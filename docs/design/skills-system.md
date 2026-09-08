@@ -490,6 +490,18 @@ may land alongside writes; do not leave a second live editor until the end.
 
 ## 8. Remaining decisions, not hidden assumptions
 
+**Blocking retention decision:** a real PostgreSQL before/after probe confirms
+that migration 0426 prevents deletion of an installed-only workspace which was
+previously deletable (`23503`, registry workspace foreign key). The existing
+registry contract in `docs/preference-registry.md` intentionally retains history
+through restrictive deletion semantics. New source bindings and write receipts
+also retain workspace/source references, so changing one foreign key is not a
+fix. Proposed policy, awaiting user agreement: workspace deletion removes its
+workspace-owned Skills and history; organization/personal Skills are unaffected,
+and ordinary runtime history mutation remains forbidden. Do not relax retention
+or ship this migration before resolving that decision and testing the full
+deletion boundary.
+
 The shared schema, Learning write rules, text validation, save/publication
 concurrency, and source compatibility are specified above and implemented on the
 working branch. The remaining integration and verification gates are recorded

@@ -112,7 +112,7 @@ export function renderWorkspaceGovernanceContext(
     options.sharedSkillReader ? null : preferenceEvidence,
     ...sections,
     options.sharedSkillReader
-      ? "Skills use the shared Skill index and skill_read. For reusable procedures, read opengeni-skills and use the lazy Skill management tools; do not use the legacy remember preference lane."
+      ? "Skills use the shared Skill index and skill_read. Follow Skill management guidance only when it is present in that index; do not use the legacy remember preference lane."
       : "Skill entries above are short descriptors only. Retrieve the full Skill instructions only when relevant through the exact preference_registry_get retrievalHandle; do not infer omitted content.",
     options.sharedSkillReader
       ? "Use Memory for durable facts and outcomes. Keep remember lane=instruction_policy for minimal universal workspace rules; Skills and instructions remain separate."

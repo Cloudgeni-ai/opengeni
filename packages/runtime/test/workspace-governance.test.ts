@@ -161,6 +161,7 @@ describe("exact-attempt workspace governance prompt", () => {
     expect(governance).not.toContain("preference_registry_get");
     expect(governance).not.toContain("lane=preference");
     expect(governance).not.toContain("Skill snapshot evidence");
+    expect(governance).not.toContain("opengeni-skills");
   });
   test("orders fixed authorities before session/task state and bounded memory", () => {
     const governance = renderWorkspaceGovernanceContext({

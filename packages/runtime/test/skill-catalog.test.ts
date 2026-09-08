@@ -59,5 +59,7 @@ describe("sandbox-independent Skill catalog", () => {
       "skill_read",
     );
     expect(inspection.composed.endsWith("Session-specific instructions")).toBe(true);
+    expect(inspection.composed).not.toContain("opengeni-skills");
+    expect(inspection.composed).not.toContain("skill_save");
   });
 });
