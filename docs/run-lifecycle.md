@@ -123,7 +123,8 @@ delegations and voice-end handoffs inherit that same model, reasoning and latenc
 policy through `packages/db/src/session-execution-policy.ts`. Creation settings
 are used only before any turn starts. Existing drafts and accepted queued turns
 keep their explicit settings; a rejected admission never changes inheritance.
-The stored session creation fields are not rewritten. API admission freezes its
+The stored session creation fields are not rewritten. Scheduled generated-session
+recovery validates those stored fields, not the public latest-turn projection. API admission freezes its
 resolved policy so billing validation and the accepted turn cannot disagree if
 another turn starts before the prompt transaction commits. A removed or blocked
 inherited model requires a new selection, never a silent switch to the original.

@@ -19,6 +19,8 @@ import {
   syncUpdatedScheduledTask,
 } from "@opengeni/core";
 import {
+  appendSessionEvents,
+  enqueueSessionTurn,
   claimSessionWorkForAttempt,
   bindScheduledTaskRunSessionInTransaction,
   createDb,
@@ -1456,7 +1458,7 @@ describe("scheduled task personal MCP authority", () => {
     });
   });
 
-  test("a queued run recovers from its immutable snapshot after the task head changes", async () => {
+  test("queued recovery validates creation policy after the task head and latest model change", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
@@ -1569,6 +1571,34 @@ describe("scheduled task personal MCP authority", () => {
           sessionId,
         });
       },
+    });
+    const [trigger] = await appendSessionEvents(client.db, workspace.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "switch model" } },
+    ]);
+    const switched = await enqueueSessionTurn(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+      source: "user",
+      prompt: "switch model",
+      resources: [],
+      tools: [],
+      model: "newer-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: workspace.subjectId },
+    });
+    await appendSessionEvents(client.db, workspace.workspaceId, session.id, [
+      { type: "turn.started", turnId: switched.id, payload: {} },
+    ]);
+    expect(await requireSession(client.db, workspace.workspaceId, session.id)).toMatchObject({
+      model: "newer-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
     });
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: { ...task.agentConfig, prompt: "new mutable prompt" },

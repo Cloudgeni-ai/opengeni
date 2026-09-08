@@ -103,4 +103,14 @@ describe("session resource tool policy fences", () => {
       ),
     ).toEqual([mcp("cap-docs", true)]);
   });
+
+  test("custom built-in tools do not override inherited MCP server defaults", () => {
+    const deployment = { mcpServers: [settings.mcpServers[0]!, settings.mcpServers[2]!] };
+    expect(
+      withWorkspaceDefaultMcpTools([], deployment, settings, { firstPartyMcpTools: [] }),
+    ).toEqual(withWorkspaceDefaultMcpTools([], deployment, settings, null));
+    expect(withWorkspaceDefaultMcpTools([], deployment, settings, { mcpServerIds: [] })).toEqual(
+      [],
+    );
+  });
 });

@@ -2179,12 +2179,12 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
     });
-    // hostedWebSearch off removes only web search; structured human input is a
-    // provider-neutral built-in on every agent.
+    // hostedWebSearch off removes only web search; structured human input
+    // and built-in skill loading are provider-neutral on every agent.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
     expect(
       ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
-    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
+    ).toEqual(["load_builtin_skill", HUMAN_INPUT_TOOL_NAME]);
     // encryptedReasoning off (chat wire API) → no providerData.include.
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,

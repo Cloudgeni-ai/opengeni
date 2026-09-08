@@ -2989,6 +2989,13 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "project_list"
+  | "project_get"
+  | "project_create"
+  | "project_update"
+  | "project_reorder"
+  | "project_delete"
+  | "session_set_project"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -4382,8 +4389,8 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4440,7 +4447,9 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
