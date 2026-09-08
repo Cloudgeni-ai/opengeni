@@ -100,6 +100,46 @@ afterAll(() => {
 });
 
 describe("SessionVariableSetPicker", () => {
+  test("embedded read-only panel keeps navigation and cancel available", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const close = mock(() => undefined);
+    function Panel() {
+      const [sharedState, setSharedState] = useState<SessionVariableSetPickerSharedState>({
+        saving: false,
+        committedSelection: null,
+      });
+      return (
+        <SessionVariableSetPicker
+          session={sessionFixture}
+          canControl={false}
+          canAttach={false}
+          canUse={false}
+          canList={false}
+          sharedState={sharedState}
+          setSharedState={setSharedState}
+          onReloadSession={async () => {}}
+          embedded
+          leading={<button>Back</button>}
+          onClose={close}
+        />
+      );
+    }
+    try {
+      await act(async () => root.render(<Panel />));
+      expect(container.textContent).toContain("Back");
+      expect(container.textContent).toContain("Session control permission is required");
+      const buttons = [...container.querySelectorAll("button")];
+      expect(buttons.find((b) => b.textContent === "Save")?.disabled).toBe(true);
+      await act(async () => buttons.find((b) => b.textContent === "Cancel")?.click());
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("shares first-attachment refresh recovery across responsive picker surfaces", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

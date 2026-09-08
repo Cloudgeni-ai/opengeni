@@ -65,8 +65,8 @@ export function ConsoleComposer(props: {
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
       {...(props.header ? { header: props.header } : {})}
-      // Wide panes keep the paperclip; narrow panes use the “+” menu.
-      attachButtonClassName="console-composer-wide-control max-sm:hidden"
+      // The actions menu owns attachments when supplied.
+      attachButtonClassName={props.controlsLeading ? "hidden" : undefined}
       controlsStart={props.controls}
       actionsStart={props.actions}
       transcriptionSuppressed={props.transcriptionSuppressed === true}

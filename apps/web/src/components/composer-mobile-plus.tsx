@@ -1,17 +1,27 @@
+import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
+  BoxIcon,
   ChevronLeftIcon,
   GitBranchIcon,
   PaperclipIcon,
   PlugIcon,
   PlusIcon,
 } from "lucide-react";
-import { cloneElement, isValidElement, useState, type ReactElement, type ReactNode } from "react";
+import {
+  cloneElement,
+  isValidElement,
+  useState,
+  useRef,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 
 import {
   SessionToolsMenuBody,
-  visibleSessionToolSelection,
+  sessionToolSelectionSummary,
+  SESSION_TOOLS_PANEL_CLASS,
   type SessionToolSelection,
 } from "@/components/pickers";
 import { Button } from "@/components/ui/button";
@@ -24,11 +34,10 @@ import {
 import { repoCountLabel } from "@/lib/format";
 import type { McpServerOption } from "@/lib/session-tools";
 
-type Panel = "root" | "tools" | "repos" | "voice";
+type Panel = "root" | "tools" | "repos" | "voice" | "variables";
 
 /**
- * Narrow-composer “+” overflow. Attach, tools, repositories, and voice model live
- * here so the bar stays one compact row.
+ * Shared composer actions at every width; model and voice stay in the bar.
  */
 export function ComposerMobilePlus(props: {
   disabled?: boolean;
@@ -37,6 +46,7 @@ export function ComposerMobilePlus(props: {
   firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
   selection: SessionToolSelection;
   toolsDisabled?: boolean;
+  toolsSaving?: boolean;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
   /** When set, Repositories appears under + and opens a drill-in panel. */
   repositories?: {
@@ -44,6 +54,10 @@ export function ComposerMobilePlus(props: {
     disabled?: boolean;
     /** Panel element; receives `leading` (back control) via clone. */
     panel: ReactElement<{ leading?: ReactNode }>;
+  };
+  variableSets?: {
+    selectedCount: number;
+    panel: ReactElement<{ leading?: ReactNode; onClose?: () => void }>;
   };
   /** When set, Voice model appears under + (bar keeps a start-only control). */
   voiceModel?: {
@@ -53,16 +67,11 @@ export function ComposerMobilePlus(props: {
     panel: ReactElement<{ leading?: ReactNode }>;
   };
 }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
-  const toolsTotal = props.servers.length + props.firstPartyTools.length;
-  const visible = visibleSessionToolSelection(
-    props.selection,
-    props.servers,
-    props.firstPartyTools,
-  );
-  const toolsSelected = visible.mcpServerIds.size + visible.firstPartyToolIds.size;
-  const toolsAvailable = toolsTotal > 0;
+  const toolSummary = sessionToolSelectionSummary(props);
+  const toolsAvailable = toolSummary.total > 0;
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
 
@@ -90,12 +99,13 @@ export function ComposerMobilePlus(props: {
     >
       <DropdownMenuTrigger asChild>
         <Button
+          ref={triggerRef}
           type="button"
           variant="ghost"
           size="icon-xs"
           disabled={props.disabled}
           aria-label="More composer actions"
-          className="console-composer-compact-control size-11 shrink-0 rounded-full border border-border text-fg-muted hover:text-fg sm:hidden"
+          className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
         >
           <PlusIcon className="size-4" />
         </Button>
@@ -106,11 +116,15 @@ export function ComposerMobilePlus(props: {
         sideOffset={8}
         collisionPadding={12}
         className={
-          panel === "tools" || panel === "voice"
-            ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
-            : panel === "repos"
-              ? "flex w-[min(28rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-0"
-              : "min-w-52 rounded-xl"
+          panel === "tools"
+            ? SESSION_TOOLS_PANEL_CLASS
+            : panel === "variables"
+              ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
+              : panel === "voice"
+                ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
+                : panel === "repos"
+                  ? REPOSITORY_PANEL_CLASS
+                  : "min-w-52 rounded-xl"
         }
       >
         {panel === "root" ? (
@@ -122,7 +136,7 @@ export function ComposerMobilePlus(props: {
                 onSelect={(event) => {
                   event.preventDefault();
                   setOpen(false);
-                  const root = document.querySelector<HTMLElement>("[data-og-composer-id]");
+                  const root = triggerRef.current?.closest<HTMLElement>("[data-og-composer-id]");
                   root?.querySelector<HTMLInputElement>("[data-og-composer-attach]")?.click();
                 }}
               >
@@ -142,7 +156,7 @@ export function ComposerMobilePlus(props: {
                 <PlugIcon className="size-4" />
                 Tools
                 <span className="ml-auto text-2xs text-fg-subtle">
-                  {toolsSelected}/{toolsTotal}
+                  {props.toolsSaving ? "Saving…" : toolSummary.label}
                 </span>
               </DropdownMenuItem>
             ) : null}
@@ -162,6 +176,24 @@ export function ComposerMobilePlus(props: {
                     ? repoCountLabel(repositories.selectedCount)
                     : "Optional"}
                 </span>
+              </DropdownMenuItem>
+            ) : null}
+            {props.variableSets ? (
+              <DropdownMenuItem
+                className="pointer-coarse:min-h-11"
+                disabled={props.disabled}
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setPanel("variables");
+                }}
+              >
+                <BoxIcon className="size-4" />
+                Variable sets
+                {props.variableSets.selectedCount > 0 ? (
+                  <span className="ml-auto text-2xs text-fg-subtle">
+                    {props.variableSets.selectedCount}
+                  </span>
+                ) : null}
               </DropdownMenuItem>
             ) : null}
             {voiceModel ? (
@@ -191,6 +223,14 @@ export function ComposerMobilePlus(props: {
           />
         ) : panel === "repos" && repositories ? (
           withLeading(repositories.panel, backButton)
+        ) : panel === "variables" && props.variableSets ? (
+          cloneElement(props.variableSets.panel, {
+            leading: backButton,
+            onClose: () => {
+              setOpen(false);
+              setPanel("root");
+            },
+          })
         ) : panel === "voice" && voiceModel ? (
           withLeading(voiceModel.panel, backButton)
         ) : null}

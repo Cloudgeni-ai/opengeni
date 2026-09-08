@@ -73,10 +73,9 @@ import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
-import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
+import { ModelPicker } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
-  RepositoryContextPicker,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
 import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
@@ -1350,6 +1349,34 @@ function SessionsIndexRouteContent({
                       },
                     }
                   : {})}
+                {...(draft.compute.kind === "sandbox"
+                  ? {
+                      variableSets: {
+                        selectedCount: draft.variableSetIds.length,
+                        panel: (
+                          <ManagedSandboxFields
+                            variableSetsOnly
+                            draft={draft}
+                            onChange={setDraft}
+                            disabled={busy || newSessionDraft.loading}
+                            variableSets={selectableVariableSets}
+                            rigs={selectableRigs}
+                            personalResourceAccess={{
+                              names: selectedPersonalResourceNames,
+                              mode: personalScopeChoice.mode,
+                              onModeChange: personalScopeChoice.setMode,
+                              visibility: createVisibility,
+                            }}
+                            catalogRecovery={{
+                              error: fixedResourceCatalogError,
+                              refreshing: personalResourceCatalogRefreshPending,
+                              onRetry: () => void refreshPersonalResourceCatalogs(),
+                            }}
+                          />
+                        ),
+                      },
+                    }
+                  : {})}
                 voiceModel={{
                   selectedLabel: voiceSelection.selectedModel.label,
                   disabled: busy || newSessionDraft.loading || personalMachineSelected,
@@ -1367,6 +1394,9 @@ function SessionsIndexRouteContent({
             actions={
               <>
                 <SessionModelControl
+                  hasImageAttachments={attachments.attachments.some(
+                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                  )}
                   modelCatalog={modelCatalog}
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
@@ -1410,25 +1440,11 @@ function SessionsIndexRouteContent({
             }
             header={
               <SessionSetupStrip
-                workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
-                showRepos={draft.compute.kind === "sandbox"}
                 channels={channelsQuery.channels}
                 selectedChannelId={selectedChannelId}
                 onChannelChange={selectProject}
                 onCreateProject={() => setProjectDialogOpen(true)}
-                selection={{
-                  mcpServerIds: context.selectedCapabilityToolIds,
-                  firstPartyToolIds: draft.firstPartyMcpTools,
-                }}
-                onToolSelectionChange={(selection) => {
-                  setToolSelectionExplicit(true);
-                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
-                  setDraft((current) => ({
-                    ...current,
-                    firstPartyMcpTools: selection.firstPartyToolIds,
-                  }));
-                }}
               />
             }
           />
@@ -1616,42 +1632,22 @@ function RecentSessionRow({
 
 // Setup selections sit above the prompt so the footer remains an action row.
 // Repo stays out of the compute band so that band only shows when rigs /
-// variable sets exist. On mobile, tools and repos remain under “+”.
+// variable sets exist. Tools and repos live under “+” at every width.
 function SessionSetupStrip({
-  workspaceId,
   disabled,
-  showRepos,
   channels,
   selectedChannelId,
   onChannelChange,
   onCreateProject,
-  selection,
-  onToolSelectionChange,
 }: {
-  workspaceId: string;
   disabled: boolean;
-  showRepos: boolean;
   channels: Channel[];
   selectedChannelId: string | null;
   onChannelChange: (channelId: string | null) => void;
   onCreateProject: () => void;
-  selection: SessionToolSelection;
-  onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
-  const context = useAppContext();
-  const firstPartyToolOptions = firstPartySessionToolOptionsFor(
-    clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
-  );
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
-      <SessionToolPicker
-        servers={context.toolMcpServers}
-        firstPartyTools={firstPartyToolOptions}
-        selection={selection}
-        triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
-        disabled={disabled}
-        onChange={onToolSelectionChange}
-      />
+    <div className="flex min-w-0 items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
       <SessionFolderPicker
         channels={channels}
         selectedChannelId={selectedChannelId}
@@ -1659,23 +1655,18 @@ function SessionSetupStrip({
         onChange={onChannelChange}
         onCreateProject={onCreateProject}
       />
-      {showRepos ? (
-        <WorkspaceRepositoryPicker
-          workspaceId={workspaceId}
-          disabled={disabled}
-          triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
-        />
-      ) : null}
     </div>
   );
 }
 
 /** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
+  hasImageAttachments,
   modelCatalog,
   policyError,
   disabled,
 }: {
+  hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
@@ -1683,6 +1674,7 @@ function SessionModelControl({
   const context = useAppContext();
   return (
     <ModelPicker
+      hasImageAttachments={hasImageAttachments}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}
@@ -1937,28 +1929,6 @@ function workspaceRepositoryPickerProps(
       await context.disconnectGitHubInstallation(workspaceId, installationId);
     },
   };
-}
-
-// The workspace repository picker, wired to the cross-route selection in context.
-// Reused in both compute kinds: the primary clone source on a managed sandbox,
-// and grayed/disabled on a connected machine (which uses its own checkout).
-// Mobile opens the same body from ComposerMobilePlus — hide the bar pill there.
-function WorkspaceRepositoryPicker({
-  workspaceId,
-  disabled,
-  triggerClassName,
-}: {
-  workspaceId: string;
-  disabled: boolean;
-  triggerClassName?: string;
-}) {
-  const context = useAppContext();
-  return (
-    <RepositoryContextPicker
-      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
-      {...(triggerClassName ? { triggerClassName } : {})}
-    />
-  );
 }
 
 function WorkspaceRepositoryMenuBody({
@@ -2329,6 +2299,8 @@ function ComputeKindButton(props: {
 // ── Managed Sandbox extras: rig + variable set only (repos live in the composer pills) ─
 
 function ManagedSandboxFields(props: {
+  variableSetsOnly?: boolean;
+  leading?: ReactNode;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
@@ -2342,9 +2314,7 @@ function ManagedSandboxFields(props: {
   const personalVariableSets = props.variableSets.filter((resource) => resource.scope === "user");
   const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
   const workspaceVariableSets = props.variableSets.filter((resource) => resource.scope !== "user");
-  const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
-  const hasEnumerableVariableSets =
-    workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
+  const showRigs = !props.variableSetsOnly && (workspaceRigs.length > 0 || personalRigs.length > 0);
   const availableWorkspaceVariableSets = workspaceVariableSets.filter(
     (variableSet) => !draft.variableSetIds.includes(variableSet.id),
   );
@@ -2353,7 +2323,7 @@ function ManagedSandboxFields(props: {
   );
   const hasVariableSetChoices =
     availableWorkspaceVariableSets.length > 0 || availablePersonalVariableSets.length > 0;
-  const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets;
+  const showVariableSets = props.variableSetsOnly === true;
   if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
     return null;
   }
@@ -2361,7 +2331,19 @@ function ManagedSandboxFields(props: {
   return (
     // One flat card: hairline-separated rows, controls right-aligned, no
     // nested boxes and no restating helper text — the controls speak.
-    <div className="mt-5 overflow-hidden rounded-lg border border-border bg-surface/40">
+    <div
+      className={
+        props.variableSetsOnly
+          ? "min-h-0 overflow-y-auto"
+          : "mt-5 overflow-hidden rounded-lg border border-border bg-surface/40"
+      }
+    >
+      {props.leading ? (
+        <div className="flex items-center gap-2 px-1 pb-2">
+          {props.leading}
+          <span className="text-sm font-medium">Variable sets</span>
+        </div>
+      ) : null}
       {props.catalogRecovery.error ? (
         <div
           role="alert"
@@ -2435,11 +2417,11 @@ function ManagedSandboxFields(props: {
       {showVariableSets ? (
         <div
           className={cn(
-            "flex items-center justify-between gap-3 px-3 py-2",
+            "flex flex-col items-stretch gap-3 px-3 py-2",
             showRigs && "border-t border-border/70",
           )}
         >
-          <Label className="flex shrink-0 items-center gap-1.5 self-start pt-1.5 text-xs">
+          <Label className="sr-only">
             <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
             Variable sets
           </Label>
