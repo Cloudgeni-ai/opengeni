@@ -1294,6 +1294,10 @@ fences history navigation by session/client lifetime, independently of SSE
 reconnects. The web route supplies source events alongside projected rows;
 it keys the timeline by session so pagination ownership and reading state cannot
 survive navigation to another session.
+The database event-page reader uses at most 256 rows per internal batch to limit
+round trips on large history reads. Full-payload reads plan against the page's
+byte budget before transferring canonical payloads; increasing the batch count
+does not increase the default 1 MiB page envelope.
 Retained event identity determines window overlap because partial-message row
 IDs can change on prepend. `timeline-anchor.tsx` captures the reading position
 immediately before React mutates the DOM; `message-timeline.tsx` applies only
