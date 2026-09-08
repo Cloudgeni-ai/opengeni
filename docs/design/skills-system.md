@@ -1,6 +1,6 @@
 # One Skill system
 
-Design dossier · updated September 8, 2026 · tracking: OPE-421.
+Design specification · updated September 8, 2026.
 
 Design-review baseline: `origin/main` at `d33ce73b54fb4656213790dc4b035e9bcafc9a41`.
 Implementation started from `cb97a3eb` on branch `feat/unified-skills`.
@@ -448,9 +448,9 @@ implementation dependency and has not been revalidated for this rewrite.
 
 ## 7. Implementation sequence and checks
 
-Existing tracking: OPE-421; OPE-424 read, OPE-425 search/install, OPE-428 writes,
-OPE-426 checkout, OPE-427 UI. Those issue descriptions need reconciliation with
-this dossier; this document does not assert they have been updated.
+The implementation is sequenced by shared lifecycle, reading, search/install,
+writes, checkout, and UI. This specification describes the public boundaries;
+internal work tracking is maintained separately.
 
 1. **Set the shared content/write boundary.** Resolve identity, migration and
    ownership, and the simplified Skill Learning path. Choose one write authority
