@@ -34,6 +34,21 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Inspector changes must not pull account-management forms into
+              // the direct-session graph through entry-aware chunk merging.
+              name: "model-connection-settings",
+              test: /(?:components[\\/](?:codex-source-settings|connection-access-settings|model-connection-section|subscription-account-row|subscription-connect-action)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // Keep context and its virtual reader in the lazy debug inspector.
+              name: "context-inspector",
+              test: /(?:components[\\/]session[\\/](?:model-context-inspector|context-text-reader)\.tsx$|@tanstack[\\+\/]virtual-core|@tanstack[\\+\/]react-virtual)/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // Workspace forms, provider marks, and administration links are
               // shared route primitives. They must not pull the settings
               // implementation into the workspace shell or direct sessions.
