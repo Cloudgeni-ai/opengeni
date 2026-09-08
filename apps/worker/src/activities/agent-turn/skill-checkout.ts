@@ -10,8 +10,8 @@ export function createSkillCheckoutAttemptToolDefinition(input: {
   authorize: () => Promise<void>;
   load: (skill: string) => Promise<{
     skillId: string;
-    revisionId: string;
-    scopeVersion: number;
+    revisionId: string | null;
+    scopeVersion: number | null;
     files: readonly SkillTextFile[];
   }>;
   filesystem: () => Promise<SkillFileSystem>;

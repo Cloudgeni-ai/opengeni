@@ -26,6 +26,12 @@ export function validateSkillFiles(files: readonly SkillFile[]): SkillFile[] {
       paths.has(path)
     )
       throw new Error(`Invalid or duplicate Skill path: ${path}`);
+    if (
+      [...paths].some(
+        (existing) => existing.startsWith(`${path}/`) || path.startsWith(`${existing}/`),
+      )
+    )
+      throw new Error(`Skill file/directory path conflict: ${path}`);
     if (Buffer.from(content, "utf8").toString("utf8") !== content || content.includes("\0"))
       throw new Error("Skill content must be valid UTF-8 text without NUL");
     const size = Buffer.byteLength(content, "utf8");

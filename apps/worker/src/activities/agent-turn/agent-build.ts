@@ -75,6 +75,7 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
+  skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   runtime: ActivityServices["runtime"];
@@ -701,9 +702,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               promptCacheKey: input.sessionId,
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
-        ...(runtimeSkillActivations.length > 0
-          ? { skillActivations: runtimeSkillActivations }
-          : {}),
+        skillCatalog: deps.skillCatalog,
+        serverSkillReading: true,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),

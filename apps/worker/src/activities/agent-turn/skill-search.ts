@@ -9,6 +9,7 @@ export type WorkspaceSkillSearchEntry = Readonly<{
   revisionId?: string;
   scopeVersion?: number;
   installationVersion?: number;
+  source?: "workspace" | "builtin" | "session" | "pack";
 }>;
 
 export function createSkillSearchAttemptToolDefinition(input: {
@@ -56,8 +57,8 @@ export function createSkillSearchAttemptToolDefinition(input: {
         .slice(0, limit)
         .map((entry) => ({
           ...entry,
-          source: "workspace" as const,
-          installed: true,
+          source: entry.source ?? "workspace",
+          installed: !entry.source || entry.source === "workspace",
         }));
       const libraryHits =
         scope === "installed"

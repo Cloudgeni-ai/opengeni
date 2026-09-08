@@ -214,9 +214,10 @@ and Connected Machines omit video guidance because the old loader cannot deliver
 the files. These are existing delivery constraints, not a product rule that
 Connected Machines should receive different instructions.
 
-The new server-readable native artifact loader has no compute-backend input and
-does not stage files. Live selection remains to be wired. Preserve generated
-Sites package-version metadata when reading or checking out its folder.
+The server-readable native artifact loader has no compute-backend input and
+does not stage files. The worker now selects it through `skill-selection.ts`.
+Preserve generated Sites package-version metadata when reading or checking out
+its folder. This branch has not completed API/UI cutover or been deployed.
 
 User clarification, September 8: use one mechanism for bundled selection, but
 choose the inclusion rule separately for each Skill. Do not impose a universal
@@ -303,6 +304,15 @@ Implementation checks required before rollout:
 Remaining choices are the exact predicate for each built-in and the public
 host-selection field. The shared mechanism must support those choices without
 requiring all bundled Skills to use the same policy.
+
+Initial implementation defaults, subject to product refinement: artifact
+guidance requires configured `editable_artifact_list` and `editable_artifact_get`
+(not the entire family or optional exports); Sites requires configured
+`artifacts_create` and `artifacts_publish`; video follows enabled workspace video
+policy without resolving credentials; management is currently included for all
+workspace agents. These defaults do not constitute the proposed public host
+allowlist. A stalled-discovery regression test now exercises first-request
+index visibility and eager reads on all three lazy-tool transports.
 
 ## 6. Current implementation: verified baseline
 

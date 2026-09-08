@@ -1,5 +1,7 @@
 import {
   beginConnectorActionExecution,
+  getWorkspaceVideoGenerationPolicy,
+  listSkillDescriptors,
   completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   getWorkspaceModelPolicy,
@@ -85,6 +87,9 @@ import {
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
+import { createWorkspaceSkillTools } from "./skill-tools";
+import { loadConfiguredBundledSkills } from "./skill-selection";
+import type { RuntimeSkillActivation } from "@opengeni/runtime";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -101,6 +106,7 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  selectedSkillActivations: readonly RuntimeSkillActivation[];
   input: RunAgentTurnInput;
   catalogSourceSettings: Settings;
   db: ActivityServices["db"];
@@ -554,7 +560,75 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         outcome,
       }),
   };
+  const skillConfiguration = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  const bundledSkills = loadConfiguredBundledSkills({
+    firstPartyTools: selectedFirstPartyMcpTools,
+    videoGenerationEnabled:
+      skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
+  });
+  const selectedSkills = [
+    ...bundledSkills,
+    ...deps.selectedSkillActivations.map((entry) => ({ id: entry.id, artifact: entry.artifact })),
+    ...session.skills.map((skill) => ({
+      id: `session:${session.id}:${skill.name}`,
+      artifact: skill,
+    })),
+  ];
+  const sharedSkillDescriptors = await listSkillDescriptors(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+  });
+  const skillCatalog = [
+    ...sharedSkillDescriptors
+      .filter((entry) => entry.activationMode === "workspace_managed")
+      .map((entry) => ({
+        id: entry.id,
+        name: entry.title,
+        description: entry.description,
+      })),
+    ...selectedSkills.map((entry) => ({
+      id: entry.id,
+      name: entry.artifact.name,
+      description: entry.artifact.description || entry.artifact.name,
+    })),
+  ];
+  const skillTools = createWorkspaceSkillTools({
+    db,
+    settings: runSettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    actor: {
+      kind: "agent",
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    selected: selectedSkills,
+    filesystem: async () => {
+      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
+      const access = await resolveTurnSandboxAccess(
+        sandboxState,
+        media.sdkOwnedSandboxSession,
+        "Skill checkout/publish requires a sandbox or Connected Machine.",
+      );
+      const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+      const runAs = sandboxRunAs(runSettings);
+      return new SandboxChannelAService({
+        session: access.session,
+        workspaceRoot: machineRoot ?? "/workspace",
+        ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
+        leaseEpoch: access.leaseEpoch,
+        emit: async (events) => {
+          await eventing.publish?.(events, true);
+        },
+        ...(runAs ? { runAs } : {}),
+      });
+    },
+  });
   const attemptToolDefinitions = [
+    ...skillTools,
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
       load: async () => {
@@ -872,7 +946,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     connectorActionPolicy,
     generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
-    preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
+    preparationIndependentToolNames: [
+      ...titleToolPlan.preparationIndependentToolNames,
+      "skill_read",
+    ],
+    skillCatalog,
   };
 }
 

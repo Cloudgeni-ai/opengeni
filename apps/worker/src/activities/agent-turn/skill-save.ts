@@ -41,7 +41,7 @@ export function createSkillSaveAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_save"],
     title: "Save Skill text",
     description:
-      "Create or edit a workspace Skill without a sandbox. Supply only changed UTF-8 text files and explicit deletions; omitted files are preserved. Use the revision and scope version returned by Skill discovery for stale-write protection. For creation choose a new UUID and set expectedRevisionId to null. Learning mode determines whether the change is live, pending approval, or refused.",
+      "Create or edit a workspace Skill without a sandbox. Supply only changed UTF-8 text files and explicit deletions; omitted files are preserved. Use the revision and scope version returned by Skill discovery for stale-write protection. For creation choose a new UUID, set expectedRevisionId to null and expectedScopeVersion to 1. Learning mode determines whether the change is live, pending approval, or refused.",
     inputSchema: {
       type: "object",
       properties: {

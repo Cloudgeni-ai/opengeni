@@ -49,7 +49,8 @@ the same Skill management authority; there is no per-agent or per-Skill ACL.
 
 Learning reads the current workspace policy under a shared lock: Off refuses
 durable writes, Suggest saves an inactive revision, and Automatic activates a
-valid revision directly. Human approval activates an exact revision with head
+valid revision directly. No active policy defaults to Suggest, matching the
+workspace Learning default. Human approval activates an exact revision with head
 CAS. Restore saves the selected historical folder as a new immutable revision
 and follows the same actor/Learning rules.
 

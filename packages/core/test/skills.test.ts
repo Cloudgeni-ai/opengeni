@@ -4,6 +4,14 @@ import { skillArtifactContentSha256 } from "@opengeni/runtime/skill-library";
 
 const main = { path: "SKILL.md", content: "# A Skill\nDo the thing." };
 describe("unified Skill text folders", () => {
+  test("rejects file/directory conflicts in either order", () => {
+    const files = [
+      { path: "references", content: "file" },
+      { path: "references/a.md", content: "nested" },
+    ];
+    expect(() => validateSkillFiles([main, ...files])).toThrow("path conflict");
+    expect(() => validateSkillFiles([main, ...files.reverse()])).toThrow("path conflict");
+  });
   test("requires a nonempty SKILL.md", () => {
     expect(() => validateSkillFiles([])).toThrow();
     expect(() => validateSkillFiles([{ path: "skill.md", content: "x" }])).toThrow();

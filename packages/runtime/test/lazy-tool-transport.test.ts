@@ -27,6 +27,8 @@ import { boundModelToolOutputItem } from "@opengeni/codex";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "../src/mcp-network";
 import { normalizeSdkEvent } from "../src/run-events";
 import { restoreInterruptedRunState } from "../src/index";
+import { formatSkillCatalog } from "../src/skill-catalog";
+import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
 
 const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
@@ -1391,6 +1393,62 @@ describe("generic lazy tool dispatch", () => {
 });
 
 describe("OpenAI/Azure native client tool search", () => {
+  test("initial Skill index and eager reads do not wait for lazy tool preparation", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      let release!: () => void;
+      const preparation = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      const reader = tool({
+        name: "skill_read",
+        description: "Read selected Skill files",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        strict: false,
+        execute: () => {
+          reads++;
+          return JSON.stringify(readSkillFiles(loadSkillManagementSkill().files));
+        },
+      }) as unknown as Tool;
+      const agent = new Agent({
+        name: "sandbox-free-skills",
+        model: "scripted",
+        instructions: formatSkillCatalog([]),
+        tools: [reader],
+      });
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set(["opengeni"]),
+        preparation,
+        new Set(["opengeni"]),
+        new Set(["skill_read"]),
+      );
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: `read-${transport}`,
+            name: "skill_read",
+            arguments: "{}",
+          },
+        ],
+        [finalMessage("Read the Skill")],
+      ]);
+      const running = runStreamed(agent, model, runtime);
+      const outcome = await Promise.race([
+        running.then(() => "completed"),
+        Bun.sleep(500).then(() => "blocked"),
+      ]);
+      release();
+      await running;
+      expect(outcome).toBe("completed");
+      expect(reads).toBe(1);
+      expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
+    }
+  });
+
   test("plain model output never waits for non-eager MCP preparation", async () => {
     for (const transport of ["openai_native", "generic_dispatch"] as const) {
       let releasePreparation!: () => void;

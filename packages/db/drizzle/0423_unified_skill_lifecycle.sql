@@ -36,7 +36,9 @@ BEGIN
       OR (f - 'path' - 'content') <> '{}'::jsonb
       OR jsonb_typeof(f->'content') IS DISTINCT FROM 'string' OR length(f->>'path') NOT BETWEEN 1 AND 512
       OR f->>'path' ~ '(^/|\\|(^|/)\.\.?(/|$)|//|/$|[[:cntrl:]]|:)'
-      OR f->>'path' = ANY(paths) THEN RETURN false; END IF;
+      OR f->>'path' = ANY(paths)
+      OR EXISTS (SELECT 1 FROM unnest(paths) existing WHERE starts_with(f->>'path', existing||'/') OR starts_with(existing, (f->>'path')||'/'))
+      THEN RETURN false; END IF;
     bytes := octet_length(convert_to(f->>'content', 'UTF8'));
     IF bytes > 262144 THEN RETURN false; END IF;
     total := total + bytes; paths := array_append(paths, f->>'path');
@@ -144,7 +146,7 @@ BEGIN
     SELECT r.workspace_mode INTO mode FROM workspace_learning_policy_heads h
       JOIN workspace_learning_policy_revisions r ON r.id=h.revision_id AND r.account_id=h.account_id
       WHERE h.account_id=p_account_id AND h.workspace_id=p_workspace_id FOR SHARE OF h;
-    mode := coalesce(mode,'off');
+    mode := coalesce(mode,'suggest');
     IF mode = 'off' THEN RAISE EXCEPTION 'Learning is Off; durable Skill changes are refused' USING ERRCODE='42501'; END IF;
   END IF;
 

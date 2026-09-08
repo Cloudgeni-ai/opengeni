@@ -5,6 +5,7 @@ import type {
   SkillRecord,
   SkillWriteContext,
   SkillWriteReceipt,
+  SkillActor,
 } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 
@@ -50,10 +51,76 @@ export type SkillReadContext = {
   subjectId?: string;
 };
 
+/** Recheck the host-bound attempt before any agent-facing Skill read/search. */
+export async function assertSkillReadAttempt(
+  db: Database,
+  context: SkillReadContext & { actor: Extract<SkillActor, { kind: "agent" }> },
+): Promise<void> {
+  await withWorkspaceRls(db, context.workspaceId, async (tx) => {
+    const rows = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      SELECT a.id FROM sessions s
+      JOIN session_turns t ON t.id=s.active_turn_id AND t.session_id=s.id
+      JOIN session_turn_attempts a ON a.id=t.active_attempt_id AND a.turn_id=t.id
+      WHERE s.account_id=${context.accountId}::uuid AND s.workspace_id=${context.workspaceId}::uuid
+        AND s.id=${context.actor.sessionId}::uuid
+        AND t.account_id=s.account_id AND t.workspace_id=s.workspace_id
+        AND t.id=${context.actor.turnId}::uuid
+        AND t.status IN ('running','requires_action','recovering','waiting_capacity')
+        AND a.id=${context.actor.attemptId}::uuid AND a.account_id=s.account_id
+        AND a.workspace_id=s.workspace_id AND a.session_id=s.id
+        AND a.execution_generation=${context.actor.executionGeneration}::integer
+        AND t.execution_generation=a.execution_generation AND a.state IN ('claimed','running')
+        AND NOT EXISTS (SELECT 1 FROM session_attempt_interruptions i
+          WHERE i.workspace_id=s.workspace_id AND i.attempt_id=a.id
+            AND i.state IN ('pending','delivered','acknowledged'))
+    `,
+    );
+    if (!rows.length) throw new Error("Skill access requires the exact live attempt");
+  });
+}
+
+export type SkillDescriptor = {
+  id: string;
+  stableKey: string;
+  title: string;
+  description: string;
+  revisionId: string;
+  scopeVersion: number;
+  activationMode: "workspace_managed" | "session_selected";
+};
+
+/** Active metadata only: building an index must not transfer every Skill folder. */
+export async function listSkillDescriptors(
+  db: Database,
+  context: SkillReadContext,
+): Promise<SkillDescriptor[]> {
+  const run = (tx: Database) =>
+    rawRows<SkillDescriptor>(
+      tx,
+      sql`
+    SELECT h.id, h.stable_key AS "stableKey", r.title, r.description,
+      r.id AS "revisionId", h.scope_version AS "scopeVersion",
+      coalesce(r.skill_activation_mode,'workspace_managed') AS "activationMode"
+    FROM preference_registry_preferences h
+    JOIN preference_registry_revisions r ON r.id=h.active_revision_id AND r.preference_id=h.id
+      AND r.account_id=h.account_id
+    WHERE h.account_id=${context.accountId}::uuid AND h.status='active'
+      AND (h.scope='organization' OR (h.scope='workspace' AND h.scope_workspace_id=${context.workspaceId}::uuid)
+        OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
+    ORDER BY h.stable_key,h.id
+  `,
+    );
+  return context.subjectId
+    ? withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, run)
+    : withWorkspaceRls(db, context.workspaceId, run);
+}
+
 export async function listSkillRecords(
   db: Database,
   context: SkillReadContext,
-  options: { skillId?: string; revisionId?: string; limit?: number } = {},
+  options: { skillId?: string; revisionId?: string; limit?: number; metadataOnly?: boolean } = {},
 ): Promise<SkillRecord[]> {
   const run = async (tx: Database) => {
     const rows = await rawRows<{ skill: SkillRecord }>(
@@ -71,8 +138,8 @@ export async function listSkillRecords(
               AND e.new_revision_id=(pending.receipt->>'revisionId')::uuid
               AND e.type IN ('activated','corrected','rejected'))),'[]'::jsonb),
         'title',r.title,'description',r.description,'contentHash',r.content_hash,
-        'files',coalesce(r.skill_files,CASE WHEN r.id IS NULL THEN '[]'::jsonb ELSE
-          jsonb_build_array(jsonb_build_object('path','SKILL.md','content',r.content)) END),
+        'files',CASE WHEN ${options.metadataOnly === true} THEN '[]'::jsonb ELSE coalesce(r.skill_files,CASE WHEN r.id IS NULL THEN '[]'::jsonb ELSE
+          jsonb_build_array(jsonb_build_object('path','SKILL.md','content',r.content)) END) END,
         'source',CASE WHEN b.preference_id IS NULL THEN NULL ELSE jsonb_build_object(
           'pluginId',b.plugin_id,'facetKey',b.facet_key,'skillFacetId',b.skill_facet_id) END
       ) AS skill

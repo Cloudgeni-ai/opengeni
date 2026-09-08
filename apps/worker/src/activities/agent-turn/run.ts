@@ -1144,6 +1144,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ).values(),
       ];
       const toolRuntime = await prepareTurnToolRuntime({
+        selectedSkillActivations: packRuntime.skillActivations,
         input,
         catalogSourceSettings,
         db,
@@ -1191,6 +1192,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       } = toolRuntime;
 
       const builtAgent = await buildTurnAgent({
+        skillCatalog: toolRuntime.skillCatalog,
         input,
         db,
         runtime,

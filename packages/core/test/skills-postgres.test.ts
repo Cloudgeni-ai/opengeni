@@ -14,6 +14,8 @@ import {
   type InstallPortableSkillInput,
   uninstallPortableSkill,
   getCurrentPreferenceRegistryGovernanceMetadata,
+  assertSkillReadAttempt,
+  listSkillDescriptors,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
@@ -50,7 +52,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(mode: "off" | "suggest" | "automatic") {
+async function fixture(mode: "off" | "suggest" | "automatic" | null) {
   const key = crypto.randomUUID();
   const subjectId = `user:skill-${key}`;
   const grant = (
@@ -69,21 +71,23 @@ async function fixture(mode: "off" | "suggest" | "automatic") {
     ...context,
     actor: { kind: "human", subjectId, principalKind: "human_session" } as const,
   };
-  const policy = await createWorkspaceLearningPolicyRevision(client!.db, {
-    ...context,
-    workspaceMode: mode,
-    actorSubjectId: subjectId,
-    principalKind: "human_session",
-  });
-  await activateWorkspaceLearningPolicyRevision(client!.db, {
-    ...context,
-    revisionId: policy.id,
-    expectedCurrentRevisionId: null,
-    expectedActivationVersion: 0,
-    actorSubjectId: subjectId,
-    principalKind: "human_session",
-    reason: "Skill lifecycle test policy",
-  });
+  if (mode !== null) {
+    const policy = await createWorkspaceLearningPolicyRevision(client!.db, {
+      ...context,
+      workspaceMode: mode,
+      actorSubjectId: subjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client!.db, {
+      ...context,
+      revisionId: policy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: subjectId,
+      principalKind: "human_session",
+      reason: "Skill lifecycle test policy",
+    });
+  }
   const session = await withSessionRlsActorContext({ subjectId }, () =>
     createSession(client!.db, {
       ...context,
@@ -142,6 +146,41 @@ async function fixture(mode: "off" | "suggest" | "automatic") {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("no policy means Require approval; agent reads are fenced and descriptors omit bodies", async () => {
+    if (!client) return;
+    const f = await fixture(null);
+    await assertSkillReadAttempt(client.db, f.agent);
+    await expect(
+      assertSkillReadAttempt(client.db, {
+        ...f.agent,
+        actor: { ...f.agent.actor, executionGeneration: 2 },
+      }),
+    ).rejects.toThrow("exact live attempt");
+    const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+    expect(pending.outcome).toBe("pending");
+    expect(await listSkillDescriptors(client.db, f.context)).toEqual([]);
+    const record = await readSkill(client.db, f.context, pending.skillId, pending.revisionId);
+    await approveSkill(client.db, {
+      ...f.human,
+      operationId: crypto.randomUUID(),
+      skillId: pending.skillId,
+      revisionId: pending.revisionId,
+      expectedRevisionId: null,
+      expectedScopeVersion: record!.scopeVersion,
+      reason: "Approve test Skill",
+    });
+    const descriptors = await listSkillDescriptors(client.db, f.context);
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0]).not.toHaveProperty("files");
+    expect(descriptors[0]?.id).toBe(pending.skillId);
+    const invalid = await shared!.admin`select skill_files_valid(${JSON.stringify([
+      { path: "SKILL.md", content: "main" },
+      { path: "a", content: "file" },
+      { path: "a/b", content: "nested" },
+    ])}::jsonb) AS valid`;
+    expect(invalid[0]?.valid).toBe(false);
+  });
+
   test("human bypasses Off, roundtrips files, retries exactly, CAS conflicts and restore creates history", async () => {
     if (!client) return;
     const f = await fixture("off");

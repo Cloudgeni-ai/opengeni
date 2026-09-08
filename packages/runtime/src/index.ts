@@ -1872,6 +1872,8 @@ export type BuildAgentOptions = {
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Server-backed Skill descriptors, independent of sandbox capabilities. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
+  /** Shared reader serves configured Skills; filesystem discovery remains for repo Skills only. */
+  serverSkillReading?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2530,19 +2532,26 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
-    editableArtifacts: editableArtifactToolsAvailable,
-    // Sites guidance is bundled capability metadata, not eager tool authority.
-    // Tool discovery/execution remains governed by the lazy attempt gateway.
-    sites: (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
-    // A connected machine owns its filesystem, and its session deliberately
-    // does not materialize host-local lazy entries. Advertising this bundled
-    // skill there makes load_skill report a path that does not exist. Keep the
-    // executable tools (whose descriptions contain the full short workflow),
-    // but expose the filesystem-backed helper only where it can be delivered.
-    videoGeneration:
-      Boolean(options.videoGeneration) && options.activeSandboxBackend !== "selfhosted",
-  });
+  const skillComposition = composeRuntimeSkills(
+    options.serverSkillReading ? [] : (options.skillActivations ?? []),
+    {
+      editableArtifacts: !options.serverSkillReading && editableArtifactToolsAvailable,
+      // Sites guidance is bundled capability metadata, not eager tool authority.
+      // Tool discovery/execution remains governed by the lazy attempt gateway.
+      sites:
+        !options.serverSkillReading &&
+        (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
+      // A connected machine owns its filesystem, and its session deliberately
+      // does not materialize host-local lazy entries. Advertising this bundled
+      // skill there makes load_skill report a path that does not exist. Keep the
+      // executable tools (whose descriptions contain the full short workflow),
+      // but expose the filesystem-backed helper only where it can be delivered.
+      videoGeneration:
+        !options.serverSkillReading &&
+        Boolean(options.videoGeneration) &&
+        options.activeSandboxBackend !== "selfhosted",
+    },
+  );
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
