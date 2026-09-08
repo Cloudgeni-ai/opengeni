@@ -49,9 +49,15 @@ describe("console composer in a split desktop pane", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   });
 
-  test("production console opts into pane measurement", () => {
+  test("production console source wires pane measurement", () => {
     expect(readFileSync(`${root}/apps/web/src/components/Composer.tsx`, "utf8")).toContain(
       'responsiveBasis="container"',
+    );
+  });
+
+  test("rendered fixture measures its composer container", async () => {
+    expect(await page.locator(".og-composer").getAttribute("data-og-responsive-basis")).toBe(
+      "container",
     );
   });
 
