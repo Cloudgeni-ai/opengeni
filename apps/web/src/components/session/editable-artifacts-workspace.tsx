@@ -8,12 +8,14 @@ import {
   RefreshCwIcon,
   Table2Icon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { lazy, useEffect, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
-import { ArtifactDetailRoute } from "@/routes/artifacts";
+const ArtifactDetailRoute = lazy(() =>
+  import("@/routes/artifacts").then((module) => ({ default: module.ArtifactDetailRoute })),
+);
 
 export type SessionEditableArtifactSummary = Readonly<{
   id: string;

@@ -50,7 +50,6 @@ import {
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
-import { retainArtifactsAfterRefreshFailure } from "@/lib/artifact-refresh";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel } from "@/components/common";
@@ -1092,60 +1091,17 @@ function useSessionEditableArtifactSummaries(input: {
             artifacts: previous?.key === authorityKey ? previous.artifacts : [],
           },
     );
-    void Promise.all([
-      import("@/lib/editable-artifact-client"),
-      import("@/lib/editable-artifact-browser"),
-    ])
-      .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
-        const [result, sites] = await Promise.allSettled([
-          editableArtifactClient.listSessionEditableArtifacts(input.workspaceId, input.sessionId, {
-            replicaId: createConsoleEditableArtifactReplicaId(),
-          }),
-          (async () => {
-            const sitePages = await editableArtifactClient.listWorkspaceArtifacts(
-              input.workspaceId,
-              {
-                sourceSessionId: input.sessionId,
-                limit: 100,
-              },
-            );
-            while (sitePages.nextCursor) {
-              const page = await editableArtifactClient.listWorkspaceArtifacts(input.workspaceId, {
-                sourceSessionId: input.sessionId,
-                limit: 100,
-                cursor: sitePages.nextCursor,
-              });
-              if (!current) return [];
-              sitePages.artifacts.push(...page.artifacts);
-              sitePages.nextCursor = page.nextCursor;
-            }
-            return sitePages.artifacts;
-          })(),
-        ]);
+    void import("@/lib/session-artifact-discovery")
+      .then(async ({ discoverSessionArtifacts }) => {
+        const reconcile = await discoverSessionArtifacts(
+          input.workspaceId,
+          input.sessionId,
+          () => current,
+        );
         if (current) {
           setLoaded((previous) => ({
             key: authorityKey,
-            status:
-              result.status === "fulfilled" && sites.status === "fulfilled" ? "ready" : "error",
-            artifacts: [
-              ...(result.status === "fulfilled"
-                ? result.value.artifacts
-                : previous?.key === authorityKey &&
-                    retainArtifactsAfterRefreshFailure(result.reason)
-                  ? previous.artifacts.filter((item) => item.modality !== "site")
-                  : []),
-              ...(sites.status === "fulfilled"
-                ? sites.value.map((site) => ({
-                    id: site.id,
-                    title: site.title,
-                    modality: "site" as const,
-                    versionId: site.currentVersion?.id,
-                    siteStatus: site.status,
-                  }))
-                : previous?.key === authorityKey && retainArtifactsAfterRefreshFailure(sites.reason)
-                  ? previous.artifacts.filter((item) => item.modality === "site")
-                  : []),
-            ],
+            ...reconcile(previous?.key === authorityKey ? previous.artifacts : []),
           }));
         }
       })
