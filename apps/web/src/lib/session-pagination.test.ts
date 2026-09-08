@@ -20,6 +20,41 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test("combines archive pages without losing microseconds, including offset timestamps", () => {
+    const latest = { ...row("a-latest"), archivedAt: "2026-09-08T12:00:00.123456Z" };
+    const older = { ...row("z-older"), archivedAt: "2026-09-08T12:00:00.123455Z" };
+    const tied = { ...row("b-tied"), archivedAt: "2026-09-08T14:00:00.123456+02:00" };
+    const millisecond = { ...row("z-millisecond"), archivedAt: "2026-09-08T12:00:00.123Z" };
+    expect(
+      [older, millisecond, latest, tied]
+        .sort(compareSessionArchiveOrder)
+        .map((session) => session.id),
+    ).toEqual(["b-tied", "a-latest", "z-older", "z-millisecond"]);
+  });
+
+  test("same-version receipts preserve exact archive timestamps but newer decisions replace them", () => {
+    const exact = {
+      ...row("root"),
+      archived: true,
+      archiveVersion: 4,
+      archivedAt: "2026-09-08T12:00:00.123456Z",
+    };
+    const rounded = { ...exact, archivedAt: "2026-09-08T12:00:00.123Z" };
+    expect(applySessionArchiveProjection(exact, rounded).archivedAt).toBe(exact.archivedAt);
+    expect(applySessionArchiveProjection(rounded, exact).archivedAt).toBe(exact.archivedAt);
+    expect(applySessionArchiveProjection(exact, { ...rounded, archiveVersion: 5 }).archivedAt).toBe(
+      rounded.archivedAt,
+    );
+    expect(
+      applySessionArchiveProjection(exact, {
+        ...rounded,
+        archiveVersion: 5,
+        archived: false,
+        archivedAt: null,
+      }).archivedAt,
+    ).toBeNull();
+  });
+
   test("sorts archives by filing time, ignoring activity, with deterministic ties", () => {
     const older = {
       ...row("older"),

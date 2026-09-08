@@ -1,10 +1,25 @@
 import type { Session } from "@/types";
 
+function archiveTimestampOrder(timestamp: string | null | undefined) {
+  const milliseconds = timestamp ? Date.parse(timestamp) : 0;
+  const fraction = timestamp?.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1] ?? "";
+  return {
+    milliseconds: Number.isFinite(milliseconds) ? milliseconds : 0,
+    // Date.parse retains the first three digits; PostgreSQL retains six.
+    microseconds: Number(fraction.padEnd(6, "0").slice(3, 6)),
+    precision: Math.min(6, fraction.length),
+  };
+}
+
 /** Archive order is personal filing time, never activity or running status. */
 export function compareSessionArchiveOrder(a: Session, b: Session): number {
-  const timeA = a.archivedAt ? Date.parse(a.archivedAt) : 0;
-  const timeB = b.archivedAt ? Date.parse(b.archivedAt) : 0;
-  return timeB - timeA || b.id.localeCompare(a.id);
+  const timeA = archiveTimestampOrder(a.archivedAt);
+  const timeB = archiveTimestampOrder(b.archivedAt);
+  return (
+    timeB.milliseconds - timeA.milliseconds ||
+    timeB.microseconds - timeA.microseconds ||
+    b.id.localeCompare(a.id)
+  );
 }
 
 export type SessionPageIdentity = {
@@ -41,10 +56,20 @@ export type SessionContinuationChannelEvidence = readonly [
  */
 export function applySessionArchiveProjection(current: Session, updated: Session): Session {
   if ((current.archiveVersion ?? 0) > (updated.archiveVersion ?? 0)) return current;
+  const currentTime = archiveTimestampOrder(current.archivedAt);
+  const updatedTime = archiveTimestampOrder(updated.archivedAt);
+  // List pages retain exact SQL timestamps; an idempotent mutation receipt may
+  // still hydrate through Date. The same archive revision cannot change time.
+  const preserveExactTimestamp =
+    current.archived &&
+    updated.archived &&
+    (current.archiveVersion ?? 0) === (updated.archiveVersion ?? 0) &&
+    currentTime.milliseconds === updatedTime.milliseconds &&
+    currentTime.precision > updatedTime.precision;
   return {
     ...current,
     archived: updated.archived,
-    archivedAt: updated.archivedAt,
+    archivedAt: preserveExactTimestamp ? current.archivedAt : updated.archivedAt,
     archiveVersion: updated.archiveVersion,
     ...((current.pinVersion ?? 0) <= (updated.pinVersion ?? 0)
       ? {
