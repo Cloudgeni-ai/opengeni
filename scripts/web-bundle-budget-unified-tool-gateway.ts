@@ -25,5 +25,12 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
   // September 6, Bun 1.4 macOS/arm64: main 52ff56a94 measures 2,309,542
   // raw bytes; history anchoring and input handling measure 2,312,535.
-  wholeKibEnvelope(2_312_535),
+  // September 7: idle queue-offer chrome lifts the graph to 2,315,348.
+  wholeKibEnvelope(2_315_348),
+  // September 8: organization subscription SDK methods and connection-policy
+  // contracts add 4,920 raw / 1,330 gzip bytes over e30c35f07 on macOS.
+  // Combined with main's invitation chrome and journey analytics, the integrated
+  // graph measures 2,321,561 raw on macOS/Bun 1.3.14. Settings stay route-lazy;
+  // retain all gzip, file-count, initial-load, and lazy-chunk ceilings.
+  wholeKibEnvelope(2_321_561),
 );
