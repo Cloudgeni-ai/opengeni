@@ -807,7 +807,9 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
-        timeout-minutes: 4
+        # Expanded rail move/group/Site coverage measured 243s on CI; retain
+        # per-test limits and allow bounded setup/teardown headroom.
+        timeout-minutes: 6
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -815,6 +817,7 @@ jobs:
 
       - name: Responsive knowledge surfaces browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
+        id: knowledge_surfaces_browser
         timeout-minutes: 6
         env:
           # This gate traverses the public configured-principal API and must fail
@@ -890,7 +893,7 @@ jobs:
             /tmp/codex-quota-evidence/codex-quota-mobile-dark.png
 
       - name: Upload responsive knowledge-surface evidence
-        if: ${{ always() && matrix.lane == 'knowledge' }}
+        if: ${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: responsive-knowledge-surface-evidence

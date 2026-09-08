@@ -4314,7 +4314,7 @@ describe("workflow contracts", () => {
         ],
       },
       "Upload responsive knowledge-surface evidence": {
-        if: "${{ always() && matrix.lane == 'knowledge' }}",
+        if: "${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}",
         name: "responsive-knowledge-surface-evidence",
         path: [
           "/tmp/knowledge-surfaces-320-light-memory.png",
