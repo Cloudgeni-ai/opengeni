@@ -24,6 +24,7 @@ import {
   listInstalledSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
+  PortableSkillSourcePathConflictError,
   uninstallPortableSkill,
   SkillSourceRemovalAuthorityError,
 } from "@opengeni/db";
@@ -261,6 +262,9 @@ export function registerSkillRoutes(
 }
 
 function portableSkillMutationHttpError(error: unknown): Error {
+  if (error instanceof PortableSkillSourcePathConflictError) {
+    return new HTTPException(409, { message: error.message });
+  }
   if (error instanceof PortableSkillInstallationVersionRequiredError) {
     return new HTTPException(400, { message: error.message });
   }

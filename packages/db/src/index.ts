@@ -6131,6 +6131,10 @@ export class PortableSkillInstallationVersionRequiredError extends Error {
   readonly name = "PortableSkillInstallationVersionRequiredError";
 }
 
+export class PortableSkillSourcePathConflictError extends Error {
+  readonly name = "PortableSkillSourcePathConflictError";
+}
+
 export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
@@ -8524,6 +8528,26 @@ export async function installPortableSkill(
             .returning();
         }
         if (!plugin) throw new Error("Failed to create portable Skill plugin");
+
+        // Legacy source IDs fold path case. Preserve those IDs for existing
+        // installations, but never let a distinct Git folder overwrite one.
+        if (input.source === "github" || input.source === "skills_sh") {
+          const [collision] = await tx
+            .select({ id: schema.capabilityPluginVersions.id })
+            .from(schema.capabilityPluginVersions)
+            .where(
+              and(
+                eq(schema.capabilityPluginVersions.pluginId, plugin.id),
+                sql`lower(${schema.capabilityPluginVersions.manifest}->>'sourcePath') = lower(${input.sourcePath})`,
+                sql`${schema.capabilityPluginVersions.manifest}->>'sourcePath' <> ${input.sourcePath}`,
+              ),
+            )
+            .limit(1);
+          if (collision)
+            throw new PortableSkillSourcePathConflictError(
+              "This repository folder differs only by case from an existing Skill source. Legacy source IDs cannot distinguish these folders; use a uniquely named source folder.",
+            );
+        }
 
         const manifest = {
           schemaVersion: 1,

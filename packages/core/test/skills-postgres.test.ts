@@ -734,6 +734,15 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       },
     });
     expect(moved.installationVersion).toBe(installed.installationVersion + 1);
+    await expect(
+      installPortableSkill(client.db, {
+        ...input,
+        skillOperationId: crypto.randomUUID(),
+        sourceCommit: "d".repeat(40),
+        sourcePath: key.toUpperCase(),
+        expectedInstallationVersion: moved.installationVersion,
+      }),
+    ).rejects.toThrow("differs only by case");
     const expectedReplay = {
       ...installed,
       skillReceipt: { ...installed.skillReceipt, replayed: true },

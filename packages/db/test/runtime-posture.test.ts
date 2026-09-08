@@ -565,7 +565,7 @@ describe("runtime database posture evaluator", () => {
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 71],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 72],
             [RUNTIME_DML_TABLES, 269],
           ] as const)
         : ([
