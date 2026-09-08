@@ -137,7 +137,7 @@ export function PageHeader(props: {
   return (
     <div className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
       <div className="min-w-0">
-        <h1 className="flex items-center gap-2 text-base font-semibold">
+        <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <span className="text-brand">{props.icon}</span>
           {props.title}
         </h1>
