@@ -1,4 +1,8 @@
 import {
+  latestStartedSessionTurnQuery,
+  withLatestStartedSessionPolicy,
+} from "./session-execution-policy";
+import {
   assignedConnectionDefault,
   updateModelConnectionAccess as updateModelConnectionAccessPolicy,
   type ModelConnectionAccess,
@@ -32862,20 +32866,24 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
-  return rows.map((row) => {
-    const cursor = cursorBySessionId.get(row.id);
-    if (
-      !cursor ||
-      cursor.accountId !== row.accountId ||
-      cursor.workspaceId !== row.workspaceId ||
-      cursor.lastSequence < row.lastSequence
-    ) {
-      throw new Error(`Session event cursor invariant failed for session ${row.id}`);
-    }
-    return cursor.lastSequence === row.lastSequence
-      ? row
-      : { ...row, lastSequence: cursor.lastSequence };
-  });
+  return withLatestStartedSessionPolicy(
+    db,
+    workspaceId,
+    rows.map((row) => {
+      const cursor = cursorBySessionId.get(row.id);
+      if (
+        !cursor ||
+        cursor.accountId !== row.accountId ||
+        cursor.workspaceId !== row.workspaceId ||
+        cursor.lastSequence < row.lastSequence
+      ) {
+        throw new Error(`Session event cursor invariant failed for session ${row.id}`);
+      }
+      return cursor.lastSequence === row.lastSequence
+        ? row
+        : { ...row, lastSequence: cursor.lastSequence };
+    }),
+  );
 }
 
 function mapSessionAttention(
@@ -63825,29 +63833,11 @@ export async function claimSessionWorkForAttempt(
                   eq(schema.sessionTurns.sessionId, sessionId),
                 ),
               );
-            const [latestStarted] = await tx
-              .select({
-                model: schema.sessionTurns.model,
-                reasoningEffort: schema.sessionTurns.reasoningEffort,
-                latencyMode: schema.sessionTurns.latencyMode,
-                sandboxBackend: schema.sessionTurns.sandboxBackend,
-                sandboxOs: schema.sessionTurns.sandboxOs,
-                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-                initiatorKind: schema.sessionTurns.initiatorKind,
-                initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-                xaiProviderAccountAuthoritySnapshot:
-                  schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-              })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, workspaceId),
-                  eq(schema.sessionTurns.sessionId, sessionId),
-                  sql`${schema.sessionTurns.startedAt} is not null`,
-                ),
-              )
-              .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
-              .limit(1);
+            const latestStarted = await latestStartedSessionTurnRow(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+            );
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
@@ -64151,28 +64141,11 @@ export async function claimSessionWorkForAttempt(
           let frozenTurnExecutionPolicy = goalPolicy?.turnExecutionPolicy
             ? TurnExecutionPolicyV1.parse(goalPolicy.turnExecutionPolicy)
             : null;
-          const [latestStarted] = await tx
-            .select({
-              model: schema.sessionTurns.model,
-              reasoningEffort: schema.sessionTurns.reasoningEffort,
-              latencyMode: schema.sessionTurns.latencyMode,
-              tools: schema.sessionTurns.tools,
-              sandboxBackend: schema.sessionTurns.sandboxBackend,
-              sandboxOs: schema.sessionTurns.sandboxOs,
-              initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-              initiatorKind: schema.sessionTurns.initiatorKind,
-              initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, workspaceId),
-                eq(schema.sessionTurns.sessionId, sessionId),
-                sql`${schema.sessionTurns.startedAt} is not null`,
-              ),
-            )
-            .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
-            .limit(1);
+          const latestStarted = await latestStartedSessionTurnRow(
+            tx as unknown as Database,
+            workspaceId,
+            sessionId,
+          );
           let model =
             typeof goalPolicy?.model === "string"
               ? goalPolicy.model
@@ -75288,7 +75261,8 @@ async function mapSessionWithControl(
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  return mapSession(row, control, mcpServers, pin, attention, archive, tenancyViewer);
+  const [effective] = await withLatestStartedSessionPolicy(db, row.workspaceId, [row]);
+  return mapSession(effective!, control, mcpServers, pin, attention, archive, tenancyViewer);
 }
 
 function mapSessionTenancy(
@@ -75527,29 +75501,13 @@ async function latestStartedSessionTurnRow(
   workspaceId: string,
   sessionId: string,
 ): Promise<typeof schema.sessionTurns.$inferSelect | null> {
+  const latest = latestStartedSessionTurnQuery(db, workspaceId, sessionId).as(
+    "latest_started_turn",
+  );
   const [row] = await db
     .select({ turn: schema.sessionTurns })
-    .from(schema.sessionEvents)
-    .innerJoin(
-      schema.sessionTurns,
-      and(
-        eq(schema.sessionEvents.workspaceId, schema.sessionTurns.workspaceId),
-        eq(schema.sessionEvents.sessionId, schema.sessionTurns.sessionId),
-        eq(schema.sessionEvents.turnId, schema.sessionTurns.id),
-      ),
-    )
-    .where(
-      and(
-        eq(schema.sessionEvents.workspaceId, workspaceId),
-        eq(schema.sessionEvents.sessionId, sessionId),
-        eq(schema.sessionEvents.type, "turn.started"),
-      ),
-    )
-    // session_events_workspace_session_sequence_idx supports this backward
-    // scan; the PK join then fetches exactly one turn row even for very long
-    // sessions with thousands of timeline deltas per turn.
-    .orderBy(desc(schema.sessionEvents.sequence))
-    .limit(1);
+    .from(latest)
+    .innerJoin(schema.sessionTurns, eq(schema.sessionTurns.id, latest.id));
   return row?.turn ?? null;
 }
 

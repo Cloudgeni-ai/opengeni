@@ -1582,7 +1582,10 @@ export async function postUserMessageTurn(
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
-  const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  // Acceptance already froze this policy before resource/credential validation.
+  // A different turn starting meanwhile must not change the model we gate here.
+  const effectiveModelForGate =
+    input.turnExecutionPolicy?.productModelId ?? requestedModel ?? sessionForModelGate.model;
   const freshWorkspaceCustomModel =
     requestedModel !== null &&
     isWorkspaceCustomModelId(settings, requestedModel) &&
