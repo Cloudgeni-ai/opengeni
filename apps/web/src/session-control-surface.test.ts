@@ -94,7 +94,7 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain('id: "agents"');
   });
 
-  test("keeps setup above the prompt and model beside voice/send on new sessions", async () => {
+  test("keeps the folder above the prompt and context actions inside plus on new sessions", async () => {
     const route = await source("routes/sessions-index.tsx");
     const actions = route.indexOf("actions={");
     const model = route.indexOf("<SessionModelControl", actions);
@@ -111,9 +111,11 @@ describe("session control surface architecture", () => {
       route.indexOf("function SessionSetupStrip"),
       route.indexOf("function SessionModelControl"),
     );
-    expect(setupImplementation).toContain("<SessionToolPicker");
+    expect(route).toContain("<ComposerMobilePlus");
+    expect(route).toContain("<RepositoryContextMenuBody");
+    expect(setupImplementation).not.toContain("<SessionToolPicker");
     expect(setupImplementation).toContain("<SessionFolderPicker");
-    expect(setupImplementation).toContain("<WorkspaceRepositoryPicker");
+    expect(setupImplementation).not.toContain("<WorkspaceRepositoryPicker");
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
@@ -189,7 +191,7 @@ describe("session control surface architecture", () => {
     expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
   });
 
-  test("keeps Variable Sets editable at create time and beside an established composer", async () => {
+  test("keeps Variable Sets editable through create and established composer actions", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),
       source("routes/session.tsx"),
@@ -199,7 +201,7 @@ describe("session control surface architecture", () => {
     expect(route).toContain("Add Variable Set…");
     expect(route).toContain("<SelectedVariableSetList");
     expect(route).toContain(
-      "const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets",
+      "const showVariableSets = props.variableSetsOnly === true",
     );
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
@@ -258,15 +260,15 @@ describe("session control surface architecture", () => {
       establishedRoute.match(
         /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
       ),
-    ).toHaveLength(2);
-    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(1);
     expect(establishedRoute).toContain(
       "const [variableSetPickerState, setVariableSetPickerState] =",
     );
-    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(1);
     expect(establishedPicker).toContain(
       "const busy = props.busy || props.goalActive || props.voiceActive",
     );
