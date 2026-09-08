@@ -21,6 +21,7 @@ import {
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
+import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 
 function selectedVariableSetIds(
   session: Pick<Session, "variableSetIds" | "variableSetId">,
@@ -37,7 +38,16 @@ export type SessionVariableSetPickerSharedState = {
 };
 
 export function SessionVariableSetPicker(props: {
-  session: Pick<Session, "id" | "workspaceId" | "variableSetIds" | "variableSetId" | "tenancy">;
+  session: Pick<
+    Session,
+    | "id"
+    | "workspaceId"
+    | "variableSetIds"
+    | "variableSetId"
+    | "tenancy"
+    | "status"
+    | "activeTurnId"
+  >;
   canControl: boolean;
   canAttach: boolean;
   canUse: boolean;
@@ -108,13 +118,19 @@ export function SessionVariableSetPicker(props: {
   const selectedPersonal = variableSets.variableSets.filter(
     (variableSet) => variableSet.scope === "user" && draftIds.includes(variableSet.id),
   );
-  const canEdit = props.canControl && props.canAttach && !refreshRequired;
+  const workPending = props.busy || sessionHasVariableSetBlockingWork(props.session);
+  const busy = workPending || props.goalActive || props.voiceActive;
+  const canEdit = props.canControl && props.canAttach && !refreshRequired && !busy;
   const canAdd = canEdit && props.canUse && props.canList;
-  const busy = props.busy || props.goalActive || props.voiceActive;
-  const visible = refreshRequired || currentIds.length > 0 || canAdd;
+  const visible =
+    refreshRequired ||
+    currentIds.length > 0 ||
+    (props.canControl && props.canAttach && props.canUse && props.canList);
   if (!visible && !props.embedded) return null;
 
   const save = async () => {
+    if (saving || busy || !canEdit || !selectedChanged || (draftIds.length > 0 && !props.canUse))
+      return;
     setSharedState((current) => ({ ...current, saving: true }));
     setError(null);
     try {
@@ -177,7 +193,7 @@ export function SessionVariableSetPicker(props: {
       <div>
         {!props.embedded ? <div className="text-sm font-medium text-fg">Variable Sets</div> : null}
         <p className="mt-0.5 text-2xs leading-4 text-fg-subtle">
-          Attach, remove, or reorder encrypted environment values for the next message.
+          Attach, remove, or reorder encrypted environment values while the session is idle.
         </p>
       </div>
 
@@ -284,7 +300,7 @@ export function SessionVariableSetPicker(props: {
         </p>
       ) : props.voiceActive ? (
         <p className="text-2xs text-fg-subtle">End voice mode before changing Variable Sets.</p>
-      ) : props.busy ? (
+      ) : workPending ? (
         <p className="text-2xs text-fg-subtle">
           Variable Sets can be changed after the current and queued work finishes.
         </p>
