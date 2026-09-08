@@ -55,9 +55,15 @@ export const SkillWriteReceipt = z.object({
   skillId: z.uuid(),
   revisionId: z.uuid(),
   outcome: z.enum(["applied", "pending", "preserved"]),
+  pendingReason: z.enum(["approval", "source_finalization"]).optional(),
   replayed: z.boolean(),
 });
 export type SkillWriteReceipt = z.infer<typeof SkillWriteReceipt>;
+export const SkillPublicationReceipt = SkillWriteReceipt.extend({
+  sourceOperationId: z.uuid(),
+  activationEventId: z.uuid().nullable(),
+});
+export type SkillPublicationReceipt = z.infer<typeof SkillPublicationReceipt>;
 export const SkillSourceReleaseReceipt = z.object({
   skillId: z.uuid(),
   revisionId: z.uuid().nullable(),

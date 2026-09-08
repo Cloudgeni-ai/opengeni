@@ -106,6 +106,44 @@ when finalizing their operation result.
 
 ## Release
 
+### Composite source publication
+
+An unfinished Pack/Plugin owner cannot publish newly installed guidance. An
+otherwise-Automatic child install saves an inactive revision and returns
+`outcome: pending, pendingReason: source_finalization`. Its immutable write receipt
+retains the deferred intent and the expected head, scope version, and source facet.
+Suggest proposals are not marked for automatic publication.
+
+Successful Pack/Plugin finalization changes the owner status and publishes
+eligible deferred revisions in the same database transaction. A private status
+trigger, `skill_publish_finalized_owner`, has no runtime EXECUTE grant. Install,
+replay, parent preparation and finalization serialize on the workspace publication
+lock before their component/operation locks. Finalization checks the latest
+revision, immutable source, head/scope CAS, expiry and effective owner; newer
+customization or source intent wins. Machine-originated intents also recheck
+current Learning. Agent-originated intents require the original exact live
+attempt without a pending interruption; closed/replaced attempts remain pending
+for human approval. Human-originated authorization still bypasses Learning, not
+the owner gate. Both unified approval and legacy files-bearing activation reject
+an unfinished source owner.
+
+Publication appends a separate immutable receipt in `skill_write_receipts`, with
+a deterministic operation ID, `sourceOperationId` and `activationEventId`.
+Original install receipts are never rewritten: replay can truthfully return the
+original pending result after publication. Parent finalizers return supplemental
+`skillPublications` and persist them in the parent operation's replay result.
+Pack and Plugin API adapters must forward these completion receipts; they must
+not relabel the earlier `skillWrites` as if those installs were already applied.
+The publication event is attributed to `service:skill-publication`; any retained
+human-confirmed authority is derived from the original immutable human receipt,
+not fabricated human execution identity.
+
+There is no current-owner filter in historical snapshot reads. Owner readiness is
+checked only at activation, and before/after snapshots retain the exact historical
+event boundary. Pre-0423 active child installations lacking an effective owner
+must be completed or disabled before migration; cutover fails clearly rather
+than inventing publication authority for unfinished historical composite work.
+
 After cutover every new revision must have files, including legacy human CREATE;
 activation of historical null-files revisions fails closed. History reads remain
 available. Save, install, restore and approval derive metadata with the one

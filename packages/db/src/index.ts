@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { lockSkillPublication } from "./skill-publication";
 import {
   StoredSessionSkills,
   readSkillMetadata,
@@ -8365,6 +8366,7 @@ export async function replayPortableSkillInstall(
   },
 ): Promise<InstalledPortableSkill | null> {
   return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    await lockSkillPublication(tx, input.workspaceId);
     if (input.actor.kind === "agent")
       await assertSkillReadAttempt(tx, { ...input, actor: input.actor });
     await tx.execute(
@@ -8438,6 +8440,7 @@ export async function installPortableSkill(
     },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await lockSkillPublication(tx as unknown as Database, input.workspaceId);
         const replay = await replayPortableSkillInstall(tx as unknown as Database, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,

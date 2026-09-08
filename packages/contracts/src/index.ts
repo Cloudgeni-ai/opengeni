@@ -1,7 +1,7 @@
 export * from "./skills";
 export * from "./bundled-skills";
 import { BundledSkillSelection } from "./bundled-skills";
-import { SkillWriteReceipt, SkillSourceReleaseReceipt } from "./skills";
+import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
 import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
 import { z } from "zod";
@@ -10192,6 +10192,7 @@ export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
 
 export const PackInstallation = z.object({
   skillWrites: z.array(SkillWriteReceipt).optional(),
+  skillPublications: z.array(SkillPublicationReceipt).optional(),
   skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -11921,6 +11922,7 @@ export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 export const InstalledPlugin = z
   .object({
     skillWrites: z.array(SkillWriteReceipt).optional(),
+    skillPublications: z.array(SkillPublicationReceipt).optional(),
     skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     pluginKey: z.string().min(1),
     version: z.string().min(1),
