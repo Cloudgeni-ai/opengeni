@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { OpenGeniChat } from "../src/chat";
+import { createChatHandler } from "@opengeni/sdk/chat";
+import { fakeServer } from "../../sdk/test/chat-helpers";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -51,6 +53,38 @@ function setTextarea(textarea: HTMLTextAreaElement, value: string): void {
 }
 
 describe("OpenGeniChat", () => {
+  test("a real chat handler preserves paragraphs across a tool call", async () => {
+    const server = fakeServer({
+      reply: () => [
+        { type: "agent.message.delta", payload: { text: "Before." } },
+        { type: "agent.message.completed", payload: { text: "Before." } },
+        { type: "agent.toolCall.created", payload: { id: "lookup", name: "search" } },
+        { type: "agent.message.delta", payload: { text: "After." } },
+        { type: "agent.message.completed", payload: { text: "After." } },
+        { type: "turn.completed", payload: {} },
+      ],
+    });
+    const handler = createChatHandler(server.og, {
+      resolve: () => ({ tenant: "acme", user: "alice" }),
+    });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
+      handler(new Request(input, init))) as typeof fetch;
+    const r = await renderComponent(
+      <OpenGeniChat handlerUrl="https://host.test/chat" conversation="paragraphs" />,
+    );
+    try {
+      await flush(10);
+      await actRun(() => setTextarea(r.container.querySelector("textarea")!, "hello"));
+      await actRun(() => r.container.querySelector("form")!.requestSubmit());
+      await flush(10);
+      expect(
+        [...r.container.querySelectorAll(".og-chat-assistant p")].map((p) => p.textContent),
+      ).toEqual(["Before.", "After."]);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("restores an approval after reload even without text, and retains it after a failed response", async () => {
     const pending = {
       kind: "approval",

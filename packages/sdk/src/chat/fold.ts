@@ -107,7 +107,7 @@ export class ChatTurnFold {
         if (open?.open) {
           open.text += text;
         } else {
-          this.segments.push({ text, open: true });
+          return { chunks: [this.startSegment(text, true)], terminal: null };
         }
         return { chunks: [{ type: "text", text }], terminal: null };
       }
@@ -116,8 +116,7 @@ export class ChatTurnFold {
         const target = this.segments.at(-1);
         if (!target || (!target.open && target.text && !text.startsWith(target.text))) {
           if (!text) return { chunks: [], terminal: null };
-          this.segments.push({ text, open: false });
-          return { chunks: [{ type: "text", text }], terminal: null };
+          return { chunks: [this.startSegment(text, false)], terminal: null };
         }
         target.open = false;
         if (text.length > target.text.length && text.startsWith(target.text)) {
@@ -221,6 +220,14 @@ export class ChatTurnFold {
   private closeSegment(): void {
     const open = this.segments.at(-1);
     if (open) open.open = false;
+  }
+
+  private startSegment(text: string, open: boolean): ChatChunk {
+    // Match the separator used by `text` before exposing the next segment to
+    // append-only consumers (React and both protocol adapters).
+    const separator = this.segments.length > 0 ? "\n\n" : "";
+    this.segments.push({ text, open });
+    return { type: "text", text: separator + text };
   }
 }
 

@@ -328,6 +328,33 @@ describe("Chat.send", () => {
 });
 
 describe("Chat.stream", () => {
+  for (const deltas of [true, false]) {
+    test(`streamed paragraphs match the final reply with ${deltas ? "deltas" : "completed messages only"}`, async () => {
+      const server = fakeServer({
+        reply: () => [
+          { type: "agent.toolCall.created", payload: { id: "first", name: "search" } },
+          { type: "agent.message.delta", payload: { text: "" } },
+          ...(deltas
+            ? [{ type: "agent.message.delta" as const, payload: { text: "Before." } }]
+            : []),
+          { type: "agent.message.completed", payload: { text: "Before." } },
+          { type: "agent.toolCall.created", payload: { id: "second", name: "search" } },
+          ...(deltas ? [{ type: "agent.message.delta" as const, payload: { text: "After" } }] : []),
+          { type: "agent.message.completed", payload: { text: "After." } },
+          { type: "turn.completed", payload: {} },
+        ],
+      });
+      const chat = await server.og.chat({ tenant: "acme", conversation: "paragraphs" });
+      const chunks = await collect(chat.stream("hello"));
+      const text = chunks
+        .filter((chunk) => chunk.type === "text")
+        .map((chunk) => chunk.text)
+        .join("");
+      expect(text).toBe("Before.\n\nAfter.");
+      expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text } });
+    });
+  }
+
   test("yields tool and text chunks in order and ends with done", async () => {
     const server = fakeServer({
       reply: () => [

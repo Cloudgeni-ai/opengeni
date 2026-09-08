@@ -89,15 +89,15 @@ export function agentAccessPermitsCrossTreeAccess(
 
 /**
  * The in-database list scope for one calling attempt. A `session` caller is
- * pinned to its own root tree explicitly; every caller additionally carries
- * the viewer so `sessionAuthorizationScopeFilter` applies the same pairwise
- * rule in SQL, and a host scope is intersected rather than replaced.
+ * pinned to its own root tree when the host does not narrow it. Every caller
+ * carries the viewer so `sessionAuthorizationScopeFilter` intersects the host
+ * scope with the same pairwise rule in SQL, including for session callers.
  */
 export function agentAccessListScopeForViewer(
   viewer: SessionAgentAccessViewer,
   hostScope: SessionAuthorizationListScope | null = null,
 ): SessionAuthorizationListScope {
-  if (viewer.agentAccess === "session") {
+  if (viewer.agentAccess === "session" && (!hostScope || hostScope.kind === "all")) {
     return {
       kind: "scoped",
       rootSessionIds: [viewer.callerRootSessionId],

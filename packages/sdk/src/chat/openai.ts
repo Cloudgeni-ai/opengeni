@@ -192,31 +192,49 @@ export async function handleChatCompletionsRequest(
 
 // --- Responses ----------------------------------------------------------------
 
-/** `resp_<sessionId>_<sequence>`; the session id alone addresses the conversation. */
+/** Non-streaming response id; the session id alone addresses the conversation. */
 export function encodeResponseId(sessionId: string, sequence: number): string {
   return `resp_${sessionId}_${sequence}`;
 }
 
 export function decodeResponseId(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const match = /^resp_([0-9a-f-]{36})(?:_\d+)?$/i.exec(value);
+  // Streams allocate a UUID before the final event sequence is known. Keep
+  // accepting existing sequence-based response ids for conversation continuity.
+  const match = /^resp_([0-9a-f-]{36})(?:_(\d+|[0-9a-f-]{36}))?$/i.exec(value);
   const sessionId = match?.[1];
+  const suffix = match?.[2];
+  if (suffix && !/^\d+$/.test(suffix) && !isUuid(suffix)) return null;
   return sessionId && isUuid(sessionId) ? sessionId : null;
+}
+
+type ResponseIdentity = { responseId: string; itemId: string; createdAt: number };
+type ResponseStatus = "in_progress" | "completed" | "incomplete";
+
+function responseOutputItem(itemId: string, status: ResponseStatus, text: string | null) {
+  return {
+    type: "message",
+    id: itemId,
+    status,
+    role: "assistant",
+    content: text === null ? [] : [{ type: "output_text", text, annotations: [] }],
+  };
 }
 
 function responseObject(
   reply: ChatReply | null,
   chat: Chat,
   model: string,
-  status: "in_progress" | "completed" | "incomplete",
+  status: ResponseStatus,
   previousResponseId: string | null,
   text: string,
+  identity?: ResponseIdentity,
 ): Record<string, unknown> {
   const sequence = reply?.events.at(-1)?.sequence ?? 0;
   return {
-    id: encodeResponseId(chat.sessionId, sequence),
+    id: identity?.responseId ?? encodeResponseId(chat.sessionId, sequence),
     object: "response",
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: identity?.createdAt ?? Math.floor(Date.now() / 1000),
     status,
     model,
     previous_response_id: previousResponseId,
@@ -224,13 +242,11 @@ function responseObject(
       status === "in_progress"
         ? []
         : [
-            {
-              type: "message",
-              id: `msg_${chat.sessionId}_${sequence}`,
-              status: "completed",
-              role: "assistant",
-              content: [{ type: "output_text", text, annotations: [] }],
-            },
+            responseOutputItem(
+              identity?.itemId ?? `msg_${chat.sessionId}_${sequence}`,
+              status,
+              text,
+            ),
           ],
     output_text: text,
     ...(reply ? { opengeni: replyExtension(reply) } : {}),
@@ -244,38 +260,72 @@ export async function* responsesBlocks(
   previousResponseId: string | null,
 ): AsyncGenerator<string, void, void> {
   let sequenceNumber = 0;
-  const itemId = `msg_${chat.sessionId}`;
+  const requestId = crypto.randomUUID();
+  const identity: ResponseIdentity = {
+    responseId: `resp_${chat.sessionId}_${requestId}`,
+    itemId: `msg_${chat.sessionId}_${requestId}`,
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+  const { itemId } = identity;
   const event = (type: string, data: Record<string, unknown>): string =>
     sseLine(JSON.stringify({ type, sequence_number: sequenceNumber++, ...data }), type);
-  let text = "";
-  yield event("response.created", {
-    response: responseObject(null, chat, model, "in_progress", previousResponseId, ""),
+  const initial = responseObject(
+    null,
+    chat,
+    model,
+    "in_progress",
+    previousResponseId,
+    "",
+    identity,
+  );
+  yield event("response.created", { response: initial });
+  yield event("response.in_progress", { response: initial });
+  yield event("response.output_item.added", {
+    output_index: 0,
+    item: responseOutputItem(itemId, "in_progress", null),
+  });
+  yield event("response.content_part.added", {
+    item_id: itemId,
+    output_index: 0,
+    content_index: 0,
+    part: { type: "output_text", text: "", annotations: [] },
   });
   try {
     for await (const chunk of chunks) {
       if (chunk.type === "text") {
-        text += chunk.text;
         yield event("response.output_text.delta", {
           item_id: itemId,
           output_index: 0,
           content_index: 0,
           delta: chunk.text,
+          logprobs: [],
         });
       } else if (chunk.type === "done") {
+        const status = chunk.reply.status === "completed" ? "completed" : "incomplete";
+        const item = responseOutputItem(itemId, status, chunk.reply.text);
         yield event("response.output_text.done", {
           item_id: itemId,
           output_index: 0,
           content_index: 0,
           text: chunk.reply.text,
+          logprobs: [],
         });
-        yield event("response.completed", {
+        yield event("response.content_part.done", {
+          item_id: itemId,
+          output_index: 0,
+          content_index: 0,
+          part: item.content[0]!,
+        });
+        yield event("response.output_item.done", { output_index: 0, item });
+        yield event(`response.${status}`, {
           response: responseObject(
             chunk.reply,
             chat,
             model,
-            chunk.reply.status === "completed" ? "completed" : "incomplete",
+            status,
             previousResponseId,
             chunk.reply.text,
+            identity,
           ),
         });
       }

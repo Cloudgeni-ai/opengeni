@@ -4,6 +4,7 @@ import {
   type AccessGrant,
   type Permission,
   type Session,
+  type SessionAuthorizationListScope,
   type SessionEndUser,
 } from "@opengeni/contracts";
 import {
@@ -303,6 +304,41 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () => {
+  test("session-scoped HTTP and MCP lists intersect the host allowlist", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const root = await createSession(f, { agentAccess: "session" });
+    const peer = await createSession(f, { agentAccess: "workspace" });
+    const attempt = await liveAttempt(f, root.id);
+    const server = await agentServer(f, attempt);
+    const bearer = await agentBearer(f, attempt);
+    const spawned = (await expectAllowed(
+      callTool(server, "session_create", { initialMessage: "child" }),
+    )) as { resource: { id: string } };
+    const childId = spawned.resource.id;
+    let scope: SessionAuthorizationListScope = { kind: "all" };
+    f.deps.sessionAuthorization = {
+      authorizeSession: async () => ({ allowed: true }),
+      resolveListScope: async () => scope,
+    };
+    // Rebuild adapters with the host port installed, as an embedding host would.
+    f.app = createApp(f.deps);
+    const restrictedServer = await agentServer(f, attempt);
+    const cases: Array<[SessionAuthorizationListScope, string[]]> = [
+      [{ kind: "scoped", rootSessionIds: [], sessionIds: [] }, []],
+      [{ kind: "scoped", rootSessionIds: [], sessionIds: [childId, peer.id] }, [childId]],
+      [{ kind: "scoped", rootSessionIds: [childId], sessionIds: [] }, [childId]],
+      [{ kind: "scoped", rootSessionIds: [peer.id], sessionIds: [] }, []],
+      [{ kind: "scoped", rootSessionIds: [root.id], sessionIds: [] }, [root.id, childId]],
+      [{ kind: "all" }, [root.id, childId]],
+    ];
+    for (const [hostScope, expected] of cases) {
+      scope = hostScope;
+      expect(await httpListedIds(f, bearer)).toEqual(new Set(expected));
+      expect(await listedIds(restrictedServer)).toEqual(new Set(expected));
+    }
+  });
+
   test("the create contract stores and projects the scope and rejects an unlabelled user memory", async () => {
     if (!available) return;
     const f = await fixture();

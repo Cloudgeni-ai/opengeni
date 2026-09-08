@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import OpenAI from "openai";
 import {
   chatSessionId,
   decodeResponseId,
@@ -7,7 +8,7 @@ import {
   handleResponsesRequest,
   type ChatResolve,
 } from "../src/chat";
-import { fakeServer, readBody, sseDataLines } from "./chat-helpers";
+import { fakeServer, readBody, sseDataLines, type ScriptedEvent } from "./chat-helpers";
 import { WORKSPACE_ID } from "./helpers";
 
 const ENDPOINT = "https://product.example.test/v1";
@@ -22,6 +23,16 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
 
 const resolveTenant: ChatResolve = async () => ({ tenant: "acme", user: "u_42" });
 const U_42 = { source: "app", id: "u_42" };
+
+function responsesClient(server: ReturnType<typeof fakeServer>): OpenAI {
+  return new OpenAI({
+    apiKey: "test-only",
+    baseURL: ENDPOINT,
+    maxRetries: 0,
+    fetch: async (input, init) =>
+      handleResponsesRequest(server.og, new Request(input, init), resolveTenant),
+  });
+}
 
 describe("handleChatCompletionsRequest", () => {
   test("streams chat.completion.chunk objects and terminates with [DONE]", async () => {
@@ -165,7 +176,42 @@ describe("handleChatCompletionsRequest", () => {
 });
 
 describe("handleResponsesRequest", () => {
-  test("streams response.created, output_text deltas, output_text.done, and response.completed", async () => {
+  test("the official Responses stream helper receives stable, complete snapshots", async () => {
+    const server = fakeServer();
+    const client = responsesClient(server);
+    const stream = client.responses.stream({ model: "m", input: "hello", conversation: "c_9" });
+    const events: OpenAI.Responses.ResponseStreamEvent[] = [];
+    const snapshots: string[] = [];
+    stream.on("event", (event) => events.push(event));
+    stream.on("response.output_text.delta", (event) => snapshots.push(event.snapshot));
+    const response = await stream.finalResponse();
+    expect(snapshots).toEqual(["Hel", "Hello"]);
+    expect(response.output_text).toBe("Hello");
+    const created = events.find((event) => event.type === "response.created")!;
+    expect(created.type).toBe("response.created");
+    if (created.type !== "response.created") throw new Error("Missing response.created");
+    expect(response.id).toBe(created.response.id);
+    expect(response.created_at).toBe(created.response.created_at);
+    const message = response.output[0]!;
+    if (message.type !== "message") throw new Error("Expected an assistant message");
+    for (const event of events) {
+      if ("response" in event) {
+        expect(event.response.id).toBe(response.id);
+        expect(event.response.created_at).toBe(response.created_at);
+      }
+      if ("item_id" in event) expect(event.item_id).toBe(message.id);
+      if ("item" in event) expect(event.item.id).toBe(message.id);
+    }
+    const next = await client.responses
+      .stream({ model: "m", input: "again", previous_response_id: response.id })
+      .finalResponse();
+    expect(next.id).not.toBe(response.id);
+    expect(next.output[0]!.id).not.toBe(message.id);
+    expect(next.previous_response_id).toBe(response.id);
+    expect(server.creates).toHaveLength(1);
+  });
+
+  test("streams the complete response, output-item, and content-part lifecycle", async () => {
     const server = fakeServer();
     const response = await handleResponsesRequest(
       server.og,
@@ -180,21 +226,44 @@ describe("handleResponsesRequest", () => {
       .map((line) => line.slice(7));
     expect(eventNames).toEqual([
       "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.content_part.added",
       "response.output_text.delta",
       "response.output_text.delta",
       "response.output_text.done",
+      "response.content_part.done",
+      "response.output_item.done",
       "response.completed",
     ]);
     const events = sseDataLines(body).map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(events.map((event) => event.sequence_number)).toEqual([0, 1, 2, 3, 4]);
+    expect(events.map((event) => event.sequence_number)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect((events[0]!.response as Record<string, unknown>).status).toBe("in_progress");
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "message", role: "assistant", status: "in_progress", content: [] },
+    });
+    expect(events[3]).toMatchObject({
+      type: "response.content_part.added",
+      part: { type: "output_text", text: "", annotations: [] },
+    });
+    expect(events[4]).toMatchObject({
       type: "response.output_text.delta",
       delta: "Hel",
       output_index: 0,
+      logprobs: [],
     });
-    expect(events[3]).toMatchObject({ type: "response.output_text.done", text: "Hello" });
-    const completed = events[4]!.response as Record<string, unknown>;
+    expect(events[6]).toMatchObject({
+      type: "response.output_text.done",
+      text: "Hello",
+      logprobs: [],
+    });
+    expect(events[7]).toMatchObject({
+      type: "response.content_part.done",
+      part: { type: "output_text", text: "Hello", annotations: [] },
+    });
+    const completed = events[9]!.response as Record<string, unknown>;
     const sessionId = server.creates[0]!.requestedSessionId!;
     expect(completed).toMatchObject({
       object: "response",
@@ -209,6 +278,90 @@ describe("handleResponsesRequest", () => {
     expect(server.creates[0]!.requestedSessionId).toBe(
       await chatSessionId(WORKSPACE_ID, "c_9", U_42),
     );
+  });
+
+  const terminalCases: Array<{
+    name: string;
+    events: ScriptedEvent[];
+    text: string;
+    status: "completed" | "incomplete";
+  }> = [
+    {
+      name: "an empty reply",
+      events: [{ type: "turn.completed" }],
+      text: "",
+      status: "completed",
+    },
+    {
+      name: "a cancelled reply",
+      events: [
+        { type: "agent.message.delta", payload: { text: "Partial" } },
+        { type: "turn.cancelled" },
+      ],
+      text: "Partial",
+      status: "incomplete",
+    },
+    {
+      name: "an approval wait without text",
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvals: [{ rawItem: { callId: "approval", name: "shell" } }] },
+        },
+      ],
+      text: "",
+      status: "incomplete",
+    },
+    {
+      name: "text before and after a tool",
+      events: [
+        { type: "agent.message.delta", payload: { text: "Before." } },
+        { type: "agent.toolCall.created", payload: { id: "tool", name: "search" } },
+        { type: "agent.message.delta", payload: { text: "After." } },
+        { type: "turn.completed" },
+      ],
+      text: "Before.\n\nAfter.",
+      status: "completed",
+    },
+  ];
+  for (const scenario of terminalCases) {
+    test(`the official Responses helper settles ${scenario.name}`, async () => {
+      const server = fakeServer({ reply: () => scenario.events });
+      const stream = responsesClient(server).responses.stream({
+        model: "m",
+        input: "hello",
+        conversation: "c_9",
+      });
+      let text = "";
+      const events: OpenAI.Responses.ResponseStreamEvent[] = [];
+      stream.on("event", (event) => events.push(event));
+      stream.on("response.output_text.delta", (event) => {
+        text += event.delta;
+      });
+      const response = await stream.finalResponse();
+      expect(text).toBe(scenario.text);
+      expect(response).toMatchObject({ status: scenario.status, output_text: text });
+      expect(response.output[0]).toMatchObject({ status: scenario.status });
+      expect(events.at(-1)).toMatchObject({ type: `response.${scenario.status}` });
+    });
+  }
+
+  test("the official Responses helper rejects a failed turn", async () => {
+    const server = fakeServer({
+      reply: () => [
+        { type: "agent.message.delta", payload: { text: "Partial" } },
+        { type: "turn.failed", payload: { error: "boom", code: "provider_error" } },
+      ],
+    });
+    await expect(
+      responsesClient(server)
+        .responses.stream({
+          model: "m",
+          input: "hello",
+          conversation: "c_9",
+        })
+        .finalResponse(),
+    ).rejects.toThrow("boom");
   });
 
   test("imports prior array input items as context on the first create only", async () => {
@@ -356,6 +509,9 @@ describe("handleResponsesRequest", () => {
     const sessionId = "22222222-2222-4222-8222-222222222222";
     expect(decodeResponseId(encodeResponseId(sessionId, 12))).toBe(sessionId);
     expect(decodeResponseId(`resp_${sessionId}`)).toBe(sessionId);
+    expect(decodeResponseId(`resp_${sessionId}_${crypto.randomUUID()}`)).toBe(sessionId);
+    expect(decodeResponseId(`resp_${sessionId}_${"-".repeat(36)}`)).toBeNull();
+    expect(decodeResponseId(`resp_${sessionId}_arbitrary`)).toBeNull();
     expect(decodeResponseId("resp_abc")).toBeNull();
     expect(decodeResponseId(42)).toBeNull();
   });
