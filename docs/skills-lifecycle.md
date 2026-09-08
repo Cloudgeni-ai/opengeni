@@ -106,6 +106,13 @@ Historical rows and hashes remain unchanged. Use explicit unified restore to
 create a new files-bearing revision from older text; activating an already
 files-bearing revision remains compatible with human governance.
 
+The installed-source backfill opens an owner-only `NO FORCE` window on the four
+portable source tables and the registry heads, revisions, events, and source
+bindings. RLS stays enabled for application roles. Deferred proposal-event and
+foreign-key constraints are flushed before restoring FORCE RLS, all within the
+migration transaction. A seeded `NOSUPERUSER NOBYPASSRLS` owner test verifies
+cross-tenant identity preservation, folder content, and the restored posture.
+
 Migration `0423_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never

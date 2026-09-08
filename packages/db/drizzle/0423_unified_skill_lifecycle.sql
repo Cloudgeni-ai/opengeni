@@ -265,6 +265,16 @@ END $secure$;
 
 -- Backfill by immutable portable identity, never by matching names or bytes.
 -- Distribution owners/manifests/files remain untouched and keep their upstream history.
+-- FORCE RLS also binds the non-superuser migration owner. Relax only that owner
+-- for every source/target read (including head-validation/event triggers).
+ALTER TABLE capability_plugin_installations NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_facets NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_skill_facets NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_skill_files NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE preference_registry_preferences NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE preference_registry_revisions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE preference_registry_events NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE skill_source_bindings NO FORCE ROW LEVEL SECURITY;
 DO $backfill$
 DECLARE source record; skill_id uuid; revision_id uuid; main_content text;
 BEGIN
@@ -299,6 +309,18 @@ BEGIN
     INSERT INTO skill_source_bindings VALUES(source.account_id,source.workspace_id,source.plugin_id,source.facet_key,skill_id,source.facet_id);
   END LOOP;
 END $backfill$;
+-- Flush creation-event validation while its exact event is owner-visible, and
+-- deferred head/revision foreign keys before ALTER TABLE restores protection.
+-- Pending FK trigger events otherwise reject the ALTER even with valid rows.
+SET CONSTRAINTS ALL IMMEDIATE;
+ALTER TABLE capability_plugin_installations FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_facets FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_skill_facets FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_skill_files FORCE ROW LEVEL SECURITY;
+ALTER TABLE preference_registry_preferences FORCE ROW LEVEL SECURITY;
+ALTER TABLE preference_registry_revisions FORCE ROW LEVEL SECURITY;
+ALTER TABLE preference_registry_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE skill_source_bindings FORCE ROW LEVEL SECURITY;
 
 -- Once a head adopts unified folders, old single-text writes cannot discard them.
 -- Keep historical rows/hashes unchanged; explicit restore creates a new folder revision.
