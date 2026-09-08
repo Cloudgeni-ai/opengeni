@@ -12490,10 +12490,12 @@ export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessi
  * `nextCursor` is still set (the server bounds how many workspaces one request
  * visits), so callers follow `nextCursor` until it is null.
  */
-export const OrganizationSessionListResponse = z.object({
-  sessions: z.array(Session),
-  nextCursor: z.string().nullable(),
-});
+export const OrganizationSessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    sessions: z.array(Session),
+    nextCursor: z.string().nullable(),
+  }),
+);
 export type OrganizationSessionListResponse = z.infer<typeof OrganizationSessionListResponse>;
 
 // Recursive: the TS type is declared first so the schema annotation can carry
