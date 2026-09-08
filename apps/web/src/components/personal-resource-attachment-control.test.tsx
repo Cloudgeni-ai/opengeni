@@ -41,7 +41,7 @@ describe("PersonalResourceAttachmentControl", () => {
   test("shows explicit duration choice for selected personal resources", () => {
     expect(
       renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller()} compact />),
-    ).toContain("For my ongoing work in this session");
+    ).toContain("Ongoing work in this chat");
   });
 
   test("keeps actionable recovery states visible", () => {
@@ -65,7 +65,11 @@ test.each([
   ["reloading", "Session authority changed. Reloading personal resources before retrying."],
   ["reload_failed", "Session authority could not be refreshed. Retry before sending again."],
   ["reloaded", "Session authority changed. Personal resources were reloaded before retrying."],
-  ["accepted", "Personal-resource use was accepted for this work."],
+  [
+    "accepted",
+    "Personal access authorized for the sent message. Existing ongoing access is unchanged.",
+  ],
+  ["accepted_session", "Ongoing personal access authorized for your work in this chat."],
 ] as const)("renders exact %s status text from the lazy notice projection", (notice, message) => {
   expect(
     renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller({ notice })} />),

@@ -16,7 +16,10 @@ const noticeMessages: Record<PersonalResourceNotice, string> = {
   reloading: "Session authority changed. Reloading personal resources before retrying.",
   reload_failed: "Session authority could not be refreshed. Retry before sending again.",
   reloaded: "Session authority changed. Personal resources were reloaded before retrying.",
-  accepted: "Personal-resource use was accepted for this work.",
+  accepted:
+    "Personal access authorized for the sent message. Existing ongoing access is unchanged.",
+  accepted_session:
+    "Ongoing personal access authorized for your work in this chat. The picker has reset for your next message; your grant has not been revoked.",
 };
 
 export function PersonalResourceAttachmentControl(props: {
@@ -31,13 +34,14 @@ export function PersonalResourceAttachmentControl(props: {
     controller.visibility === "workspace" &&
     controller.selected.personalResourceCount > 0 &&
     controller.mode !== null;
+  const ongoingNames = useOngoingNames(controller);
   const hasVisibleStatus =
+    ongoingNames.length > 0 ||
     showScopeChoice ||
     controller.loading ||
     controller.notice !== null ||
     controller.error !== null ||
     controller.truncated;
-  const ongoingNames = useOngoingNames(controller);
   if (!controller.eligible || !hasVisibleStatus) {
     return null;
   }
@@ -49,9 +53,8 @@ export function PersonalResourceAttachmentControl(props: {
       aria-busy={controller.loading || controller.refreshing}
     >
       {ongoingNames.length > 0 ? (
-        <p className="text-xs text-fg-muted">
-          Existing ongoing authorization: {ongoingNames.join(", ")}. This is separate from your
-          next-message choice.
+        <p className="text-xs text-fg-muted" role="status">
+          Ongoing access active: {ongoingNames.join(", ")}.
         </p>
       ) : null}
       {showScopeChoice ? (

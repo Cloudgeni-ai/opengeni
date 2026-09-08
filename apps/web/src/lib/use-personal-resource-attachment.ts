@@ -39,7 +39,8 @@ export type PersonalResourceNotice =
   | "reloading"
   | "reload_failed"
   | "reloaded"
-  | "accepted";
+  | "accepted"
+  | "accepted_session";
 
 export type PersonalResourceAttachmentController = Readonly<{
   eligible: boolean;
@@ -498,7 +499,7 @@ export function usePersonalResourceAttachment(input: {
       const acceptedIntent = acceptedInput.personalResourceAttachment;
       intentConsumers.current.get(acceptedIntent)?.();
       intentConsumers.current.delete(acceptedIntent);
-      setNotice("accepted");
+      setNotice(acceptedIntent.mode === "session" ? "accepted_session" : "accepted");
       void load(true);
     },
     [load],
