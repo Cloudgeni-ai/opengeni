@@ -159,9 +159,9 @@ describe("Session rail row metadata in Chromium", () => {
         await page.mouse.move(1000, 700);
         if (interaction === "hover") await row.hover();
         else await row.getByRole("button", { name: "Pin session", exact: true }).focus();
-        await page.waitForFunction((id) => {
+        await page.waitForFunction((rowId) => {
           const actions = document.querySelector(
-            `[data-row-case="${id}"] [data-session-quick-actions]`,
+            `[data-row-case="${rowId}"] [data-session-quick-actions]`,
           );
           return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "1";
         }, id);

@@ -6,7 +6,7 @@ import {
   Loader2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { Children, useId } from "react";
+import { Children, isValidElement, useId } from "react";
 
 import { CreatorMonogram } from "@/components/creator-monogram";
 import {
@@ -171,7 +171,7 @@ export function RailTrailingMetadata({
         {relativeTime}
       </span>
     ) : null,
-  ]);
+  ]).filter(isValidElement);
   if (!quickActionSlots) {
     return (
       <span
@@ -189,7 +189,7 @@ export function RailTrailingMetadata({
     <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end">
       {items.map((item, index) => (
         <span
-          key={index}
+          key={item.key}
           data-session-row-slot
           className={cn(
             "inline-flex min-w-6 shrink-0 items-center justify-center last:min-w-10",
