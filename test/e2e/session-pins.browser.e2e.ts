@@ -223,6 +223,36 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 60_000);
 
+  test("loads the settings interface only when opening a management page", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    const managementRequests: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (request.url().includes("/assets/workspace-management-surfaces-"))
+        managementRequests.push(request.url());
+    });
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      const settings = page.getByRole("link", { name: "Settings", exact: true });
+      await settings.waitFor();
+      expect(managementRequests).toHaveLength(0);
+      await settings.click();
+      await page.getByRole("heading", { name: "General", exact: true }).waitFor();
+      expect(managementRequests.length).toBeGreaterThan(0);
+      await page.getByRole("link", { name: "Back to sessions", exact: true }).click();
+      await page.getByRole("link", { name: "Settings", exact: true }).waitFor();
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
   test("adapts rail shortcuts to viewport height without hiding them on tall screens", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 900 },
