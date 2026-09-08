@@ -462,9 +462,11 @@ export type {
   OrganizationAdministrationMember,
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
+  OrganizationApiKeyAccess,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
+  OrganizationSessionListResponse,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryApproval,
   OrganizationRecoveryCapabilities,
@@ -791,6 +793,7 @@ export type {
   UpdatePrReviewRepositoryBindingRequest,
   ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListConnectionsResponse,
   ListPacksResponse,
   ListSlackUserLinkAccessRequestsResponse,
@@ -1210,3 +1213,10 @@ export type {
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,
 } from "./types";
+
+export type {
+  FeedbackSentiment,
+  CreateFeedbackRequest,
+  Feedback,
+  FeedbackSubmissionResponse,
+} from "./feedback";

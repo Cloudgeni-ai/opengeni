@@ -82,16 +82,17 @@ describe("console composer in a split desktop pane", () => {
         }
       }
       expect(await page.getByRole("button", { name: "More composer actions" }).isVisible()).toBe(
-        width < 640,
+        true,
       );
     }
     await page.screenshot({ path: `${root}/composer-pane-fixed.png` });
   });
 
-  test("compact overflow keeps repositories and tools reachable", async () => {
+  test("shared actions keep repositories, tools, and variable sets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Tools/ }).isVisible()).toBe(true);
+    expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
     await page.keyboard.press("Escape");
   });
 });

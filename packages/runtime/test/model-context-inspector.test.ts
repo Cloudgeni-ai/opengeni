@@ -27,6 +27,7 @@ describe("model context inspector", () => {
     expect(inspection.layers.map((layer) => layer.id)).toEqual([
       "operational_contract",
       "persona_and_core",
+      "builtin_skills",
       "session_instructions",
     ]);
   });
@@ -40,6 +41,7 @@ describe("model context inspector", () => {
     expect(inspection.layers.map((layer) => layer.id)).toEqual([
       "operational_contract",
       "persona_and_core",
+      "builtin_skills",
       "workspace_governance",
       "session_instructions",
       "codemode",
@@ -89,6 +91,7 @@ describe("model context inspector", () => {
       "sandbox_preamble",
       "operational_contract",
       "persona_and_core",
+      "builtin_skills",
       "session_instructions",
       "sdk_capability_instructions",
       "sandbox_filesystem",

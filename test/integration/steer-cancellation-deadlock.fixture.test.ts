@@ -295,14 +295,14 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
           const session = await getSession(dbClient.db, workspaceId, target.id);
           return session?.status === "queued" && session.activeTurnId === null;
         });
-        await Bun.sleep(300);
-
-        const description = await handle.describe();
-        const pending = description.raw.pendingActivities?.find(
-          (activity) => activity.activityType?.name === "runAgentTurn",
-        );
-        expect(pending?.state).toBe(encodePendingActivityState("CANCEL_REQUESTED"));
-        pendingActivityId = pending?.activityId;
+        await waitFor(async () => {
+          const description = await handle.describe();
+          const pending = description.raw.pendingActivities?.find(
+            (activity) => activity.activityType?.name === "runAgentTurn",
+          );
+          pendingActivityId = pending?.activityId;
+          return pending?.state === encodePendingActivityState("CANCEL_REQUESTED");
+        });
         expect(pendingActivityId).toBeTruthy();
 
         const beatsAfterCancelRequest = heartbeats;

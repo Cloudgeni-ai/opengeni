@@ -1,12 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
+  previewSessionRecencyRepair,
+  applySessionRecencyRepair,
+} from "../../../scripts/session-recency-repair";
+import {
+  appendSessionEvents,
+  withWorkspaceSessionActivityRls,
   createDb,
   createSession,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
   setSessionCodexPin,
+  setWorkspaceCodexSubscriptionMode,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -241,5 +249,203 @@ describe("codex_pin_source (AM-2)", () => {
       threw = true;
     }
     expect(threw).toBe(true);
+  });
+});
+
+// Recency is conversation activity, not provider account bookkeeping.
+async function recencySnapshot(workspaceId: string) {
+  return await admin`
+    select s.id, s.updated_at::text as updated_at, s.activity_revision::text as revision,
+      r.revision::text as workspace_revision
+    from sessions s join workspace_session_activity_revisions r using (workspace_id)
+    where s.workspace_id = ${workspaceId}
+    order by s.updated_at desc, s.id desc
+  `;
+}
+
+describe("Codex bookkeeping preserves conversation recency", () => {
+  test("source preference changes clear affinities without reordering sessions", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required for the recency regression");
+    const ws = await freshWorkspace();
+    const other = await freshWorkspace();
+    const credential = await seedCodexAccount(ws);
+    const otherCredential = await seedCodexAccount(other);
+    const first = await seedSession(ws);
+    const second = await seedSession(ws);
+    await seedSession(ws);
+    const outsider = await seedSession(other);
+    await setSessionCodexPin(db, other.workspaceId, outsider, otherCredential);
+    const otherBefore = await recencySnapshot(other.workspaceId);
+    for (const mode of ["workspace", "automatic"] as const) {
+      await setSessionCodexPin(db, ws.workspaceId, first, credential);
+      await setSessionCodexPin(db, ws.workspaceId, second, credential, "policy");
+      await recordSessionActiveCodexCredential(db, ws.workspaceId, first, credential);
+      const before = await recencySnapshot(ws.workspaceId);
+      await setWorkspaceCodexSubscriptionMode(db, { ...ws, subjectId: null, mode });
+      expect(await recencySnapshot(ws.workspaceId)).toEqual(before);
+      for (const id of [first, second]) {
+        expect(await getSessionCodexState(db, ws.workspaceId, id)).toEqual({
+          pinnedCredentialId: null,
+          lastCredentialId: null,
+          pinSource: null,
+        });
+      }
+      expect(await recencySnapshot(other.workspaceId)).toEqual(otherBefore);
+      expect(
+        (await getSessionCodexState(db, other.workspaceId, outsider))?.pinnedCredentialId,
+      ).toBe(otherCredential);
+    }
+  });
+
+  test("policy reassignment and active-account recording do not count as work", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required for the recency regression");
+    const ws = await freshWorkspace();
+    const first = await seedCodexAccount(ws);
+    const second = await seedCodexAccount(ws);
+    const id = await seedSession(ws);
+    const before = await recencySnapshot(ws.workspaceId);
+    await setSessionCodexPin(db, ws.workspaceId, id, first, "policy");
+    await recordSessionActiveCodexCredential(db, ws.workspaceId, id, first);
+    await setSessionCodexPin(db, ws.workspaceId, id, second, "policy");
+    await recordSessionActiveCodexCredential(db, ws.workspaceId, id, second);
+    await setSessionCodexPin(db, ws.workspaceId, id, null, "policy");
+    expect(await recencySnapshot(ws.workspaceId)).toEqual(before);
+    expect((await getSessionCodexState(db, ws.workspaceId, id))?.lastCredentialId).toBe(second);
+  });
+
+  test("an explicit manual account switch still counts as a session change", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required for the recency regression");
+    const ws = await freshWorkspace();
+    const credential = await seedCodexAccount(ws);
+    const id = await seedSession(ws);
+    const before = await recencySnapshot(ws.workspaceId);
+    await setSessionCodexPin(db, ws.workspaceId, id, credential);
+    const after = await recencySnapshot(ws.workspaceId);
+    expect(BigInt(after[0]!.revision)).toBeGreaterThan(BigInt(before[0]!.revision));
+    expect(after[0]!.updated_at).not.toBe(before[0]!.updated_at);
+  });
+});
+
+describe("reviewed historical recency repair", () => {
+  test("preview and apply time out behind an exclusive tenancy fence", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required");
+    const ws = await freshWorkspace();
+    const id = await seedSession(ws);
+    await withWorkspaceSessionActivityRls(db, ws.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`update sessions set status = 'idle', updated_at = updated_at + interval '1 day' where id = ${id}::uuid`,
+      );
+    });
+    const plan = await previewSessionRecencyRepair(
+      db,
+      ws.workspaceId,
+      [id],
+      "Confirmed test incident",
+    );
+    const before = await recencySnapshot(ws.workspaceId);
+    const locked = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const holder = admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${"session-tenancy:" + ws.workspaceId}, 0))`;
+      locked.resolve();
+      await release.promise;
+    });
+    try {
+      await locked.promise;
+      const results = await Promise.allSettled([
+        previewSessionRecencyRepair(db, ws.workspaceId, [id], "Confirmed test incident"),
+        applySessionRecencyRepair(db, plan),
+      ]);
+      for (const result of results) {
+        expect(result.status).toBe("rejected");
+        if (result.status === "rejected")
+          expect(result.reason.code ?? result.reason.cause?.code).toBe("55P03");
+      }
+    } finally {
+      release.resolve();
+      await holder;
+    }
+    expect(await recencySnapshot(ws.workspaceId)).toEqual(before);
+  }, 20_000);
+
+  test("dry-run preserves state, apply retains microseconds and advances only revision, repeat is idempotent", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required");
+    const ws = await freshWorkspace();
+    const id = await seedSession(ws);
+    await withWorkspaceSessionActivityRls(db, ws.workspaceId, async (tx) => {
+      await tx.execute(sql`update sessions set status = 'idle', updated_at = updated_at + interval '1 day'
+        where id = ${id}::uuid`);
+    });
+    const before = await recencySnapshot(ws.workspaceId);
+    const plan = await previewSessionRecencyRepair(
+      db,
+      ws.workspaceId,
+      [id],
+      "Test reproduces confirmed provider-only write",
+    );
+    expect(await recencySnapshot(ws.workspaceId)).toEqual(before);
+    expect(plan.candidates[0]!.proposedUpdatedAt).toMatch(/\.\d{6}Z$/);
+    expect(await applySessionRecencyRepair(db, plan)).toEqual([
+      { sessionId: id, outcome: "applied" },
+    ]);
+    const after = await recencySnapshot(ws.workspaceId);
+    expect(BigInt(after[0]!.revision)).toBeGreaterThan(BigInt(before[0]!.revision));
+    const [exact] =
+      await admin`select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as at from sessions where id = ${id}`;
+    expect(exact!.at).toBe(plan.candidates[0]!.proposedUpdatedAt);
+    expect(await applySessionRecencyRepair(db, plan)).toEqual([
+      { sessionId: id, outcome: "already_applied" },
+    ]);
+    expect(await recencySnapshot(ws.workspaceId)).toEqual(after);
+  });
+
+  test("a new semantic event invalidates a reviewed repair and still advances recency", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required");
+    const ws = await freshWorkspace();
+    const id = await seedSession(ws);
+    await withWorkspaceSessionActivityRls(db, ws.workspaceId, async (tx) => {
+      await tx.execute(sql`update sessions set status = 'idle', updated_at = updated_at + interval '1 day'
+        where id = ${id}::uuid`);
+    });
+    const plan = await previewSessionRecencyRepair(
+      db,
+      ws.workspaceId,
+      [id],
+      "Confirmed test incident",
+    );
+    const revision = BigInt((await recencySnapshot(ws.workspaceId))[0]!.revision);
+    await appendSessionEvents(db, ws.workspaceId, id, [
+      { type: "user.message", payload: { text: "new work" } },
+    ]);
+    const fresh = await recencySnapshot(ws.workspaceId);
+    expect(BigInt(fresh[0]!.revision)).toBeGreaterThan(revision);
+    expect(await applySessionRecencyRepair(db, plan)).toEqual([
+      { sessionId: id, outcome: "stale" },
+    ]);
+    expect(await recencySnapshot(ws.workspaceId)).toEqual(fresh);
+  });
+
+  test("raw deltas preserve recency but invalidate the reviewed sequence", async () => {
+    if (!available) throw new Error("Real PostgreSQL is required");
+    const ws = await freshWorkspace();
+    const id = await seedSession(ws);
+    await withWorkspaceSessionActivityRls(db, ws.workspaceId, async (tx) => {
+      await tx.execute(sql`update sessions set status = 'idle', updated_at = updated_at + interval '1 day'
+        where id = ${id}::uuid`);
+    });
+    const plan = await previewSessionRecencyRepair(
+      db,
+      ws.workspaceId,
+      [id],
+      "Confirmed test incident",
+    );
+    const before = await recencySnapshot(ws.workspaceId);
+    await appendSessionEvents(db, ws.workspaceId, id, [
+      { type: "agent.message.delta", payload: { text: "raw" } },
+    ]);
+    expect(await recencySnapshot(ws.workspaceId)).toEqual(before);
+    expect(await applySessionRecencyRepair(db, plan)).toEqual([
+      { sessionId: id, outcome: "stale" },
+    ]);
   });
 });

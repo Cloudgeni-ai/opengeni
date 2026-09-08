@@ -69,6 +69,7 @@ export function AddCustomDialog({
             </Label>
             <Input
               id="add-name"
+              suppressAutofill
               value={form.name}
               onChange={(event) => update({ name: event.target.value })}
               placeholder="e.g. Internal Tools MCP"

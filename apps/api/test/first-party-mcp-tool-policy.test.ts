@@ -148,6 +148,55 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("project tools follow existing session permissions and exact selection", () => {
+    const human = (permissions: Permission[]): AccessGrant => ({
+      accountId,
+      workspaceId,
+      subjectId: "user:projects",
+      principalKind: "human_session",
+      permissions,
+    });
+    const projects = (permissions: Permission[]) =>
+      registeredToolNames(buildOpenGeniMcpServer(deps(), human(permissions))).filter(
+        (n) => n.startsWith("project_") || n === "session_set_project",
+      );
+    expect(projects([])).toEqual([]);
+    expect(projects(["sessions:read"])).toEqual(["project_get", "project_list"]);
+    expect(projects(["sessions:create"])).toEqual([
+      "project_create",
+      "project_delete",
+      "project_reorder",
+      "project_update",
+    ]);
+    expect(projects(["sessions:control"])).toEqual(["session_set_project"]);
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(
+          deps(),
+          grant(["sessions:read", "sessions:create"], ["project_list"]),
+        ),
+      ),
+    ).toEqual(["project_list"]);
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      human(["sessions:create", "sessions:read", "sessions:control"]),
+    );
+    expect(
+      registeredToolInputSchema(server, "project_create").safeParse({ name: "  " }).success,
+    ).toBe(false);
+    expect(
+      registeredToolInputSchema(server, "session_set_project").safeParse({
+        sessionId,
+        projectId: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      registeredToolInputSchema(server, "session_create").safeParse({
+        initialMessage: "Work",
+        projectId: crypto.randomUUID(),
+      }).success,
+    ).toBe(true);
+  });
   test("workspace artifact listing is available to humans without an agent session", () => {
     const human: AccessGrant = {
       accountId,
@@ -233,7 +282,7 @@ describe("first-party MCP tool visibility policy", () => {
       { ...scoped, principalKind: "service" as const },
       { ...scoped, principalKind: "human_session" as const },
       { ...scoped, metadata: {} },
-      { ...scoped, metadata: { sessionId } },
+      { ...scoped, metadata: { sessionId, firstPartyMcpTools: ["session_get"] } },
       { ...scoped, metadata: { ...scoped.metadata, executionGeneration: 0 } },
     ]) {
       await expect(
@@ -284,16 +333,51 @@ describe("first-party MCP tool visibility policy", () => {
       await server.close();
     }
   });
-  test("omission splits the complete safe default catalog across broad and local adapters", () => {
-    const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
-      workspaceMemoryEnabled: true,
-    });
+  test("the signed default selection splits the complete safe default catalog across broad and local adapters", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
+      { workspaceMemoryEnabled: true },
+    );
 
     const broad = registeredToolNames(server);
     expect(broad).toEqual(broadServerTools(DEFAULT_FIRST_PARTY_MCP_TOOLS).sort());
     expect([...broad, ...INTERACTION_ATTEMPT_TOOL_NAMES].sort()).toEqual(
       [...DEFAULT_FIRST_PARTY_MCP_TOOLS].sort(),
     );
+  });
+
+  test("a session-scoped grant without a signed selection registers no session tools", () => {
+    // The hole: a session-scoped bearer minted without the firstPartyMcpTools
+    // claim (the sandbox Codemode bearer has exactly this shape) used to
+    // resolve to the complete deployment default catalog. An omitted claim
+    // must fail closed instead of widening to every authorized default tool.
+    const omitted = grant([...Permission.options]);
+    expect(omitted.metadata?.["sessionId"]).toBe(sessionId);
+    expect(omitted.metadata?.["firstPartyMcpTools"]).toBeUndefined();
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), omitted, { workspaceMemoryEnabled: true }),
+      ),
+    ).toEqual([]);
+    // Exact same grant with the claim keeps its ordinary catalog, so the
+    // difference is the claim alone.
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), grant([...Permission.options], ["set_session_title"])),
+      ),
+    ).toEqual(["set_session_title"]);
+    // A grant without session scope is unaffected: workspace tools that need
+    // no session still register from permissions alone.
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), {
+          ...omitted,
+          principalKind: "human_session",
+          metadata: {},
+        }),
+      ),
+    ).toContain("artifacts_list");
   });
 
   test("an explicit title-only selection does not widen to other authorized tools", () => {
@@ -790,7 +874,7 @@ describe("first-party MCP tool visibility policy", () => {
 
 describe("agent-facing goal_set schema", () => {
   test("does not accept maxAutoContinuations; the ceiling is API/scheduled configuration", async () => {
-    const server = buildOpenGeniMcpServer(deps(), grant(["goals:manage"]));
+    const server = buildOpenGeniMcpServer(deps(), grant(["goals:manage"], ["goal_set"]));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "goal-set-schema-test", version: "1" });
     await server.connect(serverTransport);
