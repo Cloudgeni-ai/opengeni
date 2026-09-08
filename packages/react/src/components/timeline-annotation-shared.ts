@@ -204,9 +204,26 @@ export function visibleClientRect(range: Range): DOMRect | null {
   return null;
 }
 
-export function revealLoadedAnnotationSource(source: TimelineAnnotationSource): boolean {
+export function resolveAnnotationRevealRoot(from: Element | null | undefined): HTMLElement | null {
+  const conversation = from?.closest("[data-og-conversation]");
+  if (conversation instanceof HTMLElement) {
+    const nested = conversation.querySelector("[data-og-timeline-scroller]");
+    return nested instanceof HTMLElement ? nested : conversation;
+  }
+  const scroller = from?.closest("[data-og-timeline-scroller]");
+  return scroller instanceof HTMLElement ? scroller : null;
+}
+
+export function revealLoadedAnnotationSource(
+  source: TimelineAnnotationSource,
+  root?: ParentNode | null,
+): boolean {
   if (typeof document === "undefined") return false;
-  const element = document.querySelector(
+  // An explicit null root means the caller already scoped the search and found
+  // no owning timeline. Do not fall back to `document`, or a second mounted
+  // timeline with the same event id would steal the reveal.
+  if (root === null) return false;
+  const element = (root ?? document).querySelector(
     `[data-og-annotation-source-key="${cssEscapeAttribute(source.eventId)}"]`,
   );
   if (!(element instanceof HTMLElement)) return false;

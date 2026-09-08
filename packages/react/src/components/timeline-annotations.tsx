@@ -1,6 +1,15 @@
 import type { TimelineAnnotationSource } from "@opengeni/sdk";
 import { QuoteIcon, XIcon } from "lucide-react";
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { cn } from "../lib/cn";
 import {
   AnnotationAccentRow,
@@ -9,11 +18,43 @@ import {
   type TimelineAnnotationLike,
 } from "./timeline-annotation-chrome";
 import { ANNOTATION_CARD_STACK_SCROLL_AT } from "./timeline-annotation-layout";
-import { annotationDisplayOrdinal, annotationHasNote } from "./timeline-annotation-shared";
+import {
+  TimelineAnnotationSourceRootContext,
+  useTimelineAnnotationSourceRoot,
+} from "./timeline-annotation-reveal-context";
+import {
+  annotationDisplayOrdinal,
+  annotationHasNote,
+  resolveAnnotationRevealRoot,
+} from "./timeline-annotation-shared";
 
 export type { TimelineAnnotationLike } from "./timeline-annotation-chrome";
 
 const TimelineAnnotationsDialog = lazy(() => import("./timeline-annotations-dialog"));
+
+function AnnotationSourceRootBridge({
+  triggerRef,
+  children,
+}: {
+  triggerRef: RefObject<HTMLElement | null>;
+  children: ReactNode;
+}) {
+  const inheritedRoot = useTimelineAnnotationSourceRoot();
+  const conversationRootRef = useRef<HTMLElement | null>(null);
+  if (!inheritedRoot) {
+    conversationRootRef.current = resolveAnnotationRevealRoot(triggerRef.current);
+  }
+  useLayoutEffect(() => {
+    if (inheritedRoot) return;
+    conversationRootRef.current = resolveAnnotationRevealRoot(triggerRef.current);
+  });
+  if (inheritedRoot) return children;
+  return (
+    <TimelineAnnotationSourceRootContext.Provider value={conversationRootRef}>
+      {children}
+    </TimelineAnnotationSourceRootContext.Provider>
+  );
+}
 
 export function TimelineAnnotationCards({
   annotations,
@@ -152,20 +193,22 @@ export function TimelineAnnotationsChip({
         ) : null}
       </span>
       {open ? (
-        <Suspense fallback={null}>
-          <TimelineAnnotationsDialog
-            annotations={annotations}
-            editable={editable}
-            focusAnnotationId={focusAnnotationId}
-            onFocusConsumed={onFocusConsumed}
-            onUpdate={onUpdate}
-            onRemove={onRemove}
-            onRevealSource={onRevealSource}
-            triggerRef={triggerRef}
-            countLabel={countLabel}
-            onDismiss={dismiss}
-          />
-        </Suspense>
+        <AnnotationSourceRootBridge triggerRef={triggerRef}>
+          <Suspense fallback={null}>
+            <TimelineAnnotationsDialog
+              annotations={annotations}
+              editable={editable}
+              focusAnnotationId={focusAnnotationId}
+              onFocusConsumed={onFocusConsumed}
+              onUpdate={onUpdate}
+              onRemove={onRemove}
+              onRevealSource={onRevealSource}
+              triggerRef={triggerRef}
+              countLabel={countLabel}
+              onDismiss={dismiss}
+            />
+          </Suspense>
+        </AnnotationSourceRootBridge>
       ) : null}
     </span>
   );

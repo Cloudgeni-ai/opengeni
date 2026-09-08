@@ -6,6 +6,7 @@ import type {
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { annotationNoteNeedsDisclosure } from "./timeline-annotation-layout";
+import { useTimelineAnnotationSourceRoot } from "./timeline-annotation-reveal-context";
 import {
   annotationSourceLabel,
   revealLoadedAnnotationSource,
@@ -44,6 +45,7 @@ export function AnnotationQuoteSourceButton({
 }) {
   const preview = quotePreview(annotation.quote);
   const sourceLabel = annotationSourceLabel(annotation.source);
+  const sourceRoot = useTimelineAnnotationSourceRoot();
   return (
     <button
       type="button"
@@ -52,7 +54,10 @@ export function AnnotationQuoteSourceButton({
       className="block w-full min-w-0 rounded-sm border-0 bg-transparent text-left text-og-sm leading-5 text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       onClick={() => {
         const revealed =
-          onRevealSource?.(annotation.source) ?? revealLoadedAnnotationSource(annotation.source);
+          onRevealSource?.(annotation.source) ??
+          (sourceRoot
+            ? revealLoadedAnnotationSource(annotation.source, sourceRoot.current)
+            : revealLoadedAnnotationSource(annotation.source));
         onUnavailable(revealed ? null : annotation.id);
       }}
     >

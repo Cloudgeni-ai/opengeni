@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type { DraftTimelineAnnotation } from "@opengeni/sdk";
+import type { DraftTimelineAnnotation, TimelineAnnotation } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { MessageTimeline } from "../src";
 import {
   TimelineAnnotationsChip,
   TimelineAnnotationCards,
 } from "../src/components/timeline-annotations";
+import {
+  resolveAnnotationRevealRoot,
+  revealLoadedAnnotationSource,
+} from "../src/components/timeline-annotation-shared";
 import type { AgentMessageItem, UserMessageItem } from "../src/timeline";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
@@ -48,6 +52,24 @@ function annotation(note = "Keep this exact constraint."): DraftTimelineAnnotati
     },
     quote: "beta",
     note,
+  };
+}
+
+function sentAnnotation(note = "Keep this exact constraint."): TimelineAnnotation {
+  return { ...annotation(note), ordinal: 1 };
+}
+
+function stubScrollIntoView(): { scrolled: Element[]; restore: () => void } {
+  const scrolled: Element[] = [];
+  const previous = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = function scrollIntoView() {
+    scrolled.push(this);
+  };
+  return {
+    scrolled,
+    restore: () => {
+      HTMLElement.prototype.scrollIntoView = previous;
+    },
   };
 }
 
@@ -146,6 +168,41 @@ async function waitFor(condition: () => boolean, message: string): Promise<void>
 }
 
 describe("timeline annotations", () => {
+  test("reveals only the source inside the supplied timeline root", () => {
+    const rootA = document.createElement("div");
+    const rootB = document.createElement("div");
+    const sourceA = document.createElement("div");
+    sourceA.setAttribute("data-og-annotation-source-key", SOURCE_EVENT_ID);
+    sourceA.textContent = "zzzz zzzz zzzz";
+    const sourceB = document.createElement("div");
+    sourceB.setAttribute("data-og-annotation-source-key", SOURCE_EVENT_ID);
+    sourceB.textContent = "alpha beta omega";
+    rootA.append(sourceA);
+    rootB.append(sourceB);
+    document.body.append(rootA, rootB);
+    const { scrolled, restore } = stubScrollIntoView();
+    try {
+      expect(revealLoadedAnnotationSource(annotation().source, rootB)).toBe(true);
+      expect(scrolled).toEqual([sourceB]);
+      expect(revealLoadedAnnotationSource(annotation().source, null)).toBe(false);
+      expect(scrolled).toEqual([sourceB]);
+      expect(resolveAnnotationRevealRoot(sourceB)).toBeNull();
+      const conversation = document.createElement("div");
+      conversation.setAttribute("data-og-conversation", "");
+      const scroller = document.createElement("div");
+      scroller.setAttribute("data-og-timeline-scroller", "");
+      const trigger = document.createElement("button");
+      conversation.append(scroller, trigger);
+      document.body.append(conversation);
+      expect(resolveAnnotationRevealRoot(trigger)).toBe(scroller);
+      conversation.remove();
+    } finally {
+      restore();
+      rootA.remove();
+      rootB.remove();
+    }
+  });
+
   test("turns one same-message text selection into one exact draft annotation", async () => {
     let captured: DraftTimelineAnnotation | null = null;
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
@@ -580,9 +637,9 @@ describe("timeline annotations", () => {
       }),
     });
     try {
-      const decoy = userItem(SOURCE_EVENT_ID, "zzzz zzzz zzzz", 3);
-      const match = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
-      const first = annotation("");
+      const first = sentAnnotation("");
+      const decoy = { ...userItem(SOURCE_EVENT_ID, "zzzz zzzz zzzz", 3), annotations: [first] };
+      const match = { ...userItem(SOURCE_EVENT_ID, "alpha beta omega", 3), annotations: [first] };
       const rendered = await renderComponent(
         <div>
           <MessageTimeline items={[decoy]} onAnnotate={() => undefined} />
@@ -606,6 +663,23 @@ describe("timeline annotations", () => {
         ...document.body.querySelectorAll<HTMLButtonElement>("[data-og-annotation-badge]"),
       ];
       expect(badges.map((button) => button.getAttribute("aria-label"))).toEqual(["Annotation 1"]);
+      const matchSource = sources[1];
+      if (!matchSource) throw new Error("expected the second timeline source");
+      const scrollers = [
+        ...document.body.querySelectorAll<HTMLElement>("[data-og-timeline-scroller]"),
+      ];
+      expect(scrollers).toHaveLength(2);
+      const secondQuote = [...(scrollers[1]?.querySelectorAll("button") ?? [])].find((button) =>
+        button.textContent?.includes("view source"),
+      );
+      expect(secondQuote).toBeDefined();
+      const { scrolled, restore } = stubScrollIntoView();
+      try {
+        await act(async () => secondQuote?.click());
+        expect(scrolled).toEqual([matchSource]);
+      } finally {
+        restore();
+      }
       await rendered.unmount();
     } finally {
       if (previousElementRect) {
@@ -695,6 +769,47 @@ describe("timeline annotations", () => {
     });
     expect(document.activeElement).toBe(notes.item(1));
     expect(document.body.querySelector("[data-og-annotation-review]")).not.toBeNull();
+    await rendered.unmount();
+  });
+
+  test("reveals the owning conversation source from a composer chip when two conversations share an event id", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const first = sentAnnotation("");
+    const rendered = await renderComponent(
+      <div>
+        <div data-og-conversation="">
+          <MessageTimeline items={[userItem(SOURCE_EVENT_ID, "zzzz zzzz zzzz", 3)]} />
+          <TimelineAnnotationsChip annotations={[first]} focusAnnotationId={first.id} />
+        </div>
+        <div data-og-conversation="">
+          <MessageTimeline items={[userItem(SOURCE_EVENT_ID, "alpha beta omega", 3)]} />
+          <TimelineAnnotationsChip annotations={[first]} focusAnnotationId={first.id} />
+        </div>
+      </div>,
+    );
+    await flush();
+    const sources = [
+      ...document.body.querySelectorAll<HTMLElement>("[data-og-annotation-source-key]"),
+    ];
+    expect(sources.map((source) => source.textContent)).toEqual([
+      expect.stringContaining("zzzz zzzz zzzz"),
+      expect.stringContaining("alpha beta omega"),
+    ]);
+    const matchSource = sources[1];
+    if (!matchSource) throw new Error("expected the second conversation source");
+    const reviews = [...document.body.querySelectorAll<HTMLElement>("[data-og-annotation-review]")];
+    expect(reviews).toHaveLength(2);
+    const secondQuote = [...(reviews[1]?.querySelectorAll("button") ?? [])].find((button) =>
+      button.textContent?.includes("view source"),
+    );
+    expect(secondQuote).toBeDefined();
+    const { scrolled, restore } = stubScrollIntoView();
+    try {
+      await act(async () => secondQuote?.click());
+      expect(scrolled).toEqual([matchSource]);
+    } finally {
+      restore();
+    }
     await rendered.unmount();
   });
 
