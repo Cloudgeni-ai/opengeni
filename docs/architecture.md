@@ -64,6 +64,12 @@ into authority.
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
 
+Unified Skill content and write authority: [`skills-lifecycle.md`](skills-lifecycle.md).
+Authored and installed Skills share the preference registry head/history;
+portable installations retain upstream ownership and bind to that identity.
+The core `domain/skills.ts` boundary owns Learning-controlled saves, installation,
+approval, and restore; migration 0423 is the maintenance activation boundary.
+
 ---
 
 ## 3. Core invariants

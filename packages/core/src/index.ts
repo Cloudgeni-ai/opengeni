@@ -1,3 +1,4 @@
+export * from "./domain/skills";
 // @opengeni/core — the framework-agnostic OpenGeni core.
 //
 // WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved

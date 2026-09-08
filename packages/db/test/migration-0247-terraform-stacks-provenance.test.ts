@@ -525,6 +525,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           subjectId: grant.subjectId,
+          skillActor: { kind: "human", subjectId: grant.subjectId, principalKind: "human_session" },
           capabilityId: "skill:terraform-stacks",
           pluginKey: "skill/library/terraform-stacks",
           source: "library",
@@ -545,6 +546,13 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           files,
         }),
       ).toEqual({
+        skillReceipt: {
+          operationId: expect.any(String),
+          skillId: expect.any(String),
+          revisionId: expect.any(String),
+          outcome: "applied",
+          replayed: false,
+        },
         created: false,
         capabilityId: "skill:terraform-stacks",
         pluginId: plugin!.id,

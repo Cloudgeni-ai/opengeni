@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { applySkillLifecycle, listSkillRecords, skillFilesContentHash } from "./skills";
+import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
@@ -468,6 +470,7 @@ export * from "./workspace-learning-policy";
 export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
+export * from "./skills";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
@@ -5956,6 +5959,9 @@ export type InstallPortableSkillInput = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /** Required at runtime after 0423; omission fails before distribution writes. */
+  skillActor?: SkillActor;
+  skillOperationId?: string;
   capabilityId: string;
   pluginKey: string;
   source: "library" | "github" | "skills_sh" | "pack";
@@ -5985,6 +5991,7 @@ export type InstallPortableSkillInput = {
 };
 
 export type InstalledPortableSkill = {
+  skillReceipt: SkillWriteReceipt;
   created: boolean;
   capabilityId: string;
   pluginId: string;
@@ -8337,6 +8344,10 @@ export async function installPortableSkill(
   db: Database,
   input: InstallPortableSkillInput,
 ): Promise<InstalledPortableSkill> {
+  if (!input.skillActor)
+    throw new Error("Portable Skill installation requires a truthful unified Skill actor");
+  const skillActor = input.skillActor;
+  const skillOperationId = input.skillOperationId ?? randomUUID();
   return await withRlsContext(
     db,
     {
@@ -8656,7 +8667,22 @@ export async function installPortableSkill(
           })
           .onConflictDoNothing();
 
+        const skillReceipt = await applySkillLifecycle(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: skillActor,
+          },
+          {
+            operation: "install",
+            operationId: skillOperationId,
+            skillFacetId: facet.id,
+            reason: "Install portable Skill through the unified registry head",
+          },
+        );
         return {
+          skillReceipt,
           created: !existingOwner,
           capabilityId: input.capabilityId,
           pluginId: plugin.id,
@@ -8687,6 +8713,17 @@ export async function listInstalledPortableSkills(
   options: { includeSessionSelected?: boolean } = {},
 ): Promise<PortableSkillRuntime[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [workspace] = await scopedDb
+      .select({ accountId: schema.workspaces.accountId })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .limit(1);
+    if (!workspace) return [];
+    const currentSkills = await listSkillRecords(
+      scopedDb,
+      { accountId: workspace.accountId, workspaceId },
+      { limit: 1000 },
+    );
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
@@ -8746,12 +8783,16 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      const current = currentSkills.find(
+        (candidate) => candidate.source?.skillFacetId === row.facetId,
+      );
+      if (!current || current.status !== "active" || !current.activeRevisionId) continue;
       if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
         throw new Error(
           `Installed Skill ${row.capabilityId} has invalid activation mode ${row.activationMode}`,
         );
       }
-      if (row.activationMode === "session_selected" && !options.includeSessionSelected) {
+      if (current.activationMode === "session_selected" && !options.includeSessionSelected) {
         continue;
       }
       const source = skillSourceFromManifest(row.manifest, row.capabilityId);
@@ -8766,7 +8807,7 @@ export async function listInstalledPortableSkills(
         version: row.version,
         name: row.name,
         description: row.description,
-        activationMode: row.activationMode,
+        activationMode: current.activationMode,
         sourceUrl: row.sourceUrl,
         sourceCommit: row.sourceCommit,
         sourcePath: row.sourcePath,
@@ -8774,7 +8815,19 @@ export async function listInstalledPortableSkills(
         files: [{ path: row.path, content: row.content }],
       });
     }
-    return [...skills.values()];
+    return [...skills.entries()].flatMap(([facetId, skill]) => {
+      const current = currentSkills.find((candidate) => candidate.source?.skillFacetId === facetId);
+      if (!current || current.status !== "active" || !current.activeRevisionId) return [];
+      return [
+        {
+          ...skill,
+          name: current.title ?? skill.name,
+          description: current.description ?? skill.description,
+          contentSha256: skillFilesContentHash(current.files),
+          files: current.files,
+        },
+      ];
+    });
   });
 }
 
@@ -9003,6 +9056,33 @@ export async function uninstallPortableSkill(
             remainingOwners,
           };
         }
+
+        const [activeSkill] = await tx
+          .select({ id: schema.preferenceRegistryPreferences.id })
+          .from(schema.skillSourceBindings)
+          .innerJoin(
+            schema.preferenceRegistryPreferences,
+            eq(schema.preferenceRegistryPreferences.id, schema.skillSourceBindings.preferenceId),
+          )
+          .innerJoin(
+            schema.capabilityFacetInstallations,
+            eq(
+              schema.capabilityFacetInstallations.facetId,
+              schema.skillSourceBindings.skillFacetId,
+            ),
+          )
+          .where(
+            and(
+              eq(schema.capabilityFacetInstallations.id, context.facetInstallationId),
+              eq(schema.skillSourceBindings.workspaceId, input.workspaceId),
+              eq(schema.preferenceRegistryPreferences.status, "active"),
+            ),
+          )
+          .limit(1);
+        if (activeSkill)
+          throw new Error(
+            "Deactivate the unified Skill head before removing its last source owner",
+          );
 
         const now = new Date();
         await tx

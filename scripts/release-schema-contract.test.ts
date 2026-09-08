@@ -131,13 +131,10 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe(
-      "0422_personal_workspace_organization_codex_inheritance.sql",
-    );
+    expect(completeSourceContract.latestMigration).toBe("0423_unified_skill_lifecycle.sql");
     expect(
       completeSourceContract.migrations.find(
-        (migration) =>
-          migration.path === "0422_personal_workspace_organization_codex_inheritance.sql",
+        (migration) => migration.path === "0423_unified_skill_lifecycle.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
@@ -1094,6 +1091,8 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     let completeSourceContract = await contractWithoutMigrations([
+      // Assert the unified Skill cutover separately without repinning published history.
+      "0423_unified_skill_lifecycle.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
@@ -1458,6 +1457,7 @@ describe("release schema contract", () => {
     // The shared complete-contract assertion intentionally excludes these
     // branch-local migrations, but the governed hash must exclude them too.
     appendedMigrationPaths.unshift(
+      "0423_unified_skill_lifecycle.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
