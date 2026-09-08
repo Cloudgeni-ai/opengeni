@@ -1,3 +1,4 @@
+export * from "./model-connection-access";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";

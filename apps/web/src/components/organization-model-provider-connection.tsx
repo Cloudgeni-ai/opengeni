@@ -1,16 +1,18 @@
+import { ConnectionAccessSettings } from "@/components/connection-access-settings";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import type {
   OrganizationModelProviderConnection as Connection,
   OrganizationModelProviderKind as ProviderKind,
   OrganizationProviderCustomModel as CustomModel,
 } from "@opengeni/sdk";
-import { OpenGeniApiError } from "@opengeni/sdk/browser";
-import { ChevronDownIcon, Loader2Icon, PlusIcon, RouteIcon, Trash2Icon } from "lucide-react";
+import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { Loader2Icon, PlusIcon, RouteIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ModelConnectionSection } from "@/components/model-connection-section";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
 
@@ -49,14 +51,26 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function OrganizationModelProviderConnection({
-  organizationId,
-  providerKind,
-}: {
+export function OrganizationModelProviderConnection(props: {
   organizationId: string;
   providerKind: ProviderKind;
 }) {
   const client = useAppContext().client;
+  return (
+    <OrganizationModelProviderConnectionWithClient
+      key={`${props.organizationId}:${props.providerKind}`}
+      {...props}
+      client={client}
+    />
+  );
+}
+
+/** Isolated product fixture seam; production callers use OrganizationModelProviderConnection. */
+export function OrganizationModelProviderConnectionWithClient({
+  organizationId,
+  providerKind,
+  client,
+}: { organizationId: string; providerKind: ProviderKind } & { client: OpenGeniBrowserClient }) {
   const meta = META[providerKind];
   const helpId = useId();
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -344,191 +358,192 @@ export function OrganizationModelProviderConnection({
 
   const summaryStatus =
     !loaded || !modelsLoaded
-      ? "…"
+      ? "Loading…"
       : connectionError || modelsError
         ? "Unavailable"
         : connected
           ? "Connected"
-          : "Off";
+          : "Not connected";
 
   return (
     <>
-      <details
-        className="group rounded-lg border border-border"
-        data-testid={`organization-${providerKind}-connection-card`}
+      <ModelConnectionSection
+        testId={`organization-${providerKind}-connection-card`}
+        title={meta.title}
+        description="API key · Billed to the organization's provider account"
+        status={summaryStatus}
+        mark={meta.mark}
         open={open}
-        onToggle={(event) => setOpen(event.currentTarget.open)}
+        onOpenChange={setOpen}
       >
-        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-          {meta.mark}
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">{meta.title}</span>
-          <span className="text-2xs text-fg-subtle">{summaryStatus}</span>
-          <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
-        </summary>
-
-        <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-          <p className="text-2xs leading-relaxed text-fg-subtle">
-            The organization pays the provider directly; OpenGeni credits are not used. Every
-            current and future shared workspace inherits these models. Personal workspaces do not.{" "}
-            {meta.distinction}
+        <p className="text-2xs leading-relaxed text-fg-subtle">
+          The organization pays the provider directly; OpenGeni credits are not used. Every current
+          and future shared workspace inherits these models. Personal workspaces do not.{" "}
+          {meta.distinction}
+        </p>
+        {connectionError ? (
+          <InlineError message={connectionError} retry={() => void refreshConnection()} />
+        ) : null}
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <Input
+            type="password"
+            autoComplete="off"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && apiKey.trim() && !connectionBusy) void save();
+            }}
+            className="h-9"
+            placeholder={
+              connected ? `Replace organization ${meta.shortName} key` : `${meta.title} API key`
+            }
+            aria-label={`Organization ${meta.title} API key`}
+          />
+          <Button disabled={connectionBusy || !apiKey.trim()} onClick={() => void save()}>
+            {connectionBusy ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : connected ? (
+              "Replace key"
+            ) : (
+              "Connect"
+            )}
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-2xs text-fg-subtle">
+            Stored encrypted. Connecting does not run a model or incur provider charges.
           </p>
-          {connectionError ? (
-            <InlineError message={connectionError} retry={() => void refreshConnection()} />
-          ) : null}
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <Input
-              type="password"
-              autoComplete="off"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && apiKey.trim() && !connectionBusy) void save();
-              }}
-              className="h-9"
-              placeholder={
-                connected ? `Replace organization ${meta.shortName} key` : `${meta.title} API key`
-              }
-              aria-label={`Organization ${meta.title} API key`}
-            />
-            <Button disabled={connectionBusy || !apiKey.trim()} onClick={() => void save()}>
-              {connectionBusy ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
-              ) : connected ? (
-                "Replace"
-              ) : (
-                "Connect"
-              )}
+          {connected ? (
+            <Button
+              ref={disconnectButtonRef}
+              size="xs"
+              variant="ghost"
+              className="text-destructive hover:text-destructive"
+              disabled={connectionBusy}
+              onClick={() => setDisconnectPending(true)}
+            >
+              <Trash2Icon className="size-3.5" /> Disconnect
             </Button>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-2xs text-fg-subtle">
-              Stored encrypted. Connecting does not run a model or incur provider charges.
-            </p>
-            {connected ? (
-              <Button
-                ref={disconnectButtonRef}
-                size="xs"
-                variant="ghost"
-                className="text-destructive hover:text-destructive"
-                disabled={connectionBusy}
-                onClick={() => setDisconnectPending(true)}
-              >
-                <Trash2Icon className="size-3.5" /> Disconnect
-              </Button>
-            ) : null}
-          </div>
+          ) : null}
+        </div>
 
-          <div className="grid gap-2.5 border-t border-border/70 pt-3">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p className="text-xs font-medium">Organization models</p>
-                <p className="mt-0.5 max-w-xl text-2xs leading-relaxed text-fg-subtle">
-                  Add an exact provider model slug. Workspace policy can further restrict it.
-                </p>
-              </div>
-              <span className="text-2xs text-fg-subtle" aria-live="polite">
-                {!modelsLoaded
-                  ? "Loading…"
-                  : modelsError
-                    ? "Unavailable"
-                    : `${models.length} ${models.length === 1 ? "model" : "models"}`}
-              </span>
-            </div>
-            <div className="grid gap-1.5">
-              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <Input
-                  ref={modelInputRef}
-                  value={slug}
-                  onChange={(event) => setSlug(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !modelBusy) {
-                      event.preventDefault();
-                      void addModel();
-                    }
-                  }}
-                  disabled={modelBusy}
-                  className="h-9 font-mono text-base md:text-base"
-                  placeholder={meta.placeholder}
-                  aria-label={`${meta.title} organization model slug`}
-                  aria-describedby={helpId}
-                  aria-invalid={slugInvalid || undefined}
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                />
-                <Button
-                  variant="secondary"
-                  className="min-h-11"
-                  disabled={modelBusy || !slugValid || slugExists}
-                  onClick={() => void addModel()}
-                >
-                  {modelBusy ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : (
-                    <PlusIcon className="size-3.5" />
-                  )}
-                  Add model
-                </Button>
-              </div>
-              <p id={helpId} className="text-2xs text-fg-subtle" aria-live="polite">
-                {slugHelp}
+        {connected ? (
+          <ConnectionAccessSettings
+            client={client}
+            organizationId={organizationId}
+            kind={providerKind}
+            connectionId="current"
+            canManage
+          />
+        ) : null}
+        <div className="grid gap-2.5 border-t border-border/70 pt-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-xs font-medium">Custom models</p>
+              <p className="mt-0.5 max-w-xl text-2xs leading-relaxed text-fg-subtle">
+                Add an exact provider model slug. Workspace policy can further restrict it.
               </p>
             </div>
-            {modelsError ? (
-              <InlineError message={modelsError} retry={() => void refreshModels()} />
-            ) : null}
-            {modelsLoaded && !modelsError && models.length === 0 ? (
-              <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
-                No organization model slugs yet. Add one to expose models from this account.
-              </div>
-            ) : null}
-            {modelsLoaded && !modelsError && models.length > 0 ? (
-              <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
-                {models.map((model) => (
-                  <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      {model.label ? (
-                        <p className="truncate text-xs text-fg">{model.label}</p>
-                      ) : null}
-                      <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
-                      <p className="mt-0.5 text-2xs text-fg-subtle">
-                        {connectionError
-                          ? "Connection unavailable"
-                          : connected
-                            ? "Ready in shared workspaces"
-                            : `Waiting for ${meta.shortName} connection`}
-                      </p>
-                    </div>
-                    <Button
-                      ref={(node) => {
-                        if (node) removeButtonRefs.current.set(model.id, node);
-                        else removeButtonRefs.current.delete(model.id);
-                      }}
-                      size="icon-xs"
-                      variant="ghost"
-                      className="size-11 shrink-0 text-fg-subtle hover:text-destructive"
-                      disabled={removingId !== null}
-                      aria-label={`Remove ${model.upstreamModelId}`}
-                      onClick={() => {
-                        removalFocusRef.current =
-                          removeButtonRefs.current.get(model.id) ?? modelInputRef.current;
-                        setPendingRemoval(model);
-                      }}
-                    >
-                      {removingId === model.id ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <Trash2Icon className="size-3.5" />
-                      )}
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+            <span className="text-2xs text-fg-subtle" aria-live="polite">
+              {!modelsLoaded
+                ? "Loading…"
+                : modelsError
+                  ? "Unavailable"
+                  : `${models.length} ${models.length === 1 ? "model" : "models"}`}
+            </span>
           </div>
+          <div className="grid gap-1.5">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <Input
+                ref={modelInputRef}
+                value={slug}
+                onChange={(event) => setSlug(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !modelBusy) {
+                    event.preventDefault();
+                    void addModel();
+                  }
+                }}
+                disabled={modelBusy}
+                className="h-9 font-mono text-base md:text-base"
+                placeholder={meta.placeholder}
+                aria-label={`${meta.title} organization model slug`}
+                aria-describedby={helpId}
+                aria-invalid={slugInvalid || undefined}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+              <Button
+                variant="secondary"
+                className="min-h-11"
+                disabled={modelBusy || !slugValid || slugExists}
+                onClick={() => void addModel()}
+              >
+                {modelBusy ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <PlusIcon className="size-3.5" />
+                )}
+                Add model
+              </Button>
+            </div>
+            <p id={helpId} className="text-2xs text-fg-subtle" aria-live="polite">
+              {slugHelp}
+            </p>
+          </div>
+          {modelsError ? (
+            <InlineError message={modelsError} retry={() => void refreshModels()} />
+          ) : null}
+          {modelsLoaded && !modelsError && models.length === 0 ? (
+            <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
+              No organization model slugs yet. Add one to expose models from this account.
+            </div>
+          ) : null}
+          {modelsLoaded && !modelsError && models.length > 0 ? (
+            <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
+              {models.map((model) => (
+                <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    {model.label ? <p className="truncate text-xs text-fg">{model.label}</p> : null}
+                    <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
+                    <p className="mt-0.5 text-2xs text-fg-subtle">
+                      {connectionError
+                        ? "Connection unavailable"
+                        : connected
+                          ? "Ready in shared workspaces"
+                          : `Waiting for ${meta.shortName} connection`}
+                    </p>
+                  </div>
+                  <Button
+                    ref={(node) => {
+                      if (node) removeButtonRefs.current.set(model.id, node);
+                      else removeButtonRefs.current.delete(model.id);
+                    }}
+                    size="icon-xs"
+                    variant="ghost"
+                    className="size-11 shrink-0 text-fg-subtle hover:text-destructive"
+                    disabled={removingId !== null}
+                    aria-label={`Remove ${model.upstreamModelId}`}
+                    onClick={() => {
+                      removalFocusRef.current =
+                        removeButtonRefs.current.get(model.id) ?? modelInputRef.current;
+                      setPendingRemoval(model);
+                    }}
+                  >
+                    {removingId === model.id ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : (
+                      <Trash2Icon className="size-3.5" />
+                    )}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
-      </details>
+      </ModelConnectionSection>
 
       <ConfirmDialog
         open={disconnectPending}

@@ -127,6 +127,8 @@ import type {
   CodexConnectStart,
   CodexUsage,
   CodexUsageMap,
+  ModelConnectionAccessPolicy,
+  ModelConnectionAccessResponse,
   SuperGrokAccount,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
@@ -7604,6 +7606,110 @@ export class OpenGeniClient {
 
   // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------
 
+  /** Organization subscription management requires an administrator browser session. */
+  async getModelConnectionAccess(target: {
+    scope: "organizations" | "workspaces";
+    scopeId: string;
+    kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+    connectionId: string;
+  }): Promise<ModelConnectionAccessResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
+    );
+  }
+
+  async updateModelConnectionAccess(
+    target: {
+      scope: "organizations" | "workspaces";
+      scopeId: string;
+      kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+      connectionId: string;
+    },
+    policy: ModelConnectionAccessPolicy,
+  ): Promise<ModelConnectionAccessPolicy> {
+    return await this.requestJson(
+      "PUT",
+      `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
+      policy,
+    );
+  }
+
+  async listOrganizationSuperGrokAccounts(
+    organizationId: string,
+  ): Promise<SuperGrokAccountsResponse> {
+    return await this.requestJson("GET", `/v1/organizations/${organizationId}/supergrok/accounts`);
+  }
+  async organizationSupergrokConnectStart(organizationId: string): Promise<SuperGrokConnectStart> {
+    return await this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/supergrok/connect/start`,
+      {},
+    );
+  }
+  async organizationSupergrokConnectPoll(
+    organizationId: string,
+    state: string,
+  ): Promise<SuperGrokConnectPoll> {
+    return await this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/supergrok/connect/poll`,
+      { state },
+    );
+  }
+  async activateOrganizationSuperGrokAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<{ updated: boolean }> {
+    return await this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}/activate`,
+      {},
+    );
+  }
+  async setOrganizationSuperGrokRotationSettings(
+    organizationId: string,
+    patch: { rotationEnabled: boolean },
+  ): Promise<SuperGrokRotationSettings> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/supergrok/settings`,
+      patch,
+    );
+  }
+  async setOrganizationSuperGrokAccountAllocator(
+    organizationId: string,
+    accountId: string,
+    input: { enabled: boolean; expectedVersion: number },
+  ): Promise<{ updated: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}/allocator`,
+      input,
+    );
+  }
+  async renameOrganizationSuperGrokAccount(
+    organizationId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<{ updated: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}`,
+      { label },
+    );
+  }
+  async disconnectOrganizationSuperGrokAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<{ disconnected: boolean }> {
+    return await this.requestJson(
+      "DELETE",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}`,
+      {},
+    );
+  }
+
   async supergrokStatus(workspaceId: string): Promise<SuperGrokConnectionStatus> {
     return await this.requestJson<SuperGrokConnectionStatus>(
       "GET",
@@ -7613,7 +7719,7 @@ export class OpenGeniClient {
 
   async supergrokConnectStart(
     workspaceId: string,
-    scope: SuperGrokAccountScope = "workspace",
+    scope: Exclude<SuperGrokAccountScope, "organization"> = "workspace",
   ): Promise<SuperGrokConnectStart> {
     return await this.requestJson<SuperGrokConnectStart>(
       "POST",

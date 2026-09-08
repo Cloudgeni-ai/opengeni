@@ -48,7 +48,9 @@ describe("organization administration surface", () => {
     }
     expect(organizationModelProviderSource).toContain('type="password"');
     expect(organizationModelProviderSource).not.toContain("localStorage");
-    expect(organizationModelProviderSource).toContain("current and future shared workspace");
+    expect(organizationModelProviderSource.replace(/\s+/g, " ")).toContain(
+      "current and future shared workspace",
+    );
     expect(organizationModelProviderSource).toContain("Personal workspaces do not");
     expect(organizationModelProviderSource).toContain("<ConfirmDialog");
     expect(organizationModelProviderSource).toContain("OpenGeni credits are not used");
@@ -84,9 +86,8 @@ describe("organization administration surface", () => {
     expect(organizationCodexSource).toContain("setLoadError(message)");
     expect(organizationCodexSource).toContain('role="alert"');
     expect(organizationCodexSource).toContain("Retry");
-    expect(workspaceCodexSource).toContain("Where this workspace gets Codex");
-    expect(workspaceCodexSource).toContain("Automatic: prefer this workspace");
-    expect(workspaceCodexSource).toContain("Connect an organization subscription");
+    expect(workspaceCodexSource).toContain("<CodexSourceSettings");
+    expect(workspaceCodexSource).toContain("Manage in organization settings");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(routeSource).toContain('accountGrant?.role === "owner"');
     expect(routeSource).toContain('"account:admin"');

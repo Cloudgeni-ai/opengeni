@@ -1,8 +1,10 @@
+import { ConnectionAccessSettings } from "@/components/connection-access-settings";
 import { trackModelConnection } from "@/lib/analytics-observer";
+
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { ChevronDownIcon, Loader2Icon, PlusIcon, RouteIcon, Trash2Icon } from "lucide-react";
+import { Loader2Icon, PlusIcon, RouteIcon, Trash2Icon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -18,6 +20,7 @@ import { toast } from "sonner";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ModelConnectionSection } from "@/components/model-connection-section";
 import { Input } from "@/components/ui/input";
 
 type WorkspaceProviderCustomModel = WorkspaceGatewayCustomModel;
@@ -105,7 +108,7 @@ const VERCEL_AI_GATEWAY_CONFIG: ProviderConnectionConfig = {
   credentialRole: GATEWAY_ROLE,
   credentialLabel: "Vercel AI Gateway",
   readinessProvider: "workspace-gateway",
-  title: "Bring your own Vercel AI Gateway",
+  title: "Vercel AI Gateway",
   mark: (className) => <VercelMark className={className} />,
   billingDescription:
     "Use models through this workspace's Vercel account. The workspace's Vercel account is billed directly instead of using OpenGeni credits.",
@@ -114,7 +117,7 @@ const VERCEL_AI_GATEWAY_CONFIG: ProviderConnectionConfig = {
   keyAriaLabel: "Vercel AI Gateway key",
   keyPlaceholder: (connected) =>
     connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key",
-  customModelsHeading: "Models from your Gateway",
+  customModelsHeading: "Custom models",
   customModelsDescription:
     "Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not inspect or pin a provider for custom entries.",
   customModelInputAriaLabel: "Vercel AI Gateway model slug",
@@ -141,7 +144,7 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
   credentialRole: OPENROUTER_ROLE,
   credentialLabel: "OpenRouter",
   readinessProvider: "workspace-openrouter",
-  title: "Bring your own OpenRouter",
+  title: "OpenRouter",
   mark: (className) => <RouteIcon className={className} aria-hidden />,
   billingDescription:
     "Use models through this workspace's OpenRouter account. The workspace's OpenRouter account is billed directly. This is separate from deployment-provided OpenRouter models, including free models and models funded by deployment credits.",
@@ -149,7 +152,7 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
     "Members with connection-management access manage this workspace OpenRouter connection.",
   keyAriaLabel: "OpenRouter API key",
   keyPlaceholder: (connected) => (connected ? "Replace OpenRouter API key" : "OpenRouter API key"),
-  customModelsHeading: "Models from workspace OpenRouter",
+  customModelsHeading: "Custom models",
   customModelsDescription:
     "Add an exact OpenRouter model slug for this workspace account. Deployment-provided OpenRouter models remain separate.",
   customModelInputAriaLabel: "OpenRouter model slug",
@@ -644,219 +647,229 @@ function ModelProviderConnectionCardWithClient(
 
   const summaryStatus =
     !loaded || !customModelsLoaded
-      ? "…"
+      ? "Loading…"
       : error || customModelsError
         ? "Unavailable"
         : connected
           ? "Connected"
-          : "Off";
+          : "Not connected";
 
   return (
     <>
-      <details
-        className="group rounded-lg border border-border"
-        data-testid={`${config.id}-connection-card`}
+      <ModelConnectionSection
+        testId={`${config.id}-connection-card`}
+        title={config.title}
+        description="API key · Billed to this workspace's provider account"
+        status={summaryStatus}
+        mark={config.mark("size-4")}
         open={open}
-        onToggle={(event) => setOpen(event.currentTarget.open)}
+        onOpenChange={setOpen}
       >
-        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-          {config.mark("size-3.5 shrink-0 text-fg")}
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">{config.title}</span>
-          <span className="text-2xs text-fg-subtle">{summaryStatus}</span>
-          <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
-        </summary>
+        <p className="text-2xs text-fg-subtle">{config.billingDescription}</p>
+        {error ? (
+          <div className="flex items-center justify-between gap-3" role="alert">
+            <p className="text-xs text-destructive">{error}</p>
+            <Button size="sm" variant="secondary" onClick={() => void refreshConnection()}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
+        {props.canManageConnection ? (
+          <>
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <Input
+                type="password"
+                autoComplete="off"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                className="h-9"
+                placeholder={config.keyPlaceholder(connected)}
+                aria-label={config.keyAriaLabel}
+              />
+              <Button
+                type="button"
+                disabled={busy || !apiKey.trim()}
+                data-analytics-action={
+                  config.id === "openrouter" ? "connect_openrouter" : "connect_ai_gateway"
+                }
+                onClick={save}
+              >
+                {busy ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : connected ? (
+                  "Replace key"
+                ) : (
+                  "Connect"
+                )}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-2xs text-fg-subtle">
+                Stored encrypted. Connecting does not run a model or spend credits.
+              </p>
+              {connected ? (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  disabled={busy}
+                  className="text-destructive hover:text-destructive"
+                  onClick={disconnect}
+                >
+                  <Trash2Icon className="size-3.5" />
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <p className="text-xs text-fg-subtle">{config.connectionManagerDescription}</p>
+        )}
 
-        <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-          <p className="text-2xs text-fg-subtle">{config.billingDescription}</p>
-          {error ? <p className="text-xs text-destructive">{error}</p> : null}
-          {props.canManageConnection ? (
-            <>
+        {connected ? (
+          <ConnectionAccessSettings
+            client={client}
+            workspaceId={props.workspaceId}
+            kind={config.credentialRole === "openrouter" ? "openrouter" : "vercel_gateway"}
+            connectionId="current"
+            canManage={props.canManageCustomModels}
+          />
+        ) : null}
+        <div className="grid gap-2.5 border-t border-border/70 pt-3">
+          <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+            <div className="grid gap-0.5">
+              <p className="text-xs font-medium text-fg">{config.customModelsHeading}</p>
+              <p className="max-w-xl text-2xs leading-relaxed text-fg-subtle">
+                {config.customModelsDescription}
+              </p>
+            </div>
+            <span className="text-2xs text-fg-subtle" aria-live="polite">
+              {!customModelsLoaded
+                ? "Loading…"
+                : customModelsError
+                  ? "Unavailable"
+                  : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
+            </span>
+          </div>
+
+          {props.canManageCustomModels ? (
+            <div ref={addWorkflowRef} className="grid gap-1.5">
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <Input
-                  type="password"
+                  ref={modelInputRef}
+                  value={modelSlug}
+                  onChange={(event) => setModelSlug(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !modelBusy) {
+                      event.preventDefault();
+                      void addCustomModel();
+                    }
+                  }}
+                  disabled={modelBusy}
+                  className="h-9 font-mono text-base md:text-base"
+                  placeholder={config.customModelPlaceholder}
+                  aria-label={config.customModelInputAriaLabel}
+                  aria-describedby={modelSlugHelpId}
+                  aria-invalid={modelSlugInvalid || undefined}
                   autoComplete="off"
-                  value={apiKey}
-                  onChange={(event) => setApiKey(event.target.value)}
-                  className="h-9"
-                  placeholder={config.keyPlaceholder(connected)}
-                  aria-label={config.keyAriaLabel}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                 />
                 <Button
                   type="button"
-                  disabled={busy || !apiKey.trim()}
-                  data-analytics-action={
-                    config.id === "openrouter" ? "connect_openrouter" : "connect_ai_gateway"
-                  }
-                  onClick={save}
-                >
-                  {busy ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : connected ? (
-                    "Replace"
-                  ) : (
-                    "Connect"
-                  )}
-                </Button>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-2xs text-fg-subtle">
-                  Stored encrypted. Connecting does not run a model or spend credits.
-                </p>
-                {connected ? (
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    disabled={busy}
-                    className="text-destructive hover:text-destructive"
-                    onClick={disconnect}
-                  >
-                    <Trash2Icon className="size-3.5" />
-                    Disconnect
-                  </Button>
-                ) : null}
-              </div>
-            </>
-          ) : (
-            <p className="text-xs text-fg-subtle">{config.connectionManagerDescription}</p>
-          )}
-
-          <div className="grid gap-2.5 border-t border-border/70 pt-3">
-            <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-              <div className="grid gap-0.5">
-                <p className="text-xs font-medium text-fg">{config.customModelsHeading}</p>
-                <p className="max-w-xl text-2xs leading-relaxed text-fg-subtle">
-                  {config.customModelsDescription}
-                </p>
-              </div>
-              <span className="text-2xs text-fg-subtle" aria-live="polite">
-                {!customModelsLoaded
-                  ? "Loading…"
-                  : customModelsError
-                    ? "Unavailable"
-                    : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
-              </span>
-            </div>
-
-            {props.canManageCustomModels ? (
-              <div ref={addWorkflowRef} className="grid gap-1.5">
-                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <Input
-                    ref={modelInputRef}
-                    value={modelSlug}
-                    onChange={(event) => setModelSlug(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !modelBusy) {
-                        event.preventDefault();
-                        void addCustomModel();
-                      }
-                    }}
-                    disabled={modelBusy}
-                    className="h-9 font-mono text-base md:text-base"
-                    placeholder={config.customModelPlaceholder}
-                    aria-label={config.customModelInputAriaLabel}
-                    aria-describedby={modelSlugHelpId}
-                    aria-invalid={modelSlugInvalid || undefined}
-                    autoComplete="off"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    disabled={modelBusy || !modelSlugValid || modelSlugExists}
-                    onClick={() => void addCustomModel()}
-                    className="min-h-11"
-                  >
-                    {modelBusy ? (
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                    ) : (
-                      <PlusIcon className="size-3.5" />
-                    )}
-                    Add model
-                  </Button>
-                </div>
-                <p
-                  id={modelSlugHelpId}
-                  className="text-2xs text-fg-subtle"
-                  aria-live="polite"
-                  aria-atomic="true"
-                >
-                  {modelSlugHelp}
-                </p>
-              </div>
-            ) : null}
-
-            {customModelsError ? (
-              <div className="flex flex-wrap items-center justify-between gap-2" role="alert">
-                <p className="min-w-0 flex-1 text-xs text-destructive">{customModelsError}</p>
-                <Button
-                  type="button"
-                  size="sm"
                   variant="secondary"
-                  disabled={modelBusy}
-                  onClick={() => void refreshCustomModels()}
+                  disabled={modelBusy || !modelSlugValid || modelSlugExists}
+                  onClick={() => void addCustomModel()}
                   className="min-h-11"
                 >
-                  Retry
+                  {modelBusy ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <PlusIcon className="size-3.5" />
+                  )}
+                  Add model
                 </Button>
               </div>
-            ) : null}
+              <p
+                id={modelSlugHelpId}
+                className="text-2xs text-fg-subtle"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {modelSlugHelp}
+              </p>
+            </div>
+          ) : null}
 
-            {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
-              <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
-                {config.emptyCustomModelsDescription}
-              </div>
-            ) : null}
+          {customModelsError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2" role="alert">
+              <p className="min-w-0 flex-1 text-xs text-destructive">{customModelsError}</p>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={modelBusy}
+                onClick={() => void refreshCustomModels()}
+                className="min-h-11"
+              >
+                Retry
+              </Button>
+            </div>
+          ) : null}
 
-            {customModelsLoaded && !customModelsError && customModels.length > 0 ? (
-              <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
-                {customModels.map((model) => (
-                  <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
-                      <p className="mt-0.5 text-2xs text-fg-subtle">
-                        {error
-                          ? config.unavailableModelDescription
-                          : connected
-                            ? config.readyModelDescription
-                            : config.waitingModelDescription}
-                      </p>
-                    </div>
-                    {props.canManageCustomModels ? (
-                      <Button
-                        ref={(node) => {
-                          if (node) removeButtonRefs.current.set(model.id, node);
-                          else removeButtonRefs.current.delete(model.id);
-                        }}
-                        type="button"
-                        size="icon-xs"
-                        variant="ghost"
-                        className="size-11 shrink-0 text-fg-subtle hover:text-destructive"
-                        disabled={removingModelId !== null}
-                        aria-label={`Remove ${model.upstreamModelId}`}
-                        onClick={() => {
-                          removeFocusTargetRef.current =
-                            removeButtonRefs.current.get(model.id) ?? modelInputRef.current;
-                          restoreRemovalFocusRef.current = true;
-                          setModelPendingRemoval(model);
-                        }}
-                      >
-                        {removingModelId === model.id ? (
-                          <Loader2Icon className="size-3.5 animate-spin" />
-                        ) : (
-                          <Trash2Icon className="size-3.5" />
-                        )}
-                      </Button>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
+          {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
+            <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
+              {config.emptyCustomModelsDescription}
+            </div>
+          ) : null}
+
+          {customModelsLoaded && !customModelsError && customModels.length > 0 ? (
+            <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
+              {customModels.map((model) => (
+                <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
+                    <p className="mt-0.5 text-2xs text-fg-subtle">
+                      {error
+                        ? config.unavailableModelDescription
+                        : connected
+                          ? config.readyModelDescription
+                          : config.waitingModelDescription}
+                    </p>
+                  </div>
+                  {props.canManageCustomModels ? (
+                    <Button
+                      ref={(node) => {
+                        if (node) removeButtonRefs.current.set(model.id, node);
+                        else removeButtonRefs.current.delete(model.id);
+                      }}
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className="size-11 shrink-0 text-fg-subtle hover:text-destructive"
+                      disabled={removingModelId !== null}
+                      aria-label={`Remove ${model.upstreamModelId}`}
+                      onClick={() => {
+                        removeFocusTargetRef.current =
+                          removeButtonRefs.current.get(model.id) ?? modelInputRef.current;
+                        restoreRemovalFocusRef.current = true;
+                        setModelPendingRemoval(model);
+                      }}
+                    >
+                      {removingModelId === model.id ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <Trash2Icon className="size-3.5" />
+                      )}
+                    </Button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
-      </details>
+      </ModelConnectionSection>
       <ConfirmDialog
         open={modelPendingRemoval !== null}
         onOpenChange={(next) => {
