@@ -397,6 +397,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       }),
     ).rejects.toThrow("Deactivate the unified Skill head");
     const projection = await listInstalledPortableSkills(client.db, f.context.workspaceId);
+    expect(projection[0]?.name).toBe("source-skill");
     expect(projection[0]?.files).toEqual(customFiles);
     expect(await listSkills(client.db, f.context)).toHaveLength(1);
     const [owners] = await shared!
