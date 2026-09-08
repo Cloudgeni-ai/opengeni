@@ -1,4 +1,5 @@
 import { codemodeSessionRequest } from "./codemode";
+import { SiteSessionPathError } from "@opengeni/contracts";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -43,6 +44,7 @@ import {
   getWorkspace,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
+  resolveSessionMemoryAgentScope,
   rlsContextForWorkspace,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -190,6 +192,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
@@ -1023,10 +1026,22 @@ export function createAppComposition(deps: AppDependencies): {
         }
       }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+      // The bound session's frozen Memory selector (migration 0423) decides
+      // which Memory tools the attempt receives and which typed layers they
+      // read and write. A missing row resolves to no Memory tools.
+      const sessionMemory =
+        typeof boundSessionId === "string"
+          ? ((await resolveSessionMemoryAgentScope(routeDeps.db, workspaceId, boundSessionId)) ?? {
+              mode: "off" as const,
+              endUserSubjectId: null,
+              rootSessionId: null,
+            })
+          : null;
       const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
         workspaceMemoryPromptMode,
+        sessionMemory,
       });
       await mcp.connect(transport);
       // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
@@ -1134,12 +1149,17 @@ export function createAppComposition(deps: AppDependencies): {
     const grant = await requireAccessGrant(c, routeDeps, workspaceId);
     const url = new URL(c.req.url);
     const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
-    const forwarded = await codemodeSessionRequest(
-      routeDeps,
-      grant,
-      c.req.raw,
-      url.pathname.slice(prefix.length) + url.search,
-    );
+    let forwarded: Request;
+    try {
+      forwarded = await codemodeSessionRequest(
+        routeDeps,
+        grant,
+        c.req.raw,
+        url.pathname.slice(prefix.length) + url.search,
+      );
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
     return app.fetch(forwarded);
   });
 
@@ -1245,6 +1265,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerConnectionAuthorityRoutes(app, routeDeps);
@@ -1426,6 +1447,12 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
 }
 
 function codemodeHttpError(error: unknown): HTTPException {
+  if (error instanceof SiteSessionPathError) {
+    // The proxied Site/SDK surface is an explicit allowlist; a route outside
+    // it (tool policy, visibility, forks, Steer, control, ...) does not exist
+    // for this caller rather than being a server fault.
+    return new HTTPException(404, { message: error.message, cause: error });
+  }
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, {
       message: "session not found",

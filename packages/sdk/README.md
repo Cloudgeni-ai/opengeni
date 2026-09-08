@@ -18,6 +18,72 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Chat quick start (`@opengeni/sdk/chat`)
+
+The fastest way to put OpenGeni behind an existing chat: one option object per
+conversation, one server handler for your endpoint. Tenants map to organization
+workspaces, conversations map to deterministic sessions, and the organization
+API key never leaves your server.
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  // baseUrl defaults to https://app.opengeni.ai; source (default "app") labels your product.
+});
+
+const chat = await og.chat({
+  tenant: "acme", // one workspace per customer, created on first use
+  user: "u_42", // opaque end-user label (required for memory: "user")
+  conversation: "c_9", // stable id; the session id is derived from it
+  agentAccess: "session", // "session" (default) | "user" | "workspace"
+  memory: "user", // "session" | "user" | "workspace" | false; default follows agentAccess
+  create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
+});
+
+const reply = await chat.send("hello"); // creates the session on the first send
+console.log(reply.text); // or String(reply)
+
+for await (const chunk of chat.stream("and then?")) {
+  if (chunk.type === "text") process.stdout.write(chunk.text);
+  if (chunk.type === "pending") await chat.respond({ requestId: chunk.pending.requestId, decision: "approve" });
+}
+
+// Your endpoint. `resolve` is your auth hook: identity comes from the request
+// you authenticated, never from the body.
+export const POST = createChatHandler(og, {
+  resolve: async (request) => {
+    const session = await getSessionFromCookie(request);
+    if (!session) return new Response("Unauthorized", { status: 401 });
+    return {
+      tenant: session.accountId,
+      user: session.userId,
+      conversation: request.headers.get("x-opengeni-conversation") ?? undefined,
+    };
+  },
+  // format: "vercel" | "openai-chat" | "openai-responses" (default "native");
+  // a request may override it with the x-opengeni-chat-format header.
+});
+```
+
+Pick the isolation per session with `agentAccess` (which other sessions the
+agent may reach) and `memory` (what it remembers), all inside one workspace that
+shares the customer's documents, instructions, and integrations:
+
+| Scenario                                          | `agentAccess` | `memory`      |
+| ------------------------------------------------- | ------------- | ------------- |
+| Every chat isolated (support desk)                | `"session"`   | `"session"`   |
+| One user's chats see each other, not other users' | `"user"`      | `"user"`      |
+| Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
+| Shared agent access, no memory                    | any           | `false`       |
+
+`<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
+`@opengeni/react/chat` is the matching drop-in browser component (it talks only
+to your handler). Graduate to `OpenGeniClient` below when you need the full
+session surface: files, tools, approvals with policies, forks, realtime voice.
+
 ## Quick start
 
 ```ts
@@ -76,7 +142,14 @@ complete organization-workspace inventory.
 Organization key administration uses `listOrganizationApiKeys`,
 `createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
 create response is shown once and must be stored in the backend's secret
-manager.
+manager. `createOrganizationApiKey(organizationId, { name, access: "read" })`
+mints a read-only master key: it inventories shared workspaces and reads their
+sessions, events, and files, but cannot create sessions, send messages, or mint
+keys, and every key reports its tier as `apiKey.access`. Either tier can call
+`listOrganizationSessions(organizationId, { limit, cursor, endUser, status })`
+for one page of sessions across every shared workspace (each row carries its
+`workspaceId`; private sessions and Personal workspaces never appear), or
+`iterateOrganizationSessions` to follow `nextCursor` to the end.
 
 The external backend also owns its Skill catalog. Load the selected definitions
 and pass them inline in `CreateSessionRequest.skills` for each product-created

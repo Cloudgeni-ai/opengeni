@@ -34,7 +34,14 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import {
+  grantHasAgentAttemptAuthority,
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
@@ -357,6 +364,30 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     assertSelfhostedEnabled();
     const sessionId = c.req.param("sessionId");
+    // Registered before the session route module, so its authorization
+    // middleware does not cover this path: an agent attempt must pass the
+    // core seam (including the 0423 agent-access scope) before it may repoint
+    // another session's compute.
+    if (grantHasAgentAttemptAuthority(grant)) {
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: "session.control",
+          surface: "http",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found", cause: error });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, {
+            message: "session authorization is unavailable",
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    }
     const body = SwapActiveSandboxRequest.parse(await c.req.json());
     const ctx = await buildFleetContextForSession(deps, {
       accountId: grant.accountId,

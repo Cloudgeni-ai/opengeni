@@ -4135,6 +4135,20 @@ export const sessions = pgTable(
       .notNull()
       .default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
+    // Agent-access scope (migration 0423). Declares how far a live attempt on
+    // this session may reach across the workspace and how far peers may reach
+    // into it. 'workspace' is the pre-0423 behaviour; 'user' limits reach to
+    // sessions carrying the same end-user label; 'session' limits it to the
+    // own root tree. Enforced only in the core session-authorization seam.
+    agentAccess: text("agent_access").notNull().default("workspace"),
+    // Opaque end-user label (both set or both null). This is a product label
+    // used for scoping and filtering, never a subject and never authority.
+    endUserSource: text("end_user_source"),
+    endUserId: text("end_user_id"),
+    // Typed Workspace Memory selector this session's agent reads and writes:
+    // 'workspace' | 'user' (end_user:<source>:<id>) | 'session' (root tree) |
+    // 'off' (no Memory tools). Frozen at create like the columns above.
+    memoryScope: text("memory_scope").notNull().default("workspace"),
     // Independent-copy provenance. A destination may use either visibility and
     // may live in another workspace in the same organization; no live process,
     // credential, grant, or delegation is represented by these facts.
@@ -10731,6 +10745,20 @@ export const scheduledTasks = pgTable(
     // in migration 0047 (forward-reference pattern). Consumed in M3.
     rigId: uuid("rig_id"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // Frozen creator boundary for tasks created by a live agent attempt
+    // (migration 0424): generated sessions inherit these instead of the
+    // deployment default. NULL for human/API creates.
+    creatorFirstPartyMcpTools: jsonb("creator_first_party_mcp_tools").$type<
+      FirstPartyMcpToolName[]
+    >(),
+    creatorFirstPartyMcpPermissions: jsonb("creator_first_party_mcp_permissions").$type<
+      Permission[]
+    >(),
+    creatorSessionPolicy: jsonb("creator_session_policy").$type<{
+      agentAccess: string | null;
+      endUser: { source: string; id: string } | null;
+      memoryScope: string | null;
+    }>(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
-import type { AccessGrant } from "@opengeni/contracts";
+import { DEFAULT_FIRST_PARTY_MCP_TOOLS, type AccessGrant } from "@opengeni/contracts";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
@@ -78,7 +78,12 @@ beforeAll(async () => {
   expect(grant.permissions).toContain("sessions:read");
   grant = {
     ...grant,
-    metadata: { ...(grant.metadata ?? {}), sessionId },
+    metadata: {
+      ...(grant.metadata ?? {}),
+      sessionId,
+      // A session-scoped grant registers only its signed selection.
+      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    },
   };
   await updateSessionTitle(client.db, {
     workspaceId: grant.workspaceId,

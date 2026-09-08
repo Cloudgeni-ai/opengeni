@@ -50,6 +50,60 @@ ownership.
 - This Skill guides an implementation agent. Never copy it into the runtime
   Skills of the customer-facing agent.
 
+## Fastest Path: `@opengeni/sdk/chat`
+
+Start here when the product already has a chat, or wants one, and OpenGeni
+should sit behind it. Install, keep the organization API key on the server, and
+put one handler behind the chat endpoint:
+
+```bash
+bun add @opengeni/sdk @opengeni/react
+```
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
+
+export const POST = createChatHandler(og, {
+  // Your auth hook. Tenant and user come from the authenticated request, never the body.
+  resolve: async (request) => {
+    const me = await authenticate(request);
+    return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
+  },
+  // format: "vercel" keeps an existing useChat client; "openai-chat" / "openai-responses"
+  // keep an OpenAI-shaped client. The default streams native chunks for <OpenGeniChat>.
+});
+
+// Server-side use without an endpoint:
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
+```
+
+Browser: `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
+`@opengeni/react/chat` (no provider, no SDK client). Every customer gets one
+workspace (`tenant`), every conversation one deterministic session, and each
+session picks its own isolation:
+
+| Scenario | `agentAccess` | `memory` |
+| --- | --- | --- |
+| Support desk: every chat isolated | `"session"` (default) | `"session"` (default) |
+| One customer, several users, private from each other | `"user"` with a `user` label | `"user"` |
+| A team collaborating across chats | `"workspace"` | `"workspace"` |
+| Any of the above without Memory tools | any | `false` |
+
+`agentAccess` is enforced in the server-side session-authorization seam for
+agents (own tree always allowed, most restrictive side wins); `user` is an opaque
+label for memory scope and list filtering, never a login. Humans and the
+organization key still see every session. Graduate to `og.client`
+(`OpenGeniClient`) on the same `chat.sessionId` when the product needs files,
+tools, approval policies, forks, or realtime voice. The
+`examples/chat-quickstart` directory is this path as one server file and one
+page.
+
 ## Choose The Integration Shape First
 
 Pick the smallest surface that satisfies the product:
@@ -122,17 +176,22 @@ insert from an idempotent replay. Call it an **organization workspace** in
 customer guidance; its exact wire kind is `"shared"`. Personal workspaces are
 excluded and must never be selected through a default-workspace fallback.
 
-Choose the boundary from who may share workspace-scoped agent authority and
-resources, not from a preferred workspace count: use one workspace per tenant
-for collaborative chats, per end user when chats are private between users, and
-per chat when even the same user's chats require a hard boundary. Shared
-upstream data does not weaken the chat boundary. Turning `memoryEnabled` off
-does not isolate sessions.
+Choose the workspace from who shares documents, workspace instructions,
+Connections, and integrations: normally one workspace per customer. Chat
+isolation inside it is per session: `agentAccess: "session" | "user" | "workspace"`
+plus an opaque `endUser: { source, id }` label (the facade's `user`) and
+`memoryScope`. Use a separate workspace only when groups need different
+Connections, integrations, or instructions. Turning `memoryEnabled` off does
+not isolate sessions; `memoryScope` does.
 
-Organization-key-created top-level sessions are workspace-visible. Managed
-human Only-me sessions are not a backend impersonation mechanism. A live agent
-with cross-session tools can reach unrelated sessions in the same workspace;
-removing those tools is defense in depth, not a hard boundary.
+Organization-key-created top-level sessions are workspace-visible to humans
+and to the organization key. Managed-human Only-me sessions are a console
+visibility feature, not a backend impersonation mechanism. A live agent can
+reach another session only when both sessions' `agentAccess` scopes allow it,
+and a child, an agent's tool-policy update, an agent-created scheduled task, or
+the Codemode SDK proxy can never widen tools, permissions, or scope beyond the
+creating session. A read-only organization key (`access: "read"`) plus
+`listOrganizationSessions` reads every shared workspace's transcripts.
 
 The external backend owns product Skills. Store and version them outside
 OpenGeni, then pass the selected definitions inline in
@@ -184,11 +243,11 @@ agent instruction prefix.
   themselves.
 - Organization workspaces have wire `kind: "shared"`; Personal workspaces are
   outside the external product mapping.
-- Use the smallest workspace whose members may share agent authority. Memory
-  settings and prompt instructions do not create a tenant boundary.
-- For hard session isolation use separate workspaces. Removing every
-  unnecessary peer-session and workspace-wide tool can narrow a deliberately
-  softer design, but cannot replace the boundary.
+- Use one workspace per customer and `agentAccess` per session for chat
+  isolation. Prompt instructions do not create a boundary; `agentAccess` and
+  `memoryScope` do, and children can only narrow them.
+- Use separate workspaces only when groups must not share documents,
+  Connections, integrations, or workspace instructions.
 - Do not invent an organization-wide Skill registry or rely on Skill
   inheritance. The external backend passes selected Skills inline per session.
 - The SDK cannot accept arbitrary customer backend functions as remote tools.
