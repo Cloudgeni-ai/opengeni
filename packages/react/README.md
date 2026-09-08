@@ -813,14 +813,18 @@ consumer described above, with deterministic mock and same-origin live modes.
 ### Model selection
 
 `ModelPolicyPicker` opens a flat, searchable list grouped by payment source, with
-its current model first. Choosing a model applies it and closes the popover.
+the selected model checked in its provider group. Choosing a model applies it and closes the popover.
 Thinking and supported speed controls remain in a fixed footer instead of a
 nested page. Model changes preserve supported reasoning effort and latency;
 unsupported effort falls back to the new model's default, and unsupported speed
-returns to Standard. A model with one reasoning level displays a disabled effort
-control. Availability and Codex-only session restrictions still disable choices.
+returns to Standard. Thinking uses inline radio choices and is hidden when the
+model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
 
 The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
+
+Subscription descriptions appear once per provider group. Free models carry a
+Free badge. Pass `hasImageAttachments` for the current draft to show an image
+compatibility warning only when the selected model cannot view those images.

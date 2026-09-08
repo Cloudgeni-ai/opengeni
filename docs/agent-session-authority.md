@@ -128,7 +128,7 @@ Authority never widens down a tree or through a side door:
   the ability to widen a top-level session.
 - A scheduled task created by an agent freezes the creating session's effective
   tools, permissions, and `{ agentAccess, endUser, memoryScope }` as its creator
-  policy (`packages/core/src/domain/scheduled-tasks.ts`, migration 0426), and
+  policy (`packages/core/src/domain/scheduled-tasks.ts`, migration 0427), and
   every session it generates uses that policy instead of deployment defaults.
 - The Codemode SDK proxy (`/v1/workspaces/:workspaceId/codemode/sdk/*`) mints
   its agent token from the session's permissions intersected with the

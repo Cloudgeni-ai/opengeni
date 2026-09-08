@@ -329,7 +329,7 @@ export type McpServerOptions = {
   workspaceMemoryEnabled?: boolean | undefined;
   workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
   /**
-   * The bound session's typed Memory selector (migration 0425), resolved by
+   * The bound session's typed Memory selector (migration 0426), resolved by
    * the route from the session row. `off` registers no Memory tools; `user`
    * and `session` read the workspace layer plus their own private layer and
    * save into that private layer. Omitted/null keeps the workspace layer.
@@ -3608,7 +3608,7 @@ function registerMemoryTools(
   sessionMemory: MemoryAgentScope | null,
 ): void {
   // Read layers: workspace plus the session's private layer. Write layer: the
-  // session's narrowest layer. A null scope is the pre-0425 workspace path.
+  // session's narrowest layer. A null scope is the pre-0426 workspace path.
   const agentScope: MemoryAgentScope = sessionMemory ?? {
     mode: "workspace",
     endUserSubjectId: null,
@@ -4510,6 +4510,13 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          originSiteId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Conversations created through this Site, regardless of their project. Keep unchanged when paging.",
+            ),
           recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
           projectId: z4
             .string()
@@ -4543,6 +4550,7 @@ function registerWorkspaceOrchestrationTools(
         query,
         statuses,
         activeOnly,
+        originSiteId,
         recentHours,
         rootSessionId,
         projectId,
@@ -4608,6 +4616,7 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
             ...(projectId !== undefined ? { channelId: projectId } : {}),
@@ -6416,7 +6425,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
   const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
-      v: relevance ? 3 : 2,
+      v: cursor.originSiteId ? 4 : relevance ? 3 : 2,
+      ...(cursor.originSiteId ? { originSiteId: cursor.originSiteId } : {}),
       orderBy: cursor.orderBy,
       ...(relevance ? { sortRank: cursor.sortRank, filterHash: cursor.filterHash } : {}),
       sortRevision: cursor.sortRevision,
@@ -6470,6 +6480,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       updatedAfter?: unknown;
       sortRank?: unknown;
       filterHash?: unknown;
+      originSiteId?: unknown;
     };
     if (
       parsed.v === undefined &&
@@ -6519,8 +6530,14 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     }
     const isV2 = parsed.v === 2;
     const isV3 = parsed.v === 3;
+    const isV4 = parsed.v === 4;
+    const relevance = parsed.orderBy === "relevance";
     if (
-      (!isV2 && !isV3) ||
+      (!isV2 && !isV3 && !isV4) ||
+      (isV4 &&
+        (typeof parsed.originSiteId !== "string" ||
+          !SESSION_DISCOVERY_UUID.test(parsed.originSiteId) ||
+          !["createdAt", "updatedAt", "relevance"].includes(parsed.orderBy as string))) ||
       (isV2 && parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
       (isV3 && parsed.orderBy !== "relevance") ||
       typeof parsed.sortRevision !== "string" ||
@@ -6534,7 +6551,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       throw new Error("invalid cursor fields");
     }
     if (
-      isV3 &&
+      relevance &&
       (!Number.isSafeInteger(parsed.sortRank) ||
         (parsed.sortRank as number) < 0 ||
         typeof parsed.filterHash !== "string" ||
@@ -6542,7 +6559,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     ) {
       throw new Error("invalid relevance cursor fields");
     }
-    if (isV2 && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
+    if (!relevance && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
       throw new Error("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
@@ -6565,19 +6582,20 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
       throw new Error("creation cursor cannot carry activity revisions");
     }
-    const orderBy: SessionDiscoveryOrderBy = isV3
+    const orderBy: SessionDiscoveryOrderBy = relevance
       ? "relevance"
       : (parsed.orderBy as "createdAt" | "updatedAt");
     return {
       orderBy,
-      sortRank: isV3 ? (parsed.sortRank as number) : null,
+      sortRank: relevance ? (parsed.sortRank as number) : null,
       sortRevision,
       sortAt,
       id: parsed.id,
       snapshotAt,
       snapshotRevision,
       updatedAfter: normalizedUpdatedAfter,
-      filterHash: isV3 ? (parsed.filterHash as string) : null,
+      filterHash: relevance ? (parsed.filterHash as string) : null,
+      ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
     };
   } catch {
     throw new Error("sessions_list cursor is invalid");
@@ -6644,6 +6662,7 @@ export function capSessionDiscoveryCompactPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           }
         : page.nextCursor;
     return {
@@ -6809,6 +6828,7 @@ export function capSessionDiscoveryPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           })
         : null
       : page.nextCursor

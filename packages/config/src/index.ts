@@ -2502,12 +2502,10 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
     capabilities: {
       reasoning: {
         upstream: "supported",
-        // OpenRouter advertises the reasoning controls, but the catalogue does
-        // not publish this model's accepted effort vocabulary. Preserve that
-        // upstream fact without exposing an unverified runnable selector.
-        runnable: false,
-        efforts: [],
-        defaultEffort: null,
+        // OpenRouter /api/v1/models advertises low and medium for this route.
+        runnable: true,
+        efforts: ["low", "medium"],
+        defaultEffort: "medium",
         required: false,
       },
       functionCalling: { upstream: "supported", runnable: true },

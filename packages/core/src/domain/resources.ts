@@ -100,7 +100,7 @@ export function withWorkspaceDefaultMcpTools(
   runtimeSettings: McpSettings,
   defaults: WorkspaceSessionToolDefaults | null,
 ): ToolRef[] {
-  if (!defaults) {
+  if (!defaults?.mcpServerIds) {
     return withDefaultEnabledCapabilityMcpTools(tools, settings, runtimeSettings);
   }
   return mergeToolRefs(

@@ -1,3 +1,4 @@
+import { registerFeedbackRoutes } from "./routes/feedback";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -454,6 +455,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      "X-OpenGeni-Site-Id",
+      "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
     ],
     exposeHeaders: [
@@ -1027,7 +1030,7 @@ export function createAppComposition(deps: AppDependencies): {
         }
       }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-      // The bound session's frozen Memory selector (migration 0425) decides
+      // The bound session's frozen Memory selector (migration 0426) decides
       // which Memory tools the attempt receives and which typed layers they
       // read and write. A missing row resolves to no Memory tools.
       const sessionMemory =
@@ -1257,6 +1260,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerFeedbackRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

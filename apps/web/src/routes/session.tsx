@@ -53,12 +53,9 @@ import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel } from "@/components/common";
-import {
-  FollowUpRepositoryMenuBody,
-  FollowUpRepositoryPicker,
-} from "@/components/follow-up-repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
-import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
+import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   TerminalSessionArchive,
   TerminalSessionBanner,
@@ -152,6 +149,10 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
+const SessionFeedback = lazy(() =>
+  import("@/components/feedback").then((module) => ({ default: module.SessionFeedback })),
+);
+
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
     default: module.FailedSessionBanner,
@@ -210,6 +211,7 @@ export function SessionRoute({
   const {
     events,
     sessionStatus,
+    sessionStatusSequence,
     connectionState,
     initialLoading,
     hasOlder,
@@ -268,11 +270,15 @@ export function SessionRoute({
       sessionSeed
         ? {
             ...sessionSeed,
-            status: sessionStatus ?? sessionSeed.status,
+            // Old idle events must not overwrite a fresh queued/claimed detail read.
+            status:
+              (sessionStatusSequence ?? 0) > sessionSeed.lastSequence
+                ? (sessionStatus ?? sessionSeed.status)
+                : sessionSeed.status,
             effectiveControl: queue.effectiveControl ?? sessionSeed.effectiveControl,
           }
         : null,
-    [queue.effectiveControl, sessionSeed, sessionStatus],
+    [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
@@ -1998,6 +2004,21 @@ function SessionChatPane(props: {
         </>
       )}
 
+      {hasWorkspacePermission(
+        context.accessContext,
+        props.session.workspaceId,
+        "sessions:create",
+      ) ? (
+        <Suspense fallback={null}>
+          <SessionFeedback
+            key={props.session.id}
+            client={context.client}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+          />
+        </Suspense>
+      ) : null}
+
       {/* Live decision strip: only while the session is actually paused on
           an approval — a replayed log or a stale stream must never render
           actionable Approve/Reject buttons for an already-resumed turn. */}
@@ -2110,39 +2131,45 @@ function SessionChatPane(props: {
                   servers={selectableSessionMcpServers}
                   firstPartyTools={firstPartyToolOptions}
                   selection={durableToolSelection}
+                  toolsSaving={durableToolsSaving}
                   toolsDisabled={
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }
                   onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                  variableSets={{
+                    selectedCount:
+                      props.session.variableSetIds?.length ?? (props.session.variableSetId ? 1 : 0),
+                    panel: (
+                      <SessionVariableSetPicker
+                        session={props.session}
+                        canControl={workspacePermissions.includes("sessions:control")}
+                        canAttach={workspacePermissions.includes("variable-sets:attach")}
+                        canUse={workspacePermissions.includes("variable-sets:use")}
+                        canList={
+                          workspacePermissions.includes("variable-sets:list") &&
+                          workspacePermissions.includes("secrets:list")
+                        }
+                        disabled={terminal}
+                        busy={
+                          voiceActive ||
+                          composer.sending ||
+                          props.session.activeTurnId !== null ||
+                          props.queue.queue.length > 0
+                        }
+                        goalActive={props.goal.isActive}
+                        voiceActive={voiceActive}
+                        sharedState={variableSetPickerState}
+                        setSharedState={setVariableSetPickerState}
+                        embedded
+                        onReloadSession={props.onReloadSession}
+                      />
+                    ),
+                  }}
                   repositories={{
                     selectedCount: repositories.selectionCount,
                     disabled: terminal || composer.sending,
                     panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
                   }}
-                />
-                <SessionVariableSetPicker
-                  session={props.session}
-                  canControl={workspacePermissions.includes("sessions:control")}
-                  canAttach={workspacePermissions.includes("variable-sets:attach")}
-                  canUse={workspacePermissions.includes("variable-sets:use")}
-                  canList={
-                    workspacePermissions.includes("variable-sets:list") &&
-                    workspacePermissions.includes("secrets:list")
-                  }
-                  disabled={terminal}
-                  busy={
-                    voiceActive ||
-                    composer.sending ||
-                    props.session.activeTurnId !== null ||
-                    props.queue.queue.length > 0
-                  }
-                  goalActive={props.goal.isActive}
-                  voiceActive={voiceActive}
-                  sharedState={variableSetPickerState}
-                  setSharedState={setVariableSetPickerState}
-                  compact
-                  triggerClassName="console-composer-compact-control sm:hidden"
-                  onReloadSession={props.onReloadSession}
                 />
               </>
             }
@@ -2182,8 +2209,11 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="@container/model-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
+              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                 <ModelPicker
+                  hasImageAttachments={attachments.attachments.some(
+                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                  )}
                   open={modelPickerSession === props.session.id}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
                   rows={modelCatalog.rows}
@@ -2199,45 +2229,6 @@ function SessionChatPane(props: {
                   onModelChange={composer.setModel}
                   onEffortChange={composer.setReasoningEffort}
                   onLatencyModeChange={composer.setLatencyMode}
-                />
-                <SessionToolPicker
-                  menuSide="top"
-                  servers={selectableSessionMcpServers}
-                  firstPartyTools={firstPartyToolOptions}
-                  selection={durableToolSelection}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                  disabled={
-                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                  }
-                  saving={durableToolsSaving}
-                  onChange={(next) => void saveDurableToolPolicy(next)}
-                />
-                <FollowUpRepositoryPicker
-                  {...repositoryPickerProps}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                />
-                <SessionVariableSetPicker
-                  session={props.session}
-                  canControl={workspacePermissions.includes("sessions:control")}
-                  canAttach={workspacePermissions.includes("variable-sets:attach")}
-                  canUse={workspacePermissions.includes("variable-sets:use")}
-                  canList={
-                    workspacePermissions.includes("variable-sets:list") &&
-                    workspacePermissions.includes("secrets:list")
-                  }
-                  disabled={terminal}
-                  busy={
-                    voiceActive ||
-                    composer.sending ||
-                    props.session.activeTurnId !== null ||
-                    props.queue.queue.length > 0
-                  }
-                  goalActive={props.goal.isActive}
-                  voiceActive={voiceActive}
-                  sharedState={variableSetPickerState}
-                  setSharedState={setVariableSetPickerState}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                  onReloadSession={props.onReloadSession}
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">

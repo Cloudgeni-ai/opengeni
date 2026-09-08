@@ -1,4 +1,5 @@
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
+import { sessionCreationMetadata } from "../site-session-origin";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -795,7 +796,7 @@ export async function createAndStartSessionWithOutcome(input: {
   // firstPartyMcpPermissions and the target resource checks.
   firstPartyMcpTools: FirstPartyMcpToolName[];
   // Agent-access scope, opaque end-user label, and typed Memory selector
-  // (migration 0425), already resolved against the parent by the caller.
+  // (migration 0426), already resolved against the parent by the caller.
   // Omitted keeps the workspace defaults for internal lifecycle callers.
   agentAccess?: SessionAgentAccess;
   endUser?: SessionEndUser | null;
@@ -1834,7 +1835,7 @@ const MEMORY_SCOPE_WIDTH: Record<SessionMemoryScope, number> = {
 
 /**
  * Resolve a new session's agent-access scope, end-user label, and Memory
- * selector (migration 0425). A top-level request takes its own values. An
+ * selector (migration 0426). A top-level request takes its own values. An
  * agent-created child inherits every omitted value from its trusted parent
  * and may only NARROW an explicit one: agent access workspace > user >
  * session, memory workspace > user > session > off, and the label must equal
@@ -1966,6 +1967,7 @@ export async function createSessionForRequestWithOutcome(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  payload.metadata = sessionCreationMetadata(payload.metadata);
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
@@ -2589,7 +2591,7 @@ export async function createSessionForRequestWithOutcome(
       message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
     });
   }
-  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools.filter(
+  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools?.filter(
     (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
   );
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
@@ -3744,7 +3746,7 @@ export async function updateSessionToolPolicy(
     runtimeSettings,
   );
   const workspaceDefaultFirstPartyTools = [
-    ...(workspaceSessionToolDefaults?.firstPartyMcpTools.filter((tool) =>
+    ...(workspaceSessionToolDefaults?.firstPartyMcpTools?.filter((tool) =>
       deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
     ) ?? deploymentFirstPartyMcpToolPolicy.default),
   ];

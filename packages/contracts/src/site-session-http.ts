@@ -54,7 +54,12 @@ function siteSessionRouteAllowed(pathname: string, method: string): boolean {
 /** The shared browser/preview session SDK surface. Tenant routing stays with
  * the host; normal API handlers remain the authorization boundary, and this
  * allowlist keeps configuration/control routes out of the proxied surface. */
-export function siteSessionPath(path: string, workspaceId: string, method = "GET"): string {
+export function siteSessionPath(
+  path: string,
+  workspaceId: string,
+  method = "GET",
+  siteId?: string,
+): string {
   const verb = method.toUpperCase();
   const pathname = path.split("?")[0]!;
   const session = siteSessionRouteAllowed(pathname, verb);
@@ -71,5 +76,15 @@ export function siteSessionPath(path: string, workspaceId: string, method = "GET
   ) {
     throw new SiteSessionPathError();
   }
-  return path.replace("/workspaces/site-host", `/workspaces/${encodeURIComponent(workspaceId)}`);
+  const rewritten = path.replace(
+    "/workspaces/site-host",
+    `/workspaces/${encodeURIComponent(workspaceId)}`,
+  );
+  // Preview has no published Site identity. Never widen a Site-only list to the workspace.
+  const url = new URL(rewritten, "http://site.invalid");
+  if (url.searchParams.get("originSiteId") === "current" && workspaceId !== "site-host") {
+    url.searchParams.set("originSiteId", siteId ?? "00000000-0000-0000-0000-000000000000");
+    return url.pathname + url.search;
+  }
+  return rewritten;
 }

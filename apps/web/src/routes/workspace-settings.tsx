@@ -383,11 +383,12 @@ function OperationalWorkspaceSettingsRoute({
                   }}
                 >
                   <div className="grid min-w-0 gap-1.5">
-                    <Label htmlFor="workspace-name" className="text-xs text-fg-muted">
+                    <Label htmlFor="workspace-name" className="text-fg-muted">
                       Workspace name
                     </Label>
                     <Input
                       id="workspace-name"
+                      suppressAutofill
                       value={nameDraft}
                       onChange={(event) => setNameDraft(event.target.value)}
                       onKeyDown={(event) => {
@@ -718,6 +719,7 @@ function OperationalWorkspaceSettingsRoute({
                       <Label htmlFor="api-key-name">Name</Label>
                       <Input
                         id="api-key-name"
+                        suppressAutofill
                         autoFocus
                         value={apiKeyName}
                         onChange={(event) => setApiKeyName(event.target.value)}
@@ -1044,6 +1046,7 @@ function OrganizationManagedWorkspaceSettings({
                 Name
                 <Input
                   value={name}
+                  suppressAutofill
                   onChange={(event) => setName(event.target.value)}
                   maxLength={120}
                 />
@@ -1434,6 +1437,7 @@ export function DangerZone(props: {
               </Label>
               <Input
                 id="confirm-workspace-name"
+                suppressAutofill
                 value={confirmName}
                 onChange={(event) => setConfirmName(event.target.value)}
                 placeholder={props.workspaceName}

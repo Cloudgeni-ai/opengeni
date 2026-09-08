@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const source = readFileSync(
-  new URL("../drizzle/0425_session_agent_access_scope.sql", import.meta.url),
+  new URL("../drizzle/0426_session_agent_access_scope.sql", import.meta.url),
   "utf8",
 );
 
-test("0425 is a rolling, default-preserving sessions column addition", () => {
+test("0426 is a rolling, default-preserving sessions column addition", () => {
   expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
   expect(source).toContain("SET LOCAL lock_timeout");
   expect(source).toContain("SET LOCAL statement_timeout");
@@ -23,13 +23,13 @@ test("0425 is a rolling, default-preserving sessions column addition", () => {
   expect(source).not.toContain("NO FORCE ROW LEVEL SECURITY");
 });
 
-test("0425 pins the closed value sets and the paired end-user label", () => {
+test("0426 pins the closed value sets and the paired end-user label", () => {
   expect(source).toMatch(/CHECK \(agent_access IN \('session', 'user', 'workspace'\)\)/u);
   expect(source).toMatch(/CHECK \(memory_scope IN \('workspace', 'user', 'session', 'off'\)\)/u);
   expect(source).toMatch(/CHECK \(\(end_user_source IS NULL\) = \(end_user_id IS NULL\)\)/u);
 });
 
-test("0425 indexes the end-user pair only for labelled sessions", () => {
+test("0426 indexes the end-user pair only for labelled sessions", () => {
   expect(source).toMatch(
     /CREATE INDEX sessions_workspace_end_user_idx\s+ON sessions \(workspace_id, end_user_source, end_user_id\)\s+WHERE end_user_id IS NOT NULL;/u,
   );

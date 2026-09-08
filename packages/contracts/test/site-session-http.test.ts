@@ -115,6 +115,10 @@ describe("siteSessionPath", () => {
       expect(() => siteSessionPath(path, WORKSPACE, method)).toThrow(
         "Unsupported Site session API path",
       );
+      // Origin routing from the host must preserve the same path boundary.
+      expect(() => siteSessionPath(path, WORKSPACE, method, "published-site")).toThrow(
+        "Unsupported Site session API path",
+      );
     }
   });
 

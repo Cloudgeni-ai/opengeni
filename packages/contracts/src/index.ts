@@ -1954,14 +1954,24 @@ export const WorkspaceSessionToolDefaults = z
     mcpServerIds: z
       .array(z.string().trim().min(1).max(128))
       .max(128)
-      .transform((ids) => [...new Set(ids)]),
+      .transform((ids) => [...new Set(ids)])
+      .optional(),
     firstPartyMcpTools: z
       .array(FirstPartyMcpToolName)
       .max(512)
-      .transform((tools) => [...new Set(tools)]),
+      .transform((tools) => [...new Set(tools)])
+      .optional(),
   })
   .strict();
 export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+
+// Omitted keys preserve the stored selection; null removes only that override.
+export const WorkspaceSessionToolDefaultsPatch = z
+  .object({
+    mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
+    firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
+  })
+  .strict();
 
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
@@ -2325,7 +2335,7 @@ export const UpdateWorkspaceSettingsRequest = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
-    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -5389,7 +5399,7 @@ export const KnowledgeMemory = z.object({
   status: KnowledgeMemoryStatus,
   kind: KnowledgeMemoryKind,
   scope: z.string(),
-  /** Typed selector (migration 0152/0425): workspace, user, session, role, ephemeral, legacy. */
+  /** Typed selector (migration 0152/0426): workspace, user, session, role, ephemeral, legacy. */
   scopeType: z.string().optional(),
   /** `end_user:v1:<tuple hash>` for a session end-user layer; null otherwise. */
   scopeSubjectId: z.string().nullable().optional(),
@@ -6657,6 +6667,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.feedback.write",
   "session.attention.write",
   "session.archive.write",
   "session.delete",
@@ -12254,6 +12265,15 @@ export const Session = z.object({
   queueHeadPosition: z.number().int(),
   queueTailPosition: z.number().int(),
   effectiveControl: EffectiveSessionControl,
+  /** Current out-of-turn wait, independent of goals. Omitted by older servers.
+   * An elapsed deadline means the recheck is due, not proof it has started. */
+  inputWait: z
+    .object({
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: z.string(),
+    })
+    .nullable()
+    .optional(),
   lastSequence: z.number().int().nonnegative(),
   // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
   // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -12293,6 +12313,7 @@ export const Session = z.object({
       totalDescendants: z.number().int().nonnegative(),
       runningDescendants: z.number().int().nonnegative(),
       queuedDescendants: z.number().int().nonnegative(),
+      waitingDescendants: z.number().int().nonnegative().optional(),
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       /** Historical failed lifecycle states, including already-reviewed failures. */
@@ -12344,6 +12365,8 @@ export type SessionSummary = Session;
  */
 export const SessionListResponse = z.object({
   pinned: z.array(Session),
+  filtersApplied: z.literal(true).optional(),
+  originSiteId: z.string().uuid().optional(),
   /** True when older matching pins were omitted from this bounded page. */
   pinnedTruncated: z.boolean().optional(),
   sessions: z.array(Session),
@@ -16847,3 +16870,5 @@ export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
+
+export * from "./feedback";

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  authorizationServerMetadataCandidates,
   McpOAuthDiscoveryError,
   parseMcpOAuthChallenge,
   protectedResourceMetadataCandidates,
@@ -44,6 +45,99 @@ const modernAs = {
 };
 
 describe("MCP OAuth discovery", () => {
+  test("tries standard authorization-server discovery paths in protocol order", () => {
+    expect(authorizationServerMetadataCandidates("https://auth.example.test/tenant")).toEqual([
+      "https://auth.example.test/.well-known/oauth-authorization-server/tenant",
+      "https://auth.example.test/.well-known/openid-configuration/tenant",
+      "https://auth.example.test/tenant/.well-known/openid-configuration",
+    ]);
+    expect(authorizationServerMetadataCandidates("https://auth.example.test")).toEqual([
+      "https://auth.example.test/.well-known/oauth-authorization-server",
+      "https://auth.example.test/.well-known/openid-configuration",
+    ]);
+  });
+
+  test("reaches OpenID metadata without probing protected guessed OAuth suffixes", async () => {
+    const requested: string[] = [];
+    const openidUrl = "https://auth.example.test/.well-known/openid-configuration/tenant";
+    await resolveMcpOAuthDiscovery({
+      resourceUrl,
+      challenge: { scheme: "bearer", scope: [] },
+      validateEndpoint,
+      canonicalizeResource,
+      fetchMetadata: async ({ url }) => {
+        requested.push(url);
+        if (url === modernPrmUrl) {
+          return {
+            status: "present",
+            url,
+            document: {
+              resource: resourceUrl,
+              authorization_servers: [modernAs.issuer],
+            },
+          };
+        }
+        if (url === modernAsMetadataUrl) return { status: "absent", url, httpStatus: 404 };
+        if (url === openidUrl) return { status: "present", url, document: modernAs };
+        throw new Error("HTTP 401 at non-metadata route");
+      },
+    });
+    expect(requested).toEqual([modernPrmUrl, modernAsMetadataUrl, openidUrl]);
+  });
+
+  test("falls back to appended OpenID metadata only after standard predecessors are absent", async () => {
+    const requested: string[] = [];
+    const inserted = "https://auth.example.test/.well-known/openid-configuration/tenant";
+    const appended = "https://auth.example.test/tenant/.well-known/openid-configuration";
+    await resolveMcpOAuthDiscovery({
+      resourceUrl,
+      challenge: { scheme: "bearer", scope: [] },
+      validateEndpoint,
+      canonicalizeResource,
+      fetchMetadata: async ({ url }) => {
+        requested.push(url);
+        if (url === modernPrmUrl)
+          return {
+            status: "present",
+            url,
+            document: {
+              resource: resourceUrl,
+              authorization_servers: [modernAs.issuer],
+            },
+          };
+        if (url === appended) return { status: "present", url, document: modernAs };
+        return { status: "absent", url, httpStatus: 404 };
+      },
+    });
+    expect(requested).toEqual([modernPrmUrl, modernAsMetadataUrl, inserted, appended]);
+  });
+
+  test("does not skip a failed standard authorization-server metadata endpoint", async () => {
+    const requested: string[] = [];
+    await expect(
+      resolveMcpOAuthDiscovery({
+        resourceUrl,
+        challenge: { scheme: "bearer", scope: [] },
+        validateEndpoint,
+        canonicalizeResource,
+        fetchMetadata: async ({ url }) => {
+          requested.push(url);
+          if (url === modernPrmUrl)
+            return {
+              status: "present",
+              url,
+              document: {
+                resource: resourceUrl,
+                authorization_servers: [modernAs.issuer],
+              },
+            };
+          throw new Error("HTTP 401 standard metadata denied");
+        },
+      }),
+    ).rejects.toThrow("HTTP 401 standard metadata denied");
+    expect(requested).toEqual([modernPrmUrl, modernAsMetadataUrl]);
+  });
+
   test("does not downgrade an authorization failure at advertised or standard metadata", async () => {
     for (const advertised of [undefined, `${resourceUrl}/.well-known/oauth-protected-resource`]) {
       const requested: string[] = [];

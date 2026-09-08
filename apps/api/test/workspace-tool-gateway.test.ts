@@ -323,6 +323,7 @@ describe("workspace tool gateway adapters", () => {
         undefined,
         undefined,
         async () => undefined,
+        async () => ({ siteId: "44444444-4444-4444-8444-444444444444", title: "Test Site" }),
       ),
     ).rejects.toMatchObject(expected);
   });

@@ -8,13 +8,13 @@ import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // still gets exactly one row, with every account listed in its sheet's
 // Connected accounts block. Connectors are MCP servers from the catalog plus
 // workspace-defined Custom APIs: a curated Featured strip, then a large
-// search, kind filters, an "Enabled" strip the user manages daily, a Custom
+// kind filters, an "Enabled" strip the user manages daily, a Custom
 // APIs list, and a logo tile grid over the full catalog (1,000+ items,
 // rendered in explicit 48-item windows). Credentialed MCP servers connect through the
 // connections spine (OAuth redirect or an API-key form) in a right-hand detail
 // sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
 // and Packs: a named collection of tools and instructions rather than a live
-// connection, so they get their own section, their own search, and one uniform
+// connection, so they get their own section and one uniform
 // row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
@@ -40,6 +40,7 @@ import { BundlesSection } from "@/components/capabilities/bundles-section";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
+  PluginSearch,
   EnabledCapabilitiesSection,
 } from "@/components/capabilities/capability-catalog-sections";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
@@ -1714,6 +1715,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           }
         />
 
+        <PluginSearch query={query} onQueryChange={setQuery} />
+
         <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
           <div>
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -1728,23 +1731,29 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             </p>
           </div>
           <div className="grid gap-2" data-integration-list>
-            {integrations.map((adapter) => {
-              const quickConnect = integrationQuickConnect(adapter.model);
-              return (
-                <IntegrationRow
-                  key={adapter.model.id}
-                  model={adapter.model}
-                  onOpen={() => {
-                    const active = document.activeElement;
-                    integrationOpenerRef.current =
-                      active instanceof HTMLElement && active !== document.body ? active : null;
-                    setOpenIntegration(adapter.model.id);
-                  }}
-                  busy={integrationRowBusy(adapter.model)}
-                  {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
-                />
-              );
-            })}
+            {integrations
+              .filter(({ model }) =>
+                `${model.name} ${model.description}`
+                  .toLowerCase()
+                  .includes(query.trim().toLowerCase()),
+              )
+              .map((adapter) => {
+                const quickConnect = integrationQuickConnect(adapter.model);
+                return (
+                  <IntegrationRow
+                    key={adapter.model.id}
+                    model={adapter.model}
+                    onOpen={() => {
+                      const active = document.activeElement;
+                      integrationOpenerRef.current =
+                        active instanceof HTMLElement && active !== document.body ? active : null;
+                      setOpenIntegration(adapter.model.id);
+                    }}
+                    busy={integrationRowBusy(adapter.model)}
+                    {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
+                  />
+                );
+              })}
           </div>
         </section>
 
@@ -1800,13 +1809,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             </div>
           ) : null}
 
-          <CapabilityDiscoveryControls
-            query={query}
-            filter={filter}
-            counts={counts}
-            onQueryChange={setQuery}
-            onFilterChange={setFilter}
-          />
+          <CapabilityDiscoveryControls filter={filter} counts={counts} onFilterChange={setFilter} />
 
           <div className="mt-8 space-y-10">
             <EnabledCapabilitiesSection
@@ -1861,6 +1864,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
         <div ref={bundlesRef}>
           <BundlesSection
+            query={query}
             client={client}
             workspaceId={workspaceId}
             connections={connections}

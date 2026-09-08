@@ -194,8 +194,10 @@ describe("container-responsive public composer demo", () => {
     await search.fill("no-such-model");
     await page.getByText("No matching models. Try a model or provider name.").waitFor();
     await search.fill("codex");
-    await page.getByRole("combobox", { name: "Thinking effort" }).selectOption("high");
-    expect(await page.getByRole("combobox", { name: "Thinking effort" }).inputValue()).toBe("high");
+    await page.getByRole("radio", { name: "High", exact: true }).click();
+    expect(
+      await page.getByRole("radio", { name: "High", exact: true }).getAttribute("aria-checked"),
+    ).toBe("true");
     await search.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");

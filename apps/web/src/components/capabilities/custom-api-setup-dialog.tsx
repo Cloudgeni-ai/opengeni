@@ -191,6 +191,7 @@ export function CustomApiSetupDialog({
                     />
                     <Field
                       id="custom-graphql-name"
+                      suppressAutofill
                       label="API name (optional)"
                       value={state.draft.graphqlName}
                       placeholder="Issue tracker API"
@@ -445,6 +446,7 @@ function NewCredentialFields({
               </div>
               <Field
                 id="custom-credential-name"
+                suppressAutofill
                 label="Credential name"
                 value={state.draft.credentialName}
                 placeholder="X-API-Key"
@@ -508,6 +510,7 @@ function ReviewStep({
       <div className="grid gap-4 rounded-xl border border-border bg-bg/50 p-4">
         <Field
           id="custom-display-name"
+          suppressAutofill
           label="Instance label"
           value={state.draft.displayName}
           placeholder={preview.name}
@@ -668,6 +671,7 @@ function Field({
   placeholder,
   type = "text",
   autoComplete,
+  suppressAutofill,
 }: {
   id: string;
   label: string;
@@ -676,6 +680,7 @@ function Field({
   placeholder?: string;
   type?: string;
   autoComplete?: string;
+  suppressAutofill?: boolean;
 }) {
   return (
     <div className="grid gap-1.5">
@@ -687,6 +692,7 @@ function Field({
         placeholder={placeholder}
         type={type}
         autoComplete={autoComplete}
+        suppressAutofill={suppressAutofill}
       />
     </div>
   );

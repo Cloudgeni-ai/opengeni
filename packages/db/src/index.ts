@@ -5389,7 +5389,7 @@ export type ScheduledTaskCreatorSessionPolicy = {
 };
 
 /**
- * Frozen creator boundary of a scheduled task (migration 0426). Every field is
+ * Frozen creator boundary of a scheduled task (migration 0427). Every field is
  * null for a human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
@@ -14953,7 +14953,7 @@ export type SaveWorkspaceMemoryInput = {
   origin?: WorkspaceMemoryOrigin | undefined;
   metadata?: Record<string, unknown> | undefined;
   /**
-   * Typed selector the record is written under (migration 0425). Omitted
+   * Typed selector the record is written under (migration 0426). Omitted
    * means the shared workspace layer; `user` and `session` write one private
    * layer whose rows only that end-user label / root tree can read back.
    */
@@ -15004,7 +15004,7 @@ export type WorkspaceMemorySearchInput = {
   /** Agent-only containment. Human audit/search callers omit this. */
   agentPromptMode?: WorkspaceMemoryPromptMode | undefined;
   /**
-   * Agent-only typed read layers (migration 0425): the workspace layer plus
+   * Agent-only typed read layers (migration 0426): the workspace layer plus
    * the session's own `user` or `session` layer. Human callers omit this and
    * keep today's workspace-only read.
    */
@@ -31141,11 +31141,11 @@ export type SessionCreateInput = {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
   policyRole?: string | null;
-  /** Agent-to-agent reach (migration 0425); omitted means the workspace default. */
+  /** Agent-to-agent reach (migration 0426); omitted means the workspace default. */
   agentAccess?: SessionAgentAccess;
   /** Opaque end-user label; omitted or null means none. */
   endUser?: SessionEndUser | null;
-  /** Typed Memory selector (migration 0425); omitted means the workspace layer. */
+  /** Typed Memory selector (migration 0426); omitted means the workspace layer. */
   memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
@@ -32517,7 +32517,7 @@ export async function deleteSessionTreeIfQuiescent(
 }
 
 /**
- * The frozen agent-access facts of one session (migration 0425). Together
+ * The frozen agent-access facts of one session (migration 0426). Together
  * with `rootSessionId` these are everything the core seam needs to decide
  * whether one live agent attempt may reach another session.
  */
@@ -33024,6 +33024,8 @@ export type SessionListKeysetCursor = {
 export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
 export type SessionListFilterOptions = {
+  /** Sessions created through this published Site, independent of project. */
+  originSiteId?: string;
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
   /** Exact frozen creator identity. */
@@ -33228,7 +33230,63 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
-type SessionRow = typeof schema.sessions.$inferSelect;
+type SessionRow = typeof schema.sessions.$inferSelect & { currentInputWait?: Session["inputWait"] };
+
+/** One bounded query in the caller's RLS scope; never infer waits from history text. */
+async function withCurrentSessionInputWait(
+  db: Database,
+  workspaceId: string,
+  rows: readonly SessionRow[],
+): Promise<SessionRow[]> {
+  const candidates = rows.filter(
+    (row) =>
+      row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
+  );
+  if (!candidates.length) return rows.map((row) => ({ ...row, currentInputWait: null }));
+  const latest = db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, schema.sessions.id),
+        isNotNull(schema.sessionTurns.finishedAt),
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
+    .limit(1)
+    .as("latest_wait_turn");
+  const matches = await db
+    .select({ id: schema.sessions.id, turnId: latest.id })
+    .from(schema.sessions)
+    .leftJoinLateral(latest, sql`true`)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(
+          schema.sessions.id,
+          candidates.map((row) => row.id),
+        ),
+      ),
+    );
+  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
+  return rows.map((row) => ({
+    ...row,
+    currentInputWait:
+      row.status === "idle" &&
+      !row.activeTurnId &&
+      row.inputWaitUntil &&
+      row.inputWaitReason &&
+      row.inputWaitTurnId &&
+      byId.get(row.id) === row.inputWaitTurnId
+        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
+        : null,
+  }));
+}
 
 /**
  * Public sequence and unread projections are cursor-authoritative after the
@@ -33260,7 +33318,7 @@ async function canonicalSessionRowsFromEventCursors(
   return withLatestStartedSessionPolicy(
     db,
     workspaceId,
-    rows.map((row) => {
+    (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
       const cursor = cursorBySessionId.get(row.id);
       if (
         !cursor ||
@@ -33317,6 +33375,7 @@ type SessionTreeStatsRow = {
   totalDescendants: number | string;
   runningDescendants: number | string;
   queuedDescendants: number | string;
+  waitingDescendants: number | string;
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
@@ -33337,6 +33396,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   totalDescendants: 0,
   runningDescendants: 0,
   queuedDescendants: 0,
+  waitingDescendants: 0,
   attentionDescendants: 0,
   pausedDescendants: 0,
   failedDescendants: 0,
@@ -33467,6 +33527,7 @@ export async function sessionTreeStatsForSessions(
         stats."totalDescendants",
         stats."runningDescendants",
         stats."queuedDescendants",
+        stats."waitingDescendants",
         stats."attentionDescendants",
         stats."pausedDescendants",
         stats."failedDescendants",
@@ -33590,6 +33651,22 @@ export async function sessionTreeStatsForSessions(
           )::int as "queuedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'idle' and effective_pause_revision is null
+              and exists (
+                select 1 from ${schema.sessions} waiting_session
+                where waiting_session.workspace_id = ${workspaceId} and waiting_session.id = numbered.id
+                  and waiting_session.active_turn_id is null
+                  and waiting_session.input_wait_until is not null
+                  and waiting_session.input_wait_turn_id = (
+                    select finished.id from ${schema.sessionTurns} finished
+                    where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
+                      and finished.finished_at is not null
+                    order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
+                  )
+              )
+          )::int as "waitingDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
               and depth > 0 and status = 'requires_action'
           )::int as "attentionDescendants",
           count(*) filter (
@@ -33689,6 +33766,7 @@ export async function sessionTreeStatsForSessions(
         totalDescendants: Number(row.totalDescendants),
         runningDescendants: Number(row.runningDescendants),
         queuedDescendants: Number(row.queuedDescendants),
+        waitingDescendants: Number(row.waitingDescendants),
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
@@ -33752,6 +33830,7 @@ function sessionFilters(
     | "subjectId"
     | "archivedOnly"
     | "channelId"
+    | "originSiteId"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -33770,6 +33849,11 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  if (options.originSiteId) {
+    filters.push(
+      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
+    );
+  }
   const archivedRoot = sql`exists (
     select 1
     from ${schema.sessionPins} archive_state
@@ -33831,7 +33915,7 @@ function sessionFilters(
 }
 
 /**
- * The agent-access predicate for one calling attempt (migration 0425). It
+ * The agent-access predicate for one calling attempt (migration 0426). It
  * mirrors the pairwise rule in the core seam exactly: a caller always keeps
  * its own root tree; a `session` caller sees nothing else; a `user` caller
  * additionally sees non-`session` sessions carrying its own end-user label; a
@@ -33988,6 +34072,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   const hasChannel = options.channelId !== undefined;
   if (
     !hasChannel &&
+    !options.originSiteId &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33998,6 +34083,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     return "all";
   }
   return JSON.stringify([
+    ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
@@ -35199,6 +35285,8 @@ export async function getLatestSessionModelForSubject(
 
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt" | "relevance";
 export type SessionDiscoveryCursor = {
+  /** Site provenance is bound for chronological as well as relevance lists. */
+  originSiteId?: string;
   orderBy: SessionDiscoveryOrderBy;
   /** Stable rank class for relevance order; null for chronological order. */
   sortRank: number | null;
@@ -35310,6 +35398,7 @@ async function readWorkspaceSessionActivityRevision(
 const SESSION_DISCOVERY_QUERY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
 
 type NormalizedSessionDiscoveryFilters = {
+  originSiteId: string | null;
   query: string | null;
   statuses: SessionStatus[];
   activeOnly: boolean;
@@ -35388,6 +35477,7 @@ function normalizeSessionDiscoverySubject(
 }
 
 function normalizeSessionDiscoveryFilters(options: {
+  originSiteId?: string;
   query?: string;
   search?: string;
   statuses?: SessionStatus[];
@@ -35426,6 +35516,7 @@ function normalizeSessionDiscoveryFilters(options: {
   }
   return {
     query,
+    originSiteId: options.originSiteId ?? null,
     statuses,
     activeOnly: options.activeOnly === true,
     recentHours,
@@ -35443,6 +35534,7 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
     .update(
       JSON.stringify({
         query: filters.query,
+        ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
         statuses: filters.statuses,
         activeOnly: filters.activeOnly,
         recentHours: filters.recentHours,
@@ -35508,6 +35600,11 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.statuses.length > 0) {
     authorizationFilters.push(inArray(schema.sessions.status, options.filters.statuses));
+  }
+  if (options.filters.originSiteId) {
+    authorizationFilters.push(
+      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.filters.originSiteId}`,
+    );
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
@@ -36076,6 +36173,7 @@ export async function listSessionDiscoverySummaries(
   db: Database,
   workspaceId: string,
   options: {
+    originSiteId?: string;
     limit: number;
     cursor?: SessionDiscoveryCursor;
     includeLastMessage?: boolean;
@@ -36110,6 +36208,7 @@ export async function listSessionDiscoverySummaries(
   updatedAfter: string | null;
   /** Internal relevance cursor binding; omitted from row projections. */
   filterHash: string | null;
+  originSiteId?: string;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
   const claimLimit = Math.max(
@@ -36131,6 +36230,9 @@ export async function listSessionDiscoverySummaries(
   }
   const filterHash = relevanceRequested ? sessionDiscoveryFilterHash(filters) : null;
   const readPage = async (scopedDb: Database) => {
+    if (options.cursor && (options.cursor.originSiteId ?? null) !== filters.originSiteId) {
+      throw new Error("sessions_list cursor Site filter does not match the request");
+    }
     const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
     const updatedAfter =
       requestedUpdatedAfter === null
@@ -36394,6 +36496,7 @@ export async function listSessionDiscoverySummaries(
               snapshotRevision,
               updatedAfter,
               filterHash,
+              ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
             }
           : null,
       total: selected.total,
@@ -36403,6 +36506,7 @@ export async function listSessionDiscoverySummaries(
       updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
       updatedAfter,
       filterHash,
+      ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
     };
   };
   const transactionConfig: PgTransactionConfig =
@@ -36773,6 +36877,26 @@ export async function countActiveSessionsForWorkspace(
         ),
       );
     return Number(count);
+  });
+}
+
+/** Immutable creation evidence for scheduled-session binding checks, never continuation defaults. */
+export async function getSessionCreationExecutionPolicy(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+) {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ?? null;
   });
 }
 
@@ -72721,8 +72845,8 @@ export async function claimPendingSessionWorkflowWakes(
  * accepted direction or an interrupted attempt awaiting writer-set proof.
  * Temporal accepting a signal is transport evidence, not proof that a closing
  * workflow observed Postgres. While active control still has an actionable
- * Agent Steer, a current wake still owns an accepted queued human/API turn, or
- * an attempt awaits quiescence, retain the revision so the bounded outbox
+ * Agent Steer, a current wake owns a queued human/API turn, eligible machine
+ * input, or a due idle input-wait obligation, or an attempt awaits quiescence, retain the revision so the bounded outbox
  * dispatcher retries signalWithStart. The attempt-fenced claim consumes each
  * direction once; a real Pause is the typed blocker and may acknowledge this
  * revision because Resume commits a new one.
@@ -72738,7 +72862,12 @@ export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
   | {
       action: "pending_admission";
-      blocker: "pending_agent_steer" | "pending_prompt_turn" | "pending_quiescence";
+      blocker:
+        | "pending_agent_steer"
+        | "pending_prompt_turn"
+        | "pending_quiescence"
+        | "pending_machine_input"
+        | "pending_input_wait";
     };
 
 export async function markSessionWorkflowWakeDelivered(
@@ -72804,6 +72933,64 @@ export async function markSessionWorkflowWakeDelivered(
             )
             .limit(1);
           if (currentWake?.wakeRevision === input.wakeRevision) {
+            // A transport ACK is not consumption. The workflow may have already
+            // taken its closing snapshot when a timeout or child result arrives.
+            // Keep the current revision retryable until claim consumes the input.
+            if (
+              session.activeTurnId === null &&
+              session.status !== "failed" &&
+              session.status !== "cancelled" &&
+              session.status !== "requires_action" &&
+              !(await sessionRealtimeIsActiveInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+              ))
+            ) {
+              const wait = await sessionInputWaitStateTx(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+                session,
+              );
+              const pending = await tx
+                .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+                .from(schema.sessionSystemUpdates)
+                .where(
+                  and(
+                    eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                    eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                    eq(schema.sessionSystemUpdates.state, "pending"),
+                  ),
+                );
+              const [goal] = await tx
+                .select({ status: schema.sessionGoals.status })
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
+                  ),
+                )
+                .limit(1);
+              if (
+                pending.some(
+                  ({ kind }) =>
+                    SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
+                      "immediate" &&
+                    (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+                      goal?.status === "active" ||
+                      wait.disposition === "held" ||
+                      session.status === "queued"),
+                )
+              )
+                return { action: "pending_admission", blocker: "pending_machine_input" } as const;
+              // A future hold is explicitly re-armed by settlement. Retaining its
+              // early transport revision would coalesce every rearm back to now.
+              if (wait.disposition === "timeout") {
+                return { action: "pending_admission", blocker: "pending_input_wait" } as const;
+              }
+            }
             const [pendingPromptTurn] = await tx
               .select({ id: schema.sessionTurns.id })
               .from(schema.sessionTurns)
@@ -75723,7 +75910,11 @@ async function mapSessionWithControl(
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  const [effective] = await withLatestStartedSessionPolicy(db, row.workspaceId, [row]);
+  const [effective] = await withLatestStartedSessionPolicy(
+    db,
+    row.workspaceId,
+    await withCurrentSessionInputWait(db, row.workspaceId, [row]),
+  );
   return mapSession(effective!, control, mcpServers, pin, attention, archive, tenancyViewer);
 }
 
@@ -75757,7 +75948,7 @@ function mapSessionTenancy(
 }
 
 function mapSession(
-  row: typeof schema.sessions.$inferSelect,
+  row: SessionRow,
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
@@ -75836,6 +76027,7 @@ function mapSession(
     queueHeadPosition: Number(row.queueHeadPosition),
     queueTailPosition: Number(row.queueTailPosition),
     effectiveControl,
+    inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
     codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
     codexLastCredentialId: row.codexLastCredentialId ?? null,
@@ -77050,3 +77242,5 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
     sql`select * from opengeni_private.list_due_workspace_pause_timers(${limit})`,
   );
 }
+
+export * from "./feedback";

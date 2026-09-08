@@ -363,6 +363,7 @@ function CreateRigForm({
           <Label htmlFor="rig-name">Name</Label>
           <Input
             id="rig-name"
+            suppressAutofill
             value={name}
             onChange={(event) => setName(event.target.value)}
             placeholder="dev-machine"

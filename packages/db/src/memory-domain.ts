@@ -276,7 +276,7 @@ export function isMemoryScopeApplicable(
 }
 
 // ---------------------------------------------------------------------------
-// Session memory scope (migration 0425). A session freezes which typed Memory
+// Session memory scope (migration 0426). A session freezes which typed Memory
 // layer its agent reads and writes. `user` and `session` are ADDITIVE to the
 // shared workspace layer: the agent still reads workspace facts and saves into
 // its narrowest configured layer. `off` registers no Memory tools at all.

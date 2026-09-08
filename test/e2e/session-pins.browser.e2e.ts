@@ -148,6 +148,75 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("moves sessions using the context menu and folder drag targets", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const project = await createChannelThroughApi(page, apiBaseUrl, workspaceId, "Move target");
+      const session = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Movable session",
+      );
+      await page.reload();
+      const row = page.locator(`a[data-session-row="${session.id}"]`);
+      // macOS Control-click reaches the same native contextmenu event. Do not
+      // turn ordinary modified link clicks into synthetic menu gestures.
+      await row.dispatchEvent("contextmenu", { button: 0, ctrlKey: true });
+      const menu = page.locator(`[data-session-menu="${session.id}"]`);
+      await menu.getByText("Move to project", { exact: true }).waitFor();
+      expect(await menu.getByRole("menuitem", { name: "Default", exact: true }).isDisabled()).toBe(
+        true,
+      );
+      const persistedMove = (channelId: string | null) =>
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === "PUT" &&
+            response.url().endsWith(`/sessions/${session.id}/channel`) &&
+            response.request().postDataJSON()?.channelId === channelId &&
+            response.ok(),
+        );
+      const menuMove = persistedMove(project.id);
+      await menu.getByRole("menuitem", { name: project.name, exact: true }).click();
+      await menuMove;
+      // A PUT response precedes the rail's post-write verification and list
+      // refresh. Reload to prove persistence and avoid racing its in-flight
+      // duplicate-move guard with the next gesture.
+      await page.reload();
+      const projectGroup = page.getByRole("group", { name: project.name, exact: true });
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      // Even after the last unfiled session leaves, Default remains a target.
+      const defaultGroup = page.getByRole("group", { name: "Default", exact: true });
+      const dragToGroup = async (group: typeof defaultGroup) => {
+        await row.hover();
+        await page.mouse.down();
+        try {
+          const header = group.locator(":scope > div[draggable]").first();
+          // Deliver dragover after entering the target before releasing the
+          // mouse, including on browsers that need a second pointer move.
+          await header.hover();
+          await header.hover();
+        } finally {
+          await page.mouse.up();
+        }
+      };
+      await Promise.all([persistedMove(null), dragToGroup(defaultGroup)]);
+      await page.reload();
+      await defaultGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      await Promise.all([persistedMove(project.id), dragToGroup(projectGroup)]);
+      await page.reload();
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("renders goal landmarks through the production session chunk graph", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },

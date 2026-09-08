@@ -15,6 +15,37 @@ import * as schema from "./schema";
 import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
+
+/** Validate a published Site identity without loading its HTML or version history. */
+export async function getWorkspaceSiteSessionOrigin(
+  db: Database,
+  workspaceId: string,
+  siteId: string,
+  versionId: string,
+): Promise<{ siteId: string; title: string }> {
+  return withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const [origin] = await scoped
+      .select({ siteId: schema.workspaceArtifacts.id, title: schema.workspaceArtifacts.title })
+      .from(schema.workspaceArtifacts)
+      .innerJoin(
+        schema.workspaceArtifactVersions,
+        and(
+          eq(schema.workspaceArtifactVersions.artifactId, schema.workspaceArtifacts.id),
+          eq(schema.workspaceArtifactVersions.workspaceId, workspaceId),
+          eq(schema.workspaceArtifactVersions.id, versionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+          eq(schema.workspaceArtifacts.id, siteId),
+        ),
+      )
+      .limit(1);
+    if (!origin) throw new WorkspaceArtifactNotFoundError("Site origin not found");
+    return origin;
+  });
+}
 export async function createWorkspaceArtifactUpload(
   db: Database,
   input: {

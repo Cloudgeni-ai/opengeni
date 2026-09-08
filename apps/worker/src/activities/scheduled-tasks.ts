@@ -54,6 +54,7 @@ import {
   getScheduledScopedRigVersionMetadata,
   getNestedAgentDepthDeploymentPolicy,
   getSessionByCreateIdempotencyKey,
+  getSessionCreationExecutionPolicy,
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
@@ -2229,6 +2230,13 @@ async function recoverBoundScheduledTaskDispatch(input: {
       task.runMode === "reusable_session" && typeof session.metadata.scheduledTaskRunId === "string"
         ? session.metadata.scheduledTaskRunId
         : input.run.id;
+    // The public Session policy follows the latest started turn. Recovery must
+    // instead validate the immutable creation binding accepted by this run.
+    const creationPolicy = await getSessionCreationExecutionPolicy(
+      input.db,
+      task.workspaceId,
+      session.id,
+    );
     const expectedTaskMetadata = { ...task.agentConfig.metadata };
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
     const expectedMetadata = {
@@ -2274,9 +2282,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.alertOccurrenceLabels === null &&
         (session.metadata.scheduledTaskRunId !== input.run.id ||
           session.createdByContext.scheduledTaskRunId !== input.run.id)) ||
-      session.model !== input.acceptedExecution.resolvedModel ||
-      session.reasoningEffort !== input.acceptedExecution.resolvedReasoningEffort ||
-      session.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
+      creationPolicy?.model !== input.acceptedExecution.resolvedModel ||
+      creationPolicy.reasoningEffort !== input.acceptedExecution.resolvedReasoningEffort ||
+      creationPolicy.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
       session.sandboxBackend !== input.acceptedExecution.resolvedSandboxBackend ||
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
       session.activeSandboxId !== (task.agentConfig.machineTarget?.targetSandboxId ?? null) ||

@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { withSiteSessionOrigin } from "@opengeni/core";
+import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
@@ -408,6 +410,7 @@ export async function callWorkspaceToolGateway(
   consumeApproval: typeof consumeToolGatewayApproval = consumeToolGatewayApproval,
   observability?: Observability,
   authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
+  resolveOrigin: typeof resolveSiteSessionOrigin = resolveSiteSessionOrigin,
 ) {
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
@@ -466,7 +469,18 @@ export async function callWorkspaceToolGateway(
       throw new HTTPException(409, { message: "tool_gateway_approval_required" });
     }
     transportMeta.approvalConfirmed = approvalConfirmed;
-    const result = await preparedCall.execute();
+    const origin =
+      siteContext && db
+        ? await resolveOrigin(
+            db,
+            grant.workspaceId,
+            siteContext.siteArtifactId,
+            siteContext.siteVersionId,
+          )
+        : null;
+    const result = await (origin
+      ? withSiteSessionOrigin(origin, () => preparedCall.execute())
+      : preparedCall.execute());
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
