@@ -58,23 +58,7 @@ Separate surfaces:
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
 
-Unified Skill content and write authority: [`skills-lifecycle.md`](skills-lifecycle.md).
-The shared human file editor uses `apps/api/src/routes/skill-content.ts`
-(`/v1/workspaces/:workspaceId/skills/content`) and the SDK's
-`listWorkspaceSkills`, `readWorkspaceSkill`, `saveWorkspaceSkill`,
-`approveWorkspaceSkill`, and `restoreWorkspaceSkill`. Both web destinations use
-`apps/web/src/routes/skills-panel.tsx`; file bodies are fetched on opening a
-Skill, not while listing the cursor-paginated catalog. Existing registry scope authorization
-still gates human mutations. Legacy agent preference-write tools return a
-redirect to `skill_save` without creating Knowledge evidence or a second Skill.
-Authored and installed Skills share the preference registry head/history;
-portable installations retain upstream ownership and bind to that identity.
-The core `domain/skills.ts` boundary owns Learning-controlled saves, installation,
-approval, and restore; migration 0426 is the maintenance activation boundary.
-Its parser-backed runner also archives and converts mutable legacy Session/Pack
-Skill configuration; immutable execution pins block cutover rather than being
-rewritten. `packages/db/src/skill-config-migration.ts` owns that maintenance seam,
-and runtime-inaccessible conversion receipts retain the original configuration.
+Skills: [`content, authority, and migration`](skills-lifecycle.md).
 
 ---
 
@@ -885,27 +869,7 @@ workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
-The server-backed Skill reader is an ordinary first-party gateway definition,
-not a filesystem capability. Hosts supplying `BuildAgentOptions.skillCatalog`
-compose a bounded descriptor-only `skill_catalog` instruction layer even without
-a sandbox. File selection and partial-edit primitives live in runtime
-`skill-files.ts`; the worker's `skill-transfer.ts` uses the existing structured
-filesystem service only for optional checkout/publish. The turn worker registers
-the six Skill gateway tools through `skill-tools.ts`, puts `skill_read` in the
-preparation-independent set, and builds its short index from metadata-only
-registry descriptors and configured bundled/session/Pack sources. Startup no
-longer loads installed folders merely to count their contribution: telemetry
-uses the actual bounded index text, including on the no-sandbox path. The
-shared API/UI and legacy agent-write redirect use that same content lifecycle;
-remaining integration gates are tracked in [the Skill design](design/skills-system.md).
-`runtime-skills.ts` also exposes `loadNativeToolSkillArtifacts` to read packaged
-native guidance without staging files or selecting a compute backend, including
-the generated Sites package-version file. Worker bundled selection uses
-`skill-selection.ts` with synchronous per-Skill configuration rules, never the
-prepared lazy-tool catalog. `BuildAgentOptions.serverSkillReading` prevents
-duplicate filesystem-backed delivery of these Skills while retaining repository
-discovery. Legacy direct-runtime callers keep their prior composition path.
-Embedding-product selection controls are not introduced by this helper alone.
+Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no
@@ -1163,10 +1127,7 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects guidance is a default bundled Skill (`builtin:opengeni-projects`) in
-the shared Skill catalog. Host bundle selection can exclude it; `skill_read`
-reads its packaged files without starting a sandbox. It has no separate eager
-loader or unconditional instruction index.
+Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
 
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
