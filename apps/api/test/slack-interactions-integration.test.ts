@@ -7306,6 +7306,84 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
   });
 
+  test("reaction waits keep Slack delivery open until the later real result", async () => {
+    if (!available) return;
+    const channelId = "C_WAIT_RESULT";
+    const timestamp = "1788876251.571219";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    value.slack.reactionContexts.set(`${channelId}:${timestamp}`, {
+      messages: [{ ts: timestamp, user: value.ownerSlackUserId, text: "Review this change." }],
+    });
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_WAIT_RESULT_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const initialPosts = value.slack.posts.length;
+    // wait_for_input settles a completed turn with no assistant output.
+    // Consume it separately, as the delivery pump does while a child runs.
+    for (const payload of [
+      { output: "" },
+      { output: "   " },
+      { output: "", segmentLimit: "max_turns" },
+      { output: "", segmentLimit: "budget_exhausted" },
+      { output: "Segment ended before the task result.", segmentLimit: "max_turns" },
+    ]) {
+      await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+        { type: "turn.completed", payload },
+      ]);
+      await drainAll({ ...value.deps, bus: new MemoryEventBus() });
+      expect(value.slack.posts.length).toBe(initialPosts);
+      expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe(
+        "open",
+      );
+      expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    }
+    // Commentary before a wait stays progress, not a substitute final result.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "Waiting for the delegated review." } },
+      { type: "turn.completed", payload: { output: "" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(initialPosts).map((post) => post.text)).toEqual([
+      "Waiting for the delegated review.",
+    ]);
+    expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe("open");
+    const result = "Review could not complete: repository access is missing.";
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: result } },
+      { type: "turn.completed", payload: { output: result } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.at(-1)!.text).toContain(result);
+    expect(value.slack.posts.filter((post) => post.text.includes(result))).toHaveLength(1);
+    expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe(
+      "completed",
+    );
+    expect(
+      value.slack.posts.some((post) => post.text.includes("OpenGeni finished this task.")),
+    ).toBe(false);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+  });
+
   test("caps durable progress globally across pages, response loss, retries, restarts, and replica claims", async () => {
     if (!available) return;
     const value = await fixture({ failAfterAcceptTexts: ["Progress 2"] });
