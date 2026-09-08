@@ -20,6 +20,7 @@ import {
   createPreferenceRegistryProposal,
   activatePreferenceRegistryRevision,
   correctPreferenceRegistry,
+  applySkillLifecycle,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
@@ -166,6 +167,143 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  for (const mode of ["off", "suggest", "automatic"] as const) {
+    test(`truthful machine install principals obey ${mode} and cannot perform other lifecycle operations`, async () => {
+      if (!client) return;
+      const f = await fixture(mode);
+      for (const principalKind of ["service", "api_key", "configured_key"] as const) {
+        const key = crypto.randomUUID();
+        const content = skillMarkdown("Machine source");
+        const digest = createHash("sha256").update(content).digest("hex");
+        const actor = { kind: "service", subjectId: `service:test-${key}`, principalKind } as const;
+        const input: InstallPortableSkillInput = {
+          ...f.context,
+          subjectId: actor.subjectId,
+          skillActor: actor,
+          skillOperationId: crypto.randomUUID(),
+          capabilityId: `skill:${key}`,
+          pluginKey: `skill/machine/${key}`,
+          source: "github",
+          sourceUrl: "https://example.test/machine",
+          repositoryUrl: "https://example.test/machine",
+          sourceCommit: "a".repeat(40),
+          sourcePath: key,
+          name: "test-skill",
+          description: "Test Skill folder",
+          contentSha256: digest,
+          totalBytes: Buffer.byteLength(content),
+          files: [
+            {
+              path: "SKILL.md",
+              content,
+              byteSize: Buffer.byteLength(content),
+              contentSha256: digest,
+            },
+          ],
+        };
+        if (mode === "off") {
+          await expectDatabaseGuard(installPortableSkill(client.db, input), "Learning is Off");
+          expect(
+            await shared!
+              .admin`SELECT operation_id FROM skill_write_receipts WHERE operation_id=${input.skillOperationId!}`,
+          ).toHaveLength(0);
+          expect(
+            await shared!
+              .admin`SELECT id FROM capability_plugins WHERE plugin_key=${input.pluginKey}`,
+          ).toHaveLength(0);
+          continue;
+        }
+        const installed = await installPortableSkill(client.db, input);
+        expect(installed.skillReceipt.outcome).toBe(mode === "suggest" ? "pending" : "applied");
+        const [head] = await shared!
+          .admin`SELECT status,active_revision_id FROM preference_registry_preferences WHERE id=${installed.skillReceipt.skillId}`;
+        expect(head!.active_revision_id).toBe(
+          mode === "suggest" ? null : installed.skillReceipt.revisionId,
+        );
+        const [receipt] = await shared!
+          .admin`SELECT actor FROM skill_write_receipts WHERE operation_id=${input.skillOperationId!}`;
+        expect(receipt!.actor).toEqual(actor);
+        const [revision] = await shared!
+          .admin`SELECT created_by_subject_id FROM preference_registry_revisions WHERE id=${installed.skillReceipt.revisionId}`;
+        expect(revision!.created_by_subject_id).toBe(actor.subjectId);
+        const replay = await installPortableSkill(client.db, input);
+        expect(replay.skillReceipt.replayed).toBe(true);
+        expect(replay.skillReceipt.revisionId).toBe(installed.skillReceipt.revisionId);
+        await expectDatabaseGuard(
+          uninstallPortableSkill(client.db, {
+            ...f.context,
+            capabilityId: input.capabilityId,
+            expectedInstallationVersion: installed.installationVersion,
+            skillActor: actor,
+          }),
+          "requires a trusted human session actor",
+        );
+        for (const operation of ["save", "approve", "restore"] as const) {
+          await expectDatabaseGuard(
+            applySkillLifecycle(
+              client.db,
+              { ...f.context, actor },
+              {
+                operation,
+                operationId: crypto.randomUUID(),
+                skillId: installed.skillReceipt.skillId,
+                revisionId: installed.skillReceipt.revisionId,
+                files: f.input.files,
+                expectedRevisionId: head!.active_revision_id,
+                expectedScopeVersion: 1,
+                reason: "Machine authority negative test",
+              },
+            ),
+            "Skill lifecycle actor is not authorized",
+          );
+        }
+        await expectDatabaseGuard(
+          applySkillLifecycle(
+            client.db,
+            { ...f.context, accountId: crypto.randomUUID(), actor },
+            {
+              operation: "install",
+              operationId: crypto.randomUUID(),
+              skillFacetId: installed.facetId,
+            },
+          ),
+          "exact tenant context",
+        );
+        await expectDatabaseGuard(
+          applySkillLifecycle(
+            client.db,
+            { ...f.context, actor },
+            {
+              operation: "install",
+              scope: "organization",
+              operationId: crypto.randomUUID(),
+              skillFacetId: installed.facetId,
+            },
+          ),
+          "Skill lifecycle actor is not authorized",
+        );
+        if (principalKind === "api_key" && mode === "automatic") {
+          const appSql = postgres(shared!.appUrl, { max: 1 });
+          try {
+            await expectDatabaseGuard(
+              appSql.begin(async (tx) => {
+                await tx`SELECT set_config('opengeni.account_id',${f.context.accountId},true),
+                set_config('opengeni.workspace_id',${f.context.workspaceId},true),
+                set_config('opengeni.subject_id',${actor.subjectId},true),
+                set_config('opengeni.principal_kind','service',true)`;
+                await tx`SELECT skill_apply_lifecycle(${f.context.accountId},${f.context.workspaceId},${tx.json(actor)},
+                ${tx.json({ operation: "install", operationId: crypto.randomUUID(), skillFacetId: installed.facetId })})`;
+              }),
+              "Skill lifecycle actor is not authorized",
+            );
+          } finally {
+            await appSql.end();
+          }
+        }
+      }
+    }, 30_000);
+  }
+
   test("stores full 1024-character description projections and rejects overflow without truncation", async () => {
     if (!client) return;
     const f = await fixture("off");
