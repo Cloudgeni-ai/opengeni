@@ -33,4 +33,9 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // graph measures 2,321,561 raw on macOS/Bun 1.3.14. Settings stay route-lazy;
   // retain all gzip, file-count, initial-load, and lazy-chunk ceilings.
   wholeKibEnvelope(2_321_561),
+  // Site-origin navigation and grouping: Bun 1.4 macOS/arm64 measures
+  // 2,324,500 raw bytes. Splitting the tiny heading increases the graph to
+  // 2,324,964 through shared chunk overhead, so retain synchronous rail UI.
+  // Advance only the measured raw envelope; compressed and other caps stay fixed.
+  wholeKibEnvelope(2_324_500),
 );

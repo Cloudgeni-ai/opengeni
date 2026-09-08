@@ -4,6 +4,8 @@
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
+import { SiteOriginLink } from "@/components/session/site-origin-link";
+import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -1266,8 +1268,11 @@ export function SessionList() {
   // The helper builds all three projections together so explicit nested pins
   // never disappear into an ancestor shortcut.
   const railSections = useMemo(
-    () => buildPinnedRailSections(projectedSessions),
-    [projectedSessions],
+    () =>
+      buildPinnedRailSections(projectedSessions, new Date(), {
+        groupSites: hierarchyMode && !browseControlsActive,
+      }),
+    [projectedSessions, hierarchyMode, browseControlsActive],
   );
   const forest = useMemo(
     () =>
@@ -1838,6 +1843,7 @@ export function SessionList() {
         return next;
       });
       const node = nodesById.get(sessionId);
+      if (sessionId.startsWith("site:")) return;
       const knownDirectChildren =
         node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
       if (
@@ -3308,6 +3314,39 @@ function SessionGroup(props: {
 }
 
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
+function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
+  const { node } = props;
+  const origin = node.siteGroup!;
+  const key = `site:${origin.siteId}`;
+  const expanded = props.expanded.has(key);
+  const summary = summarizeRailNodes(node.children, props.localDeliveryAttention);
+  const selected = selectedDescendantNode(node, props.activeSessionId);
+  const children = expanded ? node.children : selected ? [selected] : [];
+  return (
+    <div role="listitem" className="min-w-0">
+      <SiteSessionGroupHeading
+        origin={origin}
+        workspaceId={node.session.workspaceId}
+        expanded={expanded}
+        onToggle={() => props.onToggleExpand(key)}
+        summary={summary}
+      />
+      {children.length > 0 && (
+        <div role="list" aria-label={`Conversations from ${origin.title}`}>
+          {children.map((child) => (
+            <SessionTreeRow
+              {...props}
+              key={child.session.id}
+              node={child}
+              depth={props.depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SessionTreeRow(props: {
   node: SessionTreeNode;
   localDeliveryAttention: ReadonlyMap<string, number>;
@@ -3329,6 +3368,7 @@ function SessionTreeRow(props: {
   onRequestDelete: RequestDeleteFn;
 }) {
   const { node } = props;
+  if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
   const index = props.flat.indexOf(node.session);
   const directChildCount = node.session.treeStats?.directChildren ?? node.children.length;
   // Server treeStats only counts spawned descendants. Repeat runs of a scheduled
@@ -3595,6 +3635,7 @@ function SessionRow(props: {
         <div className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
+          <SiteOriginLink session={props.session} compact />
           <HoverCard openDelay={100} closeDelay={80}>
             <HoverCardTrigger asChild>
               <Link

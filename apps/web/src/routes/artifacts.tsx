@@ -6,6 +6,7 @@ import type {
   WorkspaceArtifactMutationResponse,
 } from "@opengeni/sdk";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
+import { SiteConversations } from "@/components/artifacts/site-conversations";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
@@ -404,6 +405,12 @@ export function ArtifactDetailRoute({
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <SiteConversations
+              key={artifactId}
+              workspaceId={workspaceId}
+              siteId={artifactId}
+              title={detail?.artifact.title ?? "this Site"}
+            />
             {archived ? (
               <Button
                 variant="outline"

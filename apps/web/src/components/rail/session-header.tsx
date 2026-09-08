@@ -13,6 +13,7 @@ import {
 } from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
+import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
   CalendarClockIcon,
   LockIcon,
@@ -155,6 +156,7 @@ export function SessionHeader({
             loading={lineageLoading}
             error={lineageError}
           />
+          <SiteOriginLink session={session} />
           {onOpenSchedule ? (
             <button
               type="button"

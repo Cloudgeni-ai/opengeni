@@ -1272,7 +1272,7 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
-Canonical: [`artifact-engine.md`](artifact-engine.md),
+Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
 
