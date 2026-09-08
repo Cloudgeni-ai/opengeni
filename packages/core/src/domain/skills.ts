@@ -4,6 +4,7 @@ import type {
   SkillRevisionInput,
   SkillSaveInput,
 } from "@opengeni/contracts";
+import { validateSkillTextFiles } from "@opengeni/contracts";
 import { buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
 import {
   applySkillLifecycle,
@@ -16,33 +17,8 @@ export { replayPortableSkillInstall } from "@opengeni/db";
 
 /** Canonical text-only folder; rejects invalid Unicode before PostgreSQL conversion. */
 export function validateSkillFiles(files: readonly SkillFile[]): SkillFile[] {
-  if (files.length < 1 || files.length > 128) throw new Error("A Skill requires 1–128 text files");
-  const paths = new Set<string>();
-  let total = 0;
-  const result = files.map(({ path, content }) => {
-    if (
-      !path ||
-      path.length > 512 ||
-      /(^\/|\\|(^|\/)\.\.?($|\/)|\/\/|\/$|[\x00-\x1f\x7f]|:)/u.test(path) ||
-      Buffer.from(path, "utf8").toString("utf8") !== path ||
-      paths.has(path)
-    )
-      throw new Error(`Invalid or duplicate Skill path: ${path}`);
-    if (
-      [...paths].some(
-        (existing) => existing.startsWith(`${path}/`) || path.startsWith(`${existing}/`),
-      )
-    )
-      throw new Error(`Skill file/directory path conflict: ${path}`);
-    if (Buffer.from(content, "utf8").toString("utf8") !== content || content.includes("\0"))
-      throw new Error("Skill content must be valid UTF-8 text without NUL");
-    const size = Buffer.byteLength(content, "utf8");
-    if (size > 256 * 1024) throw new Error("Skill file exceeds 256 KiB");
-    total += size;
-    paths.add(path);
-    return { path, content };
-  });
-  if (total > 1024 * 1024) throw new Error("Skill folder exceeds 1 MiB");
+  validateSkillTextFiles(files);
+  const result = files.map(({ path, content }) => ({ path, content }));
   if (!result.some((file) => file.path === "SKILL.md" && file.content.trim()))
     throw new Error("Skill requires nonempty SKILL.md");
   return result.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));

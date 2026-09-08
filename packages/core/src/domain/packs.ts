@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   CapabilityPack,
+  StoredCapabilityPack,
   OPENGENI_PR_REVIEW_PACK_ID,
   OPENGENI_PR_REVIEW_SESSION_ROLE,
   stableJson,
@@ -298,9 +299,8 @@ export function isBuiltInCapabilityPack(packId: string): boolean {
 
 /**
  * Built-in packs plus the manifests registered for this workspace. Stored
- * manifests were validated at registration time; rows that no longer parse
- * (for example after a contract tightening) are skipped instead of breaking
- * the whole catalog.
+ * manifests retain exact historical bytes. Execution views derive Skill labels
+ * from their files, but malformed content needs explicit repair, not omission.
  */
 export async function listWorkspaceCapabilityPacks(
   db: Database,
@@ -310,9 +310,13 @@ export async function listWorkspaceCapabilityPacks(
   const builtInIds = new Set(packs.map((pack) => pack.id));
   const registeredPacks = registered
     .filter((registration) => !builtInIds.has(registration.pack.id))
-    .flatMap((registration) => {
-      const parsed = CapabilityPack.safeParse(registration.pack);
-      return parsed.success ? [parsed.data] : [];
+    .map((registration) => {
+      const parsed = StoredCapabilityPack.safeParse(registration.pack);
+      if (!parsed.success)
+        throw new HTTPException(422, {
+          message: `Stored Pack ${registration.pack.id} requires repair before it can be used: ${parsed.error.message}`,
+        });
+      return parsed.data;
     });
   return [...packs, ...registeredPacks];
 }
@@ -330,8 +334,12 @@ export async function resolveCapabilityPack(
   if (!registration) {
     return null;
   }
-  const parsed = CapabilityPack.safeParse(registration.pack);
-  return parsed.success ? parsed.data : null;
+  const parsed = StoredCapabilityPack.safeParse(registration.pack);
+  if (!parsed.success)
+    throw new HTTPException(422, {
+      message: `Stored Pack ${packId} requires repair before it can be used: ${parsed.error.message}`,
+    });
+  return parsed.data;
 }
 
 export function capabilityPackManifestDigest(pack: CapabilityPack): string {

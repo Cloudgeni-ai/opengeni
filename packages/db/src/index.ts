@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { StoredSessionSkills } from "@opengeni/contracts";
 import {
   applySkillLifecycle,
   assertSkillReadAttempt,
@@ -75352,7 +75353,7 @@ function mapSession(
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     resources: row.resources as ResourceRef[],
-    skills: (row.skills as SessionSkill[]) ?? [],
+    skills: StoredSessionSkills.parse(row.skills ?? []),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),

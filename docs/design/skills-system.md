@@ -236,6 +236,14 @@ conflicting database labels. Invalid or ambiguous inputs need explicit repair,
 not silent omission. Conversion, restore, inline/Pack compatibility, and
 database projection consistency must be verified before this cutover ships.
 
+Stored inline/session, Pack, and automation read projections discard historical
+name/description caches and derive them through the same strict file contract.
+This does not rewrite stored manifest bytes or digests, nor synthesize missing
+headers at runtime. New caller-supplied metadata must still match frontmatter.
+Malformed stored Packs report a repair error instead of disappearing from the
+catalog. Plain legacy inline content still needs explicit maintenance conversion;
+the projection is not evidence that that rollout work is complete.
+
 ### Bundled guidance: one selector, individual inclusion rules
 
 The September 8 implementation review identified inconsistent bundled selection:

@@ -4,6 +4,9 @@ import {
   CapabilityPackSkill,
   SessionSkill,
   SessionSkills,
+  StoredSessionSkills,
+  StoredAutomationSessionTemplate,
+  StoredCapabilityPack,
 } from "../src/index";
 
 const files = [
@@ -98,4 +101,50 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
     { path: "custom.bin", content: "\ufeffThis is text." },
   ];
   expect(SessionSkill.parse({ files: text }).files).toEqual(text);
+});
+
+test("stored metadata is derived without rewriting historical files or manifests", () => {
+  const legacy = { name: "old-label", description: "Old database description", files };
+  const template = { prompt: "Use the deployment Skill", skills: [legacy] };
+  const manifest = {
+    id: "deploy-pack",
+    name: "Deployment",
+    description: "Deployment workflows",
+    role: "engineering",
+    category: "development",
+    version: "1.0.0",
+    skills: [legacy],
+    automationTemplates: [
+      {
+        id: "deploy",
+        name: "Deploy",
+        description: "Deploy a service",
+        adapterId: "signed-json.v1",
+        eventTypes: ["deploy"],
+        sessionTemplate: template,
+      },
+    ],
+  };
+  const historicalBytes = JSON.stringify(manifest);
+  expect(StoredSessionSkills.parse([legacy])).toEqual(SessionSkills.parse([{ files }]));
+  expect(StoredAutomationSessionTemplate.parse(template).skills).toEqual(
+    SessionSkills.parse([{ files }]),
+  );
+  const projected = StoredCapabilityPack.parse(manifest);
+  expect(projected.skills[0]!.description).toBe("Run deployment checks");
+  expect(projected.automationTemplates![0]!.sessionTemplate.skills[0]!.name).toBe("deploy");
+  expect(JSON.stringify(manifest)).toBe(historicalBytes);
+  expect(SessionSkill.safeParse(legacy).success).toBe(false);
+});
+
+test("stored projection never invents missing frontmatter or hides invalid content", () => {
+  const plain = {
+    name: "legacy",
+    description: "Old description",
+    files: [{ path: "SKILL.md", content: "No frontmatter" }],
+  };
+  expect(StoredSessionSkills.safeParse([plain]).success).toBe(false);
+  expect(
+    StoredAutomationSessionTemplate.safeParse({ prompt: "Use Skill", skills: [plain] }).success,
+  ).toBe(false);
 });

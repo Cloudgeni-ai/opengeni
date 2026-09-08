@@ -9,8 +9,10 @@ describe("unified Skill text folders", () => {
       { path: "references", content: "file" },
       { path: "references/a.md", content: "nested" },
     ];
-    expect(() => validateSkillFiles([main, ...files])).toThrow("path conflict");
-    expect(() => validateSkillFiles([main, ...files.reverse()])).toThrow("path conflict");
+    expect(() => validateSkillFiles([main, ...files])).toThrow("both a file and a directory");
+    expect(() => validateSkillFiles([main, ...files.reverse()])).toThrow(
+      "both a file and a directory",
+    );
   });
   test("requires a nonempty SKILL.md", () => {
     expect(() => validateSkillFiles([])).toThrow();

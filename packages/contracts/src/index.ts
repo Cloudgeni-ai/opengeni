@@ -9506,6 +9506,12 @@ export const AutomationSessionTemplate = z
   });
 export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
 
+/** Stored labels are projections, not assertions supplied by a new caller. */
+export const StoredAutomationSessionTemplate = z.preprocess(
+  projectStoredTemplateSkillMetadata,
+  AutomationSessionTemplate,
+);
+
 export const AutomationNormalizedEvent = z
   .object({
     adapterId: AutomationAdapterId,
@@ -9542,6 +9548,9 @@ export const AutomationAcceptedExecution = z
   })
   .strict();
 export type AutomationAcceptedExecution = z.infer<typeof AutomationAcceptedExecution>;
+export const StoredAutomationAcceptedExecution = AutomationAcceptedExecution.extend({
+  sessionTemplate: StoredAutomationSessionTemplate,
+});
 
 export const CreateAutomationSourceRequest = z
   .object({
@@ -9842,6 +9851,33 @@ export const SessionSkills = z
     return [...selected.values()].map(({ skill }) => skill);
   });
 
+/** No header synthesis: stored files must still pass the canonical contract. */
+export const StoredSessionSkills = z.preprocess(projectStoredSkillMetadata, SessionSkills);
+
+function projectStoredSkillMetadata(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((skill: unknown) => {
+    if (!skill || typeof skill !== "object" || Array.isArray(skill)) return skill;
+    const {
+      name: _name,
+      description: _description,
+      ...definition
+    } = skill as Record<string, unknown>;
+    return definition;
+  });
+}
+
+function projectStoredTemplateSkillMetadata(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const template = value as Record<string, unknown>;
+  return {
+    ...template,
+    ...(template.skills !== undefined
+      ? { skills: projectStoredSkillMetadata(template.skills) }
+      : {}),
+  };
+}
+
 const CapabilityPackVariableSet = z
   .object({
     description: z.string().min(1).max(2048),
@@ -10069,6 +10105,28 @@ export const CapabilityPack = z.preprocess(
     }),
 );
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
+
+/** Execution view only; never replace the stored manifest or its digest with it. */
+export const StoredCapabilityPack = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const pack = value as Record<string, unknown>;
+  return {
+    ...pack,
+    ...(pack.skills !== undefined ? { skills: projectStoredSkillMetadata(pack.skills) } : {}),
+    ...(Array.isArray(pack.automationTemplates)
+      ? {
+          automationTemplates: pack.automationTemplates.map((entry: unknown) => {
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+            const template = entry as Record<string, unknown>;
+            return {
+              ...template,
+              sessionTemplate: projectStoredTemplateSkillMetadata(template.sessionTemplate),
+            };
+          }),
+        }
+      : {}),
+  };
+}, CapabilityPack);
 
 // Registering a pack stores the manifest itself; the request body is a full
 // CapabilityPack manifest.
