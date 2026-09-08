@@ -22,11 +22,12 @@ export const UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET = wholeKibEnvelope(
 
 /**
  * Timeline-annotation composer chip, numbered badges, and review dialog on the
- * always-loaded session graph. Linux CI on 8ea93c686 measured 2,333,281 raw
- * bytes for the default same-origin build and 2,333,299 with a configured
- * loopback API URL. Bind the worse configured graph.
+ * always-loaded session graph after merging current main (d06450ca3). The local
+ * Linux/x64 Bun 1.4 same-origin production graph measures 2,339,370 raw bytes;
+ * a configured loopback API URL measures 2,339,387. Bind 2,339,388 so a 5-digit
+ * loopback URL still fits the documented 18-byte configured-URL ceiling.
  */
-export const TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT = 2_333_299;
+export const TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT = 2_339_388;
 export const TIMELINE_ANNOTATION_UX_RAW_BUDGET = wholeKibEnvelope(
   TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT,
 );

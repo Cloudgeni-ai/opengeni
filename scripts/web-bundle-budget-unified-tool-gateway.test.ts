@@ -25,12 +25,12 @@ describe("unified tool gateway web bundle budget", () => {
     expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_321_561).toBeGreaterThanOrEqual(1_895);
   });
   test("fits the measured session-history graph with bounded headroom", () => {
-    expect(TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(2_333_299);
-    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET).toBe(2280 * KIB);
-    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(1_421);
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2280 * KIB);
+    expect(TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(2_339_388);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET).toBe(2286 * KIB);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(1_476);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2286 * KIB);
     expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(
-      1_421,
+      1_476,
     );
   });
 });

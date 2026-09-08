@@ -1419,9 +1419,6 @@
 :where(.og-root).max-h-\[min\(30rem\,60dvh\)\],:where(.og-root) .max-h-\[min\(30rem\,60dvh\)\] {
     max-height: min(30rem, 60dvh);
   }
-:where(.og-root).max-h-\[min\(32rem\,70vh\)\],:where(.og-root) .max-h-\[min\(32rem\,70vh\)\] {
-    max-height: min(32rem, 70vh);
-  }
 :where(.og-root).max-h-\[min\(32rem\,var\(--radix-popover-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(32rem\,var\(--radix-popover-content-available-height\)\)\] {
     max-height: min(32rem, var(--radix-popover-content-available-height));
   }
