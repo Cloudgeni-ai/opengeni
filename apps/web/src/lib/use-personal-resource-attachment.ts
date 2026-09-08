@@ -8,6 +8,7 @@ import {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { usePersonalResourceScopeChoice } from "./use-personal-resource-scope-choice";
 import type { AuthSession } from "@/types";
 import type { ManagedSelfContext } from "./managed-self-context";
 import {
@@ -33,17 +34,31 @@ type SessionAuthorityRecovery = Readonly<{
   error: Error | null;
 }>;
 
+export type PersonalResourceNotice =
+  | "source_changed"
+  | "reloading"
+  | "reload_failed"
+  | "reloaded"
+  | "accepted";
+
 export type PersonalResourceAttachmentController = Readonly<{
   eligible: boolean;
   loading: boolean;
   refreshing: boolean;
   error: Error | null;
-  notice: string | null;
+  notice: PersonalResourceNotice | null;
   sourceLost: boolean;
   truncated: boolean;
   catalog: PersonalResourceCatalog | null;
   selected: ReturnType<typeof personalSelection>;
   mode: PersonalAttachmentMode | null;
+  ongoingScope: {
+    organizationId: string;
+    workspaceId: string;
+    sessionId: string;
+    authorityEpoch: number;
+  } | null;
+  setMode: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
   requiresDecision: boolean;
   intent: PersonalResourceAttachmentIntent | undefined;
@@ -185,7 +200,7 @@ export function usePersonalResourceAttachment(input: {
   const [loading, setLoading] = useState(scope !== null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<PersonalResourceNotice | null>(null);
   const [sourceLost, setSourceLost] = useState(false);
   const [sessionAuthorityRecovery, setSessionAuthorityRecovery] =
     useState<SessionAuthorityRecovery | null>(null);
@@ -282,11 +297,7 @@ export function usePersonalResourceAttachment(input: {
     priorSelectionScopeKey.current = scopeKey;
     priorSelectedCount.current = selected.resourceCount;
     setSourceLost(lost);
-    setNotice(
-      lost
-        ? "Access to the selected personal resource changed. Choose an available resource before submitting."
-        : null,
-    );
+    setNotice(lost ? "source_changed" : null);
   }, [fixedIdentity, scopeKey, selected.resourceCount, selectedIdentity]);
 
   const visibility = input.session?.tenancy
@@ -297,8 +308,27 @@ export function usePersonalResourceAttachment(input: {
       ? "private"
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
-  const mode: PersonalAttachmentMode | null =
-    selected.resourceCount > 0 ? (visibility === "private" ? "session" : "once") : null;
+  const scopeChoice = usePersonalResourceScopeChoice(
+    [scopeKey, input.session?.id ?? "new", selectedIdentity].join(":"),
+    visibility,
+  );
+  const mode: PersonalAttachmentMode | null = selected.resourceCount > 0 ? scopeChoice.mode : null;
+  const ongoingScope =
+    scope &&
+    input.session?.tenancy &&
+    visibility === "workspace" &&
+    settledCatalogScopeKey === scopeKey &&
+    !loading &&
+    !refreshing &&
+    !error &&
+    !selected.closureUnverified
+      ? {
+          organizationId: scope.organizationId,
+          workspaceId: scope.targetWorkspaceId,
+          sessionId: input.session.id,
+          authorityEpoch: input.session.tenancy.authorityEpoch,
+        }
+      : null;
   const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
     (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
@@ -362,7 +392,7 @@ export function usePersonalResourceAttachment(input: {
         status: "pending",
         error: null,
       });
-      setNotice("Session authority changed. Reloading personal resources before retrying.");
+      setNotice("reloading");
       const [, reloadResult] = await Promise.allSettled([
         load(true),
         onReloadSession
@@ -378,7 +408,7 @@ export function usePersonalResourceAttachment(input: {
           status: "failed",
           error: new Error("The session authority could not be refreshed. Retry before sending."),
         });
-        setNotice("Session authority could not be refreshed. Retry before sending again.");
+        setNotice("reload_failed");
         return;
       }
       // Give the parent session read one render turn to publish its new
@@ -412,7 +442,7 @@ export function usePersonalResourceAttachment(input: {
           status: "failed",
           error: new Error("The session authority could not be refreshed. Retry before sending."),
         });
-        setNotice("Session authority could not be refreshed. Retry before sending again.");
+        setNotice("reload_failed");
       }
       return;
     }
@@ -429,13 +459,11 @@ export function usePersonalResourceAttachment(input: {
     if (selected.resourceCount < activeSessionAuthorityRecovery.selectedResourceCount) {
       setSessionAuthorityRecovery(null);
       setSourceLost(true);
-      setNotice(
-        "Access to the selected personal resource changed. Choose an available resource before submitting.",
-      );
+      setNotice("source_changed");
       return;
     }
     setSessionAuthorityRecovery(null);
-    setNotice("Session authority changed. Personal resources were reloaded before retrying.");
+    setNotice("reloaded");
   }, [
     activeSessionAuthorityRecovery,
     expectedAuthorityEpoch,
@@ -455,12 +483,22 @@ export function usePersonalResourceAttachment(input: {
         : await load(true),
     [activeSessionAuthorityRecovery, load, recoverSessionAuthority],
   );
+  // Event reconciliation may invoke the latest callback for an older send.
+  // Nested intent identity survives live wire construction; unknown restored
+  // receipts must never consume a newer local choice.
+  const intentConsumers = useRef(new WeakMap<PersonalResourceAttachmentIntent, () => void>());
+  if (intent) {
+    intentConsumers.current.set(intent, () => scopeChoice.consume(intent.mode));
+  }
   const onAccepted = useCallback(
     (acceptedInput: {
       personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
     }) => {
       if (!acceptedInput.personalResourceAttachment) return;
-      setNotice("Personal-resource use was accepted for this work.");
+      const acceptedIntent = acceptedInput.personalResourceAttachment;
+      intentConsumers.current.get(acceptedIntent)?.();
+      intentConsumers.current.delete(acceptedIntent);
+      setNotice("accepted");
       void load(true);
     },
     [load],
@@ -496,6 +534,8 @@ export function usePersonalResourceAttachment(input: {
     catalog,
     selected,
     mode,
+    setMode: scopeChoice.setMode,
+    ongoingScope,
     visibility,
     requiresDecision,
     intent,

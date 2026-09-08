@@ -4,16 +4,22 @@
 import { OpenGeniProvider } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
-import {
-  WorkspaceManagementShell,
-  workspaceManagementLocation,
-} from "@/components/settings/workspace-settings-shell";
+import { workspaceManagementLocation } from "@/lib/workspace-management-location";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@/components/ui/button";
 import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
@@ -33,6 +39,19 @@ import {
   type WorkspaceOperationIdentity,
 } from "@/lib/workspace-transition";
 import type { SlackUserLinkAccessRequest } from "@/types";
+
+const LazyWorkspaceManagementShell = lazy(() =>
+  import("@/components/settings/workspace-settings-shell").then((module) => ({
+    default: module.WorkspaceManagementShell,
+  })),
+);
+function WorkspaceManagementShell(props: ComponentProps<typeof LazyWorkspaceManagementShell>) {
+  return (
+    <Suspense fallback={<LoadingPanel label="Loading settings" />}>
+      <LazyWorkspaceManagementShell {...props} />
+    </Suspense>
+  );
+}
 
 type SlackAccessState = {
   request: SlackUserLinkAccessRequest | null;

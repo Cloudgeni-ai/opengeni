@@ -9,7 +9,6 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/schedules"
-  | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
@@ -20,7 +19,6 @@ export type WorkspaceConfigIcon =
   | "box"
   | "server-cog"
   | "laptop"
-  | "file-search"
   | "brain-circuit"
   | "map"
   | "plug"
@@ -52,12 +50,6 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     description: "Integrations, MCP servers, skills, and packs",
   },
   {
-    to: "/workspaces/$workspaceId/documents",
-    icon: "file-search",
-    label: "Documents",
-    description: "Indexed knowledge for agents",
-  },
-  {
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
     label: "Agent Knowledge",
@@ -72,8 +64,8 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
-    label: "Artifacts",
-    description: "Live pages and tools built by agents",
+    label: "Sites",
+    description: "Interactive pages and tools built with Geni",
   },
 ];
 
@@ -183,5 +175,6 @@ export function isConfigItemActive(
   workspaceId: string,
   to: WorkspaceConfigTarget,
 ): boolean {
-  return pathname === `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
+  const destination = `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
+  return pathname === destination || pathname.startsWith(`${destination}/`);
 }

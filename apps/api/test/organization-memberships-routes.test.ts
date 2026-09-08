@@ -51,6 +51,8 @@ const managedSettings = testSettings({
   productAccessMode: "managed",
   publicBaseUrl: "http://opengeni.test",
   betterAuthSecret: "organization-membership-route-secret-at-least-32-bytes",
+  organizationUserSetupEmailTokenTransport: "query",
+  organizationUserSetupQueryEdgeSanitizationConfirmed: true,
 });
 
 beforeAll(async () => {
@@ -137,7 +139,10 @@ describe("organization membership routes", () => {
     } as ApiRouteDeps);
     registerCodexRoutes(local, {
       db: client.db,
-      settings: testSettings({ productAccessMode: "local" }),
+      settings: testSettings({
+        productAccessMode: "local",
+        environmentsEncryptionKey: Buffer.alloc(32, 43).toString("base64"),
+      }),
       managedAuth: null,
       githubStateSecret: "local-organization-codex-test-secret",
     } as ApiRouteDeps);
@@ -182,7 +187,59 @@ describe("organization membership routes", () => {
         },
       );
       expect(start.status).toBe(200);
-      expect(await start.json()).toMatchObject({ userCode: "LOCAL-1234" });
+      const started = await start.json();
+      expect(started).toMatchObject({ userCode: "LOCAL-1234" });
+      const claims = Buffer.from(
+        JSON.stringify({
+          email: "local@example.test",
+          "https://api.openai.com/auth": {
+            chatgpt_account_id: "local-codex-account",
+            chatgpt_plan_type: "team",
+          },
+        }),
+      ).toString("base64url");
+      globalThis.fetch = (async (input) => {
+        const url = String(input);
+        if (url.endsWith("/deviceauth/token"))
+          return Response.json({ authorization_code: "authorized", code_verifier: "verifier" });
+        if (url.endsWith("/oauth/token"))
+          return Response.json({
+            id_token: `header.${claims}.signature`,
+            access_token: "test-access",
+            refresh_token: "test-refresh",
+          });
+        throw new Error(`Unexpected provider request: ${url}`);
+      }) as typeof fetch;
+      // Connect and reconnect through the same browser HTTP flow. Local dev is
+      // authorized to administer the pool, but is not a managed reset-credit owner.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const completed = await local.request(
+          `http://opengeni-api:8000/v1/organizations/${access.defaultAccountId}/codex/connect/poll`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              host: "homeserver",
+              origin: "http://homeserver:30079",
+              "sec-fetch-site": "same-origin",
+              "x-forwarded-host": "homeserver",
+              "x-forwarded-proto": "http",
+            },
+            body: JSON.stringify({ state: started.state }),
+          },
+        );
+        expect(completed.status).toBe(200);
+        expect(await completed.json()).toMatchObject({ status: "connected", isActive: true });
+      }
+      const connected = await local.request(
+        `http://x/v1/organizations/${access.defaultAccountId}/codex/accounts`,
+      );
+      const pool = await connected.json();
+      expect(pool.accounts).toHaveLength(1);
+      expect(pool.accounts[0]).toMatchObject({ email: "local@example.test", plan: "team" });
+      const [stored] = await shared!
+        .admin`select connected_by_subject_id from codex_subscription_credentials where id = ${pool.accounts[0].id}`;
+      expect(stored!.connected_by_subject_id).toBeNull();
 
       const crossOrigin = await local.request(
         `http://opengeni-api:8000/v1/organizations/${access.defaultAccountId}/codex/connect/start`,
@@ -682,7 +739,10 @@ describe("organization membership routes", () => {
 
       const setupUrl = failedMessage.text.match(/Accept invitation to .*: (https?:\/\/\S+)/)?.[1];
       expect(setupUrl).toBeTruthy();
-      const token = new URL(setupUrl!).hash.slice("#token=".length);
+      const parsedSetupUrl = new URL(setupUrl!);
+      expect(parsedSetupUrl.hash).toBe("");
+      const token = parsedSetupUrl.searchParams.get("token");
+      expect(token).toBeTruthy();
       const previewApp = new Hono();
       registerManagedOnboardingRoutes(previewApp, {
         settings: managedSettings,
@@ -694,7 +754,7 @@ describe("organization membership routes", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ token: decodeURIComponent(token) }),
+          body: JSON.stringify({ token }),
         },
       );
       expect(previewResponse.status).toBe(200);

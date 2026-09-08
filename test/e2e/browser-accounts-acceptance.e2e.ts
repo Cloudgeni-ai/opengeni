@@ -1859,6 +1859,8 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     }
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    await page.getByRole("button", { name: "Skip for now" }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
       { timeout: 30_000 },

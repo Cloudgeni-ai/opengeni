@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
 
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
@@ -23,7 +24,6 @@ const governedLegacyConcurrentIndexMigrations = new Set([
   "0075_sessions_workspace_activity_revision_idx.sql",
   "0077_session_attempt_latest_lookup.sql",
 ]);
-
 export interface ConcurrentIndexMigration {
   indexName: string;
   lockTimeout: string;
@@ -119,7 +119,7 @@ export function parseConcurrentIndexMigration(
   };
 }
 
-function parseBatchedBackfillMigration(
+export function parseBatchedBackfillMigration(
   file: string,
   sqlText: string,
 ): { batchSize: number; lockTimeout: string; statementTimeout: string; statement: string } | null {
@@ -174,6 +174,7 @@ async function executeMigrationFile(
     try {
       for (;;) {
         const result = await sql.begin(async (transaction) => {
+          const transactionLocalSetting = batchedBackfillTransactionLocalSetting(file);
           await transaction`select
             pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
             pg_catalog.set_config(
@@ -181,6 +182,13 @@ async function executeMigrationFile(
               '1',
               true
             )`;
+          if (transactionLocalSetting) {
+            await transaction`select pg_catalog.set_config(
+              ${transactionLocalSetting.guc},
+              ${transactionLocalSetting.value},
+              true
+            )`;
+          }
           return await transaction.unsafe(batchedBackfill.statement);
         });
         if (result.length === 0) break;
@@ -253,7 +261,7 @@ function deploymentDepthPolicy(
   return { maxNestedAgentDepth: value, source: "deployment" };
 }
 
-function migrationApplicationRoles(
+export function migrationApplicationRoles(
   schema: string | undefined,
   options: MigrationRuntimeOptions | undefined,
 ): string[] {
@@ -281,6 +289,14 @@ function migrationApplicationRoles(
     return [DEFAULT_APPLICATION_DATABASE_ROLE];
   }
 
+  if (
+    configured !== undefined &&
+    configured.some((role) => typeof role !== "string" || role !== role.trim())
+  ) {
+    throw new Error(
+      "MigrationRuntimeOptions.applicationDatabaseRoles must contain canonical Postgres role names without surrounding whitespace",
+    );
+  }
   if (explicit.length < 1 || explicit.length > MAX_MIGRATION_APPLICATION_ROLES) {
     throw new Error(
       `Migration application database roles must contain 1-${MAX_MIGRATION_APPLICATION_ROLES} entries`,

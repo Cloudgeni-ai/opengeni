@@ -1,3 +1,6 @@
+import { scheduledSessionIds } from "@opengeni/db";
+import { withSiteSessionOrigin } from "@opengeni/core";
+import { resolveSiteSessionOrigin } from "../site-session-origin";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -45,6 +48,9 @@ import {
   SessionEventReadMode,
   SessionEventLatestClass,
   SessionEventResultMode,
+  SessionEndUser,
+  SESSION_END_USER_ID_MAX_CHARS,
+  SESSION_END_USER_SOURCE_MAX_CHARS,
   SessionEventSemanticClass,
   SessionEventType,
   SessionMcpServerId,
@@ -108,10 +114,12 @@ import {
   getRetainedProcess,
   getSandbox,
   getSession,
+  readActiveSandbox,
   deleteSessionTreeIfQuiescent,
   getSessionEvent,
   getSessionForSubject,
   getSessionGoal,
+  getLatestSessionModelContext,
   getSessionHumanInputRequest,
   getSessionGoalWithContinuation,
   getSessionGoalRevision,
@@ -218,6 +226,7 @@ import {
   NatsControlRpc,
   negotiateCapabilities,
   negotiateSelfhostedCapabilities,
+  resolveConnectedMachineWorkspaceRoot,
   selectBackend,
   SelfhostedSession,
 } from "@opengeni/runtime/sandbox";
@@ -332,6 +341,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     db,
     settings,
     bus,
+    objectStorage,
     observability: deps.observability,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
@@ -513,6 +523,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     db,
     settings,
     bus,
+    objectStorage,
     ...(deps.establishSandboxSession
       ? { establishSandboxSession: deps.establishSandboxSession }
       : {}),
@@ -553,7 +564,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+      const origin = await resolveSiteSessionOrigin(
+        db,
+        workspaceId,
+        c.req.header("x-opengeni-site-id"),
+        c.req.header("x-opengeni-site-version"),
+      );
+      const create = () =>
+        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
@@ -663,6 +682,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.archivedOnly ? { archivedOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+        ...(query.endUser ? { endUser: query.endUser } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
         // the list's removal fence must fall back to the organization-membership
@@ -695,10 +722,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
     });
+    const scheduleTargets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(
+            db,
+            workspaceId,
+            [...page.pinned, ...page.sessions].map((session) => session.id),
+          )
+        : new Set<string>();
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
       return sessionWithEffectiveToolPolicy(
-        { ...session, ...(activity ? { backgroundCommandActivity: activity } : {}) },
+        {
+          ...session,
+          hasSchedules: scheduleTargets.has(session.id),
+          ...(activity ? { backgroundCommandActivity: activity } : {}),
+        },
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
       );
@@ -706,6 +746,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (pageView) {
       return c.json({
         ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorate),
         sessions: page.sessions.map(decorate),
       });
@@ -885,7 +927,49 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    const activity = await backgroundCommandActivityForSessions(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionIds: [sessionId],
+    });
+    const scheduleTargets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(db, workspaceId, [sessionId])
+        : new Set<string>();
+    return c.json(
+      await withEffectivePolicy(deps, workspaceId, grant.subjectId, {
+        ...session,
+        hasSchedules: scheduleTargets.has(sessionId),
+        ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
+      }),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return c.json(
+      await getLatestSessionModelContext(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/background-commands", async (c) => {
@@ -896,6 +980,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
+      activeOnly: true,
     });
     return c.json({ commands });
   });
@@ -1774,17 +1859,40 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
+    const sessionIds = [
+      c.req.param("sessionId"),
+      ...lineage.ancestors.map((session) => session.id),
+    ];
+    const collect = (nodes: LineageNode[]) => {
+      for (const node of nodes) {
+        sessionIds.push(node.session.id);
+        collect(node.children);
+      }
+    };
+    collect(lineage.children);
+    const targets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(db, workspaceId, sessionIds)
+        : new Set<string>();
+    const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
+      nodes.map((node) => ({
+        ...node,
+        session: { ...node.session, hasSchedules: targets.has(node.session.id) },
+        children: decorateNodes(node.children),
+      }));
     const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
     return c.json({
       ...lineage,
+      sessionHasSchedules: targets.has(c.req.param("sessionId")),
       ancestors: lineage.ancestors.map((session) =>
         sessionWithEffectiveToolPolicy(
-          session,
+          { ...session, hasSchedules: targets.has(session.id) },
           policy.workspaceServerIds,
           policy.workspaceDefaultServerIds,
         ),
       ),
-      children: mapLineageNodes(lineage.children, policy),
+      children: decorateNodes(mapLineageNodes(lineage.children, policy)),
     });
   });
 
@@ -1861,6 +1969,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.control",
+      surface: "http",
+    });
     const payload = UpdateSessionChannelRequest.parse(await c.req.json());
     try {
       const updated = await setSessionChannel(db, {
@@ -3254,6 +3367,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         getEnrollment(db, grant, activeSandbox.enrollmentId),
         getLiveEnrollmentConnection(db, grant, activeSandbox.enrollmentId),
       ]);
+      const reportedWorkspaceRoot = liveConnection?.workspaceRoot ?? enrollment?.workspaceRoot;
+      const effectiveWorkspaceRoot = reportedWorkspaceRoot
+        ? resolveConnectedMachineWorkspaceRoot(reportedWorkspaceRoot, session.workingDir)
+        : null;
       let probeResponded = false;
       if (liveConnection?.connectionInstanceId) {
         const machine = new SelfhostedSession({
@@ -3262,7 +3379,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           connectionInstanceId: liveConnection.connectionInstanceId,
           // Capability negotiation only pings, so a pre-root agent may still
           // report upgrade guidance without exposing a false filesystem root.
-          workspaceRoot: liveConnection.workspaceRoot ?? "/",
+          workspaceRoot: effectiveWorkspaceRoot ?? liveConnection.workspaceRoot ?? "/",
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
           relay: relayConfigFromSettings(settings),
           epoch: session.activeEpoch,
@@ -3278,7 +3395,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...commonNegotiation,
         os: enrollment?.os ?? session.sandboxOs,
         leaseEpoch: session.activeEpoch,
-        enrollment,
+        enrollment:
+          enrollment && effectiveWorkspaceRoot
+            ? { ...enrollment, workspaceRoot: effectiveWorkspaceRoot }
+            : enrollment,
         probeResponded,
       });
     } else {
@@ -3327,17 +3447,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...capabilities,
       FileSystem: {
         ...capabilities.FileSystem,
-        root: selectBackend(
-          (selfhostedActive
-            ? "selfhosted"
-            : activeSandbox?.kind === "modal"
-              ? "modal"
-              : session.sandboxBackend === "selfhosted" &&
-                  settings.sandboxBackend !== "selfhosted" &&
-                  settings.sandboxBackend !== "none"
-                ? settings.sandboxBackend
-                : session.sandboxBackend) as SandboxBackend,
-        ).workspaceRoot,
+        root: selfhostedActive
+          ? capabilities.FileSystem.root
+          : selectBackend(
+              (activeSandbox?.kind === "modal"
+                ? "modal"
+                : session.sandboxBackend === "selfhosted" &&
+                    settings.sandboxBackend !== "selfhosted" &&
+                    settings.sandboxBackend !== "none"
+                  ? settings.sandboxBackend
+                  : session.sandboxBackend) as SandboxBackend,
+            ).workspaceRoot,
       },
       Git: {
         ...capabilities.Git,
@@ -3353,6 +3473,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...responseCapabilities,
         DesktopStream: { ...capabilities.DesktopStream, ...wire },
       };
+    }
+    if (selfhostedActive) {
+      const currentPointer = await readActiveSandbox(db, workspaceId, sessionId);
+      if (
+        !currentPointer ||
+        currentPointer.activeSandboxId !== session.activeSandboxId ||
+        currentPointer.activeEpoch !== session.activeEpoch ||
+        currentPointer.workingDir !== session.workingDir
+      ) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "sandbox route changed while capabilities were being negotiated; retry",
+          retryable: true,
+        });
+      }
     }
     return c.json(responseCapabilities);
   });
@@ -4326,6 +4461,7 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
+  if (suffix === "/model-context" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }
@@ -4559,14 +4695,26 @@ function sessionListQuery(
   query: Record<string, string>,
   allowCursor = true,
 ): {
+  originSiteId: string | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
   pinsOnly: boolean;
   archivedOnly: boolean;
+  channelId: string | null | undefined;
+  createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
+  updatedFrom: Date | undefined;
+  updatedBefore: Date | undefined;
+  createdFrom: Date | undefined;
+  createdBefore: Date | undefined;
+  endUser: SessionEndUser | undefined;
+  hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
+  const originSiteId = query.originSiteId;
+  if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
+    throw new HTTPException(400, { message: "originSiteId must be a Site id" });
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
   // failure -> 500 rather than an honest 400).
@@ -4600,12 +4748,94 @@ function sessionListQuery(
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
   const archivedOnly = query.archivedOnly === "true";
+  const channelId = query.channelId;
+  if (
+    channelId !== undefined &&
+    channelId !== "null" &&
+    !z.string().uuid().safeParse(channelId).success
+  ) {
+    throw new HTTPException(400, {
+      message: 'channelId must be a channel id or the literal "null"',
+    });
+  }
+  const createdByKind = query.createdByKind;
+  const createdBySubjectId = query.createdBySubjectId;
+  if ((createdByKind === undefined) !== (createdBySubjectId === undefined)) {
+    throw new HTTPException(400, {
+      message: "createdByKind and createdBySubjectId must be supplied together",
+    });
+  }
+  if (createdByKind !== undefined && createdByKind !== "subject" && createdByKind !== "service") {
+    throw new HTTPException(400, {
+      message: 'createdByKind must be "subject" or "service"',
+    });
+  }
+  if (
+    createdBySubjectId !== undefined &&
+    (createdBySubjectId.trim().length < 1 || createdBySubjectId.length > 1_024)
+  ) {
+    throw new HTTPException(400, {
+      message: "createdBySubjectId must be between 1 and 1024 characters",
+    });
+  }
+  const parseDateBound = (name: string): Date | undefined => {
+    const raw = query[name];
+    if (raw === undefined) return undefined;
+    const parsed = z.string().datetime({ offset: true }).safeParse(raw);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `${name} must be an ISO-8601 timestamp` });
+    }
+    // Date-backed filters must not silently round accepted microseconds to an
+    // earlier boundary. Clients can use any ISO offset with at most 3 decimals.
+    if (/\.\d{4,}/.test(parsed.data)) {
+      throw new HTTPException(400, { message: `${name} supports at most millisecond precision` });
+    }
+    return new Date(parsed.data);
+  };
+  const updatedFrom = parseDateBound("updatedFrom");
+  const updatedBefore = parseDateBound("updatedBefore");
+  const createdFrom = parseDateBound("createdFrom");
+  const createdBefore = parseDateBound("createdBefore");
+  if (updatedFrom && updatedBefore && updatedFrom >= updatedBefore) {
+    throw new HTTPException(400, { message: "updatedFrom must be earlier than updatedBefore" });
+  }
+  if (createdFrom && createdBefore && createdFrom >= createdBefore) {
+    throw new HTTPException(400, { message: "createdFrom must be earlier than createdBefore" });
+  }
+  // The opaque end-user label filter is an exact pair: one half alone is a
+  // client error rather than a silently unfiltered list.
+  const endUserSource = query.endUserSource;
+  const endUserId = query.endUserId;
+  if ((endUserSource === undefined) !== (endUserId === undefined)) {
+    throw new HTTPException(400, {
+      message: "endUserSource and endUserId must be supplied together",
+    });
+  }
+  let endUser: SessionEndUser | undefined;
+  if (endUserSource !== undefined && endUserId !== undefined) {
+    const parsedEndUser = SessionEndUser.safeParse({ source: endUserSource, id: endUserId });
+    if (!parsedEndUser.success) {
+      throw new HTTPException(400, {
+        message: `endUserSource must be 1-${SESSION_END_USER_SOURCE_MAX_CHARS} and endUserId 1-${SESSION_END_USER_ID_MAX_CHARS} well-formed characters`,
+      });
+    }
+    endUser = parsedEndUser.data;
+  }
+  const hasPageFilters =
+    originSiteId !== undefined ||
+    channelId !== undefined ||
+    createdByKind !== undefined ||
+    updatedFrom !== undefined ||
+    updatedBefore !== undefined ||
+    createdFrom !== undefined ||
+    createdBefore !== undefined ||
+    endUser !== undefined;
   if (pinsOnly && !allowCursor) {
     throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
   }
-  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search)) {
+  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search || hasPageFilters)) {
     throw new HTTPException(400, {
-      message: "pinsOnly cannot be combined with cursor, parentSessionId, or search",
+      message: "pinsOnly cannot be combined with cursor, parentSessionId, search, or filters",
     });
   }
   if (pinsOnly && archivedOnly) {
@@ -4613,6 +4843,7 @@ function sessionListQuery(
   }
   return {
     limit: query.limit,
+    originSiteId,
     parentSessionId:
       parentSessionId === undefined
         ? undefined
@@ -4623,6 +4854,17 @@ function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     archivedOnly,
+    channelId: channelId === undefined ? undefined : channelId === "null" ? null : channelId,
+    createdBy:
+      createdByKind && createdBySubjectId
+        ? { kind: createdByKind, subjectId: createdBySubjectId }
+        : undefined,
+    updatedFrom,
+    updatedBefore,
+    createdFrom,
+    createdBefore,
+    endUser,
+    hasPageFilters,
   };
 }
 
@@ -4882,9 +5124,11 @@ export function agentTopologyQuery(query: Record<string, string>): {
     throw new HTTPException(400, { message: "query cannot be combined with an exact subject" });
   }
   const relevanceRequested = Boolean(searchQuery || subject);
+  // An explicit root scopes the whole workstream; only an explicit parent
+  // narrows it to one level. Ordinary browse still defaults to root sessions.
   const parentSessionId =
     rawParent === undefined
-      ? relevanceRequested
+      ? relevanceRequested || Boolean(rootSessionId)
         ? undefined
         : null
       : rawParent === "null"

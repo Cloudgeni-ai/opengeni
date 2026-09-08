@@ -1,3 +1,4 @@
+import { connectionModelAllowed } from "@opengeni/db";
 import {
   getSessionGoal,
   acquireXaiCredentialLease,
@@ -10,6 +11,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
+import { refreshExhaustedXaiQuota } from "../xai-quota";
 
 export async function selectXaiTurnCapacity(
   deps: CapacityPhaseDeps,
@@ -43,7 +45,18 @@ export async function selectXaiTurnCapacity(
       authoritySnapshot,
     });
     const leaseStartedAtMs = performance.now();
+    await refreshExhaustedXaiQuota({
+      db,
+      settings: deps.settings,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      authoritySnapshot,
+    });
     const leased = await acquireXaiCredentialLease(db, {
+      modelId: deps.turnExecutionPolicy.productModelId,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId,
@@ -71,6 +84,21 @@ export async function selectXaiTurnCapacity(
       leased.generation !== null &&
       leases.xai.confirmedUntilMs !== null;
     if (!providerTurn.effectiveXaiCredentialId) {
+      const relevant =
+        sessionPin?.pinnedCredentialId && sessionPin.pinSource !== "policy"
+          ? leased.accounts.filter((account) => account.id === sessionPin.pinnedCredentialId)
+          : leased.accounts;
+      if (
+        relevant.length > 0 &&
+        relevant.every(
+          (account) =>
+            !connectionModelAllowed(
+              account.allowedModelIds,
+              deps.turnExecutionPolicy.productModelId,
+            ),
+        )
+      )
+        throw new Error("This model is disabled for the selected SuperGrok subscription");
       const connected = leased.accounts.length;
       const allocatorEnabled = leased.accounts.filter((account) => account.allocatorEnabled).length;
       if (connected === 0) {

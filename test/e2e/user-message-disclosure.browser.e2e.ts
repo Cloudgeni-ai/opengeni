@@ -392,7 +392,7 @@ describe("long sent user-message browser acceptance", () => {
     }
   }, 30_000);
 
-  test("keeps bottom-follow pinned when a near-tip message expands", async () => {
+  test("releases bottom-follow and preserves the reader anchor when a near-tip message expands", async () => {
     const page = await openHarness(browser, baseUrl, { width: 1280, height: 900 });
     try {
       const scroller = page.locator("[data-og-timeline-scroller]");
@@ -401,20 +401,32 @@ describe("long sent user-message browser acceptance", () => {
       });
       await page.waitForTimeout(100);
       expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("true");
-      const disclosure = page
-        .locator('[data-og-message-id="long-user-message"]')
-        .getByRole("button", { name: "Show more" });
+      const body = page.locator('[data-og-message-id="long-user-message"]');
+      const disclosure = body.locator("[data-og-user-message-disclosure]");
+      const group = page.locator("[data-og-timeline-group-anchor]").filter({ has: body });
+      const groupTop = await relativeTop(group, scroller);
+      const scrollerHeight = await scroller.evaluate((node) => node.clientHeight);
+      const anchor = groupTop >= -1 && groupTop < scrollerHeight ? group : disclosure;
+      const before = await relativeTop(anchor, scroller);
       await disclosure.evaluate((node: HTMLButtonElement) => node.click());
-      await page.waitForFunction(() => {
-        const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
-        return Boolean(node && node.scrollHeight - node.scrollTop - node.clientHeight < 2);
-      });
-      const result = await scroller.evaluate((node) => ({
-        gap: node.scrollHeight - node.scrollTop - node.clientHeight,
-        bottomFollow: node.getAttribute("data-og-bottom-follow"),
-      }));
-      expect(result.gap).toBeLessThan(2);
-      expect(result.bottomFollow).toBe("true");
+      await page.waitForFunction(
+        () =>
+          document
+            .querySelector("[data-og-timeline-scroller]")
+            ?.getAttribute("data-og-bottom-follow") === "false",
+      );
+      await page.waitForTimeout(100);
+      expect(await relativeTop(anchor, scroller)).toBeCloseTo(before, 0);
+      expect(
+        await page
+          .locator('[data-og-message-id="long-user-message"]')
+          .getByRole("button", { name: "Show less" })
+          .getAttribute("aria-expanded"),
+      ).toBe("true");
+      await page.evaluate(() => window.userMessageHarness!.stream());
+      await page.waitForTimeout(100);
+      expect(await relativeTop(anchor, scroller)).toBeCloseTo(before, 0);
+      expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("false");
     } finally {
       await page.context().close();
     }

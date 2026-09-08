@@ -1100,7 +1100,6 @@ describe("worker activities integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
-        codexCredentialLeasingEnabled: true,
       }),
       db: dbClient.db,
       bus,
@@ -1388,8 +1387,14 @@ describe("worker activities integration", () => {
     });
     const runtime: OpenGeniRuntime = {
       ...baseRuntime,
-      runStream: async () =>
-        ({
+      runStream: async (_agent, prepared) => {
+        // The SDK preserves the exact prepared input under external ownership.
+        // Keep this transport-error fixture faithful to that contract.
+        const original = Array.isArray(prepared.input)
+          ? prepared.input
+          : [{ type: "message", role: "user", content: prepared.input }];
+        state.history = [...original, ...state.history.slice(1)] as typeof state.history;
+        return {
           toStream: () =>
             (async function* () {
               yield {
@@ -1423,7 +1428,8 @@ describe("worker activities integration", () => {
           interruptions: [],
           state,
           finalOutput: "",
-        }) as never,
+        } as never;
+      },
     };
     const activities = createWorkerActivities({
       settings: testSettings({
@@ -2042,7 +2048,17 @@ describe("worker activities integration", () => {
           toStream: () => (async function* () {})(),
           completed: Promise.resolve(),
           interruptions: [],
-          state: { toString: () => "resumed-state" },
+          state: {
+            history: [
+              { type: "message", role: "user", content: "approved" },
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "approved" }],
+              },
+            ],
+            toString: () => "resumed-state",
+          },
           finalOutput: "approved",
         } as never;
       },

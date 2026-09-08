@@ -293,6 +293,31 @@ Recommended follow-up, not taken here: fold `revoked_at IS NULL` and the expiry
 check into the policy so a future query that forgets them cannot authenticate a
 revoked key.
 
+### 2026-09-02 addendum: MCP OAuth exact-key protocol state
+
+The five `mcp_oauth_*` tables are deliberate non-RLS protocol-state tables.
+Dynamic clients are deployment-global, while authorization requests, codes,
+access tokens, and refresh tokens arrive at the public OAuth endpoints as only
+unguessable values. Their SHA-256 hashes are the exact keys used to discover the
+owning account, workspace, subject, resource, frozen permission set, and frozen
+tool identities. Requiring an account or workspace GUC before that lookup would
+be circular: the scoped authority is the result of the exact-key lookup.
+
+No plaintext authorization code, access token, or refresh token is persisted.
+Codes and refresh tokens are consumed or rotated atomically, every token is
+expiry-bounded, redirect URI and resource bindings are checked before exchange,
+and each MCP request intersects the frozen grant with live workspace authority.
+The runtime role needs direct DML because these public protocol transitions run
+before tenant context exists; public database access remains revoked.
+
+The residual database-level exposure is bounded but explicit: arbitrary SQL as
+the runtime role could enumerate hash-only protocol rows and their tenant,
+subject, resource, and tool attribution. Moving every exact-key transition
+behind narrowly granted SECURITY DEFINER routines remains a possible
+defence-in-depth follow-up. Until then, the five-table exemption is pinned in
+`NON_RLS_RUNTIME_TABLES`, the runtime privilege manifest, migration tests, and
+`packages/db/test/non-rls-authority-tables.test.ts` so it cannot widen silently.
+
 **Migration-owner naming.** The reported concern that some capability policies
 hardcode `CURRENT_USER = 'postgres'` while others resolve
 `pg_get_userbyid(relowner)` **does not hold in this repository.** There is not a

@@ -1,3 +1,4 @@
+import { assertModelConnectionAllowsTurn } from "@opengeni/db";
 import {
   setSessionLastInputTokensForTurnAttempt,
   getMaterializedSandboxFileResources,
@@ -98,6 +99,9 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.beforeProviderDispatch
+      ? { beforeProviderDispatch: context.beforeProviderDispatch }
+      : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
       : {}),
@@ -465,6 +469,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         requiredGeneratedVideoFiles,
       });
       if ("exit" in governance) return governance.exit;
+      await assertModelConnectionAllowsTurn(db, {
+        workspaceId: input.workspaceId,
+        subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
+        modelId: turnExecutionPolicy.productModelId,
+        codexCredentialId: providerTurn.effectiveCodexCredentialId,
+        xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+      });
       const {
         runtimePreparationStartedAt,
         packRuntime,
@@ -514,6 +525,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 input.workspaceId,
                 providerTurn.effectiveCodexCredentialId ?? "",
               );
+              const resolveTrackedToken = async (
+                resolve: () => ReturnType<typeof resolver.getToken>,
+              ) => {
+                const token = await resolve();
+                providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                return token;
+              };
               return {
                 clientVersion: CODEX_CLIENT_VERSION,
                 // Backend sticky cache-routing key — the SAME id as the body's
@@ -523,8 +541,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // (per-request shard lottery = prod's measured 48.6% on sol);
                 // with it, resends pin to the warm shard (Codex CLI parity).
                 sessionId: input.sessionId,
-                getToken: () => resolver.getToken(),
-                refresh: () => resolver.refresh(),
+                getToken: () => resolveTrackedToken(resolver.getToken),
+                refresh: () => resolveTrackedToken(resolver.refresh),
                 resolveModel: buildModelResolver(
                   CODEX_FALLBACK_MODEL_SLUGS,
                   CODEX_FALLBACK_MODEL_SLUGS[0],
@@ -532,6 +550,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onUsageHeaders: (snapshot) => {
                   providerTurn.latestCodexUsage = snapshot;
                 }, // latest wins; flushed once in finally
+                beforeProviderDispatch: () => {
+                  leases.codex.assertUsable();
+                },
                 onRequestPreparationDiagnostic: (phase) => {
                   if (
                     eventing.firstModelRequestCheckpointAt === null ||
@@ -1171,7 +1192,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const {
         attemptConnectorActionBindings,
-        connectorActionIdentity,
+        connectorActionPolicy,
         generateSessionTitleInParallel,
         postToolPreparationStartedAt,
         preparationIndependentToolNames,
@@ -1226,7 +1247,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxCodemodeToken,
         fileResourceDownloads,
         attemptConnectorActionBindings,
-        connectorActionIdentity,
+        connectorActionPolicy,
+        trigger,
         preparationIndependentToolNames,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
@@ -1557,6 +1579,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         videoGenerationAcceptancesByCallId,
       });
     } catch (error) {
+      // Stop new external wait mutations before asynchronous failure
+      // persistence. Do not drain here: the original failure/cancellation and
+      // durable attempt fence retain authority over already-running calls.
+      eventing.preparedTools?.inputWaitYield?.closeAdmission();
       return await settleTurnFailure({
         error,
         input,
@@ -1565,7 +1591,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         bus,
         observability,
         wakeSessionWorkflow,
-        signalCodexCapacityWorkflow,
         cancellationSignal,
         sandboxRotationController,
         noteCancellationRequested,

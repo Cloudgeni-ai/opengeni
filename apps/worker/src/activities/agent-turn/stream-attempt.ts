@@ -10,6 +10,7 @@ import {
   clearDurablePendingSessionToolCalls,
   isSessionCompactionRequested,
   nextSessionHistoryPosition,
+  persistModelContextSnapshot,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -470,7 +471,7 @@ export async function runTurnStreamAttempt(
       // prepareInput already sanitized the exact durable prefix represented
       // by state.history. Carry its count forward instead of loading and
       // retaining the full active transcript a second time beside runInput.
-      historySink.persistedHistoryCount = prepared.persistedHistoryCount;
+      historySink.seedHistory(prepared.input.input, prepared.persistedHistoryCount);
       preparedHistoryCount = prepared.persistedHistoryCount;
       const historyPositionStartedAt = performance.now();
       let historyPositionOutcome: "completed" | "failed" = "completed";
@@ -777,6 +778,17 @@ export async function runTurnStreamAttempt(
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
+          onModelVisibleContext: async (snapshot) => {
+            await persistModelContextSnapshot(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              snapshot,
+            });
+          },
           onRuntimeEvent: async (event) => {
             await leases.renewServing("runtime_event");
             if (leases.servingLost()) {
@@ -890,7 +902,9 @@ export async function runTurnStreamAttempt(
         });
       }
     };
-    if (leases.codex.lost) {
+    if (billingState.isCodexTurn) {
+      leases.codex.assertUsable();
+    } else if (leases.codex.lost) {
       throw new Error("Codex credential lease expired before the model run");
     }
     if (leases.xai.lost) {
@@ -947,6 +961,7 @@ export async function runTurnStreamAttempt(
       ]);
     };
     const iterator = eventing.stream.toStream()[Symbol.asyncIterator]();
+    const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();
     let streamDone = false;
     try {
       while (true) {
@@ -1316,6 +1331,10 @@ export async function runTurnStreamAttempt(
         }
       }
     } catch (error) {
+      // Event processing can fail while SDK completion is still pending.
+      // Close this stream before any failure publication; a legitimate
+      // compaction retry may start a new, independently fenced generation.
+      closeStreamWaitAdmission?.();
       if (fallbackProviderRequestLifecycleStartedAt !== null) {
         const durationMs = Math.max(
           0,
@@ -1385,8 +1404,13 @@ export async function runTurnStreamAttempt(
       temporalCancellationSignal: cancellationSignal,
       runtimeCancellationSignal,
     });
+    // External Codemode stays reachable until finalization. Close wait
+    // admission before any terminal output/history decision, and drain an
+    // already-admitted wait before consulting the actual runner-yield latch.
+    await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
     if (
       options.requireTerminalModelResponse &&
+      !eventing.preparedTools?.inputWaitYield?.yielded &&
       eventing.stream.interruptions.length === 0 &&
       modelResponseState.responseCount === responseCountBeforeStream
     ) {
@@ -1395,7 +1419,8 @@ export async function runTurnStreamAttempt(
       // is not a completed logical turn: accepting finalOutput's undefined ->
       // empty-string fallback would release the queue and start newer user
       // work. Cancellation retains priority; otherwise checkpoint and recover
-      // this exact turn from the durable compacted history.
+      // this exact turn from the durable compacted history. An actual runtime
+      // wait yield deliberately needs no subsequent provider response.
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
       throw new PostCompactionContinuationEmptyError();
@@ -1638,7 +1663,10 @@ export async function runTurnStreamAttempt(
       return claimedResult({ status: "requires_action" });
     }
 
-    const finalOutput = String(requireAgentStreamFinalOutput(eventing.stream.finalOutput));
+    const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.yielded === true;
+    const finalOutput = String(
+      requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
+    );
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the
     // history store (a redispatch would NOT re-execute them), so this
@@ -1651,10 +1679,9 @@ export async function runTurnStreamAttempt(
     if (
       !(await eventing.settle!({
         events: [
-          {
-            type: "agent.message.completed",
-            payload: { text: finalOutput },
-          },
+          ...(inputWaitYielded
+            ? []
+            : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
           { type: "turn.completed", payload: { output: finalOutput } },
           { type: "session.status.changed", payload: { status: "idle" } },
         ],

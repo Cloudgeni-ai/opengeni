@@ -4329,7 +4329,6 @@ async function deliverSlackSessionEvents(
   };
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
-  let latestAssistantText = "";
   const orderedEvents = page.events
     .filter(
       (event) =>
@@ -4346,6 +4345,7 @@ async function deliverSlackSessionEvents(
     const event = orderedEvents[index]!;
     if (event.type !== "turn.completed") continue;
     const finalOutput = safePayloadText(event.payload, "output").trim();
+    if (!finalOutput || safePayloadText(event.payload, "segmentLimit")) continue;
     const candidates: SessionEvent[] = [];
     for (let candidateIndex = index - 1; candidateIndex >= 0; candidateIndex -= 1) {
       const candidate = orderedEvents[candidateIndex]!;
@@ -4360,13 +4360,7 @@ async function deliverSlackSessionEvents(
       if (event.turnId && candidate.turnId && event.turnId !== candidate.turnId) continue;
       candidates.push(candidate);
     }
-    const terminalText =
-      finalOutput ||
-      candidates
-        .map((candidate) => safePayloadText(candidate.payload, "text").trim())
-        .find(Boolean) ||
-      "";
-    if (!terminalText) continue;
+    const terminalText = finalOutput;
     let matchedTerminalSuffix = false;
     for (const candidate of candidates) {
       const assistantText = safePayloadText(candidate.payload, "text").trim();
@@ -4394,7 +4388,7 @@ async function deliverSlackSessionEvents(
   for (const event of orderedEvents) {
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
-      latestAssistantText = safePayloadText(event.payload, "text");
+      const latestAssistantText = safePayloadText(event.payload, "text");
       if (latestAssistantText && !terminalAssistantSequences.has(event.sequence)) {
         const progress = await claimSlackInteractionProgressDelivery(deps.db, {
           accountId: interaction.accountId,
@@ -4467,7 +4461,26 @@ async function deliverSlackSessionEvents(
     } else if (event.type === "turn.completed") {
       const payloadOutput = safePayloadText(event.payload, "output");
       const hasPublishableOutput = payloadOutput.trim().length > 0;
-      const output = hasPublishableOutput ? payloadOutput : latestAssistantText;
+      if (safePayloadText(event.payload, "segmentLimit") === "budget_exhausted") {
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          `${requester.mention}OpenGeni reached a billing or usage limit. Ask your organization owner to check credits and usage limits, then reply in this thread to resume.`,
+          "billing-limit",
+        );
+        terminal = "failed";
+        continue;
+      }
+      // A completed turn is not necessarily a completed task. Input waits and
+      // pacing yields settle without a result. Keep the cursor moving
+      // and delivery open for the eventual response; never promote commentary
+      // or invent a success message for these boundaries.
+      if (!hasPublishableOutput || safePayloadText(event.payload, "segmentLimit")) {
+        terminal = null;
+        continue;
+      }
+      const output = payloadOutput;
       const normalizedOutput = output.trim();
       const existingProgress = progressEvidence.find(
         (delivery) =>
@@ -4539,9 +4552,7 @@ async function deliverSlackSessionEvents(
         const operationId = deterministicUuid(
           slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:final`),
         );
-        const text = boundedOutput(
-          `${requester.mention}${output || "OpenGeni finished this task."}`,
-        );
+        const text = boundedOutput(`${requester.mention}${output}`);
         const publicationBlocks = hasPublishableOutput
           ? await slackSharedResultPublicationBlocks(
               deps,

@@ -219,6 +219,7 @@ export type TurnSubmission = {
 
 export type AuthSession = {
   session: {
+    createdAt?: string;
     id: string;
     userId: string;
     expiresAt: string;

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
 
 const SKILL_FILE = "SKILL.md";
 const MAX_DISCOVERED_SKILLS = 256;
@@ -97,6 +98,36 @@ export async function discoverWorkspaceSkills(
   reservedNames: ReadonlySet<string> = new Set(),
   runAs?: string,
   shadowedNames: ReadonlySet<string> = new Set(),
+): Promise<readonly WorkspaceSkill[]> {
+  const startedAt = performance.now();
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    return await discoverWorkspaceSkillsUnmeasured(
+      session,
+      searchPaths,
+      reservedNames,
+      runAs,
+      shadowedNames,
+    );
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    recordModelPreparationMeasurement({
+      phase: "repository_skill_discovery",
+      outcome,
+      durationSeconds: (performance.now() - startedAt) / 1_000,
+      count: searchPaths.length,
+    });
+  }
+}
+
+async function discoverWorkspaceSkillsUnmeasured(
+  session: SandboxSessionLike,
+  searchPaths: readonly WorkspaceSkillSearchPath[],
+  reservedNames: ReadonlySet<string>,
+  runAs: string | undefined,
+  shadowedNames: ReadonlySet<string>,
 ): Promise<readonly WorkspaceSkill[]> {
   if (!session.listDir || !session.readFile) {
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");

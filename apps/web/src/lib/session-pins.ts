@@ -648,13 +648,20 @@ export function mergeSessionDetailReadProjection(
  * Merge list-owned personal pin and hierarchy fields into route-owned session
  * content. A route/SSE object must never overwrite a newer cross-device unpin,
  * while a list poll must never regress lifecycle state or message content.
+ * Activity ordering belongs to the list too: borrowing the selected route's
+ * timestamp would move that row on selection and move it back on deselection.
+ * List refreshes advance recency consistently for selected and unselected rows.
  */
 export function applySessionRailProjection(
   current: Session,
   projected: Session,
   options: { channelOwned?: boolean } = {},
 ): Session {
-  const pinned = applySessionPinProjection(current, projected) ?? current;
+  const activity =
+    current.updatedAt === projected.updatedAt
+      ? current
+      : { ...current, updatedAt: projected.updatedAt };
+  const pinned = applySessionPinProjection(activity, projected) ?? activity;
   const merged =
     options.channelOwned === false
       ? pinned

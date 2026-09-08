@@ -1,0 +1,96 @@
+---
+title: "Integrate your product"
+description: "Put durable agent sessions behind your own backend with the SDK and React components."
+icon: "plug"
+---
+
+The canonical integration keeps OpenGeni as a service behind your product backend. Your product owns its users, tenants, business data, and navigation. OpenGeni owns durable sessions, turns, events, approvals, files, tools, and execution.
+
+```text
+product browser or mobile client
+            |  your own authenticated routes
+            v
+your product backend
+  - authenticates product users
+  - maps product tenant -> OpenGeni workspace id
+  - holds the organization API key
+  - stores its own Skills
+            |  @opengeni/sdk
+            v
+OpenGeni API
+  - organization workspaces
+  - sessions, turns, events, files, tools, execution
+```
+
+## 1. Create an organization API key
+
+An organization API key is held only by your backend. Create it in organization settings or through the organization API-key routes. The token is shown once; store it in your secret manager and rotate by creating a replacement before revoking the old key.
+
+Never ship it to browser bundles, mobile apps, prompts, tool output, or logs.
+
+## 2. Map each tenant to a workspace
+
+For each product boundary that may share agent authority and resources (a tenant, a project, a user), idempotently resolve an organization workspace keyed by a stable external id:
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+
+const client = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+});
+
+const { workspace, created } = await client.ensureWorkspace({
+  accountId: process.env.OPENGENI_ORGANIZATION_ID!,
+  externalSource: "acme-product",
+  externalId: tenant.id,
+  name: tenant.displayName,
+});
+```
+
+Persist the returned workspace id next to your tenant record. Retries return the same workspace with `created: false`.
+
+## 3. Create sessions in that workspace
+
+```ts
+const session = await client.createSession(workspace.id, {
+  initialMessage: userMessage,
+  idempotencyKey: request.id,
+  skills: selectedSkills, // your own Skill content
+  tools: selectedIntegrationServers, // MCP servers the agent may use
+});
+```
+
+Use an idempotency key whenever a product request may be retried. Skills are your product's data: store and version them with your integration code and pass them per session.
+
+## 4. Stream events to your users
+
+Proxy the session's SSE stream through your own route so the organization key stays server-side. The re-emitted wire format is identical, so the browser consumes it with the same SDK or a plain `EventSource`, including resume after a reconnect:
+
+```ts
+import { proxySessionEventStream } from "@opengeni/sdk";
+
+export function GET(request: Request): Response {
+  // authenticate your user and resolve their session, then:
+  return proxySessionEventStream(client, workspaceId, sessionId, {
+    after: request,
+    signal: request.signal,
+  });
+}
+```
+
+## 5. Render the timeline
+
+`@opengeni/react` provides the session timeline, composer, status badges, and an optional sandbox workbench, all themed through CSS variables. Point it at your proxy routes and it renders streaming messages, tool calls, approvals, and structured questions with the same behavior as the OpenGeni console.
+
+## 6. Give the agent your tools
+
+Expose your product's data and actions as an authenticated MCP server and pass it in the session's tools. The agent reads and mutates the same records your human workflow uses, and mutations can be gated by approval.
+
+## Worked example
+
+The [Northstar support example](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/northstar-support) is a small support SaaS showing the whole loop: backend-created sessions, a proxied stream, an embedded timeline, and an authenticated MCP server whose tools operate on the product's tickets.
+
+## Authority in depth
+
+The repository's [product integration guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/product-integration.md) is the canonical contract for key scopes, workspace kinds, Personal-workspace exclusion, and delegated tokens for hosts acting on behalf of their own users. See also [Authentication](/reference/authentication).

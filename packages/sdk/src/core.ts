@@ -1,5 +1,18 @@
 /** Backward-compatible non-artifact client surface. */
 export { OpenGeniDocumentAuthorityClient as OpenGeniCoreClient } from "./document-authority-client";
+export {
+  OpenGeniToolCallError,
+  OpenGeniToolReapprovalRequiredError,
+  OpenGeniToolsClient,
+} from "./tools";
+export type {
+  OpenGeniGeneratedTools,
+  OpenGeniDynamicToolNode,
+  OpenGeniToolCallOptions,
+  OpenGeniToolFunction,
+  OpenGeniToolsFacade,
+  OpenGeniWorkspaceTools,
+} from "./tools";
 export type {
   FetchLike,
   FetchResponse,

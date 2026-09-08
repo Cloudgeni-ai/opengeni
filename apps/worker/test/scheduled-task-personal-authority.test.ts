@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -18,6 +19,8 @@ import {
   syncUpdatedScheduledTask,
 } from "@opengeni/core";
 import {
+  appendSessionEvents,
+  enqueueSessionTurn,
   claimSessionWorkForAttempt,
   bindScheduledTaskRunSessionInTransaction,
   createDb,
@@ -206,7 +209,10 @@ function delegation(
   ];
 }
 
-function activities(overrides: Parameters<typeof testSettings>[0] = {}) {
+function activities(
+  overrides: Parameters<typeof testSettings>[0] = {},
+  bus = new MemoryEventBus(),
+) {
   return createScheduledTaskActivities(
     async () =>
       ({
@@ -216,7 +222,7 @@ function activities(overrides: Parameters<typeof testSettings>[0] = {}) {
           ...overrides,
         }),
         db: client.db,
-        bus: new MemoryEventBus(),
+        bus,
       }) as unknown as ActivityServices,
   );
 }
@@ -1211,6 +1217,181 @@ describe("scheduled task personal MCP authority", () => {
     expect(evidence).toEqual({ runs: 2, sessions: 1 });
   });
 
+  test("0414 rolling producer fence replay preserves identity and refuses definition drift", async () => {
+    if (!available) return;
+    const migration = await readFile(
+      new URL(
+        "../../../packages/db/drizzle/0414_scheduled_generated_producer_materialization.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const [before] =
+      await admin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
+    await admin.begin(async (tx) => {
+      await tx.unsafe(migration);
+    });
+    const [after] =
+      await admin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
+    expect(after).toEqual(before);
+    await expect(
+      admin.begin(async (tx) => {
+        const drifted = String(before!.definition).replace(
+          "receipt.source_execution_digest = OLD.task_execution_digest",
+          "receipt.source_execution_digest <> OLD.task_execution_digest",
+        );
+        expect(drifted).not.toBe(before!.definition);
+        await tx.unsafe(drifted);
+        await tx.unsafe(migration);
+      }),
+    ).rejects.toMatchObject({ code: "55000" });
+    const [restored] =
+      await admin`select pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
+    expect(restored!.definition).toBe(before!.definition);
+  });
+
+  for (const authorityCase of [
+    "valid",
+    "missing_receipt",
+    "wrong_source_digest",
+    "wrong_target_digest",
+    "revoked",
+    "replaced_grant",
+  ] as const) {
+    test(`accepted cold occurrence after canonical materialization: ${authorityCase}`, async () => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      const common = await commonConnectionDelegationFixture(workspace);
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "accepted cold materialization interleaving",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3_600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "reusable_session",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Adopt the exact canonical producer",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        personalConnectionDelegations: [common.delegation],
+        metadata: {},
+      });
+      const secondProducerKey = `accepted-cold-${crypto.randomUUID()}`;
+      let secondRunId: string | null = null;
+      const bus = new MemoryEventBus();
+      const publish = bus.publish.bind(bus);
+      bus.publish = async (workspaceId, sessionId, events) => {
+        await publish(workspaceId, sessionId, events);
+        if (secondRunId || !events.some((event) => event.type === "session.created")) return;
+        const [canonical] = await listScheduledTaskRuns(
+          client.db,
+          workspace.workspaceId,
+          task.id,
+          10,
+        );
+        const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: workspace.workspaceId,
+          runId: canonical!.id,
+        });
+        // Admit another occurrence before the first materialization advances its
+        // canonical producer row; bind it only after that materialization commits.
+        const second = await createScheduledTaskRun(client.db, {
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          taskAuthorityRevision: task.authorityRevision,
+          taskExecutionDigest: task.executionDigest,
+          triggerType: "scheduled",
+          producerKey: secondProducerKey,
+          scheduledAt: null,
+          acceptedExecutionSnapshot: accepted!,
+        });
+        expect(second.status).toBe("queued");
+        secondRunId = second.id;
+      };
+      const first = await activities({}, bus).dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `canonical-cold-${crypto.randomUUID()}`,
+      });
+      expect(secondRunId).not.toBeNull();
+      const before = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      expect(before.find((run) => run.id === secondRunId)?.taskAuthorityRevision).toBe(
+        task.authorityRevision,
+      );
+      expect(before.find((run) => run.id !== secondRunId)?.taskAuthorityRevision).toBeGreaterThan(
+        task.authorityRevision,
+      );
+      if (authorityCase === "missing_receipt") {
+        await admin`delete from scheduled_task_reusable_connection_materializations where task_id = ${task.id}`;
+      } else if (authorityCase === "wrong_source_digest") {
+        await admin`update scheduled_task_reusable_connection_materializations set source_execution_digest = repeat('0', 64) where task_id = ${task.id}`;
+      } else if (authorityCase === "wrong_target_digest") {
+        await admin`update scheduled_task_reusable_connection_materializations set target_execution_digest = repeat('0', 64) where task_id = ${task.id}`;
+      } else if (authorityCase === "revoked" || authorityCase === "replaced_grant") {
+        await admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
+          await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
+          await tx`select * from revoke_self_connection_use_grant(${workspace.accountId}::uuid, ${common.grant.id}::uuid)`;
+          if (authorityCase === "replaced_grant") {
+            const [replacement] = await tx<
+              Array<{ id: string; generation: number }>
+            >`select grant_id as id, grant_generation::int as generation from issue_self_connection_use_grant(${workspace.accountId}::uuid, ${common.connection.authorityId}::uuid, ${workspace.workspaceId}::uuid, 'always', 'workspace_shared', null, true)`;
+            expect(
+              replacement!.id !== common.grant.id ||
+                replacement!.generation > common.grant.generation,
+            ).toBe(true);
+          }
+        });
+      }
+      const second = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: secondProducerKey,
+      });
+      const after = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+      if (authorityCase === "valid") {
+        expect(second).toMatchObject({ action: "start", sessionId: first.sessionId });
+        expect(after.map((run) => run.status)).toEqual(["dispatched", "dispatched"]);
+        expect(new Set(after.map((run) => run.sessionId))).toEqual(new Set([first.sessionId]));
+      } else if (authorityCase === "revoked" || authorityCase === "replaced_grant") {
+        expect(second).toMatchObject({ action: "start", sessionId: first.sessionId });
+        if (second.action !== "start") throw new Error("accepted run did not reach claim boundary");
+        const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+          sessionId: second.sessionId,
+          workflowId: second.workflowId,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+        expect(claimed).toEqual({ action: "unclaimed", reason: "no-work" });
+        const [evidence] = await admin<
+          Array<{ status: string; error: string; state: string; attempts: number }>
+        >`select run.status, run.error, update_value.state, (select count(*)::int from session_turn_attempts where session_id = run.session_id) as attempts from scheduled_task_runs run join session_system_updates update_value on update_value.scheduled_task_run_id = run.id where run.id = ${secondRunId}::uuid`;
+        expect(evidence).toEqual({
+          status: "failed",
+          error: "scheduled_connection_grant_changed",
+          state: "failed",
+          attempts: 0,
+        });
+      } else {
+        expect(second).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+        expect(after.find((run) => run.id === secondRunId)?.status).toBe("failed");
+        const [counts] = await admin<
+          Array<{ sessions: number; updates: number }>
+        >`select (select count(*)::int from sessions where workspace_id = ${workspace.workspaceId}) as sessions, (select count(*)::int from session_system_updates where scheduled_task_run_id = ${secondRunId}::uuid) as updates`;
+        expect(counts).toEqual({ sessions: 1, updates: 0 });
+      }
+    });
+  }
+
   test("a revoked frozen grant creates one stable terminal producer receipt", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -1277,7 +1458,7 @@ describe("scheduled task personal MCP authority", () => {
     });
   });
 
-  test("a queued run recovers from its immutable snapshot after the task head changes", async () => {
+  test("queued recovery validates creation policy after the task head and latest model change", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
@@ -1390,6 +1571,34 @@ describe("scheduled task personal MCP authority", () => {
           sessionId,
         });
       },
+    });
+    const [trigger] = await appendSessionEvents(client.db, workspace.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "switch model" } },
+    ]);
+    const switched = await enqueueSessionTurn(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+      source: "user",
+      prompt: "switch model",
+      resources: [],
+      tools: [],
+      model: "newer-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: workspace.subjectId },
+    });
+    await appendSessionEvents(client.db, workspace.workspaceId, session.id, [
+      { type: "turn.started", turnId: switched.id, payload: {} },
+    ]);
+    expect(await requireSession(client.db, workspace.workspaceId, session.id)).toMatchObject({
+      model: "newer-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
     });
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: { ...task.agentConfig, prompt: "new mutable prompt" },

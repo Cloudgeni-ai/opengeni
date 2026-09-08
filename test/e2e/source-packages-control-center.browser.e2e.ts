@@ -141,7 +141,7 @@ describe("Bundles section browser acceptance", () => {
       });
       // One Bundles section, one search, and a row for every kind in it.
       await expectVisible(page.getByRole("heading", { name: "Bundles" }));
-      const search = page.getByLabel("Search bundles");
+      const search = page.getByLabel("Search all plugins");
       await search.fill("research");
       await expectVisible(pluginRow);
       await expectHidden(skillRow);
@@ -374,6 +374,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json(capabilityCatalog(state));
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: connections() });

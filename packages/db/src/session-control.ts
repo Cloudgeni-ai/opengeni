@@ -4,6 +4,7 @@ import {
   childPausedClassification,
   McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
+  type WorkspacePauseTimerRequest,
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
@@ -176,6 +177,11 @@ export type WorkspaceControlRow = {
   revision: number | string;
   workspaceState: string;
   workspacePauseRevision: number | string | null;
+  timerId: string | null;
+  timerAction: string | null;
+  timerDueAt: Date | string | null;
+  timerPauseForSeconds: number | null;
+  timerPauseRevision: number | string | null;
   reason: string | null;
   changedBy: string | null;
   changedAt: Date | string | null;
@@ -244,11 +250,11 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal";
+    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait";
   },
 ): Promise<void> {
-  if (input.action === "goal" && input.targetSessionId !== input.actor.sessionId) {
-    throw new SessionControlInvariantError("An agent goal command must target its own session");
+  if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+    throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
   // Reusing the event-write helper here keeps cross-session actor authority on
@@ -546,6 +552,9 @@ export async function lockWorkspaceInferenceControl(
         revision,
         workspace_state as "workspaceState",
         workspace_pause_revision as "workspacePauseRevision",
+        timer_id as "timerId", timer_action as "timerAction",
+        timer_due_at as "timerDueAt", timer_pause_for_seconds as "timerPauseForSeconds",
+        timer_pause_revision as "timerPauseRevision",
         reason,
         changed_by as "changedBy",
         changed_at as "changedAt"
@@ -1391,26 +1400,21 @@ async function stoppingBackgroundCommandCounts(
 ): Promise<Map<string, number>> {
   const rows = await db.execute<{ sessionId: string; commandCount: number | string }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    command_ancestry(command_id, ancestor_id, depth, path) as (
-      select command.id, command.session_id, 0::integer, array[command.session_id]::uuid[]
-      from ${schema.sessionBackgroundCommands} command
-      where command.workspace_id = ${workspaceId}
-        and command.state = 'stopping'
+    descendants(target_id, session_id, depth, path) as (
+      select target.id, target.id, 0::integer, array[target.id]::uuid[] from targets target
       union all
-      select ancestry.command_id, current.parent_session_id,
-        ancestry.depth + 1, ancestry.path || current.parent_session_id
-      from command_ancestry ancestry
-      join ${schema.sessions} current
-        on current.workspace_id = ${workspaceId}
-       and current.id = ancestry.ancestor_id
-      where current.parent_session_id is not null
-        and not current.parent_session_id = any(ancestry.path)
-        and ancestry.depth < ${SESSION_ANCESTRY_LIMIT}
+      select parent.target_id, child.id, parent.depth + 1, parent.path || child.id
+      from descendants parent
+      join ${schema.sessions} child
+        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.session_id
+      where not child.id = any(parent.path) and parent.depth < ${SESSION_ANCESTRY_LIMIT}
     )
-    select target.id as "sessionId", count(distinct ancestry.command_id)::integer as "commandCount"
-    from targets target
-    join command_ancestry ancestry on ancestry.ancestor_id = target.id
-    group by target.id
+    select descendant.target_id as "sessionId", count(distinct command.id)::integer as "commandCount"
+    from descendants descendant
+    join ${schema.sessionBackgroundCommands} command
+      on command.workspace_id = ${workspaceId} and command.session_id = descendant.session_id
+      and command.state = 'stopping'
+    group by descendant.target_id
   `);
   return new Map(
     rows.map((row: { sessionId: string; commandCount: number | string }) => [
@@ -1855,13 +1859,13 @@ async function findCommandReceipt(
     targetSessionId: string | null;
     targetTurnId: string | null;
     operationKey: string;
-    identityScope: "actor" | "goal_operation";
+    identityScope: "actor" | "target_operation";
   },
 ): Promise<SessionCommandReceiptRow | null> {
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const identity =
-    input.identityScope === "goal_operation"
+    input.identityScope === "target_operation"
       ? and(
           eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
           eq(schema.sessionCommandReceipts.actorType, "agent_attempt"),
@@ -2063,21 +2067,21 @@ export async function reserveSessionCommandReceipt(
     targetTurnId: string | null;
     operationKey: string;
     canonicalRequestHash: string;
-    identityScope?: "actor" | "goal_operation";
+    identityScope?: "actor" | "target_operation";
     initialResult?: Record<string, unknown>;
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const identityScope = input.identityScope ?? "actor";
   if (
-    identityScope === "goal_operation" &&
+    identityScope === "target_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      !["goal.update", "goal.progress", "goal.wait"].includes(input.action) ||
+      !["goal.update", "goal.progress", "session.wait_for_input"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {
     throw new SessionControlInvariantError(
-      "Target-scoped receipt identity is reserved for agent goal commands",
+      "Target-scoped receipt identity is reserved for agent self commands",
     );
   }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
@@ -2160,13 +2164,12 @@ async function registerContinuableWakes(
       )
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
-        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
+        session_id, account_id, workspace_id, temporal_workflow_id, reason
       )
-      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}, 1
+      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}
       from eligible
       on conflict (session_id) do update set
         wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
-        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
         temporal_workflow_id = excluded.temporal_workflow_id,
         reason = excluded.reason,
         attempts = 0,
@@ -3507,12 +3510,44 @@ export async function mutateSessionControlInTransaction(
             rootSessionId: input.sessionId,
           }));
     if (!changed) {
+      // Repeating Pause may repair a lost reconciliation wake without changing
+      // control authority. The exact closed attempt still needs the existing
+      // worker's Temporal and writer-set proof; this is never new turn work.
+      const [quiescence] =
+        input.action === "pause"
+          ? await db.execute<{ needed: boolean }>(sql`
+            select exists (
+              select 1 from ${schema.sessionTurnAttempts} attempt
+              where attempt.workspace_id = ${input.workspaceId}
+                and attempt.session_id = ${input.sessionId}
+                and attempt.state = 'closed'
+                and attempt.quiesced_at is null
+                and exists (
+                  select 1 from ${schema.sessionAttemptInterruptions} interruption
+                  where interruption.workspace_id = attempt.workspace_id
+                    and interruption.session_id = attempt.session_id
+                    and interruption.attempt_id = attempt.id
+                    and interruption.state in ('settled', 'rejected_stale')
+                )
+            ) as needed
+          `)
+          : [];
+      const wakeCount = quiescence?.needed ? 1 : 0;
+      if (wakeCount > 0) {
+        await registerSessionWorkflowWakeInTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId: targetSession.temporalWorkflowId ?? `session-${input.sessionId}`,
+          reason: "session_pause_quiescence_reconciliation",
+        });
+      }
       const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
         result: {
           outcome: "unchanged",
           interruptionCount: 0,
           backgroundCommandCount: 0,
-          wakeCount: 0,
+          wakeCount,
           cancelledSessionCount: 0,
           cancelledTurnCount: 0,
           affectedSessionEvents: [],
@@ -3525,11 +3560,16 @@ export async function mutateSessionControlInTransaction(
         workspaceControlEventId: null,
         interruptionCount: 0,
         backgroundCommandCount: 0,
-        wakeCount: 0,
+        wakeCount,
         cancelledSessionCount: 0,
         cancelledTurnCount: 0,
         affectedSessionEvents: [],
-        workflowWake: null,
+        workflowWake: await pendingSessionControlWorkflowWake(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          wakeCount,
+        ),
         outcome: "unchanged",
         replay: false,
       };
@@ -3890,6 +3930,8 @@ export async function mutateWorkspaceControlInTransaction(
     operationKey: string;
     action: "pause" | "resume";
     reason?: string | null;
+    /** Internal timer executor retains/replaces its own timer atomically. */
+    timerExecution?: boolean;
     expectedRevision?: number | null;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
@@ -3955,7 +3997,8 @@ export async function mutateWorkspaceControlInTransaction(
     "workspace pause revision",
   );
   const changed =
-    input.action === "pause"
+    (!input.timerExecution && workspace.timerId != null) ||
+    (input.action === "pause"
       ? workspace.workspaceState !== "paused" ||
         workspacePauseRevision === null ||
         (await workspacePauseEffectsNeeded(db, {
@@ -3966,7 +4009,7 @@ export async function mutateWorkspaceControlInTransaction(
         (await continuableWakeRepairNeeded(db, {
           workspaceId: input.workspaceId,
           rootSessionId: null,
-        }));
+        })));
   if (!changed) {
     const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
       result: {
@@ -4004,6 +4047,7 @@ export async function mutateWorkspaceControlInTransaction(
   const [updated] = await db
     .update(schema.workspaceInferenceControls)
     .set({
+      ...(!input.timerExecution ? clearWorkspaceTimerFields : {}),
       revision,
       workspaceState: input.action === "pause" ? "paused" : "active",
       workspacePauseRevision: input.action === "pause" ? revision : null,
@@ -4029,7 +4073,7 @@ export async function mutateWorkspaceControlInTransaction(
     scope: "workspace",
     rootSessionId: null,
     action: input.action,
-    automatic: false,
+    automatic: input.timerExecution === true,
     reason: input.reason ?? null,
     actor,
   });
@@ -4082,7 +4126,7 @@ async function insertWorkspaceControlEventInTransaction(
     revision: number;
     scope: "workspace" | "session";
     rootSessionId: string | null;
-    action: "pause" | "resume";
+    action: "pause" | "resume" | "timer_set" | "timer_cancelled";
     automatic: boolean;
     reason: string | null;
     actor: string;
@@ -4125,4 +4169,164 @@ async function insertWorkspaceControlEventInTransaction(
     throw new SessionControlInvariantError("Workspace control event was not inserted");
   }
   return event.id;
+}
+
+export class WorkspacePauseTimerInputError extends Error {}
+
+const clearWorkspaceTimerFields = {
+  timerId: null,
+  timerAction: null,
+  timerDueAt: null,
+  timerPauseForSeconds: null,
+  timerPauseRevision: null,
+};
+
+/** Called under workspace RLS. The same control fence serializes timers and human actions. */
+export async function setWorkspacePauseTimerInTransaction(
+  db: Database,
+  input: WorkspacePauseTimerRequest & { accountId: string; workspaceId: string; subjectId: string },
+): Promise<{ workspaceControlEventId: string | null }> {
+  let workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
+    lockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+  });
+  const reserved = await reserveSessionCommandReceipt(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    actor: { type: "human", subjectId: input.subjectId },
+    action: `workspace.timer.${input.action}`,
+    targetSessionId: null,
+    targetTurnId: null,
+    operationKey: input.clientEventId,
+    canonicalRequestHash: canonicalSessionCommandHash({
+      action: input.action,
+      pauseInSeconds: input.pauseInSeconds ?? 0,
+      pauseForSeconds: input.pauseForSeconds ?? null,
+      expectedRevision: input.expectedRevision,
+    }),
+  });
+  if (reserved.replay)
+    return {
+      workspaceControlEventId:
+        (reserved.receipt.result.workspaceControlEventId as string | null) ?? null,
+    };
+  if (Number(workspace.revision) !== input.expectedRevision)
+    throw new SessionControlConflictError();
+  let action: "pause" | "resume" = "pause";
+  let delay = input.pauseInSeconds ?? 0;
+  let pauseRevision: number | null = null;
+  if (input.action === "set") {
+    if (workspace.workspaceState === "paused") {
+      if (delay !== 0 || input.pauseForSeconds == null) {
+        throw new WorkspacePauseTimerInputError("A paused workspace requires a resume duration");
+      }
+      action = "resume";
+      delay = input.pauseForSeconds;
+      pauseRevision = Number(workspace.workspacePauseRevision);
+    } else if (delay === 0) {
+      await mutateWorkspaceControlInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actor: { type: "human", subjectId: input.subjectId },
+        operationKey: `timer-pause:${reserved.receipt.id}`,
+        action: "pause",
+      });
+      workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+      action = "resume";
+      delay = input.pauseForSeconds ?? 0;
+      pauseRevision = Number(workspace.workspacePauseRevision);
+    }
+  }
+  const hasTimer = input.action === "set" && delay > 0;
+  const [clock] = await db.execute<{ now: Date }>(sql`select clock_timestamp() as now`);
+  const revision = nextRevision(workspace);
+  await db
+    .update(schema.workspaceInferenceControls)
+    .set({
+      ...clearWorkspaceTimerFields,
+      ...(hasTimer
+        ? {
+            timerId: reserved.receipt.id,
+            timerAction: action,
+            timerDueAt: new Date(new Date(clock!.now).getTime() + delay * 1000),
+            timerPauseForSeconds: action === "pause" ? (input.pauseForSeconds ?? null) : null,
+            timerPauseRevision: pauseRevision,
+          }
+        : {}),
+      revision,
+      updatedAt: new Date(clock!.now),
+    })
+    .where(eq(schema.workspaceInferenceControls.workspaceId, input.workspaceId));
+  const workspaceControlEventId = await insertWorkspaceControlEventInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    revision,
+    scope: "workspace",
+    rootSessionId: null,
+    action: hasTimer ? "timer_set" : "timer_cancelled",
+    automatic: false,
+    reason: null,
+    actor: input.subjectId,
+  });
+  await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
+    controlRevision: revision,
+    result: { workspaceControlEventId },
+  });
+  return { workspaceControlEventId };
+}
+
+/** Discovery is a hint. Identity, deadline and pause ownership are rechecked under the fence. */
+export async function fireWorkspacePauseTimerInTransaction(
+  db: Database,
+  input: { workspaceId: string; timerId: string },
+): Promise<{ workspaceControlEventId: string | null; wakeCount: number } | null> {
+  const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
+    lockTimeoutMs: 1000,
+  });
+  const [clock] = await db.execute<{ now: Date }>(sql`select clock_timestamp() as now`);
+  if (
+    workspace.timerId !== input.timerId ||
+    !workspace.timerDueAt ||
+    new Date(workspace.timerDueAt).getTime() > new Date(clock!.now).getTime()
+  )
+    return null;
+  const action = workspace.timerAction as "pause" | "resume";
+  // A superseding pause must never be undone by an old timer, even across rolling upgrades.
+  if (
+    action === "resume" &&
+    (workspace.workspaceState !== "paused" ||
+      Number(workspace.workspacePauseRevision) !== Number(workspace.timerPauseRevision))
+  ) {
+    await db
+      .update(schema.workspaceInferenceControls)
+      .set(clearWorkspaceTimerFields)
+      .where(eq(schema.workspaceInferenceControls.workspaceId, input.workspaceId));
+    return null;
+  }
+  const result = await mutateWorkspaceControlInTransaction(db, {
+    accountId: workspace.accountId,
+    workspaceId: input.workspaceId,
+    actor: { type: "service", subjectId: "service:workspace-pause-timer" },
+    operationKey: `timer:${input.timerId}:${action}`,
+    action,
+    timerExecution: true,
+  });
+  // Use application time only for display elsewhere; deadlines are database-clock based.
+  const [applied] = await db.execute<{ now: Date }>(sql`select clock_timestamp() as now`);
+  await db
+    .update(schema.workspaceInferenceControls)
+    .set({
+      ...clearWorkspaceTimerFields,
+      ...(action === "pause" && workspace.timerPauseForSeconds !== null
+        ? {
+            timerId: input.timerId,
+            timerAction: "resume",
+            timerDueAt: new Date(
+              new Date(applied!.now).getTime() + workspace.timerPauseForSeconds * 1000,
+            ),
+            timerPauseRevision: result.revision,
+          }
+        : {}),
+    })
+    .where(eq(schema.workspaceInferenceControls.workspaceId, input.workspaceId));
+  return result;
 }

@@ -48,8 +48,12 @@ describe("video generation runtime surface", () => {
       ((agent as unknown as { tools: Array<{ name: string }> }).tools ?? []).map(
         (tool) => tool.name,
       );
-    expect(names(disabled)).toEqual([]);
-    expect(names(enabled)).toEqual(["get_video_generation_capabilities", "generate_video"]);
+    expect(names(disabled)).toEqual(["load_builtin_skill"]);
+    expect(names(enabled)).toEqual([
+      "load_builtin_skill",
+      "get_video_generation_capabilities",
+      "generate_video",
+    ]);
   });
 
   test("keeps its lazy skill absent unless the same executable boundary is enabled", () => {
@@ -61,6 +65,7 @@ describe("video generation runtime surface", () => {
     const disabled = composeRuntimeSkills([]).lazySource;
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
+      sites: false,
       videoGeneration: true,
     }).lazySource;
     expect(disabled.getIndex?.(manifest, ".agents")?.map((entry) => entry.name)).not.toContain(
@@ -110,7 +115,11 @@ describe("video generation runtime surface", () => {
       (tool) => tool.name,
     );
 
-    expect(toolNames).toEqual(["get_video_generation_capabilities", "generate_video"]);
+    expect(toolNames).toEqual([
+      "load_builtin_skill",
+      "get_video_generation_capabilities",
+      "generate_video",
+    ]);
     expect(skillNames).not.toContain("opengeni-video-generation");
   });
 

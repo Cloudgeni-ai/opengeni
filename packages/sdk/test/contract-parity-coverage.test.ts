@@ -38,12 +38,16 @@ import {
   RetainedOutputKind as ContractRetainedOutputKind,
   RetainedOutputUnavailableReason as ContractRetainedOutputUnavailableReason,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
+  GitHubActionPoliciesResponse as ContractGitHubActionPoliciesResponse,
+  GitHubActionPolicyDecision as ContractGitHubActionPolicyDecision,
+  GitHubActionPolicyGroup as ContractGitHubActionPolicyGroup,
   GitHubAppInfo as ContractGitHubAppInfo,
   GitHubBindingStatus as ContractGitHubBindingStatus,
   GitHubInstallationBinding as ContractGitHubInstallationBinding,
   GitHubInstallationLifecycle as ContractGitHubInstallationLifecycle,
   GitHubRepository as ContractGitHubRepository,
   GitHubRepositoryScope as ContractGitHubRepositoryScope,
+  UpdateGitHubActionPolicyRequest as ContractUpdateGitHubActionPolicyRequest,
   ListManagedOrganizationMembershipsResponse as ContractListManagedOrganizationMembershipsResponse,
   PackInstallation as ContractPackInstallation,
   PackInstallationStatus as ContractPackInstallationStatus,
@@ -114,11 +118,15 @@ import type {
   RetainedOutputKind,
   RetainedOutputUnavailableReason,
   GitHubRepository,
+  GitHubActionPoliciesResponse,
+  GitHubActionPolicyDecision,
+  GitHubActionPolicyGroup,
   GitHubAppInfo,
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,
   GitHubRepositoryScope,
+  UpdateGitHubActionPolicyRequest,
   ListManagedOrganizationMembershipsResponse,
   PackInstallation,
   PackInstallationStatus,
@@ -169,6 +177,21 @@ describe("SDK / contracts parity (full coverage)", () => {
     ): GitHubInstallationBinding => value;
     const acceptInfo = (value: z.infer<typeof ContractGitHubAppInfo>): GitHubAppInfo => value;
     expect([acceptBinding, acceptInfo].every((fn) => typeof fn === "function")).toBe(true);
+  });
+
+  test("GitHub action policy literals and shapes match", () => {
+    const decisions: readonly GitHubActionPolicyDecision[] =
+      ContractGitHubActionPolicyDecision.options;
+    const groups: readonly GitHubActionPolicyGroup[] = ContractGitHubActionPolicyGroup.options;
+    expect(decisions).toEqual(ContractGitHubActionPolicyDecision.options);
+    expect(groups).toEqual(ContractGitHubActionPolicyGroup.options);
+    const acceptResponse = (
+      value: z.infer<typeof ContractGitHubActionPoliciesResponse>,
+    ): GitHubActionPoliciesResponse => value;
+    const acceptRequest = (
+      value: UpdateGitHubActionPolicyRequest,
+    ): z.input<typeof ContractUpdateGitHubActionPolicyRequest> => value;
+    expect([acceptResponse, acceptRequest].every((fn) => typeof fn === "function")).toBe(true);
   });
 
   test("delegated service initiator grant fields match the contracts", () => {

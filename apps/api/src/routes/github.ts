@@ -1,9 +1,13 @@
 import {
+  GitHubActionPoliciesResponse,
+  GitHubActionPolicyActorState,
   GitHubAppManifestCreate,
+  UpdateGitHubActionPolicyRequest,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
   type GitHubInstallationBindingProof,
 } from "@opengeni/contracts";
+import { PersonalGitHubConnectionMetadata } from "@opengeni/contracts/personal-github";
 import {
   ListGitHubRepositoryBranchesQuery,
   VerifyPublicGitHubRepositoryRefRequest,
@@ -13,6 +17,7 @@ import {
   bindAuthorizedGitHubInstallationRepositories,
   deleteGitHubInstallationBinding,
   GitHubInstallationAuthorityCommitError,
+  listGitHubInstallationAccessForWorkspace,
 } from "@opengeni/db";
 import {
   authorizeGitHubInstallationBinding,
@@ -38,7 +43,15 @@ import {
 import type { Context, Hono } from "hono";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requireAccessGrant } from "@opengeni/core";
+import {
+  githubAppActionPolicyActor,
+  hasPermission,
+  listGitHubActionPolicyActors,
+  personalGitHubActionPolicyActor,
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  updateGitHubActionPolicyGroup,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   continuedGitHubBrowserGrantClaims,
@@ -54,6 +67,8 @@ import {
   listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
+import { assertPersonalConnectionOwnerPrincipal } from "../connection-ownership";
+import { listPersonalGitHubConnections } from "../integrations/personal-github";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -106,6 +121,95 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       installations: installationViews,
       missing: setupMode === "operator" ? missing : [],
     });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/github/action-policies", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "github:use");
+    const [installations, personalConnections] = await Promise.all([
+      listGitHubInstallationAccessForWorkspace(db, grant.workspaceId),
+      listPersonalGitHubConnections(deps, {
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+      }),
+    ]);
+    const personalConnection = canonicalPersonalGitHubPolicyConnection(personalConnections);
+    const actors = [
+      ...installations.map(githubAppActionPolicyActor),
+      ...(personalConnection
+        ? [
+            personalGitHubActionPolicyActor({
+              connectionId: personalConnection.id,
+              githubLogin: PersonalGitHubConnectionMetadata.parse(personalConnection.metadata)
+                .githubLogin,
+            }),
+          ]
+        : []),
+    ];
+    return c.json(
+      GitHubActionPoliciesResponse.parse({
+        enabled: settings.githubRestMcpEnabled,
+        actors: await listGitHubActionPolicyActors(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actors,
+        }),
+      }),
+    );
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/github/action-policies", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const payload = UpdateGitHubActionPolicyRequest.parse(await c.req.json());
+    const actor = payload.actor;
+    if (actor.kind === "workspace_app") {
+      const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
+      const installations = await listGitHubInstallationAccessForWorkspace(db, grant.workspaceId);
+      const installation = installations.find(
+        (candidate) => candidate.installationId === actor.installationId,
+      );
+      if (!installation || installation.accountId !== grant.accountId) {
+        throw new HTTPException(404, { message: "GitHub installation not found" });
+      }
+      return c.json(
+        GitHubActionPolicyActorState.parse(
+          await updateGitHubActionPolicyGroup(db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            actor: githubAppActionPolicyActor(installation),
+            group: payload.group,
+            decision: payload.decision,
+          }),
+        ),
+      );
+    }
+
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    assertPersonalConnectionOwnerPrincipal(access, "My GitHub action policy");
+    const connections = await listPersonalGitHubConnections(deps, {
+      workspaceId: access.grant.workspaceId,
+      subjectId: access.grant.subjectId,
+    });
+    const connection = connections.find((candidate) => candidate.id === actor.connectionId);
+    if (!connection) {
+      throw new HTTPException(404, { message: "personal GitHub connection not found" });
+    }
+    return c.json(
+      GitHubActionPolicyActorState.parse(
+        await updateGitHubActionPolicyGroup(db, {
+          accountId: access.grant.accountId,
+          workspaceId: access.grant.workspaceId,
+          subjectId: access.grant.subjectId,
+          actor: personalGitHubActionPolicyActor({
+            connectionId: connection.id,
+            githubLogin: PersonalGitHubConnectionMetadata.parse(connection.metadata).githubLogin,
+          }),
+          group: payload.group,
+          decision: payload.decision,
+        }),
+      ),
+    );
   });
 
   // Start with user authorization, not GitHub's install/configure selector.
@@ -701,6 +805,25 @@ function githubInstallationSettingsUrl(installation: {
     );
   }
   return new URL(`https://github.com/settings/installations/${installation.installationId}`);
+}
+
+function canonicalPersonalGitHubPolicyConnection<
+  T extends { id: string; status: string; updatedAt: string },
+>(connections: T[]): T | null {
+  const statusRank: Record<string, number> = {
+    active: 0,
+    needs_reauth: 1,
+    error: 2,
+    revoked: 3,
+  };
+  return (
+    [...connections].sort((left, right) => {
+      const rank = (statusRank[left.status] ?? 4) - (statusRank[right.status] ?? 4);
+      if (rank !== 0) return rank;
+      const updated = right.updatedAt.localeCompare(left.updatedAt);
+      return updated !== 0 ? updated : right.id.localeCompare(left.id);
+    })[0] ?? null
+  );
 }
 
 function redirectToExactGitHubAuthorization(

@@ -72,6 +72,80 @@ export type GatewayRealtimeConnectResponse = {
   replay: false;
 };
 
+export type ToolGatewayIdentity = {
+  serverId: string;
+  toolName: string;
+};
+
+export type ToolGatewayCatalogEntry = {
+  identity: ToolGatewayIdentity;
+  modelName: string;
+  codemodePath: string[];
+  title?: string | undefined;
+  description?: string | undefined;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown> | undefined;
+  annotations?: Record<string, unknown> | undefined;
+  icons?: Array<Record<string, unknown>> | undefined;
+  source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
+  approval: "none" | "human" | "policy";
+};
+
+export type ToolGatewayCatalog = {
+  version: 1;
+  accountId: string;
+  workspaceId: string;
+  generation: number;
+  digest: string;
+  createdAt: string;
+  entries: ToolGatewayCatalogEntry[];
+};
+
+export type ToolGatewayResult = {
+  content: Array<{ type: string; [key: string]: unknown }>;
+  structuredContent?: Record<string, unknown> | undefined;
+  isError?: boolean | undefined;
+  _meta?: Record<string, unknown> | undefined;
+  [key: string]: unknown;
+};
+
+export type ToolGatewayCallRequest = {
+  operationId?: string | undefined;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+  siteArtifactId?: string | undefined;
+  siteVersionId?: string | undefined;
+  approvalToken?: string | undefined;
+};
+
+export type ToolGatewayApprovalRequest = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolGatewayApprovalResponse = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  approvalToken: string;
+  expiresAt: string;
+};
+
+export type ToolGatewayCallResponse = {
+  operationId: string;
+  catalogDigest: string;
+  result: ToolGatewayResult;
+};
+
+export type ToolGatewayDeclarationsResponse = {
+  catalogDigest: string;
+  moduleSpecifier: string;
+  source: string;
+};
+
 export type ActivateCodexRealtimeConnectionRequest = {
   operationId: string;
   browserInstanceId: string;
@@ -1264,6 +1338,7 @@ export type Session = {
   accountId: string;
   status: SessionStatus;
   backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
+  hasSchedules?: boolean | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1323,6 +1398,8 @@ export type Session = {
   queueHeadPosition: number;
   queueTailPosition: number;
   effectiveControl: EffectiveSessionControl;
+  /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
+  inputWait?: { deadlineAt: string; reason: string } | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -1357,6 +1434,7 @@ export type Session = {
         totalDescendants: number;
         runningDescendants: number;
         queuedDescendants: number;
+        waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
@@ -1377,6 +1455,12 @@ export type Session = {
    * list and lineage reads for `requires_action` sessions; null otherwise.
    */
   requiresActionSince?: string | null | undefined;
+  /** Agent access scope; absent on servers before the agent-access release. */
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label; null when the session carries none. */
+  endUser?: SessionEndUser | null | undefined;
+  /** Memory scope; absent on servers before the agent-access release. */
+  memoryScope?: SessionMemoryScope | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -1393,6 +1477,10 @@ export type SessionListResponse = {
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
+  /** Present only when the server recognized and applied additive list filters. */
+  filtersApplied?: true;
+  /** Server-resolved Site origin filter, when requested. */
+  originSiteId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -1531,6 +1619,7 @@ export type LineageNode = {
 };
 
 export type SessionLineageResponse = {
+  sessionHasSchedules?: boolean | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;
@@ -1753,6 +1842,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -2076,7 +2167,14 @@ export type CodexFleetDecisionEventPayload = {
   actual: {
     outcome: "selected" | "waiting" | "none";
     candidateKey: string | null;
-    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+    reason:
+      | "lease_reused"
+      | "pin"
+      | "rotation"
+      | "active"
+      | "all_capped"
+      | "allocator_disabled"
+      | "none";
   };
   comparison: CodexFleetShadowComparison;
   replay: {
@@ -2227,11 +2325,16 @@ export type FsTreeNode = {
   truncated: boolean;
 };
 export type FsEncoding = "utf8" | "base64";
+export type FileSystemRouteIdentity = {
+  epoch: number;
+  root: string;
+};
 export type FsListRequest = {
   path?: string;
   depth?: number;
   maxEntries?: number;
   includeHidden?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsListResponse = {
   root: FsTreeNode;
@@ -2244,6 +2347,7 @@ export type FsReadRequest = {
   path: string;
   encoding?: FsEncoding;
   maxBytes?: number;
+  route?: FileSystemRouteIdentity;
 };
 export type FsReadResponse = {
   path: string;
@@ -2268,26 +2372,36 @@ export type FsWriteRequest = {
   content: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsWriteResponse = {
   path: string;
   sizeBytes: number;
   revision: number;
 };
-export type FsDeleteRequest = { path: string; recursive?: boolean };
+export type FsDeleteRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
   path: string;
   newPath: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsMoveResponse = {
   path: string;
   newPath: string;
   revision: number;
 };
-export type FsMkdirRequest = { path: string; recursive?: boolean };
+export type FsMkdirRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
@@ -2782,7 +2896,20 @@ export type CreateSessionRequest = {
   //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
   //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager fan-out).
   sandbox?: "shared" | "new" | { groupId: string } | undefined;
+  // --- Agent access scope, end-user label, memory scope ---------------------
+  // Mirror of the contracts additions that land with the session agent-access
+  // release. Which other sessions the agent may reach; defaults to "workspace"
+  // on the platform (the chat facade defaults to "session").
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label inside the workspace. Not a subject, not authority. */
+  endUser?: SessionEndUser | undefined;
+  /** Which Memory the agent reads and where it saves; "user" requires `endUser`. */
+  memoryScope?: SessionMemoryScope | undefined;
 };
+
+export type SessionAgentAccess = "session" | "user" | "workspace";
+export type SessionEndUser = { source: string; id: string };
+export type SessionMemoryScope = "workspace" | "user" | "session" | "off";
 
 // --- Access, workspaces, API keys -------------------------------------------
 
@@ -2854,9 +2981,10 @@ export type FirstPartyMcpToolName =
   | "goal_set"
   | "goal_update"
   | "goal_progress"
-  | "goal_wait"
+  | "wait_for_input"
   | "goal_complete"
   | "goal_pause"
+  | "goal_resume"
   | "memory_search"
   | "memory_save"
   | "memory_correct"
@@ -2885,6 +3013,13 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "project_list"
+  | "project_get"
+  | "project_create"
+  | "project_update"
+  | "project_reorder"
+  | "project_delete"
+  | "session_set_project"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -2894,6 +3029,8 @@ export type FirstPartyMcpToolName =
   | "session_get"
   | "session_events"
   | "session_wait"
+  | "command_read"
+  | "command_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -2983,9 +3120,12 @@ export type FirstPartyMcpToolName =
   | "sandbox_file_publish"
   | "artifacts_list"
   | "artifacts_get_source"
+  | "artifacts_prepare_upload"
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -3245,6 +3385,12 @@ export type CodexConnectionStatus = {
     label?: string | null;
     chatgptAccountId?: string | null;
   } | null;
+  /** Live model-catalog probe result for the active account only. */
+  activeAccountValid?: boolean;
+  /** Cached readiness of any account in the effective worker pool. */
+  poolReady?: boolean;
+  /** Cached unpinned worker routability; rotation-off remains active-pointer-only. */
+  workerRoutable?: boolean;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
   source?: WorkspaceCodexSubscriptionSource;
@@ -3474,11 +3620,12 @@ export type CodexConnectPoll =
     };
 
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
-export type SuperGrokAccountScope = "workspace" | "user";
+export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
   email?: string | null;
@@ -3509,6 +3656,8 @@ export type SuperGrokRotationSettings = {
 
 /** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
 export type SuperGrokAccountsResponse = {
+  source?: "workspace" | "user" | "organization";
+  organizationId?: string;
   accounts: SuperGrokAccount[];
   activeAccountId: string | null;
   settings: SuperGrokRotationSettings;
@@ -3619,6 +3768,8 @@ export type ClientConfig = {
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
+  /** Client-safe hint for whether the console should offer Stripe checkout. */
+  billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
   analytics: {
@@ -4222,6 +4373,8 @@ export type Workspace = {
   agentInstructions: string | null;
   settings: Record<string, unknown>;
   inferenceControl: {
+    timer?: WorkspacePauseTimer | null | undefined;
+    serverTime?: string | undefined;
     state: "active" | "paused";
     revision: number;
     reason: string | null;
@@ -4260,8 +4413,8 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4318,7 +4471,9 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4362,6 +4517,13 @@ export type UpdateWorkspaceRequest = {
   agentInstructions?: string | null | undefined;
 };
 
+/**
+ * Organization API key access tier, derived by the server from the key's
+ * permissions: `full` administers the organization, `read` only inventories
+ * shared workspaces and reads their sessions, events, and files.
+ */
+export type OrganizationApiKeyAccess = "full" | "read";
+
 export type ApiKey = {
   id: string;
   accountId: string;
@@ -4370,6 +4532,8 @@ export type ApiKey = {
   description: string | null;
   prefix: string;
   permissions: Permission[];
+  /** Organization keys only; omitted for workspace-scoped keys. */
+  access?: OrganizationApiKeyAccess | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -4394,10 +4558,38 @@ export type CreateOrganizationApiKeyRequest = {
   name: string;
   description?: string | undefined;
   expiresAt?: string | undefined;
+  /** Omitted means `full`. */
+  access?: OrganizationApiKeyAccess | undefined;
 };
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// --- Organization-wide session list (org API key or organization owner) -----------------------
+
+export type ListOrganizationSessionsOptions = {
+  /** Page size, 1..200; the server default is 50. */
+  limit?: number | undefined;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | undefined;
+  /** Keep only sessions labelled with this exact end user. */
+  endUser?: { source: string; id: string } | undefined;
+  /** Keep only sessions in this exact lifecycle state. */
+  status?: SessionStatus | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+/**
+ * One page of `GET /v1/organizations/:organizationId/sessions`. Rows come from
+ * every shared workspace the caller may read, each carrying its
+ * `workspaceId`; personal workspaces are never included and private sessions
+ * stay invisible. A page may be shorter than `limit` while `nextCursor` is
+ * still set, so follow `nextCursor` until it is null.
+ */
+export type OrganizationSessionListResponse = {
+  sessions: Session[];
+  nextCursor: string | null;
 };
 
 // A person (or API key) with access to a workspace. `subjectId` is
@@ -4577,7 +4769,7 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
-  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  /** Agent-stated reason for a `wait_for_input` hold; null otherwise. */
   holdReason?: string | null | undefined;
 };
 
@@ -4743,6 +4935,8 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /** Absent on legacy drafts; null records an explicit Default-project selection. */
+  selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;
@@ -4777,6 +4971,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
+  | "session_wait_timeout"
+  | "background_command_result"
   | "child_terminal_result"
   | "media_generation_result"
   | "child_requires_action"
@@ -4792,6 +4988,30 @@ export type SessionSystemUpdateState =
   | "superseded"
   | "failed";
 
+export type SessionSystemUpdatePayload =
+  | {
+      type: "session_wait_timeout";
+      waitTurnId: string;
+      deadlineAt: string;
+      reason: string;
+      [key: string]: unknown;
+    }
+  | {
+      type: "background_command_result";
+      commandId: string;
+      state: "exited" | "lost";
+      exitCode: number | null;
+      reason: string;
+      outputLocator: {
+        eventType: "sandbox.command.output.delta";
+        commandId: string;
+      };
+      [key: string]: unknown;
+    }
+  | ({
+      type: Exclude<SessionSystemUpdateKind, "session_wait_timeout" | "background_command_result">;
+    } & Record<string, unknown>);
+
 export type SessionSystemUpdate = {
   id: string;
   sessionId: string;
@@ -4800,7 +5020,7 @@ export type SessionSystemUpdate = {
   sourceId: string;
   dedupeKey: string;
   summary: string;
-  payload: Record<string, unknown>;
+  payload: SessionSystemUpdatePayload;
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;
@@ -4816,6 +5036,20 @@ export type SessionControlResponse = {
   wakeCount: number;
   cancelledSessionCount: number;
   cancelledTurnCount: number;
+};
+
+export type WorkspacePauseTimer = {
+  id: string;
+  action: "pause" | "resume";
+  dueAt: string;
+  pauseForSeconds: number | null;
+};
+export type WorkspacePauseTimerRequest = {
+  action: "set" | "cancel";
+  pauseInSeconds?: number | undefined;
+  pauseForSeconds?: number | null | undefined;
+  clientEventId: string;
+  expectedRevision: number;
 };
 
 export type WorkspaceInferenceControlResponse = {
@@ -4835,7 +5069,7 @@ export type WorkspaceControlEvent = {
   type: "workspace.control.changed";
   scope: "workspace" | "session";
   rootSessionId: string | null;
-  action: "pause" | "resume";
+  action: "pause" | "resume" | "timer_set" | "timer_cancelled";
   automatic: boolean;
   reason: string | null;
   actor: string;
@@ -7228,6 +7462,30 @@ export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
 };
 
+export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
+export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
+export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+
+export type GitHubActionPolicyActor =
+  | { kind: "workspace_app"; installationId: number }
+  | { kind: "personal"; connectionId: string };
+
+export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
+  label: string;
+  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+};
+
+export type GitHubActionPoliciesResponse = {
+  enabled: boolean;
+  actors: GitHubActionPolicyActorState[];
+};
+
+export type UpdateGitHubActionPolicyRequest = {
+  actor: GitHubActionPolicyActor;
+  group: GitHubActionPolicyGroup;
+  decision: GitHubActionPolicyDecision;
+};
+
 export type VerifyPublicGitHubRepositoryRefRequest = {
   url: string;
   ref: string;
@@ -7959,4 +8217,17 @@ export type EnrollTokenExchangeRequest = {
 /** POST /v1/enrollments/token/exchange response (wraps the credential shape). */
 export type EnrollTokenExchangeResponse = {
   credentials: EnrollmentCredentials;
+};
+
+export type ModelConnectionAccessPolicy = {
+  allowedModels: string[] | null;
+  allowedWorkspaces: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  version: number;
+};
+export type ModelConnectionAccessResponse = {
+  policy: ModelConnectionAccessPolicy;
+  models: Array<{ id: string; label: string }>;
+  workspaces: Array<{ id: string; name: string }>;
+  personalWorkspacesSupported: boolean;
 };

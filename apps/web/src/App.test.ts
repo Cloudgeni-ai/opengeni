@@ -994,7 +994,9 @@ describe("organization helpers", () => {
   test("lists every org the subject can reach, default first", () => {
     const context = ctx({
       defaultAccountId: "acc-b",
-      accountGrants: [{ accountId: "acc-a", subjectId: "s", permissions: ["billing:read"] }],
+      accountGrants: [
+        { accountId: "acc-a", subjectId: "s", role: "admin", permissions: ["billing:read"] },
+      ],
     });
     const orgs = organizationsForSubject(context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
     expect(orgs.map((org) => org.accountId)).toEqual(["acc-b", "acc-a"]);
@@ -1582,12 +1584,85 @@ describe("summarizeSessionFailure", () => {
     );
   });
 
+  test("reports an unclaimed failure instead of reusing a previous provider rejection", () => {
+    const failure = {
+      ...event(3, "session.status.changed", {
+        status: "failed",
+        code: "pre_claim_failure",
+        failedSystemUpdateIds: ["update-1"],
+      }),
+      turnId: null,
+    };
+    const summary = summarizeSessionFailure(
+      [
+        {
+          ...event(1, "turn.failed", { code: "provider_safety_refusal", error: "Old rejection" }),
+          turnId: "previous-turn",
+        },
+        event(2, "session.status.changed", { status: "queued" }),
+        failure,
+      ],
+      "failed",
+    );
+    expect(summary.reason).toBe(
+      "The session failed before a turn could start. No error details were recorded.",
+    );
+    expect(summary.safetyRefusal).toBe(false);
+    expect(summary.failedAt).toBe(failure.occurredAt);
+    expect(summary.failedTurnCount).toBe(1);
+  });
+
+  test("keeps the detailed same-turn failure paired with its pre-claim status", () => {
+    const summary = summarizeSessionFailure(
+      [
+        {
+          ...event(1, "turn.failed", {
+            code: "pre_claim_failure",
+            error: "Database connection lost",
+          }),
+          turnId: "failed-turn",
+        },
+        {
+          ...event(2, "session.status.changed", { status: "failed", code: "pre_claim_failure" }),
+          turnId: "failed-turn",
+        },
+      ],
+      "failed",
+    );
+    expect(summary.reason).toBe("Database connection lost");
+    expect(summary.failedTurnCount).toBe(1);
+  });
+
   test("reports nothing for a clean session", () => {
     expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
       reason: null,
+      safetyRefusal: false,
       failedAt: null,
+      failureEventId: null,
       recoveryCount: 0,
       failedTurnCount: 0,
+    });
+  });
+  test("exposes a legacy safety rejection and clears it on a later unrelated failure", () => {
+    const refusal = event(1, "turn.failed", {
+      error: "Retries exhausted.",
+      lastRetryableError:
+        "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(summarizeSessionFailure([refusal], "failed")).toMatchObject({
+      failureEventId: refusal.id,
+      safetyRefusal: true,
+      reason:
+        "The model provider blocked this request. This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(
+      summarizeSessionFailure(
+        [refusal, event(2, "turn.failed", { error: "Connection reset." })],
+        "failed",
+      ),
+    ).toMatchObject({
+      safetyRefusal: false,
+      reason: "Connection reset.",
     });
   });
 });

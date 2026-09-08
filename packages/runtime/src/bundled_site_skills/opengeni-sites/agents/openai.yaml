@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni Sites"
+  short_description: "Build and publish Bun + React Sites"
+  default_prompt: "Use $opengeni-sites to build a polished, editable Site and publish its retained source plus self-contained HTML."

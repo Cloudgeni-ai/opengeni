@@ -1,7 +1,9 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { loadSessionSchedules } from "@/lib/scheduled-tasks";
 // Shared schedules for agent turns and deterministic knowledge-source syncs,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
-import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import {
   BotIcon,
   CalendarClockIcon,
@@ -147,17 +149,19 @@ export function SchedulesRoute({
   workspaceId,
   sourceSessionId,
   focusTaskId,
+  targetSessionId,
 }: {
   workspaceId: string;
   sourceSessionId?: string;
   /** Arrived from a session this task started: reveal that one task on load. */
   focusTaskId?: string;
+  targetSessionId?: string;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const fleet = useMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
+  const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,7 +177,10 @@ export function SchedulesRoute({
   const [expandedTaskIds, setExpandedTaskIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(focusTaskId ? [focusTaskId] : []),
   );
-  const [pausedOpen, setPausedOpen] = useState(false);
+  const [pausedOpen, setPausedOpen] = useState(Boolean(targetSessionId));
+  useEffect(() => {
+    if (targetSessionId) setPausedOpen(true);
+  }, [targetSessionId]);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const [clock, setClock] = useState(() => new Date());
@@ -272,7 +279,9 @@ export function SchedulesRoute({
     setLoading(true);
     try {
       const [next, targetSessions, exactSourceSession] = await Promise.all([
-        client.listScheduledTasks(workspaceId),
+        targetSessionId
+          ? loadSessionSchedules(client, workspaceId, targetSessionId)
+          : client.listScheduledTasks(workspaceId),
         canTargetSessions
           ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
           : Promise.resolve([]),
@@ -335,7 +344,7 @@ export function SchedulesRoute({
     } finally {
       setLoading(false);
     }
-  }, [canTargetSessions, client, loadRunHistory, sourceSessionId, workspaceId]);
+  }, [canTargetSessions, client, loadRunHistory, sourceSessionId, targetSessionId, workspaceId]);
 
   useEffect(() => {
     void refresh();

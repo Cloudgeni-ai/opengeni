@@ -273,6 +273,10 @@ export const McpServerConnectionRefSchema = z
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
+/** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
+export const DEFAULT_MODAL_IMAGE_REF =
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:c3bd17b8841de1bff9bb2777aad422cf8c75de78e2c30f9ac81d0cd6810a1b78";
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -337,6 +341,12 @@ const SettingsSchema = z.object({
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Standards-based OAuth authorization server for external workspace MCP
+  // clients. Opt-in because it creates a new public authentication surface.
+  mcpOauthEnabled: EnvBoolean.default(false),
+  // Forwarded client addresses are ignored by default. Operators may trust an
+  // exact number of proxy hops only when direct access to the API is blocked.
+  mcpOauthTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
@@ -764,11 +774,6 @@ const SettingsSchema = z.object({
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
   // OPENGENI_LAZY_TOOL_SEARCH_ENABLED
   lazyToolSearchEnabled: EnvBoolean.default(true),
-  // credential allocator atomic, workspace-local credential allocation. Default OFF is a
-  // deliberate rolling-deploy fence: migrate + roll every worker first, then
-  // enable. Turning it off restores the legacy sticky selector without a schema
-  // rollback; the additive lease table/cursor columns become inert.
-  codexCredentialLeasingEnabled: EnvBoolean.default(false),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -1324,6 +1329,15 @@ const SettingsSchema = z.object({
   // Rolling browser login-slot compatibility. Repository/deployment default is
   // deliberately legacy; changing to broker is an operator-authorized rollout.
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Query transport is an explicit second-stage rollout. A pre-compatibility
+  // web image understands only fragment bearers, so API replicas must keep
+  // generating fragment links until the compatible web fleet has converged.
+  organizationUserSetupEmailTokenTransport: z.enum(["fragment", "query"]).default("fragment"),
+  // Query-bearing setup links may appear in controller/edge error logs even
+  // when access logs and request tracing are disabled. This explicit operator
+  // confirmation keeps query transport fail closed until that separate sink is
+  // proven sanitized.
+  organizationUserSetupQueryEdgeSanitizationConfirmed: EnvBoolean.default(false),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("OpenGeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
@@ -2488,12 +2502,10 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
     capabilities: {
       reasoning: {
         upstream: "supported",
-        // OpenRouter advertises the reasoning controls, but the catalogue does
-        // not publish this model's accepted effort vocabulary. Preserve that
-        // upstream fact without exposing an unverified runnable selector.
-        runnable: false,
-        efforts: [],
-        defaultEffort: null,
+        // OpenRouter /api/v1/models advertises low and medium for this route.
+        runnable: true,
+        efforts: ["low", "medium"],
+        defaultEffort: "medium",
         required: false,
       },
       functionCalling: { upstream: "supported", runnable: true },
@@ -2858,6 +2870,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
+    mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
@@ -3014,7 +3028,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
-    codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
@@ -3039,7 +3052,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
-    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
+    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF") ?? DEFAULT_MODAL_IMAGE_REF,
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
@@ -3216,6 +3229,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthGithubClientId: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID"),
     managedAuthGithubClientSecret: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET"),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    organizationUserSetupEmailTokenTransport: optional(
+      "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
+    ),
+    organizationUserSetupQueryEdgeSanitizationConfirmed: optional(
+      "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED",
+    ),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
@@ -3287,7 +3306,10 @@ export function allowedFirstPartyMcpToolsForSession(
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
   const allowed = new Set(policy.allowed);
-  return [...(selected ?? policy.default)].filter((tool) => allowed.has(tool));
+  const tools = new Set(selected ?? policy.default);
+  // Existing sessions with pause authority also receive its resume counterpart.
+  if (tools.has("goal_pause")) tools.add("goal_resume");
+  return [...tools].filter((tool) => allowed.has(tool));
 }
 
 /**
@@ -4175,6 +4197,8 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "5.6 Terra";
     case "gpt-5.6-luna":
       return "5.6 Luna";
+    case "gpt-6-astra":
+      return "6 Astra";
     default:
       return null;
   }
@@ -4210,7 +4234,11 @@ function builtinLatencyModesForModel(modelId: string): Array<{
   runnable: boolean;
   billingMultiplierBps?: number;
 }> {
-  if (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("codex/gpt-5.6-")) {
+  if (
+    isBuiltinGpt56ModelId(modelId) ||
+    modelId.startsWith("codex/gpt-5.6-") ||
+    modelId === "codex/gpt-6-astra"
+  ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -4589,7 +4617,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: true,
-          vision: slug.startsWith("gpt-5.6-"),
+          vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
         }),
         ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
           ? {
@@ -6327,6 +6355,14 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
 
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
+  if (
+    settings.organizationUserSetupEmailTokenTransport === "query" &&
+    !settings.organizationUserSetupQueryEdgeSanitizationConfirmed
+  ) {
+    throw new Error(
+      "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true is required when OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=query",
+    );
+  }
   if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
     throw new Error(
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
@@ -6409,6 +6445,24 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
+      );
+    }
+  }
+  if (settings.mcpOauthEnabled) {
+    if (settings.productAccessMode === "configured") {
+      throw new Error(
+        "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+      );
+    }
+    const publicOrigin = canonicalPublicOrigin(settings.publicBaseUrl);
+    if (!publicOrigin) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when OPENGENI_MCP_OAUTH_ENABLED=true",
+      );
+    }
+    if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when OPENGENI_MCP_OAUTH_ENABLED=true outside local/test",
       );
     }
   }

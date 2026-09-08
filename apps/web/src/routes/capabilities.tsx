@@ -1,3 +1,4 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Plugins: the workspace integrations marketplace. A single scrollable
 // page with exactly three sections: Integrations, Connectors, and Bundles.
 // Integrations (Slack, GitHub, Google
@@ -7,19 +8,20 @@
 // still gets exactly one row, with every account listed in its sheet's
 // Connected accounts block. Connectors are MCP servers from the catalog plus
 // workspace-defined Custom APIs: a curated Featured strip, then a large
-// search, kind filters, an "Enabled" strip the user manages daily, a Custom
+// kind filters, an "Enabled" strip the user manages daily, a Custom
 // APIs list, and a logo tile grid over the full catalog (1,000+ items,
-// rendered incrementally). Credentialed MCP servers connect through the
+// rendered in explicit 48-item windows). Credentialed MCP servers connect through the
 // connections spine (OAuth redirect or an API-key form) in a right-hand detail
 // sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
 // and Packs: a named collection of tools and instructions rather than a live
-// connection, so they get their own section, their own search, and one uniform
+// connection, so they get their own section and one uniform
 // row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
-import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
+import { usePacks, useVariableSets } from "@opengeni/react";
 import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
+import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
   Suspense,
@@ -38,6 +40,7 @@ import { BundlesSection } from "@/components/capabilities/bundles-section";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
+  PluginSearch,
   EnabledCapabilitiesSection,
 } from "@/components/capabilities/capability-catalog-sections";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
@@ -160,7 +163,7 @@ export function canManageApiIntegrations(
  * It must wait for the catalog: on first commit Browse is a skeleton, and
  * resolving a 1000+ item catalog then inserts thousands of pixels above the
  * Bundles section, leaving a reader who followed the link stranded in the
- * middle of the Browse grid. It must also fire exactly once, so a later
+ * first Browse window. It must also fire exactly once, so a later
  * loading/settled cycle (a refresh) never yanks the page back.
  */
 export function shouldScrollToDeepLinkedBundles(
@@ -171,15 +174,22 @@ export function shouldScrollToDeepLinkedBundles(
   return initialSection === "packs" && !loading && !alreadyScrolled;
 }
 
-export function CapabilitiesRoute({
-  workspaceId,
-  initialSection,
-  slackLinkToken,
-}: {
+type CapabilitiesRouteProps = {
   workspaceId: string;
   initialSection?: "packs";
   slackLinkToken?: string;
-}) {
+  legacyRedirect?: boolean;
+};
+
+export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
+  return props.legacyRedirect ? (
+    <CapabilitiesLegacyRedirect workspaceId={props.workspaceId} section={props.initialSection} />
+  ) : (
+    <CapabilitiesBody {...props} />
+  );
+}
+
+function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
@@ -234,7 +244,10 @@ export function CapabilitiesRoute({
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
-  const [openIntegration, setOpenIntegration] = useState<string | null>(null);
+  const [openIntegration, setOpenIntegration] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("integration") === "slack" || params.has("slack") ? "slack" : null;
+  });
   const [skillRemoval, setSkillRemoval] = useState<{
     item: CapabilityCatalogItem;
     preview: SkillUninstallPreview;
@@ -272,7 +285,7 @@ export function CapabilitiesRoute({
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
-  const rigs = useRigs({ workspaceId });
+  const rigs = useWorkspaceRigs({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
   // The Connectors surface owns exactly MCP servers and API connectors. Skills,
@@ -503,8 +516,8 @@ export function CapabilitiesRoute({
 
   // Honour the `?section=packs` deep link exactly once, after the catalog has
   // settled. Scrolling on first commit lands in the wrong place: Browse is
-  // still a skeleton then, and resolving a 1000+ item catalog inserts thousands
-  // of pixels above the Bundles section afterwards.
+  // still a skeleton then, and resolving and rendering the first client-side
+  // 48-item window inserts the Browse grid above the Bundles section afterwards.
   useEffect(() => {
     if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
     bundlesScrolled.current = true;
@@ -1702,6 +1715,8 @@ export function CapabilitiesRoute({
           }
         />
 
+        <PluginSearch query={query} onQueryChange={setQuery} />
+
         <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
           <div>
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -1716,23 +1731,29 @@ export function CapabilitiesRoute({
             </p>
           </div>
           <div className="grid gap-2" data-integration-list>
-            {integrations.map((adapter) => {
-              const quickConnect = integrationQuickConnect(adapter.model);
-              return (
-                <IntegrationRow
-                  key={adapter.model.id}
-                  model={adapter.model}
-                  onOpen={() => {
-                    const active = document.activeElement;
-                    integrationOpenerRef.current =
-                      active instanceof HTMLElement && active !== document.body ? active : null;
-                    setOpenIntegration(adapter.model.id);
-                  }}
-                  busy={integrationRowBusy(adapter.model)}
-                  {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
-                />
-              );
-            })}
+            {integrations
+              .filter(({ model }) =>
+                `${model.name} ${model.description}`
+                  .toLowerCase()
+                  .includes(query.trim().toLowerCase()),
+              )
+              .map((adapter) => {
+                const quickConnect = integrationQuickConnect(adapter.model);
+                return (
+                  <IntegrationRow
+                    key={adapter.model.id}
+                    model={adapter.model}
+                    onOpen={() => {
+                      const active = document.activeElement;
+                      integrationOpenerRef.current =
+                        active instanceof HTMLElement && active !== document.body ? active : null;
+                      setOpenIntegration(adapter.model.id);
+                    }}
+                    busy={integrationRowBusy(adapter.model)}
+                    {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
+                  />
+                );
+              })}
           </div>
         </section>
 
@@ -1788,13 +1809,7 @@ export function CapabilitiesRoute({
             </div>
           ) : null}
 
-          <CapabilityDiscoveryControls
-            query={query}
-            filter={filter}
-            counts={counts}
-            onQueryChange={setQuery}
-            onFilterChange={setFilter}
-          />
+          <CapabilityDiscoveryControls filter={filter} counts={counts} onFilterChange={setFilter} />
 
           <div className="mt-8 space-y-10">
             <EnabledCapabilitiesSection
@@ -1849,6 +1864,7 @@ export function CapabilitiesRoute({
 
         <div ref={bundlesRef}>
           <BundlesSection
+            query={query}
             client={client}
             workspaceId={workspaceId}
             connections={connections}

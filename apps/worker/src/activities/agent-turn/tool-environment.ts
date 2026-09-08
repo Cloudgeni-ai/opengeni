@@ -1,4 +1,7 @@
+import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
+  beginConnectorActionExecution,
+  completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   getWorkspaceModelPolicy,
   listWorkspaceGatewayCustomModels,
@@ -6,6 +9,8 @@ import {
   listOrganizationModelProviderCustomModelsForWorkspace,
   organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
+  prepareConnectorActionApproval,
+  previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
@@ -19,16 +24,15 @@ import {
   type OpenGeniRuntime,
   type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
+  type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
 } from "@opengeni/runtime";
 import {
-  authorizeGoogleDrivePublicationAttempt,
   createGoogleDrivePublicationAttemptTool,
   googleDrivePublicationConnectorCall,
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
-import { buildApiIntegrationServersForTurn } from "../api-integrations";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
@@ -40,6 +44,7 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
@@ -439,7 +444,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     );
   };
   const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
-  const apiIntegrationMcpServers = buildApiIntegrationServersForTurn({
+  const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,
     integrations: installedApiIntegrations.filter((integration) =>
       selectedApiIntegrationServerIds.has(integration.serverId),
@@ -531,6 +536,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           },
         ]
       : [];
+  const attemptConnectorActionBindings = [
+    ...googleDriveConnectorBindings,
+    ...githubRestMcp.connectorBindings,
+  ];
+  const connectorActionPolicy: ConnectorActionPolicyHooks = {
+    preview: async (call) =>
+      await previewConnectorActionApproval(db, connectorActionIdentity, call),
+    prepare: async (call) =>
+      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
+    complete: async ({ requestId, outcome }) =>
+      await completeConnectorActionExecution(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        requestId,
+        attemptId: input.attemptId,
+        outcome,
+      }),
+  };
   const attemptToolDefinitions = [
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
@@ -539,6 +563,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         const currentSettings = currentCatalog.settings;
         const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
         const [
+          connectionModelRestrictions,
           policy,
           codexSubscriptionActive,
           xaiSubscriptionActive,
@@ -551,6 +576,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           organizationOpenRouterConnectionActive,
           organizationOpenRouterCustomModels,
         ] = await Promise.all([
+          getWorkspaceConnectionModelRestrictions(
+            db,
+            input.workspaceId,
+            xaiReadinessAuthority?.subjectId ?? credentialSubjectId ?? "worker:model-access",
+            xaiReadinessAuthority?.authoritySnapshot,
+          ),
           getWorkspaceModelPolicy(db, input.workspaceId),
           workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
           xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
@@ -592,6 +623,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
+            connectionModelRestrictions,
             settings: currentSettings,
             policy,
             codexSubscriptionActive,
@@ -734,6 +766,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         resolveCredential,
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
+        refreshOwnedCommand: async (commandId) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          // Read only the existing attempt-owned object. A retained read must
+          // not provision a sandbox or follow an active-pointer change.
+          const owned = (sandboxState.lazyOwnedSandbox?.session ??
+            sandboxState.resolvedSandbox?.established.session ??
+            media.sdkOwnedSandboxSession) as {
+            refreshOwnedCommand?: (id: string) => Promise<boolean>;
+          } | null;
+          return (await owned?.refreshOwnedCommand?.(commandId)) ?? false;
+        },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
         localMcpServers,
@@ -760,30 +804,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
-        ...((googleDrivePublicationTarget && googleDrivePublicationAllowed) ||
-        githubRestMcp.authorizeCodemodeCall
-          ? {
-              attemptToolAuthorize: async (authorization) => {
-                const { call } = authorization;
-                if (
-                  googleDrivePublicationTarget &&
-                  googleDrivePublicationAllowed &&
-                  call.caller.kind === "codemode" &&
-                  call.identity.serverId === "google-drive-publishing" &&
-                  call.identity.toolName === "google_drive_publish_file"
-                ) {
-                  await authorizeGoogleDrivePublicationAttempt({
-                    db,
-                    identity: connectorActionIdentity,
-                    target: googleDrivePublicationTarget,
-                    approvalId: call.operationId,
-                    arguments: call.arguments,
-                  });
-                }
-                await githubRestMcp.authorizeCodemodeCall?.(authorization);
-              },
-            }
-          : {}),
+        connectorActionPolicy,
+        attemptConnectorActionBindings,
       }),
       cancellationSignal,
       async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
@@ -855,11 +877,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     activatePreparedToolEnvironment(eventing.preparedTools);
   }
   return {
-    attemptConnectorActionBindings: [
-      ...googleDriveConnectorBindings,
-      ...githubRestMcp.connectorBindings,
-    ],
-    connectorActionIdentity,
+    attemptConnectorActionBindings,
+    connectorActionPolicy,
     generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,

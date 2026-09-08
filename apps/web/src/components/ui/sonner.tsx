@@ -1,3 +1,4 @@
+import { useAppearance } from "@/lib/appearance";
 import {
   CircleCheckIcon,
   InfoIcon,
@@ -8,9 +9,10 @@ import {
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 
 const Toaster = ({ ...props }: ToasterProps) => {
+  const { resolvedTheme } = useAppearance();
   return (
     <Sonner
-      theme="dark"
+      theme={resolvedTheme}
       className="toaster group"
       icons={{
         success: <CircleCheckIcon className="size-4" />,

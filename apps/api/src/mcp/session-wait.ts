@@ -66,7 +66,10 @@ export const SESSION_WAIT_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.control.paused",
   "session.control.resumed",
+  "session.wait.started",
+  "session.wait.finished",
   "tool.auth_needed",
+  "session.command.finished",
   "credential.auth_needed",
   "rig.setup.failed",
   "goal.set",
@@ -460,7 +463,7 @@ const SUMMARY_FAILURE_CHARS = 500;
 const SUMMARY_RESULT_CHARS = 1_000;
 
 function truncationMarker(droppedChars: number): string {
-  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events for the exact event]`;
+  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events view=debug payloadMode=full for the exact event]`;
 }
 
 function clampSummaryString(value: string, maxChars: number): string {

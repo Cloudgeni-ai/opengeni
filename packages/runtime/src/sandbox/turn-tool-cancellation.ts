@@ -5,6 +5,7 @@ import {
   parseExecBannerSessionId,
 } from "./exec-banner";
 import { RoutingMutationOutcomeUnknownError } from "./routing/routing-session";
+import { sendCommandInput } from "./command-input";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
@@ -82,7 +83,19 @@ type CommandCancellationSession = {
   /** Abort a provider exec-start transport before it returns a session id. */
   cancelPendingExecCommand?(): Promise<void>;
   supportsPty?(): boolean;
+  supportsCommandInput?(providerSessionId: number): boolean;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  /** Whether the provider locator remains controllable from another worker
+   * process after this turn returns. */
+  canAdoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): boolean;
+  adoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): Promise<void>;
+  retainedProcessIdentity?(providerSessionId: number): { id: string } | null;
+  writeStdinForProcessRead?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
     chars?: string;
@@ -337,8 +350,8 @@ function completedCommandBanner(exitCode: number, output: string): string {
   return `Process exited with code ${exitCode}\n\nOutput:\n${output}`;
 }
 
-function runningCommandBanner(sessionId: number, output: string): string {
-  return `Process running with session ID ${sessionId}\n\nOutput:\n${output}`;
+function runningCommandBanner(sessionId: number, output: string, commandId?: string): string {
+  return `Process running with session ID ${sessionId}${commandId ? `\nCommand ID: ${commandId}` : ""}\n\nOutput:\n${output}`;
 }
 
 function appendBoundedOutput(current: string, chunk: string, maxOutputTokens: number): string {
@@ -992,12 +1005,99 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       if (functionTool.name === "write_stdin") this.rawWriteInvoke = functionTool.invoke;
     }
 
-    return structuralTools.map((tool) => {
+    const wrapped = structuralTools.map((tool) => {
       if (tool.type === "function") return this.wrapFunctionTool(tool as FunctionTool, session);
       if (tool.type === "apply_patch") return this.wrapApplyPatchTool(tool as ApplyPatchTool);
       if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
       return tool;
-    }) as unknown as T[];
+    });
+    const shellTool =
+      structuralTools.find((tool) => tool.type === "function" && tool.name === "write_stdin") ??
+      structuralTools.find((tool) => tool.type === "function" && tool.name === "exec_command");
+    if (shellTool && !structuralTools.some((tool) => tool.name === "command_input")) {
+      const write = wrapped.find(
+        (tool) => tool.type === "function" && tool.name === "write_stdin",
+      ) as FunctionTool | undefined;
+      wrapped.push({
+        ...shellTool,
+        type: "function",
+        name: "command_input",
+        description:
+          "Send nonempty stdin to a native command in this owning context using its numeric session ID. Input is a mutation, not an output read; use command_read for retained output. Connected Machine commands and OpenSandbox arbitrary stdin are unsupported.",
+        parameters: {
+          type: "object",
+          properties: {
+            session_id: { type: "integer", minimum: 0 },
+            chars: { type: "string", minLength: 1 },
+          },
+          required: ["session_id", "chars"],
+          additionalProperties: false,
+        },
+        strict: true,
+        invoke: (runContext: unknown, raw: string, details?: ToolCallDetails) =>
+          this.track(async () => {
+            const input = parsedObject(raw);
+            if (
+              !input ||
+              typeof input.session_id !== "number" ||
+              !Number.isSafeInteger(input.session_id) ||
+              input.session_id < 0 ||
+              typeof input.chars !== "string" ||
+              !input.chars
+            ) {
+              return "command_input failed: provide a native session_id and nonempty chars; use command_read for observation";
+            }
+            try {
+              if (session?.supportsCommandInput?.(input.session_id) === false) {
+                return "command_input unsupported: this retained provider command has no arbitrary stdin capability";
+              }
+              if (
+                !session?.supportsCommandInput &&
+                (await session?.commandCancellationTransport?.()) === "remote_operation"
+              ) {
+                return "command_input unsupported: Connected Machine commands have no stdin transport";
+              }
+              if (write) {
+                const result = await sendCommandInput(
+                  {
+                    writeStdinForProcessMutation: async (args) => {
+                      const output = await write.invoke(
+                        runContext,
+                        JSON.stringify({
+                          session_id: args.sessionId,
+                          chars: args.chars,
+                          yield_time_ms: args.yieldTimeMs,
+                        }),
+                        details,
+                      );
+                      if (typeof output !== "string")
+                        throw new Error("Native stdin returned an invalid command result");
+                      return output;
+                    },
+                  },
+                  { providerSessionId: input.session_id, chars: input.chars },
+                );
+                return result.supported
+                  ? result.result
+                  : `command_input unsupported: ${result.reason}`;
+              }
+              if (session) {
+                const result = await sendCommandInput(session, {
+                  providerSessionId: input.session_id,
+                  chars: input.chars,
+                });
+                return result.supported
+                  ? result.result
+                  : `command_input unsupported: ${result.reason}`;
+              }
+              return "command_input unsupported: no owning native stdin capability";
+            } catch (error) {
+              return renderDirectToolFault(error, input.session_id);
+            }
+          }),
+      });
+    }
+    return wrapped as unknown as T[];
   }
 
   private wrapFunctionTool(
@@ -1105,12 +1205,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               pendingStart?.settle();
               return output;
             }
-            const sessionId = useRemoteOpCancellation ? null : parseExecBannerSessionId(output);
+            const sessionId = parseExecBannerSessionId(output);
             if (sessionId !== null) {
               const state: ActiveShellSession = {
                 sessionId,
-                markerPath,
-                token,
+                markerPath: useRemoteOpCancellation ? null : markerPath,
+                token: useRemoteOpCancellation ? null : token,
                 interactive,
                 runContext,
                 execInvoke: tool.invoke,
@@ -1120,14 +1220,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identityValidated: false,
                 cancellation: null,
               };
-              // A routing session exposes a retained locator only after both
-              // provider retention and the session-owned background-command
-              // adoption are durable. That commit transfers cancellation
-              // ownership away from this turn, so ordinary completion and
-              // Steer must not drain it.
-              if (state.processSession?.hasRetainedProcess?.(sessionId) !== true) {
-                this.shellSessions.set(sessionId, state);
-              }
+              // Provider retention preserves the physical process but does not
+              // transfer it to the session. Keep it turn-owned and cancellable
+              // throughout eager waiting; successful adoption removes it below
+              // immediately before the running receipt is returned.
+              this.shellSessions.set(sessionId, state);
               pendingStart?.settle();
               return await this.awaitModelFacingShellResult({
                 state,
@@ -1219,7 +1316,28 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 this.shellSessions.delete(sessionId);
               }
             }
-            const state = sessionId === null ? null : this.shellSessions.get(sessionId);
+            // A read of an adopted command does not reacquire cancellation
+            // ownership. Keep only a temporary eager-read context, outside the
+            // turn's drain registry.
+            const state =
+              sessionId === null
+                ? null
+                : (this.shellSessions.get(sessionId) ??
+                  (directProcessSession
+                    ? {
+                        sessionId,
+                        markerPath: null,
+                        token: null,
+                        interactive: true,
+                        runContext,
+                        execInvoke: this.rawExecInvoke ?? tool.invoke,
+                        writeInvoke: tool.invoke,
+                        processSession: directProcessSession,
+                        identity: null,
+                        identityValidated: false,
+                        cancellation: null,
+                      }
+                    : null));
             return state && typeof output === "string"
               ? await this.awaitModelFacingShellResult({
                   state,
@@ -1251,6 +1369,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     maxOutputTokens: number;
   }): Promise<string> {
     const { state, startedAt, waitMs, maxOutputTokens } = input;
+    const canAdoptInBackground =
+      state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
     if (isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
@@ -1265,39 +1385,47 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
 
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
-    while (performance.now() - startedAt < waitMs) {
+    for (;;) {
+      if (performance.now() - startedAt >= waitMs) break;
       if (this.cancelled) throw cancellationError(this.reason);
-      if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) break;
+      if (
+        !state.writeInvoke &&
+        !state.processSession?.writeStdinForProcessRead &&
+        !state.processSession?.writeStdinForProcessControl
+      ) {
+        throw new Error(
+          "The retained command cannot be observed for its requested foreground wait",
+        );
+      }
       const remainingMs = waitMs - (performance.now() - startedAt);
       if (remainingMs <= 0) break;
       const yieldTimeMs = Math.min(TURN_PROVIDER_YIELD_SLICE_MS, Math.ceil(remainingMs));
-      let next: unknown;
-      try {
-        next = state.processSession?.writeStdinForProcessControl
-          ? await state.processSession.writeStdinForProcessControl({
-              sessionId: state.sessionId,
+      // A failed read is neither terminal proof nor permission to shorten the
+      // requested wait and adopt early. Keep the exact turn-owned registration
+      // for cancellation; never replay the already-started command.
+      const read =
+        state.processSession?.writeStdinForProcessRead ??
+        state.processSession?.writeStdinForProcessControl;
+      const next = read
+        ? await read.call(state.processSession, {
+            sessionId: state.sessionId,
+            chars: "",
+            yieldTimeMs,
+            maxOutputTokens,
+          })
+        : await state.writeInvoke!(
+            state.runContext,
+            JSON.stringify({
+              session_id: state.sessionId,
               chars: "",
-              yieldTimeMs,
-              maxOutputTokens,
-            })
-          : await state.writeInvoke!(
-              state.runContext,
-              JSON.stringify({
-                session_id: state.sessionId,
-                chars: "",
-                yield_time_ms: yieldTimeMs,
-                max_output_tokens: maxOutputTokens,
-              }),
-              undefined,
-            );
-      } catch {
-        // The initial provider operation already returned a valid retained
-        // process. A failed eager observation is not evidence that it stopped
-        // and must not turn a successful exec into an outcome-unknown failure.
-        break;
-      }
+              yield_time_ms: yieldTimeMs,
+              max_output_tokens: maxOutputTokens,
+            }),
+            undefined,
+          );
       if (this.cancelled) throw cancellationError(this.reason);
-      if (typeof next !== "string") break;
+      if (typeof next !== "string")
+        throw new Error("Retained command read returned no provider status");
       if (isExecSessionLostBanner(next, state.sessionId)) {
         this.shellSessions.delete(state.sessionId);
         return next;
@@ -1309,13 +1437,29 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         this.shellSessions.delete(state.sessionId);
         return completedCommandBanner(exitCode, output);
       }
-      if (parseExecBannerSessionId(next) !== state.sessionId) break;
+      if (parseExecBannerSessionId(next) !== state.sessionId) {
+        throw new Error("Retained command read returned no matching provider status");
+      }
 
       // A conforming provider blocks for the requested slice. Avoid a hot loop
       // when an adapter returns a running receipt immediately.
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
     }
-    return runningCommandBanner(state.sessionId, output);
+    if (!canAdoptInBackground) {
+      // Docker/local handles belong to this exact worker session. Keep the
+      // shell registered with the turn fence: finalization must stop and settle
+      // it. Returning control is not durable background-command adoption.
+      return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
+    }
+    if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
+      await state.processSession.adoptRetainedProcessAsBackgroundCommand(state.sessionId);
+      this.shellSessions.delete(state.sessionId);
+    }
+    return runningCommandBanner(
+      state.sessionId,
+      output,
+      state.processSession?.retainedProcessIdentity?.(state.sessionId)?.id,
+    );
   }
 
   private wrapApplyPatchTool(tool: ApplyPatchTool): ApplyPatchTool {

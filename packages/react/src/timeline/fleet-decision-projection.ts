@@ -8,6 +8,7 @@ const FLEET_ACTUAL_REASONS = [
   "rotation",
   "active",
   "all_capped",
+  "allocator_disabled",
   "none",
 ] as const;
 const FLEET_SHADOW_OUTCOMES = ["selected", "paced", "none"] as const;
@@ -334,7 +335,7 @@ function fleetDecisionSemanticsAreConsistent(input: {
     input.actualOutcome === "selected"
       ? ["lease_reused", "pin", "rotation", "active"].includes(input.actualReason)
       : input.actualOutcome === "waiting"
-        ? input.actualReason === "all_capped"
+        ? ["all_capped", "allocator_disabled"].includes(input.actualReason)
         : input.actualReason === "none";
   const shadowConsistent =
     input.shadowOutcome === "selected"

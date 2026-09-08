@@ -462,6 +462,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 
 // Components
 export { ChatComposer } from "./components/chat-composer";
+export { SessionConversation } from "./components/session-conversation";
+export type { SessionConversationProps } from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
@@ -475,12 +477,12 @@ export type { ModelPickerProps } from "./components/model-picker";
 export {
   BillingClassMark,
   ModelPolicyPicker,
-  ModelPolicyPickerMenu,
   PickerAnimatedPage,
   PickerBackHeader,
   PickerNavRow,
   defaultModelPolicyPickerMessages,
 } from "./components/model-policy-picker";
+export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,
@@ -498,6 +500,7 @@ export {
   labelLatencyMode,
   labelReasoningEffort,
   payerSummaryForModel,
+  modelUsesCredits,
   projectClientModelRows,
   projectPickerRows,
   runnableLatencyModesForModel,
@@ -600,8 +603,10 @@ export {
   formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
+  presentFailure,
   isCreditExhaustion,
   stringifyPayload,
   truncate,
   tryParseJson,
 } from "./lib/format";
+export { SessionCommandsPanel } from "./components/session-commands-panel";

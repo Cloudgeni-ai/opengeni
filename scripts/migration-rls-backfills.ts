@@ -26,9 +26,12 @@
  * Alternatives this analyzer also accepts: setting the tenant GUC around the
  * statement, disabling RLS on the table for the window, or activating a policy
  * that is pinned to the exact table owner and a transaction-local capability.
+ * The latter may be set inside the statement or by the exact governed batched-
+ * migration runner contract before the statement executes.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { batchedBackfillTransactionLocalSetting } from "../packages/db/src/migration-runner-settings";
 
 export const MIGRATIONS_DIR = "packages/db/drizzle";
 
@@ -374,6 +377,7 @@ function ownerCapabilityPolicy(statement: string): OwnerCapabilityPolicy | null 
 function activatedOwnerCapabilityTables(
   statement: string,
   policies: ReadonlyMap<string, OwnerCapabilityPolicy>,
+  runnerCapabilityGuc?: string,
 ): Set<string> {
   const activeGucs = new Set<string>();
   for (const match of statement.matchAll(
@@ -381,6 +385,7 @@ function activatedOwnerCapabilityTables(
   )) {
     activeGucs.add(match[1]!);
   }
+  if (runnerCapabilityGuc) activeGucs.add(runnerCapabilityGuc);
   return new Set(
     [...policies.values()]
       .filter((policy) => activeGucs.has(policy.guc))
@@ -405,6 +410,12 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
 
   for (const file of files) {
     const raw = readFileSync(join(migrationsDir, file), "utf8");
+    const runnerSetting = batchedBackfillTransactionLocalSetting(file);
+    const runnerCapabilityGuc =
+      runnerSetting?.value === "1" &&
+      /^-- deployment-mode: (?:rolling|maintenance)\r?\n-- opengeni:batched-backfill\b/u.test(raw)
+        ? runnerSetting.guc.slice("opengeni.".length)
+        : undefined;
     // Owner-only posture window and tenant GUC state are per-file: the runner
     // executes one file as one implicit transaction.
     const unforced = new Set<string>();
@@ -497,7 +508,11 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       if (tenantGuc) continue;
 
       const executable = isBlock ? stripRoutineBodies(statement) : statement;
-      const ownerVisible = activatedOwnerCapabilityTables(executable, ownerCapabilityPolicies);
+      const ownerVisible = activatedOwnerCapabilityTables(
+        executable,
+        ownerCapabilityPolicies,
+        runnerCapabilityGuc,
+      );
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&

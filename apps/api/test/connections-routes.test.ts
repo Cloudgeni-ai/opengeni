@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -18,6 +18,7 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import {
+  createApiKey,
   createConnection,
   createDb,
   decryptEnvironmentValue,
@@ -1846,6 +1847,140 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth start/callback supports legacy metadata behind a protected API catch-all", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const upstreamMcp = startTestMcpServer();
+    const tokenRequests: URLSearchParams[] = [];
+    const metadataRequests: string[] = [];
+    let origin = "";
+    const legacy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/mcp") {
+          if (request.headers.get("authorization") !== "Bearer legacy-access-token") {
+            return new Response(JSON.stringify({ error: "invalid_token" }), {
+              status: 401,
+              headers: {
+                "content-type": "application/json",
+                "www-authenticate": 'Bearer error="invalid_token", scope="documents:read"',
+              },
+            });
+          }
+          return await fetch(upstreamMcp.url, {
+            method: request.method,
+            headers: request.headers,
+            ...(request.method === "GET" || request.method === "HEAD"
+              ? {}
+              : { body: await request.arrayBuffer() }),
+          });
+        }
+        if (url.pathname.startsWith("/mcp/")) {
+          return new Response("protected API route", { status: 401 });
+        }
+        if (url.pathname.includes("oauth-protected-resource")) {
+          metadataRequests.push(url.pathname);
+          return new Response("not found", { status: 404 });
+        }
+        if (url.pathname === "/.well-known/oauth-authorization-server") {
+          metadataRequests.push(url.pathname);
+          return Response.json({
+            issuer: origin,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+            client_id_metadata_document_supported: true,
+          });
+        }
+        if (url.pathname === "/token") {
+          const body = new URLSearchParams(await request.text());
+          tokenRequests.push(body);
+          return Response.json({
+            access_token: "legacy-access-token",
+            refresh_token: "legacy-refresh-token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: body.get("scope") ?? "documents:read",
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${legacy.port}`;
+    const mcpUrl = `${origin}/mcp`;
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "legacy.example.com",
+            mcpUrl,
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as { state: string; authorizationUrl: string };
+      const authorizationUrl = new URL(body.authorizationUrl);
+      expect(authorizationUrl.searchParams.get("resource")).toBeNull();
+      expect(authorizationUrl.searchParams.get("scope")).toBe("documents:read");
+      expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(state).toMatchObject({
+        discoveryMode: "legacy_2025_03_26_metadata",
+        resource: mcpUrl,
+        resourceParameterSupported: false,
+        authorizationServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+      });
+      expect(state.protectedResourceMetadataUrl).toBeUndefined();
+      expect(state.discoveryMetadataSha256).toMatch(/^[0-9a-f]{64}$/);
+
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(tokenRequests).toHaveLength(1);
+      expect(tokenRequests[0]!.get("resource")).toBeNull();
+      expect(metadataRequests).toEqual([
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+      ]);
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "legacy.example.com",
+        kind: "oauth2",
+        allowSubjectOwned: false,
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "legacy-access-token",
+        resource: mcpUrl,
+        resource_parameter_supported: false,
+      });
+      expect(loaded?.metadata.oauthDiscovery).toMatchObject({
+        mode: "legacy_2025_03_26_metadata",
+        resource: mcpUrl,
+        issuer: `${origin}/`,
+        authorizationServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+      });
+      expect(loaded?.metadata.oauthDiscovery).not.toHaveProperty("protectedResourceMetadataUrl");
+    } finally {
+      legacy.stop(true);
+      upstreamMcp.close();
+    }
+  });
+
   test("oauth start fails promptly with a structured stage when metadata streaming stalls", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1922,6 +2057,93 @@ describe("connections routes", () => {
     }
   });
 
+  test.each([
+    ["protected_resource_metadata", 403, false],
+    ["protected_resource_metadata", 429, true],
+    ["protected_resource_metadata", 503, true],
+    ["authorization_server_metadata", 401, false],
+    ["authorization_server_metadata", 403, false],
+    ["authorization_server_metadata", 503, true],
+  ] as const)(
+    "oauth start reports %s HTTP %s (retryable: %s)",
+    async (stage, status, retryable) => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      let origin = "";
+      const requestedPaths: string[] = [];
+      const source = Bun.serve({
+        port: 0,
+        fetch(request) {
+          const path = new URL(request.url).pathname;
+          requestedPaths.push(path);
+          if (path === "/mcp") {
+            return new Response(null, {
+              status: 401,
+              headers: {
+                "www-authenticate": `Bearer resource_metadata="${origin}/prm"`,
+              },
+            });
+          }
+          if (path === "/prm") {
+            if (stage === "authorization_server_metadata") {
+              return Response.json({ authorization_servers: [origin] });
+            }
+            return new Response("provider challenge private diagnostic", { status });
+          }
+          if (path === "/.well-known/oauth-authorization-server") {
+            return new Response("provider challenge private diagnostic", { status });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${source.port}`;
+      try {
+        const response = await app({ environment: "test" }).request(
+          `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+          {
+            method: "POST",
+            headers: {
+              authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              providerDomain: "denied.example.test",
+              mcpUrl: `${origin}/mcp`,
+            }),
+          },
+        );
+        const body = (await response.json()) as {
+          error: {
+            code: string;
+            message: string;
+            retryable: boolean;
+            details?: Record<string, string>;
+          };
+        };
+
+        expect(response.status).toBe(502);
+        expect(body.error).toMatchObject({
+          code: "upstream_unavailable",
+          message: `OAuth provider returned HTTP ${status} during ${stage === "protected_resource_metadata" ? "protected-resource" : "authorization-server"} discovery.`,
+          retryable,
+          details: {
+            oauthStage: stage,
+            oauthReason: `upstream_http_${status}`,
+          },
+        });
+        expect(JSON.stringify(body)).not.toContain(origin);
+        expect(JSON.stringify(body)).not.toContain("private diagnostic");
+        expect(requestedPaths).toEqual(
+          stage === "protected_resource_metadata"
+            ? ["/mcp", "/prm"]
+            : ["/mcp", "/prm", "/.well-known/oauth-authorization-server"],
+        );
+      } finally {
+        source.stop(true);
+      }
+    },
+  );
+
   test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1985,6 +2207,73 @@ describe("connections routes", () => {
       });
       expect(loaded?.metadata.mcpToolsVerification).toMatchObject({
         status: "ok",
+      });
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth callback still writes a workspace connection for an API key that can start OAuth", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = `ogk_${randomUUID().replaceAll("-", "")}`;
+    const apiKey = await createApiKey(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      name: "runtime",
+      prefix: token.slice(0, 14),
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["connections:read", "connections:write", "workspace:read"],
+    });
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "linear.app",
+            mcpUrl: mcp.url,
+            ownership: "workspace",
+            returnPath: "/integrations?connect_item=linear",
+          }),
+        },
+      );
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as { state: string };
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(state.subjectId).toBe(`api_key:${apiKey.id}`);
+      expect(state.ownership).toBe("workspace");
+
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(callback.headers.get("location")).not.toContain("integration_oauth=error");
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        subjectId: `api_key:${apiKey.id}`,
+        allowSubjectOwned: false,
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "mcp-access-token",
+        mcp_url: mcp.url,
       });
     } finally {
       mcp.close();
@@ -2419,7 +2708,7 @@ describe("connections routes", () => {
             scopes_supported: ["documents:read"],
           });
         }
-        if (url.pathname === "/as") {
+        if (url.pathname === "/.well-known/oauth-authorization-server/as") {
           return Response.json({
             issuer: `${origin}/as`,
             authorization_endpoint: `${origin}/authorize`,
@@ -2468,12 +2757,6 @@ describe("connections routes", () => {
         "/mcp",
         "/prm",
         "/.well-known/oauth-authorization-server/as",
-        "/as/.well-known/oauth-authorization-server",
-        "/.well-known/oauth-authorization-server",
-        "/.well-known/openid-configuration/as",
-        "/as/.well-known/openid-configuration",
-        "/.well-known/openid-configuration",
-        "/as",
         "/register",
       ]);
       expect(registrations).toEqual([

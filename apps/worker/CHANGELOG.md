@@ -1,5 +1,172 @@
 # @opengeni/worker-bundle
 
+## 0.27.0
+
+### Minor Changes
+
+- fa12951: Separate command interaction from session history. Add bounded retained-output command reads and use the same operation for command waits. Terminal reads observe completion and suppress only still-pending completion notifications; running reads, claimed notifications, and historical tool results remain unchanged.
+
+  Make session history conversation-first with complete-message pagination and explicit results, tools, and debug views. Preserve cursor detail selection, provide oversized-message continuation, and keep queued prompts distinct from processed conversation. Update concise model guidance for the new surfaces.
+
+  `command_wait` now uses `waitSeconds`, an output cursor, and the same flat result as `command_read`; clients using the previous command wrapper must update. Apply the additive command-observation migration before starting the new readers.
+
+- 0a81cc8: Add durable workspace pause/resume timers with duration controls, countdowns,
+  manual cancellation, and idempotent worker execution. Migration 0420 requires a
+  maintenance deployment: drain old writers and deploy matching API/workers.
+
+### Patch Changes
+
+- 22a6704: Correct oversized session-message continuation with bounded source slicing, preserve typed runner terminal failures during command observation, and keep retained command output readable when live refresh encounters a recognized temporary transport failure. Refresh fallback rechecks API authorization and explicitly marks unavailable freshness; it does not mask integrity or authorization errors.
+- 8db607e: Make GitHub connector writes capability-first when no explicit workspace action policy matches, while preserving explicit Allow, Ask, and Block decisions.
+- d8b0012: Keep parked child waits and active goals from reporting successful completion to their parent. Preserve durable wake deadlines and actual terminal result delivery.
+- ac7e07c: Retire background-command tracking after a connected agent instance is replaced, explicitly stopped, or revoked. Preserve historical records without waking old sessions, drain cleanup batches promptly, and scope session stopping counts to the requested trees.
+- c04711c: Retain PostgreSQL SQLSTATE and existing database identifier diagnostics for otherwise unclassified turn failures, without changing their error text or retry behavior.
+- ba9e5a4: Preserve the exact causal human on child lifecycle follow-up turns so personal session resources remain admissible, isolate child/goal causal claims from complete Agent Steer identities and malformed authority-bearing updates, keep atomic pre-claim database failures—including replay-compatible disposition-only results—retryable instead of terminally discarding pending work, and provide a root-only, failure-epoch-fenced repair whose idempotency receipt binds the exact recovery authority for sessions terminalized by older workers.
+- c69ad5f: Preserve externally managed history across opaque compaction checkpoints and verify conversation persistence before continuation. Reject shifted history prefixes and conflicting saved items instead of silently losing completed work.
+- 6e167eb: Preserve the supplied admission failure message and classified cause on the durable session failure event when no turn could be claimed.
+- 3673900: Preserve receipt wakeups received during quiescence reconciliation so an interrupted session admits its queued replacement. Retain historical workflow behavior behind a Temporal patch marker.
+- 732bece: Park sandbox rotation recovery until durable lease progress, and wake the exact waiting turn when provider loss, failed warming, reaping, or teardown release ends its rotation wait.
+- b1d3673: Add the `@opengeni/sdk/chat` facade (`OpenGeni`, `Chat`, `createChatHandler`, Vercel AI SDK and OpenAI adapters) and the `@opengeni/react/chat` drop-in component. Sessions gain `agentAccess`, an opaque `endUser` label, and `memoryScope`, enforced in the session-authorization seam so one workspace per customer can hold isolated, per-user, or shared chats. Organization API keys gain `access: "read"` and `GET /v1/organizations/:id/sessions`. Close the tool-widening paths: child tool selection, agent tool-policy updates, scheduled-task sessions, and the Codemode SDK proxy can no longer exceed the creating session.
+
+  Private-memory identities use bounded hashes of exact source/user tuples. Correction, archival, and replacement enforce the private writable scope. Chat reload restores unresolved approvals and questions, and the chat component uses the complete human-input form with multiple selections and Other answers.
+
+  Session-scoped discovery preserves the embedding host's allowlist. Responses streams emit the complete message/content lifecycle with stable per-response IDs, including incomplete settlement for human waits and cancellation. Streaming text preserves the same paragraph separators as the final reply.
+
+- d8a70ec: Unify first-party and integration tools behind one workspace gateway for MCP, model execution, Codemode, SDK, and browser clients; require host-confirmed SDK approval for human-gated model calls, keep Codemode claims live through gateway preparation, and deduplicate reclaimed tool-created events; add opt-in resource-bound MCP OAuth; ship governed self-contained HTML Sites with retained source, version rollback, an exact-version direct-call tool allowlist, and a native Site-authoring Skill; and default Modal self-hosts to OpenGeni's public digest-pinned desktop runtime image.
+- Updated dependencies [7dac7e3]
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [8db607e]
+- Updated dependencies [582dc62]
+- Updated dependencies [d8b0012]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [694c1ff]
+- Updated dependencies [5cc0aac]
+- Updated dependencies [341a7f6]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [ac7e07c]
+- Updated dependencies [09de906]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [52cf486]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [1fc0889]
+- Updated dependencies [ba9e5a4]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [123a72a]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [712967e]
+- Updated dependencies [0c39126]
+- Updated dependencies [ba890d1]
+- Updated dependencies [0c39126]
+- Updated dependencies [b1d479b]
+- Updated dependencies [7772511]
+- Updated dependencies [64c7c5c]
+- Updated dependencies [ccbf227]
+- Updated dependencies [6e167eb]
+- Updated dependencies [575af5b]
+- Updated dependencies [66326b3]
+- Updated dependencies [b43a821]
+- Updated dependencies [b272df2]
+- Updated dependencies [eac6a61]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [732bece]
+- Updated dependencies [19c51e2]
+- Updated dependencies [baa1c36]
+- Updated dependencies [380bba5]
+- Updated dependencies [cda46e8]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [92cdc31]
+- Updated dependencies [9e412ef]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/runtime@2.4.0
+  - @opengeni/contracts@2.14.0
+  - @opengeni/db@4.1.0
+  - @opengeni/core@2.8.0
+  - @opengeni/codex@0.2.22
+  - @opengeni/config@1.0.1
+  - @opengeni/network@0.3.1
+  - @opengeni/codemode@0.5.0
+  - @opengeni/storage@0.2.121
+  - @opengeni/xai-subscription@0.1.4
+  - @opengeni/documents@0.8.20
+  - @opengeni/events@0.4.18
+  - @opengeni/github@0.7.4
+  - @opengeni/observability@0.8.20
+  - @opengeni/capabilities@0.3.3
+
+## 0.26.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/db@4.0.0
+  - @opengeni/runtime@2.3.0
+  - @opengeni/core@2.7.5
+  - @opengeni/config@1.0.0
+  - @opengeni/capabilities@0.3.2
+  - @opengeni/codex@0.2.21
+  - @opengeni/github@0.7.3
+  - @opengeni/xai-subscription@0.1.3
+  - @opengeni/codemode@0.4.27
+  - @opengeni/documents@0.8.19
+  - @opengeni/events@0.4.17
+  - @opengeni/observability@0.8.19
+  - @opengeni/storage@0.2.120
+
+## 0.25.1
+
+### Patch Changes
+
+- Updated dependencies [599a64e]
+  - @opengeni/runtime@2.2.1
+  - @opengeni/core@2.7.4
+
+## 0.25.0
+
+### Minor Changes
+
+- b420912: Show the exact model-visible system instructions, tools, skills, and token counts in the session Debug inspector.
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+- Updated dependencies [fab39d2]
+- Updated dependencies [d8f84ac]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/core@2.7.3
+  - @opengeni/runtime@2.2.0
+  - @opengeni/db@3.9.0
+  - @opengeni/codemode@0.4.26
+  - @opengeni/config@0.23.3
+  - @opengeni/documents@0.8.18
+  - @opengeni/events@0.4.16
+  - @opengeni/github@0.7.2
+  - @opengeni/observability@0.8.18
+  - @opengeni/storage@0.2.119
+
 ## 0.24.2
 
 ### Patch Changes

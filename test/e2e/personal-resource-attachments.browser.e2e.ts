@@ -40,7 +40,7 @@ describe("personal resource attachments in Chromium", () => {
       },
     );
     browser = await chromium.launch({ headless: true });
-    browserContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    browserContext = await browser.newContext({ viewport: { width: 375, height: 812 } });
     page = await browserContext.newPage();
     await page.goto(`${baseUrl}/test/personal-resource-attachments.html`, {
       waitUntil: "networkidle",
@@ -51,17 +51,10 @@ describe("personal resource attachments in Chromium", () => {
     await Promise.allSettled([browserContext?.close(), browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("create and Send/Steer use automatic message-only authority plus exact shared warning", async () => {
+  test("create and Send/Steer retain message-only default with explicit ongoing choice", async () => {
     const control = page.locator("[data-personal-resource-attachment]");
-    expect(await control.first().ariaSnapshot()).toContain("Private deploy keys");
-    expect(await control.first().locator("fieldset").count()).toBe(0);
-    expect(await control.first().getByText("Your resource access").count()).toBe(0);
-    expect(await control.first().getByRole("radiogroup").count()).toBe(0);
-    expect(await control.first().getByRole("radio").count()).toBe(0);
-    expect(await control.first().getByRole("checkbox").count()).toBe(0);
+    expect(await control.count()).toBe(2);
     expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(false);
-    expect(await control.first().textContent()).toContain("used only for messages you send");
-    expect(await control.first().textContent()).toContain("cannot use your credential");
     await page.getByRole("button", { name: "Create session" }).click();
     expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}")).toEqual({
       mode: "once",
@@ -85,6 +78,58 @@ describe("personal resource attachments in Chromium", () => {
       sharedOutputWarningVersion: 1,
     });
 
+    const setup = page.getByRole("region", { name: "New session create" });
+    const existing = page.getByRole("region", { name: "Existing session Send and Steer" });
+    await setup.getByRole("radio", { name: "For my ongoing work in this session" }).check();
+    expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}").mode).toBe(
+      "once",
+    );
+    await page.getByRole("button", { name: "Create session", exact: true }).click();
+    expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}").mode).toBe(
+      "session",
+    );
+    expect(
+      await existing.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
+    ).toBe(true);
+    expect(
+      await setup.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
+    ).toBe(true);
+    await existing.getByRole("radio", { name: "For my ongoing work in this session" }).check();
+    expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
+      "once",
+    );
+    expect(await existing.getByTestId("failed-session-banner").textContent()).toContain(
+      "matching personal-resource grant required",
+    );
+    expect(await existing.getByText("The child reports that its reviewed PR merged.").count()).toBe(
+      1,
+    );
+    await existing.getByRole("button", { name: "Continue", exact: true }).click();
+    expect(await existing.getByTestId("failed-session-banner").count()).toBe(1);
+    expect(await existing.getByText("The child reports that its reviewed PR merged.").count()).toBe(
+      1,
+    );
+    expect(
+      JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}"),
+    ).toMatchObject({ delivery: "continue", mode: "session", expectedAuthorityEpoch: 3 });
+    expect(
+      await existing.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
+    ).toBe(true);
+    await existing.getByRole("button", { name: "Send", exact: true }).click();
+    expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
+      "once",
+    );
+    await page.screenshot({
+      fullPage: true,
+      path: `${process.env.TMPDIR ?? "/tmp"}/personal-scope-mobile.png`,
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.screenshot({
+      fullPage: true,
+      path: `${process.env.TMPDIR ?? "/tmp"}/personal-scope-desktop.png`,
+    });
+    await page.setViewportSize({ width: 375, height: 812 });
+    await existing.getByRole("radio", { name: "This message only", exact: true }).check();
     const axe = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
       .analyze();
@@ -92,6 +137,78 @@ describe("personal resource attachments in Chromium", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
+  }, 60_000);
+
+  test("optional scope chunk loading and failure keep the composer usable and authorization unchanged", async () => {
+    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    try {
+      const loadingPage = await context.newPage();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await loadingPage.route(
+        "**/src/components/personal-resource-attachment-control.tsx*",
+        async (route) => {
+          await held;
+          await route.continue();
+        },
+      );
+      await loadingPage.goto(`${baseUrl}/test/personal-resource-attachments.html`, {
+        waitUntil: "domcontentloaded",
+      });
+      await loadingPage
+        .getByRole("status")
+        .filter({ hasText: "Loading personal resource options" })
+        .first()
+        .waitFor();
+      expect(await loadingPage.getByRole("button", { name: "Send", exact: true }).isEnabled()).toBe(
+        true,
+      );
+      expect(await loadingPage.getByTestId("send-receipt").textContent()).toBe("");
+      release();
+      await loadingPage
+        .getByRole("radio", { name: "This message only", exact: true })
+        .first()
+        .waitFor();
+      expect(
+        await loadingPage
+          .getByRole("radio", { name: "This message only", exact: true })
+          .first()
+          .isChecked(),
+      ).toBe(true);
+      await loadingPage.close();
+      const failedPage = await context.newPage();
+      await failedPage.route(
+        "**/src/components/personal-resource-attachment-control.tsx*",
+        (route) => route.abort("failed"),
+      );
+      await failedPage.goto(`${baseUrl}/test/personal-resource-attachments.html`, {
+        waitUntil: "domcontentloaded",
+      });
+      await failedPage
+        .getByRole("alert")
+        .filter({ hasText: "Personal resource options are unavailable" })
+        .first()
+        .waitFor();
+      expect(await failedPage.getByRole("button", { name: "Send", exact: true }).isEnabled()).toBe(
+        true,
+      );
+      expect(await failedPage.getByTestId("send-receipt").textContent()).toBe("");
+      await failedPage.screenshot({
+        fullPage: true,
+        path: `${process.env.TMPDIR ?? "/tmp"}/personal-scope-fallback.png`,
+      });
+      await failedPage.getByRole("button", { name: "Truncate authority catalog" }).click();
+      expect(await failedPage.getByRole("button", { name: "Send", exact: true }).isDisabled()).toBe(
+        true,
+      );
+      expect(await failedPage.getByRole("alert").first().textContent()).toContain(
+        "selected resource is unavailable",
+      );
+    } finally {
+      await context.close();
+    }
   }, 60_000);
 
   test("stale epoch reloads automatically while source loss and principal transition fence state", async () => {

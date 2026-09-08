@@ -50,6 +50,86 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  test("conversation paints a matched surface on light hosts in both themes", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    try {
+      const colors: string[] = [];
+      for (const theme of ["light", "dark"]) {
+        await page.goto(`${baseUrl}/conversation-layout.html?theme=${theme}`);
+        const reply = page.getByText("Readable assistant reply in the selected theme.", {
+          exact: true,
+        });
+        await reply.waitFor();
+        const styles = await reply.evaluate((element) => {
+          const conversation = element.closest("[data-og-conversation]")!;
+          return {
+            foreground: getComputedStyle(element).color,
+            background: getComputedStyle(conversation).backgroundColor,
+          };
+        });
+        expect(styles.background).not.toBe("rgba(0, 0, 0, 0)");
+        expect(styles.foreground).not.toBe(styles.background);
+        colors.push(styles.foreground);
+        const accessibility = await new AxeBuilder({ page })
+          .include(".og-markdown-body")
+          .withRules(["color-contrast"])
+          .analyze();
+        expect(accessibility.violations).toEqual([]);
+      }
+      expect(colors[0]).not.toBe(colors[1]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("desktop measurement does not widen the document after a mobile resize", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      reducedMotion: "reduce",
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/composer-responsive.html?width=768`, {
+        waitUntil: "networkidle",
+      });
+      const textarea = page.getByRole("textbox", { name: "Message the agent" });
+      await textarea.fill("A multiline draft that creates a desktop measurement. ".repeat(30));
+      await textarea.fill("Short draft");
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-composer-panel]")?.getBoundingClientRect().width ??
+            Infinity) <= innerWidth,
+      );
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        375,
+      );
+      const shortHeight = await textarea.evaluate((node) => node.getBoundingClientRect().height);
+      await textarea.fill("A multiline draft remains editable after resizing. ".repeat(30));
+      await page.waitForFunction(
+        (height) =>
+          (document.querySelector("textarea")?.getBoundingClientRect().height ?? 0) > height,
+        shortHeight,
+      );
+      expect(
+        await textarea.evaluate((node) => node.getBoundingClientRect().height),
+      ).toBeGreaterThan(shortHeight);
+      await textarea.fill("Short again");
+      await page.waitForFunction(
+        (height) =>
+          (document.querySelector("textarea")?.getBoundingClientRect().height ?? Infinity) <=
+          height + 1,
+        shortHeight,
+      );
+      expect(
+        await textarea.evaluate((node) => node.getBoundingClientRect().height),
+      ).toBeLessThanOrEqual(shortHeight + 1);
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
+
   test("a wide viewport follows the child panel across the full width matrix", async () => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
@@ -108,6 +188,32 @@ describe("container-responsive public composer demo", () => {
 
     await openModelMenu(page);
     await assertPortalBoundToComposer(page, ".og-model-policy-menu");
+    // Flat selection: search and thinking are reachable without a Back step.
+    expect(await page.getByTestId("model-picker-back").count()).toBe(0);
+    const search = page.getByRole("textbox", { name: "Search models or providers" });
+    await search.fill("no-such-model");
+    await page.getByText("No matching models. Try a model or provider name.").waitFor();
+    await search.fill("codex");
+    await page.getByRole("radio", { name: "High", exact: true }).click();
+    expect(
+      await page.getByRole("radio", { name: "High", exact: true }).getAttribute("aria-checked"),
+    ).toBe("true");
+    await search.focus();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Model and effort",
+    );
+    expect(
+      await page
+        .getByRole("button", { name: "Model and effort" })
+        .evaluate((button) => button === document.activeElement),
+    ).toBe(true);
+    await openModelMenu(page);
+    expect(
+      await page.getByRole("textbox", { name: "Search models or providers" }).inputValue(),
+    ).toBe("");
     await page.keyboard.press("Escape");
 
     await page.getByRole("button", { name: "Choose voice model and options" }).click();

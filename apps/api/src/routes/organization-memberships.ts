@@ -75,9 +75,7 @@ import { deleteWorkspaceForRequest } from "../workspace-deletion";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
-  deriveOrganizationUserSetupToken,
-  organizationUserSetupPayloadDigest,
-  renderOrganizationUserSetupEmail,
+  resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
 
 const OrganizationId = z.string().uuid();
@@ -815,18 +813,18 @@ async function deliverOrganizationUserSetup(
 ) {
   const claim = await claimOrganizationUserSetupDelivery(deps.db, input);
   if (!claim.claimed) return claim.delivery;
-  const setup = await deriveOrganizationUserSetupToken(deps.settings, {
+  const prepared = await resolveOrganizationUserSetupDeliveryEmail(deps.settings, {
     invitationId: claim.invitationId,
     deliveryId: claim.delivery.id,
-  });
-  const message = renderOrganizationUserSetupEmail({
     senderEmail: deps.managedEmailTransport.sender,
     recipientEmail: claim.recipientEmail,
     recipientName: claim.recipientName,
     organizationName: claim.organizationName,
     organizationRole: claim.organizationRole,
     sharedWorkspaceAccess: claim.sharedWorkspaceAccess,
-    setupUrl: setup.url,
+    providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    frozenTransport: claim.setupTokenTransport,
+    frozenPayloadDigest: claim.payloadDigest,
   });
   await prepareOrganizationUserSetupDelivery(deps.db, {
     organizationId: input.organizationId,
@@ -834,11 +832,9 @@ async function deliverOrganizationUserSetup(
     deliveryId: claim.delivery.id,
     attemptId: claim.attemptId,
     claimHolderId: claim.claimHolderId,
-    tokenDigest: setup.digest,
-    payloadDigest: await organizationUserSetupPayloadDigest({
-      ...message,
-      providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
-    }),
+    tokenDigest: prepared.tokenDigest,
+    payloadDigest: prepared.payloadDigest,
+    setupTokenTransport: prepared.transport,
     providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
     providerIdempotencyRetentionSeconds: deps.managedEmailTransport.idempotency.retentionSeconds,
   });
@@ -848,7 +844,7 @@ async function deliverOrganizationUserSetup(
   try {
     outcome = await deps.managedEmailTransport.send({
       kind: "organization_user_setup",
-      ...message,
+      ...prepared.message,
       idempotencyKey: claim.providerKey,
     });
   } catch {

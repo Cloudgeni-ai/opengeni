@@ -1,3 +1,4 @@
+import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 // Organization settings (formerly "Account"): identity, organization API
 // keys, account-wide billing usage, plan entitlements, and members.
 import { useBillingUsage } from "@opengeni/react";
@@ -618,20 +619,32 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "models" && canManageOrganizationModels ? (
-          <div className="grid gap-6">
-            <OrganizationCodexSubscriptions
-              key={`${identityKey}:organization-codex`}
-              organizationId={accountId}
-            />
-            <OrganizationModelProviderConnection
-              organizationId={accountId}
-              providerKind="vercel_gateway"
-            />
-            <OrganizationModelProviderConnection
-              organizationId={accountId}
-              providerKind="openrouter"
-            />
-          </div>
+          <section className="grid gap-2" aria-labelledby="organization-model-connections-heading">
+            <div>
+              <h2 id="organization-model-connections-heading" className="text-sm font-medium">
+                Connections
+              </h2>
+              <p className="mt-1 text-xs leading-5 text-fg-muted">
+                Choose which workspaces and models each connected account can serve. Codex and
+                SuperGrok subscriptions can also be made available to Personal workspaces.
+              </p>
+            </div>
+            <div className="min-w-0">
+              <OrganizationCodexSubscriptions
+                key={`${identityKey}:organization-codex`}
+                organizationId={accountId}
+              />
+              <SuperGrokSubscriptionsCard organizationId={accountId} canManage />
+              <OrganizationModelProviderConnection
+                organizationId={accountId}
+                providerKind="vercel_gateway"
+              />
+              <OrganizationModelProviderConnection
+                organizationId={accountId}
+                providerKind="openrouter"
+              />
+            </div>
+          </section>
         ) : null}
 
         {section === "models" && !canManageOrganizationModels ? (

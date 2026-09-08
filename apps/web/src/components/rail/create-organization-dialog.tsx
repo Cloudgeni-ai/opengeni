@@ -59,6 +59,7 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
           <Label htmlFor="new-organization-name">Organization name</Label>
           <Input
             id="new-organization-name"
+            suppressAutofill
             value={props.organizationName}
             onChange={(event) => props.onOrganizationNameChange(event.target.value)}
             placeholder="Acme"
@@ -71,6 +72,7 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
           <Label htmlFor="new-organization-workspace-name">First shared workspace</Label>
           <Input
             id="new-organization-workspace-name"
+            suppressAutofill
             value={props.workspaceName}
             onChange={(event) => props.onWorkspaceNameChange(event.target.value)}
             placeholder="General"

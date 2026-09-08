@@ -1,4 +1,15 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { tool } from "@openai/agents";
+import { z } from "zod/v4";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { sitePackageVersions } from "./site-package-versions";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,7 +24,7 @@ import {
   type SkillIndexEntry,
 } from "@openai/agents/sandbox";
 
-import { skillArtifactContentSha256 } from "./skill-library";
+import { parsePortableSkillFrontmatter, skillArtifactContentSha256 } from "./skill-library";
 
 export type RuntimeSkillArtifactFile = Readonly<{
   path: string;
@@ -61,6 +72,7 @@ export type RuntimeSkillActivation =
 
 export type NativeToolSkillSet = Readonly<{
   editableArtifacts: boolean;
+  sites?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -95,8 +107,56 @@ type ValidatedRuntimeSkillActivation = Readonly<{
   contentSha256: string;
 }>;
 
+export const BUILTIN_PROJECT_SKILL_NAME = "opengeni-projects";
+let cachedProjectSkill: { name: string; description: string; content: string } | undefined;
+
+function builtinProjectSkill() {
+  if (!cachedProjectSkill) {
+    const content = readFileSync(
+      join(
+        packagedSkillDirectory("bundled_project_skills"),
+        BUILTIN_PROJECT_SKILL_NAME,
+        "SKILL.md",
+      ),
+      "utf8",
+    );
+    const metadata = parsePortableSkillFrontmatter(content);
+    if (metadata.name !== BUILTIN_PROJECT_SKILL_NAME || !metadata.description)
+      throw new Error("Invalid bundled project skill");
+    cachedProjectSkill = { name: metadata.name, description: metadata.description, content };
+  }
+  return cachedProjectSkill;
+}
+
+export function builtinSkillIndex(): string {
+  const skill = builtinProjectSkill();
+  return `## Built-in skills
+- ${skill.name}: ${skill.description}
+When relevant, call load_builtin_skill with skill_name to read the full instructions. These skills load directly from the worker; no filesystem access is needed.`;
+}
+
+export function builtinSkillLoader() {
+  return tool({
+    name: "load_builtin_skill",
+    description:
+      "Read the full instructions for a skill in the built-in skill index. Works with every compute backend; no files are created or read on the connected computer or sandbox.",
+    parameters: z.object({ skill_name: z.literal(BUILTIN_PROJECT_SKILL_NAME) }).strict(),
+    execute: async () => builtinProjectSkill().content,
+  });
+}
+
+export const BUILTIN_PROJECT_SKILL_SELECTION: EffectiveSkillSelection = Object.freeze({
+  id: "native-tool:opengeni-projects",
+  name: BUILTIN_PROJECT_SKILL_NAME,
+  source: "native_tool",
+  version: null,
+  contentSha256: null,
+  reason: "built-in project organization skill",
+});
+
 const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
   editableArtifacts: false,
+  sites: false,
   videoGeneration: false,
 });
 
@@ -117,7 +177,9 @@ export function composeRuntimeSkills(
 ): RuntimeSkillComposition {
   const nativeSources = nativeToolSkillSources(nativeTools);
   const nativeNameKeys = new Set(
-    nativeSources.flatMap((source) => source.names).map((name) => name.toLowerCase()),
+    [BUILTIN_PROJECT_SKILL_NAME, ...nativeSources.flatMap((source) => source.names)].map((name) =>
+      name.toLowerCase(),
+    ),
   );
   const effectiveActivations = resolveEffectiveActivations(
     activations.map(validateRuntimeSkillActivation),
@@ -129,7 +191,7 @@ export function composeRuntimeSkills(
   const children: Record<string, Entry> = {};
   for (const source of nativeSources) {
     for (const name of source.names) {
-      children[name] = localDir({ src: join(source.directory, name) });
+      children[name] = source.entries?.[name] ?? localDir({ src: join(source.directory, name) });
     }
   }
 
@@ -157,6 +219,7 @@ export function composeRuntimeSkills(
       ],
     },
     selections: Object.freeze([
+      BUILTIN_PROJECT_SKILL_SELECTION,
       ...nativeSources.flatMap((source) =>
         source.names.map((name) =>
           Object.freeze({
@@ -185,7 +248,10 @@ export function composeRuntimeSkills(
     configuredNames: Object.freeze(
       effectiveActivations.map(({ activation }) => activation.artifact.name),
     ),
-    nativeToolNames: Object.freeze(nativeSources.flatMap((source) => source.names)),
+    nativeToolNames: Object.freeze([
+      BUILTIN_PROJECT_SKILL_NAME,
+      ...nativeSources.flatMap((source) => source.names),
+    ]),
   });
 }
 
@@ -280,12 +346,14 @@ function selectionForActivation({
 
 function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
   directory: string;
+  entries?: Record<string, Entry>;
   lazySource: LocalDirLazySkillSource;
   names: string[];
   reason: string;
 }> {
   const sources: Array<{
     directory: string;
+    entries?: Record<string, Entry>;
     lazySource: LocalDirLazySkillSource;
     names: string[];
     reason: string;
@@ -297,6 +365,19 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
       lazySource: localDirLazySkillSource({ src: directory }),
       names: skillDirNames(directory),
       reason: "native editable-artifact tool surface",
+    });
+  }
+  if (nativeTools.sites) {
+    const directory = packagedSkillDirectory("bundled_site_skills");
+    const site = bundledSkillEntry(join(directory, "opengeni-sites"), {
+      "package-versions.json": file({ content: JSON.stringify(sitePackageVersions(), null, 2) }),
+    });
+    sources.push({
+      directory,
+      entries: { "opengeni-sites": site },
+      lazySource: localDirLazySkillSource({ src: directory, baseDir: directory }),
+      names: skillDirNames(directory),
+      reason: "bundled Site authoring skill",
     });
   }
   if (nativeTools.videoGeneration) {
@@ -332,6 +413,18 @@ function bundledArtifactSkillsDir(): string {
     );
   }
   return stagedBundledArtifactSkillsDir;
+}
+
+/** Compose generated metadata in the manifest, never in the installed application. */
+function bundledSkillEntry(directory: string, overrides: Record<string, Entry> = {}): Dir {
+  const children: Record<string, Entry> = {};
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    children[entry.name] = entry.isDirectory()
+      ? bundledSkillEntry(path)
+      : file({ content: readFileSync(path, "utf8") });
+  }
+  return dir({ children: { ...children, ...overrides } });
 }
 
 function bundledVideoSkillsDir(): string {

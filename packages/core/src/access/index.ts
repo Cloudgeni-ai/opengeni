@@ -12,6 +12,7 @@ import {
   findActiveApiKeyByHash,
   getWorkspaceGrant,
   requireWorkspace,
+  resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
@@ -244,6 +245,31 @@ export function requireAccountAdminAuthorizationStamp(
 }
 
 /**
+ * Verify that an access authorization was minted by the canonical request
+ * resolver for this exact subject and workspace.
+ *
+ * This is the protocol-neutral boundary for request-local services that need
+ * the authenticated grant rather than a caller-supplied grant-shaped object.
+ * Object identity is intentional: matching fields alone are not proof that the
+ * request authenticated the named subject.
+ */
+export function requireResolvedAccessGrantAuthorization(
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): AccessGrant {
+  const { grant } = authorization;
+  if (
+    !resolvedAccessGrantAuthorizations.has(authorization) ||
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== grant.subjectId ||
+    grant.workspaceId !== workspaceId
+  ) {
+    throw new HTTPException(403, { message: "workspace access authorization is invalid" });
+  }
+  return grant;
+}
+
+/**
  * Resolve the exact built-in single-user local administrator for an account.
  *
  * This is intentionally narrower than checking `context.mode === "local"` or
@@ -282,6 +308,35 @@ export async function requireAccessGrantAuthorization(
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
   return await accessGrantAuthorization(context, deps, workspaceId, permission);
+}
+
+/**
+ * Settings administration is narrower than workspace administration. The
+ * canonical managed-cookie owner may configure their Personal workspace, but
+ * never acquires the admin wildcard (and its membership/delegation powers).
+ * Only use this boundary for workspace configuration, not access management.
+ */
+export async function requireWorkspaceSettingsGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrant> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (hasPermission(grant.permissions, "workspace:admin")) return grant;
+  if (
+    authorization.canonicalManagedHumanSession &&
+    (await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: authorization.authenticatedSubjectId,
+    }))
+  ) {
+    return grant;
+  }
+  throw new HTTPException(403, {
+    message: "workspace settings require a workspace administrator or Personal workspace owner",
+  });
 }
 
 async function accessGrantAuthorization(

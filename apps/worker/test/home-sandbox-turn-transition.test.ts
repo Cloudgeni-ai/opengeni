@@ -55,6 +55,7 @@ describe("Connected Machine to managed-home turn transition", () => {
       events: [],
     });
     const readLease = spyOn(opengeniDb, "readLease").mockResolvedValue({
+      leaseEpoch: 6,
       rotationRequestedAt: new Date(),
       rotationReason: "operator",
     } as never);
@@ -113,7 +114,6 @@ describe("Connected Machine to managed-home turn transition", () => {
 
       expect(result).toEqual({
         status: "recovering",
-        continueDelayMs: 5_000,
         turnId: "turn-1",
         attemptId: "attempt-1",
       });
@@ -129,10 +129,97 @@ describe("Connected Machine to managed-home turn transition", () => {
           rotationReason: "operator",
           transitionReason: "capture_in_progress",
         },
+        sandboxLifecycleWait: {
+          version: 1,
+          sandboxGroupId: "group-1",
+          leaseEpoch: 6,
+          reason: "rotation_in_progress",
+        },
       });
       expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(1);
       expect(control.activityStatus).toBe("recovering");
       expect(control.turnMetricOutcome).toBe("recovering");
+    } finally {
+      requestRecovery.mockRestore();
+      readLease.mockRestore();
+    }
+  });
+
+  test("keeps the existing paced retry for a non-rotation capture transition", async () => {
+    const transition = new opengeniDb.SandboxLeaseTransitionError(
+      "group-1",
+      5,
+      "capture_in_progress",
+      "modal",
+      "sb-1",
+      "draining",
+    );
+    const requestRecovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    });
+    const readLease = spyOn(opengeniDb, "readLease").mockResolvedValue({
+      rotationRequestedAt: null,
+      rotationReason: null,
+    } as never);
+
+    try {
+      const result = await settleTurnFailure({
+        error: transition,
+        input: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+        },
+        settings: { sandboxLeaseReaperPeriodMs: 10_000 },
+        db: {},
+        bus: {},
+        observability: {},
+        wakeSessionWorkflow: async () => undefined,
+        signalCodexCapacityWorkflow: async () => undefined,
+        cancellationSignal: undefined,
+        sandboxRotationController: new AbortController(),
+        noteCancellationRequested: () => undefined,
+        codexWorkspaceKey: "workspace-key",
+        control: {
+          cancellationRequestedAt: null,
+          activityStatus: "unknown",
+          turnMetricOutcome: null,
+          activityError: null,
+          acknowledgeQuiescence: false,
+        },
+        attempt: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 1,
+          providerRecoveryCount: 0,
+          modelRequestStarted: true,
+          redispatchesAtDispatch: 0,
+          triggerType: "user",
+        },
+        billingState: {},
+        eventing: { publish: async () => [], turnStartedPublished: true },
+        providerTurn: {},
+        leases: {},
+        historySink: { reconcileConversationTruth: async () => undefined },
+        claimedResult: (value: Record<string, unknown>) => ({
+          ...value,
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+        }),
+        flushRuntimeBatcher: async () => undefined,
+        acknowledgeLostAttemptOwnership: () => undefined,
+        acknowledgeRecoveryQuiescence: () => undefined,
+      } as never);
+
+      expect(result).toEqual({
+        status: "recovering",
+        continueDelayMs: 5_000,
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+      });
+      expect(requestRecovery.mock.calls[0]?.[2]).not.toHaveProperty("sandboxLifecycleWait");
     } finally {
       requestRecovery.mockRestore();
       readLease.mockRestore();

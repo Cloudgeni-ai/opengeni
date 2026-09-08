@@ -6,6 +6,7 @@ import {
 import type { Database } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { GeneratedImageReceipt } from "./generated-images";
+import { CodexCredentialLeaseLostError } from "./agent-turn/credential-leases";
 import {
   executeImageGenerationOperation,
   imageProviderBindingHash,
@@ -27,22 +28,38 @@ export async function executeCodexImageGeneration(input: {
   prompt: string;
   references?: readonly ResolvedImageGenerationReference[];
   credentialId: string;
-  codexContext: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
+  codexContext: Pick<
+    CodexRequestContext,
+    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+  >;
   abortSignal?: AbortSignal;
 }): Promise<GeneratedImageReceipt> {
   const providerBindingHash = imageProviderBindingHash(CODEX_PROVIDER_ID, input.credentialId);
+  let providerDispatchAdmitted = false;
+  const codexContext: Pick<
+    CodexRequestContext,
+    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+  > = {
+    ...input.codexContext,
+    beforeProviderDispatch: async () => {
+      await input.codexContext.beforeProviderDispatch?.();
+      providerDispatchAdmitted = true;
+    },
+  };
   return await executeImageGenerationOperation({
     ...input,
     providerId: CODEX_PROVIDER_ID,
     providerBindingHash,
     modelId: CODEX_IMAGE_MODEL,
     ...(input.references ? { referenceDigests: input.references } : {}),
+    isProviderDispatchRejected: (error) =>
+      !providerDispatchAdmitted && error instanceof CodexCredentialLeaseLostError,
     generate: async () => {
       const generated = await generateCodexSubscriptionImage({
         prompt: input.prompt,
         ...(input.references ? { references: input.references } : {}),
         turnId: input.turnId,
-        context: input.codexContext,
+        context: codexContext,
         ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       });
       return {

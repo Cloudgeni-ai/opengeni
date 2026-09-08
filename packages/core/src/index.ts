@@ -80,6 +80,7 @@ export * from "./domain/product-integration-pack";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
+export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
@@ -106,9 +107,11 @@ export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/session-tenancy";
 export * from "./application/user-resource-grants";
+export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
 export * from "./editable-artifact-live";
 
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
+export { withSiteSessionOrigin } from "./site-session-origin";

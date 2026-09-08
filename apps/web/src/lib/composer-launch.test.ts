@@ -40,6 +40,14 @@ describe("parseComposerLaunchSearch", () => {
     ).toEqual({});
   });
 
+  test("keeps an explicit Default-folder launch distinct from an ordinary new session", () => {
+    const ordinary = parseComposerLaunchSearch({});
+    const defaultFolder = parseComposerLaunchSearch({ channelId: "default" });
+
+    expect(ordinary.channelId).toBeUndefined();
+    expect(defaultFolder.channelId).toBe("default");
+  });
+
   test("key and leftover search helpers", () => {
     const full = parseComposerLaunchSearch({
       model: "gpt-5.6-sol",

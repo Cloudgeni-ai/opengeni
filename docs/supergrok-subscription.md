@@ -16,7 +16,7 @@ Canonical implementation sources:
 - workflow capacity orchestration: `apps/worker/src/activities/codex-capacity.ts`
   and `apps/worker/src/workflows/session.ts`;
 - clients: the SuperGrok methods/types in `@opengeni/sdk`,
-  `useSuperGrokAccounts` in `@opengeni/react`, and the workspace settings card.
+  `useSuperGrokAccounts` in `@opengeni/react`, and the workspace and organization settings cards.
 
 ## Enablement and connection
 
@@ -48,6 +48,11 @@ messages are never projected into public logs.
 
 Every account has one immutable authority scope:
 
+- **`organization`**: shared across the organization's shared and Personal
+  workspaces. Connecting, renaming, selecting the default, changing rotation or
+  eligibility, and disconnecting require an organization administrator browser
+  session. Workspace users can use the pool but cannot administer it.
+
 - **`workspace`** — the default and simplest path. The account is shared with
   members who can use that workspace's model rail. Connecting or mutating this
   scope requires workspace-admin authority.
@@ -62,7 +67,11 @@ session creator/current browser user/another member.
 
 At each acceptance boundary OpenGeni freezes an identifier-free
 `XaiProviderAccountAuthoritySnapshotV1` on the logical turn or scheduled task.
-Workspace scope records only `{version:1, scope:"workspace"}`. User scope adds
+Workspace scope records only `{version:1, scope:"workspace"}`; organization
+scope records `{version:1, scope:"organization"}`. New acceptance prefers an
+explicit active private pool, then connected workspace accounts, then the
+organization pool. Adding a workspace account does not rewrite the scope of
+already accepted work. User scope adds
 the immutable authority generation, never a credential UUID, membership UUID,
 provider subject, label, quota, plan, or token. Direct Send/Steer resolves the
 authenticated subject's current active authority; edits copy the source turn;
@@ -73,7 +82,7 @@ snapshot. Private work additionally requires the exact initiating human.
 
 ## Allocation, pins, and leases
 
-One rotation row serializes each workspace or exact-user pool. Credentials have
+One rotation row serializes each organization, workspace, or exact-user pool. Credentials have
 separate health and allocator state: `status=active` is credential health, while
 `allocator_enabled` controls only new selection. Reconnect and refresh restore
 credential health but do not silently change allocator eligibility.
@@ -150,6 +159,14 @@ alternate account moves the same logical turn to `recovering`; otherwise the
 provider-tagged waiter persists until a quota reset, account reconnect,
 allocator/rotation/pin mutation, or bounded timer wakes it.
 
+Cached quota exhaustion is rechecked against provider billing before allocation
+and during capacity reconciliation (at most once per account per 30 seconds).
+Waiters recheck within the normal bounded refresh interval even when the stored
+reset is hours away, so an external usage reset can resume the same turn. A
+successful refresh below 100% clears exhaustion; unavailable or unknown billing
+preserves it. Updates compare the previously observed quota timestamp and
+exhaustion deadline so a stale refresh cannot overwrite a newer refusal.
+
 Ambiguous network failures, provider 5xx, malformed/partial streams, invalid
 content, and unrelated 4xx errors do not quarantine or rotate credentials. They
 remain on the existing same-provider recovery or terminal path because upstream
@@ -166,6 +183,16 @@ turn, consent prompt, or ambient-user fallback.
 
 ## Public management surface
 
+Organization management is available under
+`/v1/organizations/:organizationId/supergrok`: device-flow `connect/start` and
+`connect/poll`, `accounts`, `accounts/:accountId/activate`, `settings`,
+`accounts/:accountId/allocator`, rename (`PATCH accounts/:accountId`), and
+disconnect (`DELETE accounts/:accountId`). Device state binds the organization
+and administrator identity. Organization accounts are encrypted once, with
+workspace-owned leases and pins referring to the shared credential; disconnect
+is refused while a live lease exists. Pool changes durably wake waiting organization turns across the same organization
+without exposing their session content to the administrator.
+
 The workspace-scoped REST surface supports device-flow start/poll, metadata
 list/status, active-account selection, rotation enablement, allocator OCC,
 rename, and disconnect. `@opengeni/sdk` exposes matching typed methods;
@@ -173,3 +200,10 @@ rename, and disconnect. `@opengeni/sdk` exposes matching typed methods;
 settings page provides the complete account controls. Workspace is the default
 scope in every client. Private scope must be selected explicitly and succeeds
 only through the managed-browser human boundary above.
+
+
+Organization SuperGrok activates at maintenance migration
+`0423_organization_supergrok_subscriptions.sql`. Stop API, control worker, and
+turn worker before applying it with every runtime database login listed in
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. Start only the matching release;
+older processes do not understand the new frozen organization scope.

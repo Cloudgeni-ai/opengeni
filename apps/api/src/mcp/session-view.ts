@@ -17,11 +17,14 @@ import type {
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
+  SessionMcpMonitoringSource,
+  SessionQueueSnapshot,
 } from "@opengeni/contracts";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
   sessionEventJsonBytes,
+  compactSessionMcpDetail,
 } from "@opengeni/contracts";
 
 export const SESSION_EVENT_MCP_MAX_BYTES = 64 * 1024;
@@ -528,7 +531,23 @@ function projectEffectiveToolPolicy(value: Session["effectiveToolPolicy"]): {
   };
 }
 
-/** Purpose-built, flat, model-facing detail projection for `session_get`. */
+/** Compact management state; configuration is deliberately excluded, not truncated. */
+export function boundSessionCompactDetailMcp(
+  session: Session,
+  monitoring: SessionMcpMonitoringSource,
+  queue: SessionQueueSnapshot | null,
+  maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
+) {
+  const result = compactSessionMcpDetail(session, monitoring, queue);
+  // Never drop a goal outcome or blocker to fit. The ordinary closed shape fits;
+  // an unsupported envelope must fail explicitly rather than erase management truth.
+  if (prettyJsonBytes(result) > maxBytes) {
+    throw new RangeError(`session_get compact projection exceeds its ${maxBytes}-byte envelope`);
+  }
+  return result;
+}
+
+/** Legacy bounded configuration projection for explicit `session_get detail=full`. */
 export function boundSessionDetailMcp(
   session: Session,
   effectiveControl: unknown = session.effectiveControl,

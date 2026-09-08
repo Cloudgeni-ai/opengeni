@@ -121,14 +121,18 @@ Attachment points:
   returns only accessible `{ id, scope }` pairs and omits inaccessible ids.
   This keeps inaccessible choices absent, preserves create-by-id authority, and
   prevents a metadata request from blocking an otherwise valid selection. The
-  resource selector itself is the explicit user action: private-session creates
-  receive session-lifetime authority, while workspace-visible creates receive
-  message-only authority for the creating human's first message. Established
-  sessions expose the same Variable Set selection beside the composer, including
-  unavailable retained ids so they can still be removed. Private sessions use
-  an owner's selected personal resources for the session; workspace-visible
-  sessions grant them only to messages that owner sends. The web UI does not
-  expose the broader `always` grant or a separate duration/confirmation control.
+  resource selector itself is the explicit user action. Private sessions retain
+  session-lifetime authority. Workspace-visible setup and existing-session
+  composers default to message-only authorization and offer an explicit
+  “For my ongoing work in this session” option. The choice affects only the
+  authorization included with the next human Create/Send/Steer/Continue command;
+  selecting it writes no grant. Acceptance resets that submitted choice to
+  message-only without changing the immutable retry payload or a newer choice.
+  Existing sessions retain unavailable selected
+  ids so they can still be removed. A separate cue reports matching ongoing
+  authorizations from the owner's current catalog. Choosing message-only does
+  not revoke prior grants. The web UI exposes neither `always` nor a new revoke
+  control; ongoing work still requires exact initiating-human authority.
 - `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Setting or changing a non-null attachment requires both permissions; detaching requires `variable-sets:attach`. Changing the attachment of a task with a live reusable session returns 409 because the task's accepted execution snapshot must remain stable; explicitly reconfigure the quiescent target session or recreate the task instead.
 - Organization- and workspace-scoped Variable Sets on scheduled runs materialize under the exact fenced service turn (`scheduler`) and do not invent an initiating human. User-scoped Variable Sets remain different: they require the frozen causal human and exact personal-resource grant described next. This distinction applies identically to standalone database decryption and a host-provided `sandboxSecrets` credential boundary.
 - When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.

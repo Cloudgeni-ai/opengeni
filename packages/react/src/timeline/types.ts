@@ -279,7 +279,14 @@ export type FleetDecisionItem = {
   policyVersion: "adaptive-shadow-v1";
   actualOutcome: "selected" | "waiting" | "none";
   actualCandidateKey: string | null;
-  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  actualReason:
+    | "lease_reused"
+    | "pin"
+    | "rotation"
+    | "active"
+    | "all_capped"
+    | "allocator_disabled"
+    | "none";
   shadowOutcome: "selected" | "paced" | "none";
   shadowCandidateKey: string | null;
   shadowReason:
@@ -342,6 +349,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** A preserved turn-end outcome, not a claim about current session state. */
+  recordedOutcome?: true;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
@@ -371,6 +380,8 @@ export type MachineInputMember = {
   kind:
     | "scheduled_occurrence"
     | "goal_continuation"
+    | "background_command_result"
+    | "session_wait_timeout"
     | "agent_message"
     | "agent_steer_instruction"
     | "child_terminal_result"

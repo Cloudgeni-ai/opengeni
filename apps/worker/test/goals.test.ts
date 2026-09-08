@@ -30,7 +30,7 @@ describe("goalContinuationPrompt", () => {
     expect(prompt).not.toContain("goal_progress");
     // Without the tool in the session's effective first-party selection the
     // prompt must not instruct a tool the agent cannot call.
-    expect(prompt).not.toContain("goal_wait");
+    expect(prompt).not.toContain("wait_for_input");
   });
 
   test("re-enters the full objective through authoritative reconciliation", () => {
@@ -57,20 +57,20 @@ describe("goalContinuationPrompt", () => {
     expect(prompt).not.toContain("take the next useful action");
   });
 
-  test("teaches goal_wait only when the tool is in the session's selection", () => {
+  test("teaches wait_for_input only when the tool is in the session's selection", () => {
     const goal = { text: "Ship the fix" } as Parameters<typeof goalContinuationPrompt>[0];
-    const withWait = goalContinuationPrompt(goal, 1, null, { goalWaitAvailable: true });
+    const withWait = goalContinuationPrompt(goal, 1, null, { inputWaitAvailable: true });
     // Orchestrators waiting on child sessions / external events hold the goal
     // instead of sleeping or polling, and never substitute a hold for a pause
     // when a human decision is the blocker.
-    expect(withWait).toContain("opengeni__goal_wait");
+    expect(withWait).toContain("opengeni__wait_for_input");
     expect(withWait).toContain("do not sleep, loop, or poll");
     expect(withWait).toContain("do not restate it or produce another equivalent final answer");
     expect(withWait).toContain("Report only material new state or a newly discovered blocker");
     expect(withWait).toContain("blocked on a human decision, use opengeni__goal_pause");
     expect(withWait).toContain("Blocked audit:");
-    const withoutWait = goalContinuationPrompt(goal, 1, null, { goalWaitAvailable: false });
-    expect(withoutWait).not.toContain("goal_wait");
+    const withoutWait = goalContinuationPrompt(goal, 1, null, { inputWaitAvailable: false });
+    expect(withoutWait).not.toContain("wait_for_input");
     expect(withoutWait).not.toContain("another equivalent final answer");
     expect(withoutWait).toContain("Blocked audit:");
     expect(withWait).not.toContain("Ship the fix");
@@ -98,15 +98,17 @@ describe("goalContinuationPrompt", () => {
 });
 
 describe("goalContinuationModelDecision", () => {
-  test("falls back to the session model when the inherited model left the catalog", () => {
+  test("does not revert to the original model when the inherited model left the catalog", () => {
     expect(
       goalContinuationModelDecision({
         settings: testSettings(),
         workspaceModelPolicy: null,
         inheritedModel: "removed/provider-model",
-        sessionModel: "scripted-model",
       }),
-    ).toEqual({ model: "scripted-model", blocked: null });
+    ).toMatchObject({
+      model: "removed/provider-model",
+      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+    });
   });
 
   test("pauses instead of materializing when neither inherited nor session model exists", () => {
@@ -115,7 +117,6 @@ describe("goalContinuationModelDecision", () => {
         settings: testSettings(),
         workspaceModelPolicy: null,
         inheritedModel: "removed/provider-model",
-        sessionModel: "removed/session-model",
       }),
     ).toMatchObject({
       model: "removed/provider-model",
@@ -133,7 +134,6 @@ describe("goalContinuationModelDecision", () => {
           settings,
           workspaceModelPolicy: null,
           inheritedModel: model,
-          sessionModel: "scripted-model",
         }),
       ).toEqual({ model, blocked: null });
     }

@@ -1,4 +1,20 @@
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
 export { OpenGeniClient } from "./artifact-client";
+export {
+  OpenGeniToolCallError,
+  OpenGeniToolReapprovalRequiredError,
+  OpenGeniToolsClient,
+} from "./tools";
+export type {
+  OpenGeniDynamicToolNamespace,
+  OpenGeniDynamicToolNode,
+  OpenGeniGeneratedTools,
+  OpenGeniToolCallOptions,
+  OpenGeniToolFunction,
+  OpenGeniToolTransport,
+  OpenGeniToolsFacade,
+  OpenGeniWorkspaceTools,
+} from "./tools";
 export type {
   FetchLike,
   FetchResponse,
@@ -6,10 +22,48 @@ export type {
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
+  SessionListPageOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
+export {
+  OPENGENI_SITE_BRIDGE_CANCEL,
+  OPENGENI_SITE_BRIDGE_CONNECT,
+  OPENGENI_SITE_BRIDGE_READY,
+  OPENGENI_SITE_BRIDGE_REQUEST,
+  OPENGENI_SITE_BRIDGE_RESPONSE,
+  OPENGENI_SITE_BRIDGE_VERSION,
+  OpenGeniSiteBridgeError,
+  createOpenGeniSiteClient,
+  isOpenGeniSiteBridgeCancelMessage,
+  isOpenGeniSiteBridgeConnectMessage,
+  isOpenGeniSiteBridgeRequestMessage,
+  sanitizeOpenGeniSiteToolCallRequest,
+} from "./site";
+export type {
+  OpenGeniSiteBridgeCancelMessage,
+  OpenGeniSiteBridgeConnectMessage,
+  OpenGeniSiteBridgeReadyMessage,
+  OpenGeniSiteBridgeRequestMessage,
+  OpenGeniSiteBridgeResponseMessage,
+  OpenGeniSiteClient,
+  OpenGeniSiteClientOptions,
+  OpenGeniSiteToolCatalog,
+  OpenGeniSiteToolCallRequest,
+  OpenGeniSiteWorkspaceTools,
+} from "./site";
+export type {
+  ToolGatewayCallRequest,
+  ToolGatewayCallResponse,
+  ToolGatewayApprovalRequest,
+  ToolGatewayApprovalResponse,
+  ToolGatewayCatalog,
+  ToolGatewayCatalogEntry,
+  ToolGatewayDeclarationsResponse,
+  ToolGatewayIdentity,
+  ToolGatewayResult,
+} from "./types";
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -40,6 +94,17 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export type {
+  ModelContextInstructionLayer,
+  ModelContextInstructionLayerId,
+  ModelContextSkill,
+  ModelContextSkillKind,
+  ModelContextSnapshot,
+  ModelContextTokenCounts,
+  ModelContextTool,
+  ModelContextToolVisibility,
+  SessionModelContextResponse,
+} from "./model-context";
 export {
   formatSseEvent,
   proxySessionEventStream,
@@ -158,6 +223,7 @@ export type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -165,6 +231,8 @@ export type {
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
   WorkspaceArtifactVersion,
 } from "./workspace-artifacts";
 export {
@@ -394,9 +462,11 @@ export type {
   OrganizationAdministrationMember,
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
+  OrganizationApiKeyAccess,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
+  OrganizationSessionListResponse,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryApproval,
   OrganizationRecoveryCapabilities,
@@ -661,6 +731,12 @@ export type {
   AtlassianSourceKind,
   AtlassianSyncCadence,
   GetPackResponse,
+  GitHubActionPoliciesResponse,
+  GitHubActionPolicyActor,
+  GitHubActionPolicyActorState,
+  GitHubActionPolicyDecision,
+  GitHubActionPolicyEffectiveDecision,
+  GitHubActionPolicyGroup,
   GitHubAppInfo,
   GitHubAppSetupMode,
   GitHubBindingStatus,
@@ -671,6 +747,7 @@ export type {
   VerifyPublicGitHubRepositoryRefRequest,
   VerifyPublicGitHubRepositoryRefResponse,
   GitHubRepositoriesResponse,
+  UpdateGitHubActionPolicyRequest,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionLifecycle,
@@ -716,6 +793,7 @@ export type {
   UpdatePrReviewRepositoryBindingRequest,
   ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListConnectionsResponse,
   ListPacksResponse,
   ListSlackUserLinkAccessRequestsResponse,
@@ -837,6 +915,8 @@ export type {
   SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  WorkspacePauseTimer,
+  WorkspacePauseTimerRequest,
   SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
@@ -920,6 +1000,7 @@ export type {
   FsNodeType,
   FsTreeNode,
   FsEncoding,
+  FileSystemRouteIdentity,
   FsListRequest,
   FsListResponse,
   FsListBatchRequest,
@@ -1132,3 +1213,10 @@ export type {
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,
 } from "./types";
+
+export type {
+  FeedbackSentiment,
+  CreateFeedbackRequest,
+  Feedback,
+  FeedbackSubmissionResponse,
+} from "./feedback";

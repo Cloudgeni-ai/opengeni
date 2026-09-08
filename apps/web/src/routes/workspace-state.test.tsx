@@ -34,6 +34,51 @@ function response(workspaceId: string): WorkspaceStateResponse {
 }
 
 describe("Workspace State loader", () => {
+  test("retains an activated instruction head across view remounts and a stale in-flight refresh", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const oldState = {
+      ...response(workspaceId),
+      policy: { activeHeads: [] },
+    } as unknown as WorkspaceStateResponse;
+    const staleRefresh = deferred<WorkspaceStateResponse>();
+    let calls = 0;
+    const client = {
+      getWorkspaceState: async () => (++calls === 1 ? oldState : await staleRefresh.promise),
+    };
+    let observed!: ReturnType<typeof useWorkspaceStateInventory>;
+    function Harness({ show }: { show: boolean }) {
+      observed = useWorkspaceStateInventory(client, workspaceId);
+      return show ? <output>{observed.state?.policy.activeHeads[0]?.revisionId}</output> : null;
+    }
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const head = {
+      workspaceId,
+      kind: "policy" as const,
+      scope: "global" as const,
+      roleKey: null,
+      revisionId: "saved",
+      revision: 1,
+      activationVersion: 1,
+      contentHash: "a".repeat(64),
+      activatedAt: "2026-09-05T00:00:00.000Z",
+    };
+    try {
+      await act(async () => root.render(<Harness show />));
+      await act(async () => {
+        void observed.reload();
+      });
+      await act(async () => observed.acceptInstructionHead(head));
+      expect(observed.loading).toBe(false);
+      await act(async () => root.render(<Harness show={false} />));
+      await act(async () => root.render(<Harness show />));
+      expect(container.textContent).toBe("saved");
+      await act(async () => staleRefresh.resolve(oldState));
+      expect(container.textContent).toBe("saved");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
   test("does not reuse a resolved review summary across workspace authority", () => {
     type Review = { status: "loading" | "ready"; pendingCount: number };
     const ready: Review = { status: "ready", pendingCount: 0 };
@@ -72,10 +117,24 @@ describe("Workspace State loader", () => {
     const root = createRoot(container);
     await act(async () => root.render(<Harness workspaceId={workspaceA} />));
     expect(container.textContent).toBe("loading");
+    const acceptOldWorkspaceHead = current().acceptInstructionHead;
 
     await act(async () => root.render(<Harness workspaceId={workspaceB} />));
     expect(container.textContent).toBe("loading");
     expect(current().state).toBeNull();
+    await act(async () =>
+      acceptOldWorkspaceHead({
+        workspaceId: workspaceA,
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        revisionId: "old-workspace-save",
+        revision: 1,
+        activationVersion: 1,
+        contentHash: "a".repeat(64),
+        activatedAt: "2026-09-05T00:00:00.000Z",
+      }),
+    );
 
     await act(async () => pendingB.resolve(response(workspaceB)));
     expect(container.textContent).toBe(workspaceB);

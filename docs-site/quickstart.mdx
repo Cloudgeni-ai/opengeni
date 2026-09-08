@@ -1,0 +1,46 @@
+---
+title: "Quickstart"
+description: "Run your first agent session on app.opengeni.ai."
+icon: "rocket"
+---
+
+The managed version at [app.opengeni.ai](https://app.opengeni.ai) is the fastest way to try OpenGeni. There is nothing to deploy.
+
+<Steps>
+  <Step title="Create an account and organization">
+    Sign up with email and password. After sign-in, name your organization. OpenGeni creates it with you as owner, along with a Personal workspace for you. Team members join by invitation.
+  </Step>
+  <Step title="Connect a model">
+    Sessions need inference. Organization owners choose one of:
+
+    - a ChatGPT/Codex or SuperGrok subscription, connected through a device-code login;
+    - a provider key such as OpenRouter or Vercel AI Gateway; or
+    - prepaid OpenGeni credits.
+
+    In organization **Models** settings, choose which workspaces can use each subscription or gateway and which models it enables.
+
+    You can skip this during setup and do it later from settings.
+
+  </Step>
+  <Step title="Start a session">
+    Describe the task. Optionally attach a repository, upload files, or pick the tools the agent may use. The session starts on a managed sandbox by default.
+  </Step>
+  <Step title="Follow and steer">
+    The timeline streams the agent's messages, tool calls, and commands live. Messages you send while a turn is running queue behind it. Steer interrupts the running turn and delivers your message now. Pause holds the session, and Cancel ends it.
+  </Step>
+  <Step title="Answer the agent">
+    When a tool needs approval, the session waits until you approve or reject it. When the agent asks a structured question, answer it in place and the same turn continues.
+  </Step>
+</Steps>
+
+## Make it keep going
+
+For work that should not stop at the first plausible answer, give the session a goal with success criteria. While the goal is active the agent keeps working until it explicitly completes the goal with evidence or pauses it with a rationale. See [Goals](/concepts/goals).
+
+## Use your own computer
+
+Enroll a laptop or server as a Connected Machine and target it when creating a session. The agent runs there directly, under your files and your git credentials, with no cloud box in the loop. See [Connect a machine](/guides/connect-a-machine).
+
+## Call it from code
+
+Everything the web app does goes through the public API. See [Integrate your product](/guides/integrate-your-product) and the [SDK reference](/reference/sdk).

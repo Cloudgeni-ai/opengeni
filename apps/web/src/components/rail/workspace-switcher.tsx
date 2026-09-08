@@ -1,10 +1,11 @@
-import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PauseIcon, PlusIcon } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { BuildingIcon, CheckIcon, PauseIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,6 +17,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import {
+  organizationSettingsWorkspaceId,
   organizationsForSubject,
   shortAccountId,
   workspacesInOrg,
@@ -101,6 +103,7 @@ export function WorkspaceSwitcherMenu(props: {
         onSelect={props.onSelect}
         onCreate={() => setCreateOpen(true)}
         onCreateOrganization={props.onCreateOrganization}
+        workspaceId={props.workspaceId}
         managedSelfContext={context.managedSelfContext}
         align={props.align}
       >
@@ -171,27 +174,15 @@ export const WorkspaceSwitcherTrigger = forwardRef<
   }
 
   return (
-    <button
+    <ScopeSwitcherTrigger
       {...buttonProps}
       ref={ref}
-      type="button"
       aria-label={accessibleLabel}
-      className={cn(
-        "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none",
-        className,
-      )}
-    >
-      <Avatar size="sm" className="rounded-md">
-        <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
-          {workspaceInitial(activeWorkspace)}
-        </AvatarFallback>
-      </Avatar>
-      <span className="min-w-0 flex-1 truncate text-sm font-medium" title={activeWorkspace?.name}>
-        {activeWorkspace?.name ?? "Select workspace"}
-      </span>
-      {personal ? <PersonalWorkspaceBadge decorative /> : null}
-      <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
-    </button>
+      className={className}
+      label={activeWorkspace?.name ?? "Select workspace"}
+      icon={workspaceInitial(activeWorkspace)}
+      badge={personal ? <PersonalWorkspaceBadge decorative /> : null}
+    />
   );
 });
 
@@ -204,6 +195,7 @@ export function WorkspaceMenu(props: {
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
   onCreateOrganization?: () => void;
+  workspaceId?: string;
   managedSelfContext: ManagedSelfContext | null;
   align: "start" | "end";
   children: ReactNode;
@@ -211,6 +203,9 @@ export function WorkspaceMenu(props: {
   const grouped = props.orgs.map((org) => ({
     org,
     workspaces: workspacesInOrg(props.workspaces, org.accountId),
+    settingsWorkspaceId: org.canManage
+      ? organizationSettingsWorkspaceId(props.workspaces, org.accountId, props.activeWorkspaceId)
+      : null,
   }));
   const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
   return (
@@ -227,15 +222,35 @@ export function WorkspaceMenu(props: {
       )}
       <DropdownMenuContent
         align={props.align}
-        className="min-w-60"
+        className="min-w-60 max-w-[calc(100vw-2rem)]"
         side={props.collapsed ? "right" : "bottom"}
       >
-        {grouped.map(({ org, workspaces }, index) => (
+        {grouped.map(({ org, workspaces, settingsWorkspaceId }, index) => (
           <div key={org.accountId}>
             {index > 0 ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuLabel className="text-fg-subtle">
-              {props.orgs.length > 1 ? org.label : "Workspaces"}
-            </DropdownMenuLabel>
+            <div className="flex min-w-0 items-center gap-1">
+              <DropdownMenuLabel
+                className="min-w-0 flex-1 truncate text-fg-subtle"
+                title={org.label}
+              >
+                {org.label}
+              </DropdownMenuLabel>
+              {settingsWorkspaceId ? (
+                <DropdownMenuItem asChild className="size-8 shrink-0 justify-center p-0">
+                  <Link
+                    to="/workspaces/$workspaceId/organization"
+                    params={{
+                      workspaceId: settingsWorkspaceId,
+                    }}
+                    search={{ section: "overview" }}
+                    aria-label={`Organization settings for ${org.label}`}
+                    title={`Organization settings for ${org.label}`}
+                  >
+                    <SettingsIcon aria-hidden="true" className="size-3.5" />
+                  </Link>
+                </DropdownMenuItem>
+              ) : null}
+            </div>
             {workspaces.map((workspace) => (
               <DropdownMenuItem
                 key={workspace.id}

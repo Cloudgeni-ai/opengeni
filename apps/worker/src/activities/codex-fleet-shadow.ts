@@ -16,7 +16,14 @@ export const CODEX_FLEET_SHADOW_MAX_PAYLOAD_BYTES = 34 * 1_024;
 export type CodexFleetActualDecisionV1 = {
   outcome: "selected" | "waiting" | "none";
   candidateKey: string | null;
-  reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  reason:
+    | "lease_reused"
+    | "pin"
+    | "rotation"
+    | "active"
+    | "all_capped"
+    | "allocator_disabled"
+    | "none";
 };
 
 export type CodexFleetShadowComparisonV1 =

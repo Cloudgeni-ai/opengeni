@@ -41,3 +41,29 @@ The package also exports `readJsonBase64Field` for provider APIs that return
 large binary artifacts inside JSON. It validates declared and streamed limits,
 decodes canonical base64 incrementally, and avoids retaining the JSON envelope
 or encoded string. Callers remain responsible for validating the decoded media.
+
+## MCP OAuth discovery
+
+`resolveMcpOAuthDiscovery` provides the shared MCP OAuth discovery state machine
+used by runtime connections and catalog diagnostics. It prefers RFC 9728
+Protected Resource Metadata and permits the MCP 2025-03-26 compatibility path
+only after every PRM candidate is explicitly absent with HTTP 404 or 410. The
+legacy path requires a Bearer/OAuth challenge, RFC 8414 metadata on the MCP
+origin, an exact issuer match, same-origin resource binding, and PKCE S256.
+
+The resolver is transport-independent. Its `fetchMetadata` callback must
+validate each candidate before I/O, bound response size and duration, disable
+automatic redirects, and independently validate and DNS-pin every redirect
+hop. It must return `status: "absent"` only for HTTP 404 or 410 and throw for
+network, redirect, destination-policy, HTTP, body, and JSON failures; otherwise
+an unsafe or unreachable PRM endpoint could be mistaken for legacy absence.
+`validateEndpoint` and `canonicalizeResource` provide the caller's deployment
+policy and canonical identifier rules.
+
+Successful results include the discovery mode, normalized metadata, structured
+classification, and a stable SHA-256 provenance digest. Fail-closed errors carry
+classifications for broken discovery, unverified legacy defaults, or a legacy
+cross-origin configuration that requires an explicit reviewed profile. These
+classifications are diagnostics; callers still decide whether a provider
+profile is supported and must perform fresh runtime discovery before granting
+credentials.

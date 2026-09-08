@@ -1,5 +1,21 @@
 # @opengeni/codex
 
+## 0.2.22
+
+### Patch Changes
+
+- 694c1ff: Add GPT-6 Astra to the static Codex subscription catalog using the current Codex client version and the existing 272k context policy.
+- Updated dependencies [52cf486]
+- Updated dependencies [92cdc31]
+  - @opengeni/network@0.3.1
+
+## 0.2.21
+
+### Patch Changes
+
+- Updated dependencies [876396d]
+  - @opengeni/network@0.3.0
+
 ## 0.2.20
 
 ### Patch Changes

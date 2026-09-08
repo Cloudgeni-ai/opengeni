@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { RailTrailingMetadata } from "./session-row-content";
+import { ActiveWorkMark, RailTrailingMetadata } from "./session-row-content";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
@@ -56,6 +56,22 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain('d="M-8 43 C35 40 71 29 116 16"');
     expect(markup).toContain('d="M-8 86 C35 83 71 72 116 59"');
     expect(markup).not.toContain("repeating-linear-gradient");
+  });
+
+  test("scales the same active-work marker for action menus", () => {
+    const markup = renderToStaticMarkup(<ActiveWorkMark className="size-4" />);
+
+    expect(markup).toContain("size-4");
+    expect(markup).toContain("text-brand");
+    expect(markup).toContain('d="M-8 43 C35 40 71 29 116 16"');
+    expect(markup).toContain('d="M-8 86 C35 83 71 72 116 59"');
+  });
+
+  test("uses the shared active-work marker in both session action menus", async () => {
+    const source = await Bun.file(new URL("./session-list.tsx", import.meta.url)).text();
+
+    expect(source.match(/<ActiveWorkMark className="size-4" \/>/g)).toHaveLength(2);
+    expect(source).not.toContain("CircleDashedIcon");
   });
 });
 

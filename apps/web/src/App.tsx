@@ -5,7 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
+//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
@@ -313,7 +313,7 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "plugins",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+  validateSearch: (search: Record<string, unknown>) => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: Capabilities,
@@ -321,7 +321,7 @@ const workspaceCapabilitiesRoute = createRoute({
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+  validateSearch: (search: Record<string, unknown>) => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: CapabilitiesLegacyRedirect,
@@ -333,10 +333,14 @@ const workspaceSchedulesRoute = createRoute({
   path: "schedules",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { sourceSessionId?: string; taskId?: string } => ({
+  ): { sourceSessionId?: string; taskId?: string; targetSessionId?: string } => ({
     ...(typeof search.sourceSessionId === "string" &&
     SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+    ...(typeof search.targetSessionId === "string" &&
+    SCHEDULES_SEARCH_UUID.test(search.targetSessionId)
+      ? { targetSessionId: search.targetSessionId }
       : {}),
     // Set when arriving from a session that a schedule started, so the page can
     // reveal that one task instead of leaving the reader to find it.
@@ -621,29 +625,27 @@ function CapabilitiesLegacyRedirect() {
   const { workspaceId } = workspaceLegacyCapabilitiesRoute.useParams();
   const { section } = workspaceLegacyCapabilitiesRoute.useSearch();
   return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={section ? { section } : {}}
-      replace
-    />
+    <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} legacyRedirect />
   );
 }
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
+  return (
+    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+  );
 }
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  const { sourceSessionId, taskId } = workspaceSchedulesRoute.useSearch();
+  const { sourceSessionId, taskId, targetSessionId } = workspaceSchedulesRoute.useSearch();
   return (
     <LazySchedulesRoute
       workspaceId={workspaceId}
       sourceSessionId={sourceSessionId}
       focusTaskId={taskId}
+      targetSessionId={targetSessionId}
     />
   );
 }

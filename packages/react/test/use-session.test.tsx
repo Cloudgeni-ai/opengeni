@@ -193,3 +193,77 @@ describe("useSession", () => {
     await hook.unmount();
   });
 });
+
+test("shared reconciliation preserves a command update preceding the latest title", async () => {
+  let reads = 0;
+  let value = serverSession;
+  const client = fakeClient({
+    getSession: async () => {
+      reads += 1;
+      return value;
+    },
+  });
+  const hook = await renderHook(
+    (events: SessionEvent[]) =>
+      useSession(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+    [] as SessionEvent[],
+  );
+  await flush();
+  const commandEvent = { ...titleEvent("", 1), type: "session.command.started", payload: {} };
+  value = {
+    ...serverSession,
+    title: "Renamed",
+    titleSource: "user",
+    lastSequence: 2,
+    backgroundCommandActivity: { state: "running", count: 1 },
+  };
+  await hook.rerender([commandEvent, titleEvent("Renamed", 2)]);
+  await flush();
+  expect(hook.result.current.session?.backgroundCommandActivity).toEqual({
+    state: "running",
+    count: 1,
+  });
+  expect(hook.result.current.session?.title).toBe("Renamed");
+  expect(reads).toBe(2);
+  await hook.unmount();
+});
+
+test("useSession refreshes wait settlement and pending-input status without replay loops", async () => {
+  let value = {
+    ...serverSession,
+    status: "idle",
+    inputWait: { deadlineAt: "2099-09-08T14:00:00Z", reason: "CI" },
+  } as Session;
+  let reads = 0;
+  const client = fakeClient({
+    getSession: async () => {
+      reads++;
+      return value;
+    },
+  });
+  const hook = await renderHook(
+    (events: SessionEvent[]) =>
+      useSession(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+    [] as SessionEvent[],
+  );
+  await flush();
+  expect(hook.result.current.session?.inputWait).not.toBeNull();
+  value = { ...value, status: "queued", inputWait: null, lastSequence: 2 };
+  const event = {
+    ...titleEvent("", 2),
+    type: "session.wait.finished",
+    payload: { outcome: "timeout" },
+  } as SessionEvent;
+  await hook.rerender([event]);
+  await flush();
+  expect(hook.result.current.session).toMatchObject({ status: "queued", inputWait: null });
+  const readsAfter = reads;
+  await hook.rerender([event]);
+  await flush();
+  expect(reads).toBe(readsAfter);
+  value = { ...value, status: "running", lastSequence: 3 };
+  await hook.rerender([event, { ...event, sequence: 3, type: "system.update.pending" }]);
+  await flush();
+  expect(hook.result.current.session?.status).toBe("running");
+  await hook.unmount();
+});

@@ -67,6 +67,16 @@ describe("session control surface architecture", () => {
     expect(hostBranch).not.toContain("startConnectionOAuth");
   });
 
+  test("offers failed-session model recovery to Personal workspace connection owners", async () => {
+    const route = await source("routes/session.tsx");
+    const recoveryGateStart = route.indexOf("canConnectModel={hasWorkspacePermission(");
+    const recoveryGate = route.slice(recoveryGateStart, recoveryGateStart + 240);
+
+    expect(recoveryGateStart).toBeGreaterThan(-1);
+    expect(recoveryGate).toContain('"connections:write"');
+    expect(recoveryGate).not.toContain('"workspace:admin"');
+  });
+
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");
@@ -84,7 +94,7 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain('id: "agents"');
   });
 
-  test("keeps setup above the prompt and model beside voice/send on new sessions", async () => {
+  test("keeps the folder above the prompt and context actions inside plus on new sessions", async () => {
     const route = await source("routes/sessions-index.tsx");
     const actions = route.indexOf("actions={");
     const model = route.indexOf("<SessionModelControl", actions);
@@ -101,13 +111,87 @@ describe("session control surface architecture", () => {
       route.indexOf("function SessionSetupStrip"),
       route.indexOf("function SessionModelControl"),
     );
-    expect(setupImplementation).toContain("<SessionToolPicker");
+    expect(route).toContain("<ComposerMobilePlus");
+    expect(route).toContain("<RepositoryContextMenuBody");
+    expect(setupImplementation).not.toContain("<SessionToolPicker");
     expect(setupImplementation).toContain("<SessionFolderPicker");
-    expect(setupImplementation).toContain("<WorkspaceRepositoryPicker");
+    expect(setupImplementation).not.toContain("<WorkspaceRepositoryPicker");
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
-  test("keeps Variable Sets editable at create time and beside an established composer", async () => {
+  test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
+    const [rail, route, focusRequest, hydration] = await Promise.all([
+      source("components/rail/session-list.tsx"),
+      source("routes/sessions-index.tsx"),
+      source("lib/create-composer-focus.ts"),
+      source("routes/sessions-index-hydration.ts"),
+    ]);
+    expect(rail).toContain(
+      'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
+    );
+    expect(rail).toContain("channelId={props.channelId}");
+    expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
+    expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
+    expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
+    expect(route).toContain("const requestedChannelId = (");
+    expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");
+    expect(route).toContain("else if (remoteDraftHydratedRef.current)");
+    expect(route).toContain("selectProject(recentChannelId, false);");
+    expect(hydration).toContain("return newSessionProjectSelection(");
+  });
+
+  test("keeps manual folder selection from retriggering launch selection", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    const selectionStart = route.indexOf("const selectedChannelIdRef = useRef(selectedChannelId);");
+    const selectionEnd = route.indexOf(
+      "useEffect(() => {\n    resetSessionView();",
+      selectionStart,
+    );
+    const selection = route.slice(selectionStart, selectionEnd);
+
+    expect(selectionStart).toBeGreaterThan(-1);
+    expect(selectionEnd).toBeGreaterThan(selectionStart);
+    expect(selection).toContain("const selectProject = useLatestCallback(");
+    expect(selection).toContain("const previousChannelId = selectedChannelIdRef.current;");
+    expect(selection).toContain("setSelectedProjectChannelId(channelId);");
+    expect(selection).not.toContain("const selectProject = useCallback(");
+    expect(selection).not.toContain("[defaultSandboxBackend, selectedChannelId, selectionHistory]");
+    expect(route).toContain(
+      "const previousLaunchChannelIdRef = useRef<string | null | undefined>(launchChannelId);",
+    );
+    expect(route).toContain("const launchProjectIntentRef = useRef(");
+    expect(route).toContain(
+      'const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;',
+    );
+    expect(route).toContain("useCommitSynchronousEffect(() => {");
+    expect(route).toContain("nextNewSessionProjectLaunchIntent(");
+    expect(route).toContain("previousLaunchChannelIdRef.current = launchChannelId;");
+    expect(route).toContain("setProjectProvenancePresent(false);");
+    expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
+    expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
+    expect(route).toContain("onChange={props.onComputeChange}");
+    expect(route).toContain("props.onComputeChange({");
+  });
+
+  test("hydrates durable project provenance before normal and realtime create", async () => {
+    const route = await source("routes/sessions-index.tsx");
+
+    expect(route).toContain(
+      "projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}",
+    );
+    expect(route).toContain(
+      "hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote)",
+    );
+    expect(route).toContain("resolveHydratedNewSessionProjectSelection({");
+    expect(route).toContain("remote,");
+    expect(route).toContain("restoredCompute: restored.compute,");
+    expect(route.match(/const submission = submissionFromSessionDraft\(/g)).toHaveLength(2);
+    expect(route.match(/targetSandboxId: submission\.options\.targetSandboxId/g)).toHaveLength(2);
+    expect(route.match(/workingDir: submission\.options\.workingDir/g)).toHaveLength(2);
+    expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
+  });
+
+  test("keeps Variable Sets editable through create and established composer actions", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),
       source("routes/session.tsx"),
@@ -116,12 +200,15 @@ describe("session control surface architecture", () => {
     ]);
     expect(route).toContain("Add Variable Set…");
     expect(route).toContain("<SelectedVariableSetList");
-    expect(route).toContain(
-      "const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets",
-    );
+    expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).toContain("will be used only for the message you send");
+    expect(route).toContain("PersonalResourceScopeChoice");
+    expect(route).toContain("mode: personalScopeChoice.mode");
+    expect(route).toContain('personalOwnerScope?.identityKey ?? "ineligible"');
+    expect(
+      route.match(/setPersonalScopeGeneration\(\(generation\) => generation \+ 1\)/g),
+    ).toHaveLength(3);
     expect(route).not.toContain("personalResourceSendBlocker");
     expect(route).not.toContain("Confirm private credential or resource use before sending");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
@@ -141,7 +228,7 @@ describe("session control surface architecture", () => {
     expect(route).toContain("canLoadVariableSetCatalog");
     expect(route).toContain("canResolveVariableSetAttachments");
     expect(route).toContain(
-      "newSessionDraftOptionsFromSessionDraft(\n        draft,\n        defaultFirstPartyMcpTools,\n        newSessionCreateVisibility(personalWorkspace, draft.visibility),\n      )",
+      "newSessionDraftOptionsFromSessionDraft(\n        draft,\n        defaultFirstPartyMcpTools,\n        createVisibility,\n      )",
     );
     expect(route).toContain("const selectedRigDefaultVariableSetIds =");
     expect(route).toContain("selectedRigDefaultVariableSetIds,");
@@ -157,36 +244,41 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("The update committed");
     expect(establishedPicker).toContain("Retry refresh");
     expect(establishedPicker).toContain("updateSessionVariableSets");
-    expect(establishedPicker).toContain(
-      "const visible = refreshRequired || currentIds.length > 0 || canAdd",
+    expect(establishedPicker.replace(/\s+/g, " ")).toContain(
+      "const visible = refreshRequired || currentIds.length > 0 ||",
     );
     expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
     expect(establishedRoute).toContain("const variableSetComposerBlocked =");
     expect(establishedRoute).toContain("variableSetPickerState.saving ||");
-    expect(establishedRoute).toContain("variableSetComposerBlocked ||");
+    expect(establishedRoute).toContain("getComposerSendBlocker({");
+    expect(establishedRoute).toContain("variableSetBlocked: variableSetComposerBlocked,");
+    expect(establishedRoute).toContain("sendBlocked: () => composerSendBlocker() !== null,");
     expect(establishedPicker).toContain("props.canControl && props.canAttach");
     expect(
       establishedRoute.match(
         /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
       ),
-    ).toHaveLength(2);
-    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(1);
     expect(establishedRoute).toContain(
       "const [variableSetPickerState, setVariableSetPickerState] =",
     );
-    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(1);
     expect(establishedPicker).toContain(
-      "const busy = props.busy || props.goalActive || props.voiceActive",
+      "const busy = workPending || props.goalActive || props.voiceActive",
     );
+    expect(establishedPicker).toContain("sessionHasVariableSetBlockingWork(props.session)");
     expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
+    expect(establishedPicker).toContain("Only-me Variable Sets are authorized for your own work.");
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');
     expect(establishedControl).not.toContain('type="checkbox"');
-    expect(establishedControl).toContain("is available in this private session");
+    expect(establishedControl).not.toContain("is available in this private session");
+    expect(establishedControl).not.toContain("will be used only for messages you send");
   });
 
   test("announces pin results through an independent live region", async () => {
@@ -203,6 +295,33 @@ describe("session control surface architecture", () => {
     // helper that still changes the live-region text node for that retry.
     expect(header).toContain("pinLiveAnnouncement");
     expect(list).toContain("pinLiveAnnouncement");
+  });
+
+  test("keeps pin and archive one click away while the full row menu stays on right-click", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    const rowStart = list.indexOf("function SessionRow(");
+    const quickActionsStart = list.indexOf("function RowQuickActions(");
+    const overflowStart = list.indexOf("function RowActionsMenu(");
+    const row = list.slice(rowStart, quickActionsStart);
+    const quickActions = list.slice(quickActionsStart, overflowStart);
+    const overflow = list.slice(
+      overflowStart,
+      list.indexOf("function EmptySessions", overflowStart),
+    );
+
+    expect(row).toContain("<ContextMenu>");
+    expect(row).toContain("<ContextMenuContent");
+    expect(row).toContain("<RowQuickActions");
+    expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
+    expect(quickActions).toContain(
+      'aria-label={session.archived ? "Restore session" : "Archive session"}',
+    );
+    expect(quickActions).toContain("group-hover:opacity-100");
+    expect(quickActions).toContain("group-focus-within:opacity-100");
+    expect(quickActions).toContain("pointer-coarse:hidden");
+    expect(quickActions).not.toContain("<DropdownMenu>");
+    expect(overflow).toContain('data-session-actions-mode="overflow"');
+    expect(overflow).toContain("pointer-coarse:inline-flex");
   });
 
   test("keeps rail optimistic pin overrides out of the header projection", async () => {

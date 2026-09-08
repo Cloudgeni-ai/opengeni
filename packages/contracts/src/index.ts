@@ -1,6 +1,8 @@
+export * from "./model-connection-access";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
+export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
@@ -32,11 +34,13 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
+export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
@@ -45,6 +49,7 @@ export {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -54,7 +59,11 @@ export {
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactRequestedTools,
   WorkspaceArtifactSlug,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
+  WorkspaceArtifactSourcePath,
   WorkspaceArtifactStatus,
   WorkspaceArtifactVersion,
   WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
@@ -62,6 +71,9 @@ export {
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_LIST_DEFAULT,
   WORKSPACE_ARTIFACT_LIST_MAX,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   normalizeWorkspaceArtifactSlug,
 } from "./artifacts";
@@ -760,9 +772,10 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_set",
   "goal_update",
   "goal_progress",
-  "goal_wait",
+  "wait_for_input",
   "goal_complete",
   "goal_pause",
+  "goal_resume",
   "memory_search",
   "memory_save",
   "memory_correct",
@@ -791,6 +804,13 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "run_on",
   "sandbox_provision",
   "connected_machine_remove",
+  "project_list",
+  "project_get",
+  "project_create",
+  "project_update",
+  "project_reorder",
+  "project_delete",
+  "session_set_project",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -800,6 +820,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_get",
   "session_events",
   "session_wait",
+  "command_wait",
+  "command_read",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -888,9 +910,12 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
+  "artifacts_prepare_upload",
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "artifacts_archive",
+  "artifacts_restore",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -1543,6 +1568,30 @@ export const ManagedAccount = z.object({
 });
 export type ManagedAccount = z.infer<typeof ManagedAccount>;
 
+export const WorkspacePauseTimer = z.object({
+  id: z.string().uuid(),
+  action: z.enum(["pause", "resume"]),
+  dueAt: z.string().datetime(),
+  pauseForSeconds: z.number().int().min(60).max(2592000).nullable(),
+});
+export type WorkspacePauseTimer = z.infer<typeof WorkspacePauseTimer>;
+export const WorkspacePauseTimerRequest = z
+  .object({
+    action: z.enum(["set", "cancel"]),
+    pauseInSeconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(2592000)
+      .refine((v) => v === 0 || v >= 60)
+      .optional(),
+    pauseForSeconds: z.number().int().min(60).max(2592000).nullable().optional(),
+    clientEventId: z.string().min(1).max(200),
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type WorkspacePauseTimerRequest = z.infer<typeof WorkspacePauseTimerRequest>;
+
 export const Workspace = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -1562,6 +1611,8 @@ export const Workspace = z.object({
   // PATCH merges so newer settings survive an older server.
   settings: z.record(z.string(), z.unknown()),
   inferenceControl: z.object({
+    timer: WorkspacePauseTimer.nullable().optional(),
+    serverTime: z.string().optional(),
     state: z.enum(["active", "paused"]),
     revision: z.number().int().nonnegative(),
     reason: z.string().nullable(),
@@ -1903,14 +1954,24 @@ export const WorkspaceSessionToolDefaults = z
     mcpServerIds: z
       .array(z.string().trim().min(1).max(128))
       .max(128)
-      .transform((ids) => [...new Set(ids)]),
+      .transform((ids) => [...new Set(ids)])
+      .optional(),
     firstPartyMcpTools: z
       .array(FirstPartyMcpToolName)
       .max(512)
-      .transform((tools) => [...new Set(tools)]),
+      .transform((tools) => [...new Set(tools)])
+      .optional(),
   })
   .strict();
 export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+
+// Omitted keys preserve the stored selection; null removes only that override.
+export const WorkspaceSessionToolDefaultsPatch = z
+  .object({
+    mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
+    firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
+  })
+  .strict();
 
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
@@ -2274,7 +2335,7 @@ export const UpdateWorkspaceSettingsRequest = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
-    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -3105,6 +3166,16 @@ export const UpdateWorkspaceRequest = z
   .strict();
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
 
+/**
+ * Organization API key access tier. `full` keys administer the organization
+ * (create workspaces, mint keys, run sessions in every shared workspace);
+ * `read` keys only inventory shared workspaces and read their sessions, events,
+ * and files. The tier is derived from the key's stored permissions, never
+ * stored separately: a key whose permissions omit `workspace:admin` is `read`.
+ */
+export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
+
 export const ApiKey = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -3113,6 +3184,11 @@ export const ApiKey = z.object({
   description: z.string().nullable(),
   prefix: z.string(),
   permissions: z.array(Permission),
+  /**
+   * Organization keys only: the access tier derived from `permissions`.
+   * Omitted for workspace-scoped keys, whose permissions are explicit.
+   */
+  access: OrganizationApiKeyAccess.optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3141,6 +3217,8 @@ export const CreateOrganizationApiKeyRequest = z
     name: z.string().trim().min(1).max(200),
     description: z.string().trim().min(1).max(500).optional(),
     expiresAt: z.string().datetime({ offset: true }).optional(),
+    /** Access tier; omitted means `full` so existing callers keep their keys. */
+    access: OrganizationApiKeyAccess.default("full"),
   })
   .strict();
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
@@ -5321,6 +5399,12 @@ export const KnowledgeMemory = z.object({
   status: KnowledgeMemoryStatus,
   kind: KnowledgeMemoryKind,
   scope: z.string(),
+  /** Typed selector (migration 0152/0426): workspace, user, session, role, ephemeral, legacy. */
+  scopeType: z.string().optional(),
+  /** `end_user:v1:<tuple hash>` for a session end-user layer; null otherwise. */
+  scopeSubjectId: z.string().nullable().optional(),
+  /** Lineage root for a session layer; null otherwise. */
+  scopeSessionId: z.string().uuid().nullable().optional(),
   text: z.string(),
   sourceRefs: z.array(KnowledgeSourceRef),
   confidence: z.number().min(0).max(1),
@@ -5996,7 +6080,7 @@ export const SessionGoalContinuation = z.object({
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
   lastError: z.string().nullable(),
   /**
-   * The agent's stated reason for a `held_for_input` hold (`goal_wait`), so a
+   * The agent's stated reason for a `held_for_input` hold (`wait_for_input`), so a
    * human can see why the goal is waiting and until when (`nextAttemptAt`).
    * Null for every other state; omitted by older servers.
    */
@@ -6583,6 +6667,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.feedback.write",
   "session.attention.write",
   "session.archive.write",
   "session.delete",
@@ -6676,12 +6761,84 @@ export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDe
  */
 export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
 
+/**
+ * How far a live agent attempt on a session may reach across the workspace,
+ * and how far peer attempts may reach into it. `workspace` is the platform
+ * default. `user` limits both directions to sessions carrying the same
+ * {@link SessionEndUser} label; `session` limits both to the own root tree.
+ * The most restrictive side of a caller/target pair wins. Humans and API keys
+ * are unaffected: this is an agent-to-agent fence enforced only in the core
+ * session-authorization seam.
+ */
+export const SessionAgentAccess = z.enum(["session", "user", "workspace"]);
+export type SessionAgentAccess = z.infer<typeof SessionAgentAccess>;
+
+export const SESSION_END_USER_SOURCE_MAX_CHARS = 200;
+export const SESSION_END_USER_ID_MAX_CHARS = 1_024;
+
+const NUL_CHARACTER = String.fromCharCode(0);
+const UNPAIRED_SURROGATE_PATTERN =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+
+function opaqueEndUserSegment(maxChars: number) {
+  return z
+    .string()
+    .min(1)
+    .max(maxChars)
+    .refine((value) => !value.includes(NUL_CHARACTER), "must not contain NUL")
+    .refine((value) => !UNPAIRED_SURROGATE_PATTERN.test(value), "must be well-formed UTF-16");
+}
+
+/**
+ * Opaque end-user label attached to a session by the embedding product. It
+ * shares the external-identity shape (`source` + product-owned `id`) so a
+ * later join is by pair. It is NOT a subject and grants NO authority: it only
+ * scopes `agentAccess: "user"` reach, `memoryScope: "user"` Memory rows, and
+ * the session-list `endUserSource`/`endUserId` filter.
+ */
+export const SessionEndUser = z
+  .object({
+    source: opaqueEndUserSegment(SESSION_END_USER_SOURCE_MAX_CHARS),
+    id: opaqueEndUserSegment(SESSION_END_USER_ID_MAX_CHARS),
+  })
+  .strict();
+export type SessionEndUser = z.infer<typeof SessionEndUser>;
+
+/**
+ * The typed Workspace Memory selector an agent reads and writes. `workspace`
+ * is today's shared memory; `user` and `session` are ADDITIVE private layers
+ * (the agent still reads workspace facts and saves to its narrowest scope);
+ * `off` registers no Memory tools for the session. `user` requires an
+ * end-user label.
+ */
+export const SessionMemoryScope = z.enum(["workspace", "user", "session", "off"]);
+export type SessionMemoryScope = z.infer<typeof SessionMemoryScope>;
+
+/**
+ * The calling agent attempt's own access scope, resolved by OpenGeni from the
+ * caller session row (never from the request) and applied as one SQL
+ * predicate wherever a session list runs for that attempt.
+ */
+export const SessionAgentAccessViewer = z
+  .object({
+    callerRootSessionId: z.string().uuid(),
+    agentAccess: SessionAgentAccess,
+    endUser: SessionEndUser.nullable(),
+  })
+  .strict();
+export type SessionAgentAccessViewer = z.infer<typeof SessionAgentAccessViewer>;
+
 export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("all") }),
+  z.object({
+    kind: z.literal("all"),
+    /** Set by OpenGeni for an agent attempt; a host-returned value is replaced. */
+    agentAccessViewer: SessionAgentAccessViewer.optional(),
+  }),
   z.object({
     kind: z.literal("scoped"),
     rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
     sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+    agentAccessViewer: SessionAgentAccessViewer.optional(),
   }),
 ]);
 export type SessionAuthorizationListScope = z.infer<typeof SessionAuthorizationListScope>;
@@ -7255,6 +7412,8 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /** Absent on legacy drafts; null is explicit provenance for the Default project. */
+  selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
   selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
   updatedAt: z.string().nullable(),
@@ -7269,6 +7428,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
@@ -7349,7 +7509,7 @@ export const WorkspaceControlEvent = z.object({
   type: z.literal("workspace.control.changed"),
   scope: z.enum(["workspace", "session"]),
   rootSessionId: z.string().uuid().nullable(),
-  action: z.enum(["pause", "resume"]),
+  action: z.enum(["pause", "resume", "timer_set", "timer_cancelled"]),
   automatic: z.boolean(),
   reason: z.string().nullable(),
   actor: z.string().min(1),
@@ -7493,6 +7653,8 @@ export const SessionSystemUpdateKind = z.enum([
   "goal_continuation",
   "agent_message",
   "agent_steer_instruction",
+  "session_wait_timeout",
+  "background_command_result",
   "child_terminal_result",
   "media_generation_result",
   "child_requires_action",
@@ -7506,7 +7668,7 @@ export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 /**
  * How a newly pending machine input affects an idle receiving session.
  * `immediate` registers a workflow wake in the same commit (the behaviour of
- * every pre-existing kind) and ends a `goal_wait` hold at the next idle
+ * every pre-existing kind) and ends a `wait_for_input` hold at the next idle
  * evaluation; `deferred` only inserts the durable pending row plus its
  * `system.update.pending` event and is delivered coalesced with the next claim.
  */
@@ -7520,6 +7682,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   goal_continuation: "immediate",
   agent_message: "immediate",
   agent_steer_instruction: "immediate",
+  session_wait_timeout: "immediate",
+  background_command_result: "immediate",
   child_terminal_result: "immediate",
   media_generation_result: "immediate",
   child_requires_action: "immediate",
@@ -7705,6 +7869,30 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
     .passthrough(),
   z
     .object({
+      type: z.literal("session_wait_timeout"),
+      waitTurnId: z.string().uuid(),
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: boundedUtf8String(2 * 1024),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("background_command_result"),
+      commandId: z.string().uuid(),
+      state: z.enum(["exited", "lost"]),
+      exitCode: z.number().int().nullable(),
+      reason: boundedUtf8String(512),
+      failure: z.lazy(() => SessionCommandFailure).optional(),
+      outputLocator: z
+        .object({
+          eventType: z.literal("sandbox.command.output.delta"),
+          commandId: z.string().uuid(),
+        })
+        .strict(),
+    })
+    .passthrough(),
+  z
+    .object({
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
       status: z.enum(["idle", "failed", "cancelled"]),
@@ -7815,7 +8003,7 @@ export function renderSessionSystemUpdateBatch(
   }
   return [
     "[OpenGeni internal updates]",
-    "These platform updates were delivered together for this inference. They are not human prompts.",
+    "These platform updates were delivered together for this inference.",
     JSON.stringify({
       updates: updates.map((update) => ({
         id: update.id,
@@ -11860,6 +12048,20 @@ export const SessionBackgroundCommandActivity = z
   .strict();
 export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
 
+export const SessionCommandFailure = z
+  .object({
+    code: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    detail: z.record(z.string().max(128), z.string().max(2048)).optional(),
+    retryable: z.literal(false),
+  })
+  .refine(
+    (failure) =>
+      Object.keys(failure.detail ?? {}).length <= 32 &&
+      new TextEncoder().encode(JSON.stringify(failure)).byteLength <= 4096,
+    "Command failure metadata exceeds its retained bound",
+  );
+export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
+
 export const SessionBackgroundCommand = z
   .object({
     id: z.string().uuid(),
@@ -11871,12 +12073,67 @@ export const SessionBackgroundCommand = z
     cancelRequestedAt: z.string().nullable(),
     exitCode: z.number().int().nullable(),
     settlementReason: z.string().nullable(),
+    failure: SessionCommandFailure.optional(),
     startedAt: z.string(),
     settledAt: z.string().nullable(),
+    completionObservedAt: z.string().nullable().optional(),
     updatedAt: z.string(),
   })
   .strict();
 export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
+
+export const CommandReadInput = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commandId: z.string().uuid(),
+      cursor: z.string().max(128).optional(),
+      waitSeconds: z.number().int().min(0).max(50).optional(),
+      maxOutputBytes: z.number().int().min(4).max(65_536).optional(),
+    })
+    .strict())();
+export type CommandReadInput = z.infer<typeof CommandReadInput>;
+
+export const CommandReadResult = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commandId: z.string().uuid(),
+      state: SessionBackgroundCommandState,
+      exitCode: z.number().int().nullable(),
+      settlementReason: z.string().nullable().optional(),
+      // A physical zero exit is not success when runner output delivery failed.
+      failure: SessionCommandFailure.optional(),
+      terminal: z.boolean(),
+      completionObservedAt: z.string().nullable(),
+      freshness: z
+        .object({
+          status: z.literal("refresh_unavailable"),
+          retryable: z.literal(true),
+        })
+        .optional(),
+      chunks: z
+        .array(
+          z.object({
+            sequence: z.number().int().nonnegative(),
+            stream: z.enum(["stdout", "stderr"]),
+            streamFidelity: z.enum(["separate", "merged", "unknown"]),
+            chunk: z.string(),
+          }),
+        )
+        .max(64),
+      nextCursor: z.string(),
+      hasMore: z.boolean(),
+      retention: z.object({
+        source: z.literal("retained_session_events"),
+        completeness: z.literal("unknown"),
+        gaps: z.array(z.string()),
+      }),
+      waitedMs: z.number().nonnegative(),
+      timedOut: z.boolean(),
+      aborted: z.boolean(),
+      liveFanout: z.boolean(),
+    })
+    .strict())();
+export type CommandReadResult = z.infer<typeof CommandReadResult>;
 
 export const SessionBackgroundCommandListResponse = z
   .object({ commands: z.array(SessionBackgroundCommand).max(1000) })
@@ -11899,6 +12156,8 @@ export const Session = z.object({
   status: SessionStatus,
   /** Additive list projection. Detail reads may omit it. */
   backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
+  /** Current non-deleted schedules targeting this session, including paused schedules. */
+  hasSchedules: z.boolean().optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -11910,6 +12169,12 @@ export const Session = z.object({
   // workspace membership roles and from memory selectors. Null keeps the
   // compatibility fallback to a normalized metadata.role value.
   policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
+  /** Agent-to-agent reach declared at create; see {@link SessionAgentAccess}. */
+  agentAccess: SessionAgentAccess.default("workspace"),
+  /** Opaque product label; null when the create carried none. */
+  endUser: SessionEndUser.nullable().default(null),
+  /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
+  memoryScope: SessionMemoryScope.default("workspace"),
   resources: z.array(ResourceRef),
   skills: SessionSkills.default([]),
   tools: z.array(ToolRef),
@@ -11926,6 +12191,8 @@ export const Session = z.object({
   /** Frozen creator fact used only for creation attribution/idempotent repair. */
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
+  // Read projection: latest turn.started policy, or creation policy before any turn starts.
+  // Accepted/queued turns and actor composer drafts retain their own explicit policy.
   model: z.string(),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
@@ -11998,6 +12265,15 @@ export const Session = z.object({
   queueHeadPosition: z.number().int(),
   queueTailPosition: z.number().int(),
   effectiveControl: EffectiveSessionControl,
+  /** Current out-of-turn wait, independent of goals. Omitted by older servers.
+   * An elapsed deadline means the recheck is due, not proof it has started. */
+  inputWait: z
+    .object({
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: z.string(),
+    })
+    .nullable()
+    .optional(),
   lastSequence: z.number().int().nonnegative(),
   // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
   // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -12037,6 +12313,7 @@ export const Session = z.object({
       totalDescendants: z.number().int().nonnegative(),
       runningDescendants: z.number().int().nonnegative(),
       queuedDescendants: z.number().int().nonnegative(),
+      waitingDescendants: z.number().int().nonnegative().optional(),
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       /** Historical failed lifecycle states, including already-reviewed failures. */
@@ -12088,12 +12365,54 @@ export type SessionSummary = Session;
  */
 export const SessionListResponse = z.object({
   pinned: z.array(Session),
+  filtersApplied: z.literal(true).optional(),
+  originSiteId: z.string().uuid().optional(),
   /** True when older matching pins were omitted from this bounded page. */
   pinnedTruncated: z.boolean().optional(),
   sessions: z.array(Session),
   nextCursor: z.string().nullable(),
 });
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
+
+/**
+ * `GET /v1/organizations/:organizationId/sessions` query. `endUserSource` and
+ * `endUserId` must be supplied together; `status` keeps only sessions in that
+ * exact lifecycle state.
+ */
+export const ListOrganizationSessionsQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    cursor: z.string().min(1).optional(),
+    endUserSource: z.string().trim().min(1).max(200).optional(),
+    endUserId: z.string().trim().min(1).max(1024).optional(),
+    status: SessionStatus.optional(),
+  })
+  .superRefine((value, context) => {
+    if ((value.endUserSource === undefined) !== (value.endUserId === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "endUserSource and endUserId must be supplied together",
+        path: ["endUserId"],
+      });
+    }
+  });
+export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessionsQuery>;
+
+/**
+ * One page of the organization-wide session list: the sessions of every
+ * shared workspace the caller may read, visited in a stable workspace order.
+ * Every row carries its `workspaceId`; events, history, and files are read
+ * through the ordinary workspace routes. Personal workspaces are never
+ * included and private sessions stay invisible to the caller exactly as they
+ * are on the workspace list. A page may hold fewer than `limit` rows while
+ * `nextCursor` is still set (the server bounds how many workspaces one request
+ * visits), so callers follow `nextCursor` until it is null.
+ */
+export const OrganizationSessionListResponse = z.object({
+  sessions: z.array(Session),
+  nextCursor: z.string().nullable(),
+});
+export type OrganizationSessionListResponse = z.infer<typeof OrganizationSessionListResponse>;
 
 // Recursive: the TS type is declared first so the schema annotation can carry
 // the FULL recursive shape (a shallow annotation loses type information for
@@ -12110,6 +12429,8 @@ export const LineageNode: z.ZodType<LineageNode> = z.lazy(() =>
 );
 
 export const SessionLineageResponse = z.object({
+  /** Current schedule relationship for the requested session. */
+  sessionHasSchedules: z.boolean().optional(),
   ancestors: z.array(Session),
   children: z.array(LineageNode),
   truncated: z.boolean().default(false),
@@ -12177,6 +12498,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -12382,6 +12705,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
     "session.command.backgrounded",
+    "session.wait.started",
+    "session.wait.finished",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",
@@ -12789,6 +13114,16 @@ export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 // --- A2 FileSystem request/response (NOT events; returned inline) ------------
 export const FsNodeType = z.enum(["file", "dir", "symlink", "other"]);
 export type FsNodeType = z.infer<typeof FsNodeType>;
+/** Optional identity copied from one stream-capabilities response. File callers
+ * use it to fail with a retryable route conflict instead of reinterpreting a
+ * canonical path after the selected sandbox or effective root changes. */
+export const FileSystemRouteIdentity = z
+  .object({
+    epoch: z.number().int().nonnegative(),
+    root: z.string().min(1).max(4_096),
+  })
+  .strict();
+export type FileSystemRouteIdentity = z.infer<typeof FileSystemRouteIdentity>;
 // The Pierre-tree node. `children` is present only when the dir was listed with
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
 export interface FsTreeNode {
@@ -12823,6 +13158,7 @@ export const FsListRequest = z.object({
   depth: z.number().int().min(0).max(8).default(1),
   maxEntries: z.number().int().positive().max(20_000).default(2_000),
   includeHidden: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsListRequest = z.infer<typeof FsListRequest>;
 export const FsListResponse = z.object({
@@ -12855,6 +13191,7 @@ export const FsReadRequest = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(5 * 1024 * 1024),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsReadRequest = z.infer<typeof FsReadRequest>;
 export const FsReadResponse = z.object({
@@ -12874,6 +13211,7 @@ export const FsWriteRequest = z.object({
   content: z.string(),
   overwrite: z.boolean().default(true), // false + existing path => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsWriteRequest = z.infer<typeof FsWriteRequest>;
 export const FsWriteResponse = z.object({
@@ -12886,6 +13224,7 @@ export type FsWriteResponse = z.infer<typeof FsWriteResponse>;
 export const FsDeleteRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(false), // required true to delete a non-empty dir
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
 export const FsDeleteResponse = z.object({
@@ -12898,6 +13237,7 @@ export const FsMoveRequest = z.object({
   newPath: z.string(),
   overwrite: z.boolean().default(false), // false + existing destination => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMoveRequest = z.infer<typeof FsMoveRequest>;
 export const FsMoveResponse = z.object({
@@ -12910,6 +13250,7 @@ export type FsMoveResponse = z.infer<typeof FsMoveResponse>;
 export const FsMkdirRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(true), // false + existing path => 400
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMkdirRequest = z.infer<typeof FsMkdirRequest>;
 export const FsMkdirResponse = z.object({
@@ -14380,6 +14721,18 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * capability, while a private child uses an exact live-parent-attempt
      * database capability. Both commit atomically. */
     visibility: SessionVisibility.default("workspace"),
+    /** Agent-to-agent reach. Top-level omission is the platform default
+     * `workspace`. An agent-created child inherits its parent's value on
+     * omission and may only narrow it (workspace > user > session); a wider
+     * explicit child value is rejected. Never widens human or API-key access. */
+    agentAccess: SessionAgentAccess.default("workspace"),
+    /** Opaque product label for the human this session serves. A child
+     * inherits its parent's label; naming a different pair is rejected. */
+    endUser: SessionEndUser.optional(),
+    /** Typed Memory selector. `user` requires an end-user label (own or
+     * inherited; 422 otherwise). A child inherits its parent's value on
+     * omission and may only narrow it (workspace > user > session > off). */
+    memoryScope: SessionMemoryScope.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or
     // starting an underlying agent turn. Realtime can then become the first
@@ -14404,7 +14757,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // compatibility fallback by omitting this field.
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
     // For an agent-created child, omission inherits the trusted immediate
-    // parent's repository/file context. An explicit array, including [], is
+    // parent's repositories only; files require explicit selection. An explicit
+    // array, including [], is
     // authoritative. Top-level omission remains []. Presence is resolved from
     // the raw request because this Zod default erases absent-vs-empty.
     resources: z.array(ResourceRef).default([]),
@@ -14568,6 +14922,9 @@ export const CreateSessionRequest = withVariableSetIdAlias(
       message: "new-session attachment authority epoch is derived by the server",
     });
   }
+  // memoryScope "user" requires an end-user label, but an agent-created child
+  // inherits its parent's label on omission, so that rule is enforced by the
+  // core create resolver (422) after inheritance rather than at parse time.
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
@@ -14928,6 +15285,67 @@ export const GitHubRepositoriesResponse = z.object({
   repositories: z.array(GitHubRepository),
 });
 export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
+
+export const GitHubActionPolicyDecision = z.enum(["allow", "ask", "block"]);
+export type GitHubActionPolicyDecision = z.infer<typeof GitHubActionPolicyDecision>;
+
+export const GitHubActionPolicyEffectiveDecision = z.enum([
+  ...GitHubActionPolicyDecision.options,
+  "mixed",
+]);
+export type GitHubActionPolicyEffectiveDecision = z.infer<
+  typeof GitHubActionPolicyEffectiveDecision
+>;
+
+export const GitHubActionPolicyGroup = z.enum(["routine", "review", "merge"]);
+export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
+
+export const GitHubActionPolicyActor = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workspace_app"),
+    installationId: z.number().int().positive(),
+  }),
+  z.object({
+    kind: z.literal("personal"),
+    connectionId: z.string().trim().min(1).max(512),
+  }),
+]);
+export type GitHubActionPolicyActor = z.infer<typeof GitHubActionPolicyActor>;
+
+const GitHubActionPolicyGroups = z.object({
+  routine: GitHubActionPolicyEffectiveDecision,
+  review: GitHubActionPolicyEffectiveDecision,
+  merge: GitHubActionPolicyEffectiveDecision,
+});
+
+export const GitHubActionPolicyActorState = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workspace_app"),
+    installationId: z.number().int().positive(),
+    label: z.string().min(1).max(256),
+    groups: GitHubActionPolicyGroups,
+  }),
+  z.object({
+    kind: z.literal("personal"),
+    connectionId: z.string().trim().min(1).max(512),
+    label: z.string().min(1).max(256),
+    groups: GitHubActionPolicyGroups,
+  }),
+]);
+export type GitHubActionPolicyActorState = z.infer<typeof GitHubActionPolicyActorState>;
+
+export const GitHubActionPoliciesResponse = z.object({
+  enabled: z.boolean(),
+  actors: z.array(GitHubActionPolicyActorState).max(128),
+});
+export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesResponse>;
+
+export const UpdateGitHubActionPolicyRequest = z.object({
+  actor: GitHubActionPolicyActor,
+  group: GitHubActionPolicyGroup,
+  decision: GitHubActionPolicyDecision,
+});
+export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
 export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({
@@ -15911,6 +16329,92 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
 );
 export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
 
+/**
+ * Secret-safe Codex allocator policy accepted with the first durable lease of
+ * a logical turn. Account ids are policy references only; credential material
+ * and provider tokens must never be stored here.
+ */
+export const CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY =
+  "codexCredentialPolicySnapshotV1" as const;
+
+export const CodexCredentialPolicySnapshotV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      activeCredentialId: z.string().min(1).max(256).nullable(),
+      rotationEnabled: z.boolean(),
+      rotationStrategy: z.string().min(1).max(64),
+      /** Effective allocator source; absent only on pre-source snapshots. */
+      source: z.enum(["workspace", "organization", "disabled"]).optional(),
+      pinnedCredentialId: z.string().min(1).max(256).nullable(),
+      pinSource: z.enum(["manual", "policy"]).nullable(),
+      lastCredentialId: z.string().min(1).max(256).nullable(),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if ((policy.pinnedCredentialId === null) !== (policy.pinSource === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pinSource"],
+          message: "pinnedCredentialId and pinSource must both be null or both be present",
+        });
+      }
+    }),
+);
+export type CodexCredentialPolicySnapshotV1 = z.infer<typeof CodexCredentialPolicySnapshotV1>;
+
+export type CodexCredentialPolicySnapshotReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; policy: CodexCredentialPolicySnapshotV1 };
+
+/**
+ * Read the accepted Codex allocator policy from turn metadata. A present but
+ * malformed snapshot fails closed; only a missing key is legacy metadata.
+ */
+export function readCodexCredentialPolicySnapshotV1(
+  metadata: unknown,
+): CodexCredentialPolicySnapshotReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error(
+      "Malformed Codex credential policy snapshot metadata: turn metadata is not an object",
+    );
+  }
+  const record = metadata as Record<string, unknown>;
+  if (
+    !Object.prototype.hasOwnProperty.call(record, CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY)
+  ) {
+    return { kind: "absent" };
+  }
+  const parsed = CodexCredentialPolicySnapshotV1.safeParse(
+    record[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY],
+  );
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed Codex credential policy snapshot metadata at ${paths || "policy"}`);
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted Codex allocator policy snapshot into turn metadata. */
+export function metadataWithCodexCredentialPolicySnapshotV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: CodexCredentialPolicySnapshotV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: CodexCredentialPolicySnapshotV1.parse(policy),
+  };
+}
+
 export type TurnExecutionPolicyReadV1 =
   | { kind: "absent" }
   | { kind: "valid"; policy: TurnExecutionPolicyV1 };
@@ -16221,6 +16725,7 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
+    billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
@@ -16349,6 +16854,7 @@ export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
+export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";
@@ -16364,3 +16870,5 @@ export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
+
+export * from "./feedback";

@@ -2,13 +2,23 @@ import { Link } from "@tanstack/react-router";
 import { CheckIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
-import { completeOrganizationUserSetup, previewOrganizationUserSetup } from "@/api";
+import {
+  completeOrganizationUserSetup,
+  createOpenGeniClient,
+  fetchAuthSession,
+  previewOrganizationUserSetup,
+} from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
+import { setupAccountTokenFromUrl, takeBootstrappedSetupAccountToken } from "@/setup-account-token";
+import type { AuthSession, OrganizationInvitation } from "@/types";
+
+export { setupAccountTokenFromUrl } from "@/setup-account-token";
 
 const MIN_PASSWORD_LENGTH = 8;
 const SETUP_TOKEN_REMOUNT_HANDOFF_MS = 30_000;
@@ -26,6 +36,7 @@ let pendingBrowserSetupToken: {
 } | null = null;
 
 export function SetupAccountRoute({ token }: { token?: string | undefined }) {
+  const [client] = useState(() => createOpenGeniClient());
   const [setupToken] = useState(() => token ?? consumeSetupAccountTokenFromBrowserLocation());
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -33,10 +44,28 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
   const [operationId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
+  const [completion, setCompletion] = useState<"created" | "joined" | null>(null);
   const [preview, setPreview] = useState<OrganizationUserSetupPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(Boolean(setupToken));
   const [previewFailed, setPreviewFailed] = useState(false);
+  const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
+  const [matchingInvitation, setMatchingInvitation] = useState<
+    OrganizationInvitation | null | undefined
+  >(undefined);
+
+  useEffect(() => {
+    let active = true;
+    void fetchAuthSession()
+      .then((session) => {
+        if (active) setAuthSession(session);
+      })
+      .catch(() => {
+        if (active) setAuthSession(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -63,6 +92,29 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
     };
   }, [setupToken]);
 
+  useEffect(() => {
+    let active = true;
+    if (preview?.state !== "pending" || authSession === undefined) return;
+    if (
+      !authSession ||
+      normalizeEmail(authSession.user.email) !== normalizeEmail(preview.targetEmail)
+    ) {
+      setMatchingInvitation(null);
+      return;
+    }
+    setMatchingInvitation(undefined);
+    void findMatchingPendingInvitation(client, preview)
+      .then((invitation) => {
+        if (active) setMatchingInvitation(invitation);
+      })
+      .catch(() => {
+        if (active) setMatchingInvitation(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [authSession, client, preview]);
+
   async function submit() {
     setError(null);
     if (!name.trim()) {
@@ -86,7 +138,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
         password,
         operationId,
       });
-      setDone(true);
+      setCompletion("created");
     } catch (caught) {
       const raw = caught instanceof Error ? caught.message : String(caught);
       setError(
@@ -98,6 +150,29 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
       setBusy(false);
     }
   }
+
+  async function acceptWithCurrentAccount() {
+    if (!matchingInvitation || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await client.acceptOrganizationInvitation(matchingInvitation.id, {
+        expectedRevision: matchingInvitation.revision,
+        operationId,
+      });
+      setCompletion("joined");
+    } catch {
+      setError("We couldn't accept this invitation. Refresh and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const signedInAsInvitedAccount =
+    preview?.state === "pending" &&
+    authSession !== null &&
+    authSession !== undefined &&
+    normalizeEmail(authSession.user.email) === normalizeEmail(preview.targetEmail);
 
   return (
     <section className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4 sm:items-center">
@@ -114,21 +189,28 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             </h1>
             <p className="text-sm text-fg-subtle">
               {preview?.state === "pending"
-                ? "Sign in or create an account to accept this invitation."
+                ? signedInAsInvitedAccount
+                  ? `Signed in as ${authSession.user.email}.`
+                  : "Sign in or create an account to accept this invitation."
                 : "Use your existing OpenGeni account or create a new one."}
             </p>
           </div>
         </div>
 
-        {done ? (
+        {completion ? (
           <>
-            <Notice tone="success" title="Account ready">
-              Your email is verified and your organization access is ready.
+            <Notice
+              tone="success"
+              title={completion === "joined" ? "Invitation accepted" : "Account ready"}
+            >
+              {completion === "joined"
+                ? `You joined ${preview?.state === "pending" ? preview.organizationName : "the organization"}.`
+                : "Your email is verified and your organization access is ready."}
             </Notice>
             <Button asChild className="mt-4 w-full">
               <Link to="/">
                 <CheckIcon className="size-4" />
-                Sign in
+                {completion === "joined" ? "Open OpenGeni" : "Sign in"}
               </Link>
             </Button>
           </>
@@ -152,6 +234,43 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
           </Notice>
         ) : preview?.state !== "pending" ? (
           <UnavailableSetupState state={preview?.state ?? "unavailable"} />
+        ) : authSession === undefined ||
+          (signedInAsInvitedAccount && matchingInvitation === undefined) ? (
+          <div className="flex items-center gap-2 text-sm text-fg-subtle" role="status">
+            <Loader2Icon className="size-4 animate-spin" />
+            Checking your account…
+          </div>
+        ) : signedInAsInvitedAccount && matchingInvitation ? (
+          <div>
+            <InvitationSummary preview={preview} />
+            <Notice tone="info" title={`Signed in as ${authSession.user.email}`}>
+              Accept this invitation with your current OpenGeni account. No new account or password
+              is needed.
+            </Notice>
+            {error ? (
+              <Notice tone="failed" className="mt-4">
+                {error}
+              </Notice>
+            ) : null}
+            <Button
+              type="button"
+              className="mt-4 w-full"
+              disabled={busy}
+              onClick={() => void acceptWithCurrentAccount()}
+            >
+              {busy ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <CheckIcon className="size-4" />
+              )}
+              Accept and join
+            </Button>
+          </div>
+        ) : signedInAsInvitedAccount ? (
+          <Notice tone="failed" title="Invitation unavailable">
+            We couldn&apos;t find this invitation for your signed-in account. Refresh or ask the
+            organization administrator to resend it.
+          </Notice>
         ) : (
           <form
             onSubmit={(event) => {
@@ -159,27 +278,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
               void submit();
             }}
           >
-            <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3 text-sm">
-              <p>
-                <span className="font-medium">{preview.organizationName}</span> invited{" "}
-                <span className="font-medium">{preview.targetEmail}</span> as{" "}
-                {titleCase(preview.organizationRole)}.
-              </p>
-              {preview.sharedWorkspaceAccess.length > 0 ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5">
-                  {preview.sharedWorkspaceAccess.map((workspace) => (
-                    <li key={workspace.workspaceId}>
-                      {workspace.workspaceName}: {titleCase(workspace.role)}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-fg-subtle">No shared workspaces are assigned yet.</p>
-              )}
-              <p className="mt-2 text-fg-subtle">
-                This does not share anyone&apos;s Personal workspace.
-              </p>
-            </div>
+            <InvitationSummary preview={preview} />
             <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
               <p className="text-sm font-medium">Already have an OpenGeni account?</p>
               <p className="mt-1 text-xs leading-5 text-fg-subtle">
@@ -304,30 +403,96 @@ function UnavailableSetupState({
   );
 }
 
+function InvitationSummary({
+  preview,
+}: {
+  preview: Extract<OrganizationUserSetupPreview, { state: "pending" }>;
+}) {
+  return (
+    <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3 text-sm">
+      <p>
+        <span className="font-medium">{preview.organizationName}</span> invited{" "}
+        <span className="font-medium">{preview.targetEmail}</span> as{" "}
+        {titleCase(preview.organizationRole)}.
+      </p>
+      {preview.sharedWorkspaceAccess.length > 0 ? (
+        <ul className="mt-2 list-disc space-y-1 pl-5">
+          {preview.sharedWorkspaceAccess.map((workspace) => (
+            <li key={workspace.workspaceId}>
+              {workspace.workspaceName}: {titleCase(workspace.role)}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-fg-subtle">No shared workspaces are assigned yet.</p>
+      )}
+      <p className="mt-2 text-fg-subtle">This does not share anyone&apos;s Personal workspace.</p>
+    </div>
+  );
+}
+
+async function findMatchingPendingInvitation(
+  client: OpenGeniBrowserClient,
+  preview: Extract<OrganizationUserSetupPreview, { state: "pending" }>,
+): Promise<OrganizationInvitation | null> {
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await client.listOrganizationInvitations({
+      ...(cursor === undefined ? {} : { cursor }),
+      limit: 100,
+    });
+    const match = page.invitations.find(
+      (invitation) =>
+        invitation.status === "pending" &&
+        invitation.organizationId === preview.organizationId &&
+        normalizeEmail(invitation.targetEmail) === normalizeEmail(preview.targetEmail) &&
+        invitation.role === preview.organizationRole &&
+        sameStringSet(
+          invitation.initialWorkspaceIds,
+          preview.sharedWorkspaceAccess.map((workspace) => workspace.workspaceId),
+        ),
+    );
+    if (match) return match;
+    const nextCursor = page.nextCursor ?? undefined;
+    if (nextCursor !== undefined && seenCursors.has(nextCursor)) {
+      throw new Error("Organization invitation pagination did not advance");
+    }
+    if (nextCursor !== undefined) seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (cursor !== undefined);
+  return null;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const leftValues = new Set(left);
+  const rightValues = new Set(right);
+  return (
+    leftValues.size === left.length &&
+    rightValues.size === right.length &&
+    [...leftValues].every((value) => rightValues.has(value))
+  );
+}
+
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function titleCase(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
-export function setupAccountTokenFromUrl(value: string): {
-  token: string | null;
-  scrubbedPath: string;
-} {
-  const url = new URL(value, "https://opengeni.invalid");
-  const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
-  const candidate = fragment.get("token");
-  const token = candidate && candidate.length <= 2_048 ? candidate : null;
-  fragment.delete("token");
-  url.searchParams.delete("token");
-  const remainingFragment = fragment.toString();
-  return {
-    token,
-    scrubbedPath: `${url.pathname}${url.search}${remainingFragment ? `#${remainingFragment}` : ""}`,
-  };
-}
-
 function consumeSetupAccountTokenFromBrowserLocation(): string | null {
   if (typeof window === "undefined") return null;
-  const { token, scrubbedPath } = setupAccountTokenFromUrl(window.location.href);
+  const bootstrappedToken = takeBootstrappedSetupAccountToken(window);
+  const { token: locationToken, scrubbedPath } = setupAccountTokenFromUrl(window.location.href);
+  const candidates = [bootstrappedToken, locationToken].filter(
+    (candidate): candidate is string => candidate !== null,
+  );
+  const token = candidates.length === 1 ? candidates[0]! : null;
+  const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (scrubbedPath !== currentPath) window.history.replaceState(null, "", scrubbedPath);
   if (token) {
     cachePendingBrowserSetupToken(window.location.pathname, token);
   }
@@ -336,8 +501,6 @@ function consumeSetupAccountTokenFromBrowserLocation(): string | null {
     (pendingBrowserSetupToken?.pathname === window.location.pathname
       ? pendingBrowserSetupToken.token
       : null);
-  const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (scrubbedPath !== currentPath) window.history.replaceState(null, "", scrubbedPath);
   return availableToken;
 }
 

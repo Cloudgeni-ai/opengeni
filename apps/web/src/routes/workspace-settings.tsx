@@ -1,3 +1,4 @@
+import { WorkspaceRuntimeControl } from "@/components/workspace-runtime-control";
 // Workspace settings hub: browse links to workspace config surfaces, then
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
@@ -10,9 +11,7 @@ import {
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
-  PauseIcon,
   PencilIcon,
-  PlayIcon,
   PlusIcon,
   ShrinkIcon,
   Trash2Icon,
@@ -71,6 +70,7 @@ import {
 } from "@/lib/workspace-deletion";
 import {
   apiKeyPermissionGroups,
+  canManageWorkspaceSettings,
   defaultApiKeyPermissions,
   delegableApiKeyPermissions,
   hasWorkspacePermission,
@@ -114,6 +114,11 @@ function OperationalWorkspaceSettingsRoute({
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
+  const canManageSettings = canManageWorkspaceSettings(
+    context.accessContext,
+    activeWorkspace,
+    context.managedSelfContext,
+  );
 
   const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
   const [nameEditing, setNameEditing] = useState(false);
@@ -154,7 +159,6 @@ function OperationalWorkspaceSettingsRoute({
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
-  const [controlBusy, setControlBusy] = useState(false);
   const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
@@ -232,26 +236,6 @@ function OperationalWorkspaceSettingsRoute({
   function cancelRename() {
     setNameDraft(activeWorkspace?.name ?? "");
     setNameEditing(false);
-  }
-
-  async function toggleWorkspaceControl() {
-    if (!activeWorkspace || !canRename || controlBusy) return;
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
-    setControlBusy(true);
-    try {
-      const updated = await context.setWorkspaceInferenceControl(workspaceId, action);
-      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
-      }
-    } catch (error) {
-      toast.error(`Couldn't ${action} the workspace`, {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setControlBusy(false);
-    }
   }
 
   async function createKey() {
@@ -399,11 +383,12 @@ function OperationalWorkspaceSettingsRoute({
                   }}
                 >
                   <div className="grid min-w-0 gap-1.5">
-                    <Label htmlFor="workspace-name" className="text-xs text-fg-muted">
+                    <Label htmlFor="workspace-name" className="text-fg-muted">
                       Workspace name
                     </Label>
                     <Input
                       id="workspace-name"
+                      suppressAutofill
                       value={nameDraft}
                       onChange={(event) => setNameDraft(event.target.value)}
                       onKeyDown={(event) => {
@@ -441,36 +426,28 @@ function OperationalWorkspaceSettingsRoute({
               ) : null}
             </section>
 
-            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
-              <div>
-                <h2 className="text-sm font-medium">Workspace runtime</h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  {activeWorkspace?.inferenceControl.state === "paused"
-                    ? "New agent work is paused for this workspace."
-                    : "Agents can start and continue work in this workspace."}
-                </p>
-              </div>
-              {canRename ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={controlBusy}
-                  onClick={() => void toggleWorkspaceControl()}
-                >
-                  {controlBusy ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : activeWorkspace?.inferenceControl.state === "paused" ? (
-                    <PlayIcon className="size-3.5" />
-                  ) : (
-                    <PauseIcon className="size-3.5" />
-                  )}
-                  {activeWorkspace?.inferenceControl.state === "paused"
-                    ? "Resume workspace"
-                    : "Pause workspace"}
-                </Button>
-              ) : null}
-            </section>
+            {activeWorkspace ? (
+              <WorkspaceRuntimeControl
+                key={workspaceId}
+                control={activeWorkspace.inferenceControl}
+                canManage={canManageSettings}
+                onControl={async (action) => {
+                  await context.setWorkspaceInferenceControl(workspaceId, action);
+                }}
+                onRefresh={() => context.refreshWorkspace(workspaceId)}
+                onTimer={async (request, expectedRevision) => {
+                  const accepted = context.captureWorkspaceInvocation(workspaceId);
+                  if (!accepted) return;
+                  await context.client.setWorkspacePauseTimer(workspaceId, {
+                    ...request,
+                    expectedRevision,
+                    clientEventId: crypto.randomUUID(),
+                  });
+                  if (context.ownsWorkspaceInvocation(workspaceId, accepted))
+                    await context.refreshWorkspace(workspaceId);
+                }}
+              />
+            ) : null}
 
             {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
 
@@ -484,14 +461,17 @@ function OperationalWorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
                 <VideoGenerationPreferenceRow
                   workspaceId={workspaceId}
-                  canManage={canDeleteWorkspace}
+                  canManage={canManageSettings}
                   refreshKey={gatewayRevision}
                 />
-                <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <CodexCompactionPreferenceRow
+                  workspaceId={workspaceId}
+                  canManage={canManageSettings}
+                />
               </div>
             </section>
 
@@ -512,7 +492,7 @@ function OperationalWorkspaceSettingsRoute({
         {section === "tools" ? (
           <WorkspaceCapabilityDefaults
             workspaceId={workspaceId}
-            canManage={canRename}
+            canManage={canManageSettings}
             kind="permissions"
           />
         ) : null}
@@ -535,7 +515,7 @@ function OperationalWorkspaceSettingsRoute({
             </section>
             <WorkspaceCapabilityDefaults
               workspaceId={workspaceId}
-              canManage={canRename}
+              canManage={canManageSettings}
               kind="plugins"
             />
           </>
@@ -543,20 +523,6 @@ function OperationalWorkspaceSettingsRoute({
 
         {section === "models" ? (
           <>
-            <section className="rounded-lg border border-border bg-surface px-4 py-3">
-              <p className="text-xs leading-5 text-fg-muted">
-                Organization Vercel AI Gateway and OpenRouter models appear here when connected by
-                an organization admin. Workspace-only connections below remain independent.
-              </p>
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: "models" }}
-                className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-              >
-                Open organization model settings <ArrowUpRightIcon className="size-3.5" />
-              </Link>
-            </section>
             <section className="grid gap-2">
               <div>
                 <h2 className="text-sm font-medium">Default model</h2>
@@ -568,37 +534,59 @@ function OperationalWorkspaceSettingsRoute({
                 <DefaultSessionModelPreferenceRow
                   key={`default-model:${workspaceId}:${gatewayRevision}`}
                   workspaceId={workspaceId}
-                  canManage={canRename}
+                  canManage={canManageSettings}
+                />
+              </div>
+            </section>
+            <section className="grid gap-2" aria-labelledby="model-connections-heading">
+              <div>
+                <h2 id="model-connections-heading" className="text-sm font-medium">
+                  Connections
+                </h2>
+                <p className="mt-1 text-xs leading-5 text-fg-muted">
+                  Connect subscriptions or provider accounts for this workspace. Your organization
+                  can also make connections available here. Choose model access on each connected
+                  account.
+                </p>
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "models" }}
+                  className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+                >
+                  Manage organization connections <ArrowUpRightIcon className="size-3.5" />
+                </Link>
+              </div>
+              <div className="min-w-0">
+                {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
+                <CodexSubscriptionsCard
+                  key={`codex-subscriptions:${workspaceId}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageConnections}
+                />
+                <SuperGrokSubscriptionsCard
+                  key={`supergrok:${workspaceId}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageConnections}
+                />
+                <AiGatewayConnectionCard
+                  workspaceId={workspaceId}
+                  canManageConnection={canManageConnections}
+                  canManageCustomModels={canManageSettings}
+                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+                />
+                <OpenRouterConnectionCard
+                  workspaceId={workspaceId}
+                  canManageConnection={canManageConnections}
+                  canManageCustomModels={canManageSettings}
+                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
                 />
               </div>
             </section>
             <ModelAccessPolicySection
               key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
-              canManage={canDeleteWorkspace}
-            />
-            {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-            <CodexSubscriptionsCard
-              key={`codex-subscriptions:${workspaceId}`}
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-            />
-            <SuperGrokSubscriptionsCard
-              key={`supergrok:${workspaceId}`}
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-            />
-            <AiGatewayConnectionCard
-              workspaceId={workspaceId}
-              canManageConnection={canManageConnections}
-              canManageCustomModels={canRename}
-              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-            />
-            <OpenRouterConnectionCard
-              workspaceId={workspaceId}
-              canManageConnection={canManageConnections}
-              canManageCustomModels={canRename}
-              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+              canManage={canManageSettings}
             />
           </>
         ) : null}
@@ -731,6 +719,7 @@ function OperationalWorkspaceSettingsRoute({
                       <Label htmlFor="api-key-name">Name</Label>
                       <Input
                         id="api-key-name"
+                        suppressAutofill
                         autoFocus
                         value={apiKeyName}
                         onChange={(event) => setApiKeyName(event.target.value)}
@@ -1057,6 +1046,7 @@ function OrganizationManagedWorkspaceSettings({
                 Name
                 <Input
                   value={name}
+                  suppressAutofill
                   onChange={(event) => setName(event.target.value)}
                   maxLength={120}
                 />
@@ -1447,6 +1437,7 @@ export function DangerZone(props: {
               </Label>
               <Input
                 id="confirm-workspace-name"
+                suppressAutofill
                 value={confirmName}
                 onChange={(event) => setConfirmName(event.target.value)}
                 placeholder={props.workspaceName}
