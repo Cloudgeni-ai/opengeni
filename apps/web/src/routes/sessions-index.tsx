@@ -1,3 +1,6 @@
+import { PersonalResourceScopeChoice } from "@/components/personal-resource-scope-choice";
+import { usePersonalResourceScopeChoice } from "@/lib/use-personal-resource-scope-choice";
+import type { PersonalAttachmentMode } from "@/lib/personal-resource-attachments";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The sessions index: the centered "Start a session" composer. The form is
@@ -543,7 +546,17 @@ function SessionsIndexRouteContent({
   const [personalResourceCatalogRefreshPending, setPersonalResourceCatalogRefreshPending] =
     useState(false);
   const personalResourceCatalogRefreshGeneration = useRef(0);
+  const [personalScopeGeneration, setPersonalScopeGeneration] = useState(0);
+  const personalScopeChoice = usePersonalResourceScopeChoice(
+    [
+      personalOwnerScope?.identityKey ?? "ineligible",
+      personalResourceSelectionKey,
+      personalScopeGeneration,
+    ].join(":"),
+    newSessionCreateVisibility(personalWorkspace, draft.visibility),
+  );
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
+    mode: personalScopeChoice.mode,
     personalResourceCount: selectedPersonalResourceCount,
     visibility: createVisibility,
   });
@@ -763,6 +776,7 @@ function SessionsIndexRouteContent({
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
     (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
+      setPersonalScopeGeneration((generation) => generation + 1);
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -962,6 +976,7 @@ function SessionsIndexRouteContent({
                 },
               );
               if (!created) return null;
+              setPersonalScopeGeneration((generation) => generation + 1);
               return {
                 sessionId: created.id,
                 settleDraft: async () => true,
@@ -1016,6 +1031,7 @@ function SessionsIndexRouteContent({
               },
             );
             if (!created) return null;
+            setPersonalScopeGeneration((generation) => generation + 1);
             return {
               sessionId: created.id,
               settleDraft: async () => {
@@ -1393,6 +1409,8 @@ function SessionsIndexRouteContent({
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
+              mode: personalScopeChoice.mode,
+              onModeChange: personalScopeChoice.setMode,
               visibility: createVisibility,
             }}
             fleet={fleet}
@@ -1923,6 +1941,8 @@ function WorkspaceRepositoryMenuBody({
 
 type NewSessionPersonalResourceAccess = {
   names: string[];
+  mode: PersonalAttachmentMode;
+  onModeChange: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
 };
 
@@ -2450,10 +2470,14 @@ function PersonalResourceAccessInline(props: {
   if (props.access.names.length === 0) return null;
   const content =
     props.access.visibility === "workspace" ? (
-      <p className="text-2xs leading-4 text-fg-subtle">
-        {props.access.names.join(", ")} will be used only for the message you send. Other members
-        may see the result, but cannot use your private credential or resource.
-      </p>
+      <div className="space-y-2">
+        <p className="text-2xs text-fg-subtle">{props.access.names.join(", ")}</p>
+        <PersonalResourceScopeChoice
+          mode={props.access.mode}
+          onModeChange={props.access.onModeChange}
+          disabled={props.disabled}
+        />
+      </div>
     ) : (
       <p className="text-2xs text-fg-subtle">
         {props.access.names.join(", ")} will be available only to this session.
