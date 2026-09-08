@@ -86,7 +86,7 @@ export async function resolveSkillImport(
     const bytes = await readBlob(entry.sha);
     let content: string;
     try {
-      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     } catch {
       throw new HTTPException(422, {
         message: `Skill file is not valid UTF-8 text: ${relativeSkillPath(entry.path, sourcePath)}`,
@@ -304,7 +304,7 @@ async function selectSkillRoot(
       }
       let markdown: string;
       try {
-        markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        markdown = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
       } catch {
         throw new HTTPException(422, {
           message: "Skill metadata is not valid UTF-8; paste the exact GitHub folder URL",
