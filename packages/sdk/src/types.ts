@@ -6463,6 +6463,7 @@ export type WorkspaceRegisteredPack = {
 export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
   skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   id: string;
   accountId: string;
@@ -7300,6 +7301,7 @@ export type InstallPluginRequest = {
 };
 
 export type InstalledPlugin = {
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
   skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   version: string;

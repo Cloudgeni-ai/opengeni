@@ -75,6 +75,7 @@ type ResolvedPluginComponent = {
   install(ownerPluginInstallationId: string): Promise<{
     facetInstallationIds: string[];
     bindingIds?: string[];
+    skillReceipt?: import("@opengeni/contracts").SkillWriteReceipt;
   }>;
 };
 
@@ -199,11 +200,13 @@ export function registerPluginRoutes(
     const retainedFacetInstallationIds: string[] = [];
     const retainedBindingIds: string[] = [];
     const completedKeys: string[] = [];
+    const skillWrites: import("@opengeni/contracts").SkillWriteReceipt[] = [];
     let activeComponentKey = "none";
     try {
       for (const component of resolved.components) {
         activeComponentKey = component.preview.key;
         const installed = await component.install(prepared.pluginInstallationId);
+        if (installed.skillReceipt) skillWrites.push(installed.skillReceipt);
         retainedFacetInstallationIds.push(...installed.facetInstallationIds);
         retainedBindingIds.push(...(installed.bindingIds ?? []));
         completedKeys.push(component.preview.key);
@@ -215,6 +218,7 @@ export function registerPluginRoutes(
         });
       }
       const result = InstalledPlugin.parse({
+        ...(skillWrites.length ? { skillWrites } : {}),
         pluginKey: prepared.pluginKey,
         version: prepared.version,
         pluginId: prepared.pluginId,
@@ -396,7 +400,10 @@ async function resolvePluginPackage(input: {
             }),
             owner: { kind: "plugin", id: ownerPluginInstallationId, removable: true },
           });
-          return { facetInstallationIds: [installed.facetInstallationId] };
+          return {
+            facetInstallationIds: [installed.facetInstallationId],
+            skillReceipt: installed.skillReceipt,
+          };
         },
       });
       continue;

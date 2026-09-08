@@ -257,6 +257,9 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         PackInstallation.parse({
           ...replayed,
+          ...(Array.isArray(prepared.replayResult.skillWrites)
+            ? { skillWrites: prepared.replayResult.skillWrites }
+            : {}),
           ...(Array.isArray(prepared.replayResult.skillReleases)
             ? { skillReleases: prepared.replayResult.skillReleases }
             : {}),
@@ -266,6 +269,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
 
     const retainedComponentKeys: string[] = [];
+    const skillWrites: import("@opengeni/contracts").SkillWriteReceipt[] = [];
     const retainedFacetInstallationIds: string[] = [];
     const retainedBindingIds: string[] = [];
     let activeComponentKey = "manifest";
@@ -307,6 +311,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
             removable: true,
           },
         });
+        skillWrites.push(installed.skillReceipt);
         await heartbeat();
         await recordPackInlineSkillComponent(db, {
           accountId: grant.accountId,
@@ -356,6 +361,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         packId: pack.id,
         result: {
           status: "installed",
+          ...(skillWrites.length ? { skillWrites } : {}),
           packId: pack.id,
           manifestDigest: preview.manifestDigest,
           componentCount: retainedComponentKeys.length,
@@ -365,6 +371,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(
         PackInstallation.parse({
           ...finalized,
+          ...(skillWrites.length ? { skillWrites } : {}),
           ...(skillReleases.length ? { skillReleases } : {}),
         }),
         preview.installationVersion === null ? 201 : 200,

@@ -38,7 +38,10 @@ import { toast } from "sonner";
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
 import { SkillsPanel } from "./skills-panel";
-import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
+import {
+  skillReleaseMessage,
+  skillInstallationMessage,
+} from "@/components/capabilities/skill-release-message";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
@@ -1610,7 +1613,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           : preview.action === "update"
             ? `Updated ${pack.name}`
             : `Repaired ${pack.name}`,
-        { description: skillReleaseMessage(installed.skillReleases) },
+        { description: skillInstallationMessage(installed.skillWrites, installed.skillReleases) },
       );
       return true;
     } catch (error) {

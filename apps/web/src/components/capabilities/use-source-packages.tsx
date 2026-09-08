@@ -19,7 +19,7 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
-import { skillReleaseMessage } from "./skill-release-message";
+import { skillReleaseMessage, skillInstallationMessage } from "./skill-release-message";
 
 import {
   initialSourceImportState,
@@ -212,7 +212,7 @@ export function useSourcePackages({
             : `${preview.manifest.name} installed`,
           {
             description:
-              skillReleaseMessage(installed.skillReleases) ??
+              skillInstallationMessage(installed.skillWrites, installed.skillReleases) ??
               `${preview.components.length} immutable components are owned by this Plugin installation.`,
           },
         );

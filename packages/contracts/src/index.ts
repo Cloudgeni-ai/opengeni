@@ -10155,6 +10155,7 @@ export const PackInstallationStatus = z.enum([
 export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
 
 export const PackInstallation = z.object({
+  skillWrites: z.array(SkillWriteReceipt).optional(),
   skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -11880,6 +11881,7 @@ export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
 export const InstalledPlugin = z
   .object({
+    skillWrites: z.array(SkillWriteReceipt).optional(),
     skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     pluginKey: z.string().min(1),
     version: z.string().min(1),
