@@ -561,15 +561,15 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 318],
+            [FORCE_RLS_TABLES, 319],
             [NON_RLS_RUNTIME_TABLES, 19],
             [RUNTIME_FULL_DML_TABLES, 164],
             [RUNTIME_READ_ONLY_TABLES, 22],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 46],
+            [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
             [PROTECTED_NO_DIRECT_DML_TABLES, 71],
-            [RUNTIME_DML_TABLES, 266],
+            [RUNTIME_DML_TABLES, 267],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 206],
@@ -613,7 +613,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 337 : 218) + 9;
+      const tableCount = (hasCurrentMainActivityLedger ? 338 : 218) + 9;
       expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
       for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
@@ -632,6 +632,7 @@ describe("runtime database posture evaluator", () => {
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,
       );
+      expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
         "INSERT",

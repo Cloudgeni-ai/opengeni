@@ -2511,7 +2511,7 @@ export async function createSessionForRequestWithOutcome(
       message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
     });
   }
-  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools.filter(
+  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools?.filter(
     (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
   );
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
@@ -3818,7 +3818,7 @@ export async function updateSessionToolPolicy(
     runtimeSettings,
   );
   const workspaceDefaultFirstPartyTools = [
-    ...(workspaceSessionToolDefaults?.firstPartyMcpTools.filter((tool) =>
+    ...(workspaceSessionToolDefaults?.firstPartyMcpTools?.filter((tool) =>
       deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
     ) ?? deploymentFirstPartyMcpToolPolicy.default),
   ];

@@ -1973,14 +1973,24 @@ export const WorkspaceSessionToolDefaults = z
     mcpServerIds: z
       .array(z.string().trim().min(1).max(128))
       .max(128)
-      .transform((ids) => [...new Set(ids)]),
+      .transform((ids) => [...new Set(ids)])
+      .optional(),
     firstPartyMcpTools: z
       .array(FirstPartyMcpToolName)
       .max(512)
-      .transform((tools) => [...new Set(tools)]),
+      .transform((tools) => [...new Set(tools)])
+      .optional(),
   })
   .strict();
 export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+
+// Omitted keys preserve the stored selection; null removes only that override.
+export const WorkspaceSessionToolDefaultsPatch = z
+  .object({
+    mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
+    firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
+  })
+  .strict();
 
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
@@ -2344,7 +2354,7 @@ export const UpdateWorkspaceSettingsRequest = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
-    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -6701,6 +6711,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.feedback.write",
   "session.attention.write",
   "session.archive.write",
   "session.delete",
@@ -16767,3 +16778,5 @@ export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
+
+export * from "./feedback";

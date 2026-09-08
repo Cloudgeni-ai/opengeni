@@ -209,7 +209,8 @@ DISCOVER   probe server URL unauthenticated
            → only when the challenge has no resource_metadata and every PRM
              candidate is explicitly absent (404/410), probe the MCP origin's
              RFC 8414 metadata as the legacy 2025-03-26 profile
-           → pick AS; RFC 8414 / OIDC-discovery metadata (both well-known path orders)
+           → pick AS; RFC 8414 path insertion, then OIDC path insertion/appending
+             (no guessed OAuth suffix, tenant-root, or bare-issuer probes)
            → REQUIRE code_challenge_methods_supported ∋ S256, else abort with clear error
 REGISTER   priority: (1) operator pre-registered creds for this AS
            (2) DCR (RFC 7591) if registration_endpoint — minted client_id stored per AS

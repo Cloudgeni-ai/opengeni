@@ -51,15 +51,15 @@ Then open the smallest source files that answer the question:
   `withDirectHostMcpAdmission` prepares a locked direct-turn snapshot only; its
   callback must persist within canonical accepted-work transaction boundaries.
   Never call it for scheduled/inherited work or treat it as caller authentication.
-  `captureDirectHostMcpAuthority` persists that snapshot in the 0433 append-only
+  `captureDirectHostMcpAuthority` persists that snapshot in the 0434 append-only
   ledger with an independent canonical insert guard. Production capture callers
   now capture atomically for explicit direct initial-turn and follow-up send/steer selection. Worker `authorizeDirectHostMcpUse` validates captured direct
-  work and exact same-session causal resumptions. Migration 0434 separately
+  work and exact same-session causal resumptions. Migration 0435 separately
   proves delivered goal/child-result lineage before copying authority. Revoked
-  selections are omitted, not broadened. Migration 0435 freezes host selections
+  selections are omitted, not broadened. Migration 0436 freezes host selections
   on native task revisions and captures exact scheduled runs; retain promotion
   during reusable-session materialization and restore source revisions on rollback.
-  Migration 0436 admits only the spawning turn's selected `always` grants to a
+  Migration 0437 admits only the spawning turn's selected `always` grants to a
   child's initial turn. Scheduled origin survives successors. Agent-created
   schedules use the live accepted attempt, never a creator account lookup.
   Preserve frozen initiatingHumanSubjectId independently of service audit identity.
@@ -72,6 +72,7 @@ Then open the smallest source files that answer the question:
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
 - Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.

@@ -98,6 +98,56 @@ async function authorization(subjectId = grant.subjectId): Promise<string> {
 }
 
 describe("workspace control event API", () => {
+  test("tool defaults save and reset independently without losing concurrent changes", async () => {
+    const auth = await authorization();
+    const patch = async (body: unknown) => {
+      const response = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {
+        method: "PATCH",
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        settings: { sessionToolDefaults: Record<string, unknown> };
+      };
+    };
+    const plugins = await patch({ sessionToolDefaults: { mcpServerIds: ["files"] } });
+    expect(plugins.settings.sessionToolDefaults).toEqual({ mcpServerIds: ["files"] });
+    await Promise.all([
+      patch({ sessionToolDefaults: { firstPartyMcpTools: ["command_read"] } }),
+      patch({ sessionToolDefaults: { mcpServerIds: ["docs"] } }),
+    ]);
+    const both = await patch({ sessionToolDefaults: {} });
+    expect(both.settings.sessionToolDefaults).toEqual({
+      mcpServerIds: ["docs"],
+      firstPartyMcpTools: ["command_read"],
+    });
+    const reset = await patch({ sessionToolDefaults: { firstPartyMcpTools: null } });
+    expect(reset.settings.sessionToolDefaults).toEqual({ mcpServerIds: ["docs"] });
+    const none = await patch({ sessionToolDefaults: { firstPartyMcpTools: [] } });
+    expect(none.settings.sessionToolDefaults.firstPartyMcpTools).toEqual([]);
+    const clear = await patch({
+      sessionToolDefaults: { firstPartyMcpTools: null, mcpServerIds: null },
+    });
+    expect(clear.settings.sessionToolDefaults).toEqual({});
+  });
+
+  test("tool reset requires workspace settings authority", async () => {
+    const token = await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      permissions: ["workspace:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const response = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ sessionToolDefaults: { firstPartyMcpTools: null } }),
+    });
+    expect(response.status).toBe(403);
+  });
   test("workspace admin can disable agent structured human input through settings", async () => {
     const auth = await authorization();
     const changed = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {

@@ -8,8 +8,9 @@ import {
   LockIcon,
   LogOutIcon,
   UserIcon,
+  MessageSquareIcon as FeedbackIcon,
 } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
@@ -34,7 +35,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
+
+const FeedbackDialog = lazy(() =>
+  import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
+);
 
 const BrowserAccountMenu = lazy(() =>
   import("@/components/browser-account-menu").then((module) => ({
@@ -48,6 +54,7 @@ function userInitial(label: string): string {
 
 export function RailFooter() {
   const rail = useRail();
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
   const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
@@ -73,6 +80,30 @@ export function RailFooter() {
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
+        <>
+          <Suspense fallback={null}>
+            <FeedbackDialog
+              key={rail.workspaceId}
+              client={context.client}
+              workspaceId={rail.workspaceId}
+              open={feedbackOpen}
+              onOpenChange={setFeedbackOpen}
+              onSubmitted={() => toast.success("Thanks for your feedback")}
+            />
+          </Suspense>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Send feedback"
+            title="Send feedback"
+            onClick={() => setFeedbackOpen(true)}
+          >
+            <FeedbackIcon className="size-4" />
+            {rail.collapsed ? null : "Send feedback"}
+          </Button>
+        </>
+      ) : null}
       <div
         className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}
       >

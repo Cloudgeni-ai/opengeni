@@ -1,4 +1,5 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
+import { registerFeedbackRoutes } from "./routes/feedback";
 import { codemodeSessionRequest } from "./codemode";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
@@ -1247,6 +1248,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerFeedbackRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

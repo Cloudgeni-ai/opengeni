@@ -1,4 +1,5 @@
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
+import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
 import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import { createHash } from "node:crypto";
@@ -60,10 +61,10 @@ import {
   nestedPostgresSqlState,
   removeWorkspaceMember,
   requireWorkspace,
+  updateWorkspaceSettings,
   getRig,
   setWorkspaceDefaultRig,
   updateWorkspace,
-  updateWorkspaceSettings,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
@@ -397,9 +398,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy
     // workspace yields the retryable 503 instead of parking this request.
-    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data, {
-      controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-    });
+    const workspace = await updateWorkspaceSettingsWithToolDefaults(
+      deps.db,
+      workspaceId,
+      parsed.data,
+      { requireWorkspace, updateWorkspaceSettings },
+      {
+        controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+      },
+    );
     return c.json(Workspace.parse(workspace));
   });
 

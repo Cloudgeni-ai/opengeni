@@ -8,7 +8,7 @@ test("embedding migrations append after main's published 0424 without duplicate 
   expect(tail.map((m) => Number(m.path.slice(0, 4)))).toEqual(
     Array.from({ length: 20 }, (_, i) => 425 + i),
   );
-  expect(contract.latestMigration).toBe("0444_social_connection_versions.sql");
+  expect(contract.latestMigration).toBe("0445_social_connection_versions.sql");
   // Historical main contains repeated ordinals; do not rewrite published history.
   const ordinals = tail.map((m) => m.path.slice(0, 4));
   expect(new Set(ordinals).size).toBe(ordinals.length);
