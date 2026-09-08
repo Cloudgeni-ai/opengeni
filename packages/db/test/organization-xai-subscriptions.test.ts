@@ -579,10 +579,14 @@ realTest(
   },
 );
 
-realTest(
-  "organization lease blocks disconnect and survives selection from another workspace",
-  async () => {
-    const actor = await fixture();
+realTest.each(["shared", "personal"] as const)(
+  "organization %s lease blocks disconnect and wakes after pool changes",
+  async (workspaceKind) => {
+    const setup = await fixture();
+    const actor = {
+      ...setup,
+      workspaceId: workspaceKind === "personal" ? setup.personalWorkspaceId : setup.workspaceId,
+    };
     const connected = await connect(actor, "leased");
     const sessionId = crypto.randomUUID();
     const turnId = crypto.randomUUID();

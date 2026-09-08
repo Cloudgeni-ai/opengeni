@@ -87,11 +87,14 @@ async function lockPool(tx: Database, organizationId: string) {
   return rotation;
 }
 
-/** Durable invalidation only: organization administration grants no session reads. */
+/**
+ * Durable invalidation only: organization administration grants no session reads.
+ * Reuse the complete subscription inventory, including canonical Personal workspaces.
+ */
 async function wakeOrganizationPool(tx: Database, input: OrganizationActor) {
   const workspaces = await rawRows<{ workspace_id: string }>(
     tx,
-    sql`select workspace_id from list_organization_workspace_ids(${input.organizationId}::uuid) order by workspace_id`,
+    sql`select workspace_id from list_organization_codex_workspace_ids(${input.organizationId}::uuid) order by workspace_id`,
   );
   for (const { workspace_id: workspaceId } of workspaces) {
     await withWorkspaceSubjectRls(tx, workspaceId, input.actorSubjectId, async (scopedDb) => {
