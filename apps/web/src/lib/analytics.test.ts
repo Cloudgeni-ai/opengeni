@@ -1,7 +1,9 @@
+import { noteSuccessfulLogin } from "./analytics-login";
 import { describe, expect, mock, test } from "bun:test";
 
 import {
   applyAnalyticsConsent,
+  beginAnalyticsRequest,
   captureAnalyticsEvent,
   syncAnalytics,
   syncAnalyticsIdentity,
@@ -203,6 +205,7 @@ describe("analytics providers", () => {
       opt_in_capturing: () => calls.push(["opt_in_capturing"]),
       opt_out_capturing: () => calls.push(["opt_out_capturing"]),
       reset: () => calls.push(["reset"]),
+      resetGroups: () => calls.push(["resetGroups"]),
     };
     mock.module("posthog-js", () => ({ default: posthog }));
     const fakeWindow = {
@@ -265,18 +268,84 @@ describe("analytics providers", () => {
         properties: { session_id: "session-1", $geoip_disable: true },
       });
       expect(beforeSend?.(null)).toBeNull();
+      const projected = beforeSend?.({
+        uuid: "2",
+        event: "$identify",
+        properties: {
+          token: "project-key",
+          $current_url: "https://app.opengeni.ai/?secret=sensitive",
+          $pathname: "/private-title",
+          $title: "private title",
+          $set_once: {
+            $initial_current_url: "https://app.opengeni.ai/?code=sensitive",
+            utm_campaign: "private",
+            $browser: "Chrome",
+          },
+        },
+      });
+      expect(JSON.stringify(projected)).not.toMatch(/sensitive|private/);
+      expect(projected?.properties.token).toBe("project-key");
+
       expect(calls).toContainEqual(["identify", "user-1"]);
       expect(calls).toContainEqual(["group", "account", "account-1"]);
       expect(calls).toContainEqual([
         "capture",
         "$pageview",
-        { $current_url: "https://app.opengeni.ai/workspaces" },
+        { $current_url: "https://app.opengeni.ai/workspaces", page: "other" },
       ]);
       expect(calls).toContainEqual([
         "capture",
         "workspace_created",
-        { workspace_id: "workspace-1" },
+        { workspace_id: "workspace-1", page: "other" },
       ]);
+
+      noteSuccessfulLogin("user-1", "email");
+      syncAnalyticsIdentity({ userId: "user-1", accountId: null });
+      syncAnalytics(
+        {
+          consentRequired: true,
+          providers: { posthog: { projectKey: "phc_test", host: "https://eu.i.posthog.com" } },
+        },
+        "/workspaces",
+      );
+      syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(
+        calls.filter(([method, event]) => method === "capture" && event === "login_completed"),
+      ).toHaveLength(1);
+
+      const finish = beginAnalyticsRequest(
+        "/v1/workspaces/11111111-1111-4111-8111-111111111111/sessions",
+        "POST",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      finish(422);
+      finish(201);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const attempted = calls.find(
+        ([method, event]) => method === "capture" && event === "session_create_attempted",
+      );
+      const finished = calls.find(
+        ([method, event]) => method === "capture" && event === "session_create_finished",
+      );
+      expect(finished?.[2]).toMatchObject({
+        ...(attempted?.[2] as object),
+        outcome: "invalid_request",
+        http_status: 422,
+      });
+
+      const staleFinish = beginAnalyticsRequest(
+        "/v1/workspaces/11111111-1111-4111-8111-111111111111/sessions",
+        "POST",
+      );
+      syncAnalyticsIdentity({ userId: "user-2", accountId: "account-2" });
+      staleFinish(201);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(
+        calls.filter(
+          ([method, event]) => method === "capture" && event === "session_create_finished",
+        ),
+      ).toHaveLength(1);
 
       syncAnalyticsIdentity(null);
       expect(calls).toContainEqual(["reset"]);

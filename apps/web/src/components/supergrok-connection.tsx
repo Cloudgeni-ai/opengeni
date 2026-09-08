@@ -1,3 +1,4 @@
+import { trackModelConnection } from "@/lib/analytics-observer";
 import type {
   SuperGrokAccount,
   SuperGrokAccountsResponse,
@@ -110,6 +111,7 @@ export function SuperGrokSubscriptionsCard({
   }, [refresh]);
 
   const connect = useCallback(async () => {
+    const recordOutcome = trackModelConnection("supergrok", workspaceId);
     setBusy(true);
     try {
       const start = await client.supergrokConnectStart(workspaceId, scope);
@@ -135,6 +137,7 @@ export function SuperGrokSubscriptionsCard({
           if (!result || controller.signal.aborted || cancelled.current) return;
           setPending(null);
           if (result.status === "connected") {
+            recordOutcome("connected");
             toast.success(
               result.scope === "workspace"
                 ? "SuperGrok connected for the workspace"
@@ -143,9 +146,11 @@ export function SuperGrokSubscriptionsCard({
             await refresh();
             return;
           }
+          recordOutcome(result.status === "expired" ? "expired" : "denied");
           toast.error(result.status === "expired" ? "The xAI code expired" : "xAI login denied");
         })
         .catch((error) => {
+          recordOutcome("outcome_unknown");
           if (!controller.signal.aborted && !cancelled.current) {
             setPending(null);
             toast.error(error instanceof Error ? error.message : "Failed to verify xAI login");
@@ -202,7 +207,14 @@ export function SuperGrokSubscriptionsCard({
               <option value="workspace">Workspace</option>
               <option value="user">Only me</option>
             </Select>
-            <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={connect}>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              data-analytics-action="connect_supergrok"
+              onClick={connect}
+            >
               <PlusIcon className="size-3.5" /> Connect
             </Button>
           </div>
@@ -254,7 +266,13 @@ export function SuperGrokSubscriptionsCard({
                 <option value="workspace">Workspace</option>
                 <option value="user">Only me</option>
               </Select>
-              <Button type="button" size="sm" disabled={busy} onClick={connect}>
+              <Button
+                type="button"
+                size="sm"
+                disabled={busy}
+                data-analytics-action="connect_supergrok"
+                onClick={connect}
+              >
                 {busy ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
                 ) : (
