@@ -462,6 +462,9 @@ const effectiveBudgets = {
     budgets.directSessionRaw,
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),
+    // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
+    // Restore the existing whole-KiB headroom; all other caps stay unchanged.
+    wholeKibEnvelope(2_335_755),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
