@@ -989,6 +989,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const f = await fixture("off");
     const key = crypto.randomUUID();
     const content = skillMarkdown("# Source Skill\nOriginal source instructions.");
+    const reference = "Original reference bytes.";
     const digest = createHash("sha256").update(content).digest("hex");
     const input: InstallPortableSkillInput = {
       ...f.context,
@@ -1004,13 +1005,25 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       name: "source-skill",
       description: "Source Skill description",
       contentSha256: digest,
-      totalBytes: Buffer.byteLength(content),
+      totalBytes: Buffer.byteLength(content) + Buffer.byteLength(reference),
       files: [
+        {
+          path: "references/context.txt",
+          content: reference,
+          byteSize: Buffer.byteLength(reference),
+          contentSha256: createHash("sha256").update(reference).digest("hex"),
+        },
         { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: digest },
       ],
     };
     const installed = await installPortableSkill(client.db, input);
     expect(installed.skillReceipt.outcome).toBe("applied");
+    // Deliberately submitted in reverse byte order. Locale-aware collation
+    // sorts the lowercase reference first; the canonical head must not.
+    expect((await readSkill(client.db, f.context, installed.skillReceipt.skillId))?.files).toEqual([
+      { path: "SKILL.md", content },
+      { path: "references/context.txt", content: reference },
+    ]);
     const customFiles = [
       { path: "SKILL.md", content: skillMarkdown("Customized behavior") },
       { path: "reference.txt", content: "keep me" },
