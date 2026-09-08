@@ -342,12 +342,14 @@ describe("analytics providers", () => {
       finish(422);
       finish(201);
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const attempted = calls.findLast(
-        ([method, event]) => method === "capture" && event === "session_create_attempted",
-      );
-      const finished = calls.findLast(
-        ([method, event]) => method === "capture" && event === "session_create_finished",
-      );
+      const attempted = calls
+        .slice()
+        .reverse()
+        .find(([method, event]) => method === "capture" && event === "session_create_attempted");
+      const finished = calls
+        .slice()
+        .reverse()
+        .find(([method, event]) => method === "capture" && event === "session_create_finished");
       expect(finished?.[2]).toMatchObject({
         ...(attempted?.[2] as object),
         outcome: "invalid_request",
