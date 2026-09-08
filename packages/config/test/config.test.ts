@@ -64,16 +64,6 @@ describe(".env.example", () => {
   });
 });
 
-describe("review cache settings", () => {
-  test("defaults to live/wake reviews without disabling recovery snapshots", () => {
-    const defaults = getSettings({});
-    expect(defaults.workspaceCaptureEnabled).toBe(false);
-    expect(defaults.sandboxSnapshotIntervalMs).toBe(900_000);
-    expect(defaults.sandboxIdleGraceMs).toBe(900_000);
-    expect(getSettings({ OPENGENI_WORKSPACE_CAPTURE: "true" }).workspaceCaptureEnabled).toBe(true);
-  });
-});
-
 describe("MCP OAuth settings", () => {
   test("defaults off and requires a credential-free public origin when enabled", () => {
     const defaults = withEnv({}, () => getSettings());

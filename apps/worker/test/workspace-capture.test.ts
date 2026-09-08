@@ -27,6 +27,7 @@ import {
   blobKey,
   BoxExitingError,
   captureWorkspaceRevision,
+  captureWhileIdle,
   changeFingerprint,
   isBoxExitingError,
   isUnderResidueDir,
@@ -653,6 +654,91 @@ describe("workspace-capture — manifest & event serialization", () => {
 });
 
 describe("workspace-capture — pre-service skip gates", () => {
+  test("queued work skips capture entirely", async () => {
+    let started = false;
+    await captureWhileIdle({
+      hasPendingWork: async () => true,
+      capture: async () => {
+        started = true;
+      },
+    });
+    expect(started).toBe(false);
+  });
+
+  test("a hung queue lookup cannot hold up finalization", async () => {
+    const started = performance.now();
+    let captured = false;
+    await captureWhileIdle({
+      hasPendingWork: () => new Promise(() => {}),
+      capture: async () => {
+        captured = true;
+      },
+    });
+    expect(captured).toBe(false);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  test("owner cancellation interrupts a hung queue lookup", async () => {
+    const owner = new AbortController();
+    let captured = false;
+    await captureWhileIdle({
+      signal: owner.signal,
+      hasPendingWork: () => {
+        queueMicrotask(() => owner.abort());
+        return new Promise(() => {});
+      },
+      capture: async () => {
+        captured = true;
+      },
+    });
+    expect(captured).toBe(false);
+  });
+
+  test("new work interrupts a stalled provider read, including a lost wake event", async () => {
+    let pending = false;
+    let reads = 0;
+    let releaseRead!: (session: ChannelASession) => void;
+    const startedAt = performance.now();
+    await captureWhileIdle({
+      hasPendingWork: async () => pending,
+      capture: (signal) =>
+        captureWorkspaceRevision({
+          ...baseInput(),
+          settings: testSettings({ workspaceCaptureEnabled: true }),
+          signal,
+          objectStorage: forbiddenStorage(),
+          openReadSession: async () => {
+            reads += 1;
+            pending = true;
+            return await new Promise<ChannelASession>((resolve) => {
+              releaseRead = resolve;
+            });
+          },
+        }),
+    });
+    expect(reads).toBe(1);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    // The uncancellable provider response arrives after the turn can proceed.
+    // Its aborted continuation must not access the database or publish a cache.
+    releaseRead(dummySession);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("an idle capture finishes and releases its queue poller", async () => {
+    let checks = 0;
+    await captureWhileIdle({
+      hasPendingWork: async () => {
+        checks += 1;
+        return false;
+      },
+      capture: async (signal) => {
+        expect(signal.aborted).toBe(false);
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(checks).toBe(1);
+  });
+
   test("an already-cancelled Steer/Pause owner returns before touching storage or db", async () => {
     const controller = new AbortController();
     controller.abort(new Error("STEER"));

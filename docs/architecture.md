@@ -1371,11 +1371,6 @@ can race the snapshot. A failed or unverifiable capture cannot be treated as an
 empty successful snapshot, and teardown must not destroy the only recoverable
 workspace state.
 
-Review caching defaults off (`OPENGENI_WORKSPACE_CAPTURE=false`): synchronous
-capture can delay the next turn by 120 seconds. Files/Changes use live/wake reads;
-existing revisions remain readable. Recovery snapshots and idle shutdown remain
-independent. See `apps/worker/src/activities/workspace-capture.ts`.
-
 Provider-deadline rotation is an explicit preemption boundary. Once the durable
 lead-time request fences new mutations, each live turn aborts immediately rather
 than waiting for a turn-side snapshot that can be blocked by that turn's own
@@ -1425,6 +1420,8 @@ Canonical: `packages/runtime/src/sandbox/`,
 [`deployment.md`](deployment.md).
 
 ---
+
+Turn-end review capture yields to queued turns and fences late commits. Single-read files and unique storage keys isolate cleanup. Recovery snapshots retain their separate fifteen-minute cadence.
 
 ## 9. Data and storage
 
