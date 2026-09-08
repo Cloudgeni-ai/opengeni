@@ -92,6 +92,8 @@ export type PersistentAgentInstructionInspection = {
 };
 
 const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
+  // Retained only for historical captured layers; new turns use skill_catalog.
+  builtin_skills: "Built-in skills",
   skill_catalog: "Skills",
   operational_contract: "Operational contract",
   persona_and_core: "Persona and CORE",
@@ -100,7 +102,6 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   workspace_memory: "Workspace memory",
   codemode: "Codemode",
   git_bindings: "Git credential bindings",
-  builtin_skills: "Built-in skills",
   genesis_title: "Missing-title directive",
   sdk_capability_instructions: "SDK capability instructions",
   sandbox_preamble: "Sandbox runtime preamble",

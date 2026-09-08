@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { createSkillReadAttemptToolDefinition } from "../src/activities/agent-turn/skill-read";
+import { loadConfiguredBundledSkills } from "../src/activities/agent-turn/skill-selection";
 
 const scope = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -12,6 +13,58 @@ const scope = {
 };
 
 describe("skill_read gateway definition", () => {
+  test("selected Projects reads exact packaged guidance without sandbox access; host [] excludes it", async () => {
+    const markdown = await Bun.file(
+      new URL(
+        "../../../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md",
+        import.meta.url,
+      ),
+    ).text();
+    for (const bundledSkillIds of [
+      undefined,
+      ["builtin:opengeni-projects"] as const,
+      [],
+    ] as const) {
+      const selected = loadConfiguredBundledSkills({
+        firstPartyTools: [],
+        videoGenerationEnabled: false,
+        bundledSkillIds,
+        get sandboxBackend(): never {
+          throw new Error("must not access sandbox");
+        },
+      } as Parameters<typeof loadConfiguredBundledSkills>[0]);
+      const environment = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [
+          createSkillReadAttemptToolDefinition({
+            authorize: async () => {},
+            load: async (skill) => {
+              const entry = selected.find(
+                (item) => item.id === skill || item.artifact.name === skill,
+              );
+              if (!entry) throw new Error("Skill is excluded by source selection");
+              return entry.artifact.files;
+            },
+          }),
+        ],
+      });
+      for (const skill of ["builtin:opengeni-projects", "opengeni-projects"]) {
+        const output = environment.callModel({
+          modelName: "skill_read",
+          arguments: { skill },
+          subjectId: "agent:test",
+        });
+        if (bundledSkillIds?.length === 0)
+          await expect(output).rejects.toThrow("excluded by source selection");
+        else
+          expect((await output).structuredContent).toEqual({
+            files: [{ path: "SKILL.md", content: markdown }],
+          });
+      }
+    }
+  });
+
   test("returns edit metadata from the same read without expanding explicit paths", async () => {
     const environment = createAttemptToolEnvironment({
       scope,

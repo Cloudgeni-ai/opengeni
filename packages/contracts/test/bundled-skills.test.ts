@@ -11,6 +11,25 @@ import {
 
 const documents = "builtin:opengeni-documents" as const;
 const sites = "builtin:opengeni-sites" as const;
+const projects = "builtin:opengeni-projects" as const;
+
+test("Projects uses the ordinary bundle selection and inheritance contract", () => {
+  expect(
+    CreateSessionRequest.parse({ initialMessage: "Organize", bundledSkillIds: [projects] })
+      .bundledSkillIds,
+  ).toEqual([projects]);
+  expect(
+    ScheduledTaskAgentConfig.parse({ prompt: "Organize", bundledSkillIds: [projects] })
+      .bundledSkillIds,
+  ).toEqual([projects]);
+  expect(
+    AutomationSessionTemplate.parse({ prompt: "Organize", bundledSkillIds: [projects] })
+      .bundledSkillIds,
+  ).toEqual([projects]);
+  expect(resolveBundledSkillSelection(undefined, [projects])).toEqual([projects]);
+  expect(resolveBundledSkillSelection([], [projects])).toEqual([]);
+  expect(() => resolveBundledSkillSelection([projects], [])).toThrow("cannot widen");
+});
 
 test("bundle selection preserves omitted versus empty across public creation contracts", () => {
   expect(CreateSessionRequest.parse({ initialMessage: "Run" }).bundledSkillIds).toBeUndefined();
