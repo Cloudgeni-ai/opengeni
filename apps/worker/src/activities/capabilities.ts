@@ -149,7 +149,10 @@ export async function settingsWithWorkspaceGatewayCredential(
   settings: Settings,
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, { accountId, workspaceId });
+  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, {
+    accountId,
+    workspaceId,
+  });
   const retainedUpstreamModelId = retainedProductModelId?.startsWith(
     WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   )
@@ -170,7 +173,12 @@ export async function settingsWithWorkspaceGatewayCredential(
       ? [...activeCustomModels, retainedCustomModel]
       : activeCustomModels;
   const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceVercelAiGatewayApiKey(db, settings, workspaceId);
+  const apiKey = await loadWorkspaceVercelAiGatewayApiKey(
+    db,
+    settings,
+    workspaceId,
+    retainedProductModelId,
+  );
   return apiKey
     ? withWorkspaceGatewayCredential(catalogSettings, apiKey, customModels)
     : catalogSettings;
@@ -207,7 +215,12 @@ export async function settingsWithWorkspaceOpenRouterCredential(
       ? [...activeCustomModels, retainedCustomModel]
       : activeCustomModels;
   const catalogSettings = withWorkspaceOpenRouterCatalogProvider(settings, customModels);
-  const apiKey = await loadWorkspaceOpenRouterApiKey(db, settings, workspaceId);
+  const apiKey = await loadWorkspaceOpenRouterApiKey(
+    db,
+    settings,
+    workspaceId,
+    retainedProductModelId,
+  );
   return apiKey
     ? withWorkspaceOpenRouterCredential(catalogSettings, apiKey, customModels)
     : catalogSettings;

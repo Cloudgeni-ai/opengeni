@@ -1,3 +1,20 @@
+import {
+  assignedConnectionDefault,
+  updateModelConnectionAccess as updateModelConnectionAccessPolicy,
+  type ModelConnectionAccess,
+  type ModelConnectionTarget,
+} from "./model-connection-access";
+import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
+export {
+  assertModelConnectionAllowsTurn,
+  modelAllowedByConnections,
+  type ConnectionModelRestrictions,
+} from "./workspace-model-connection-access";
+import {
+  assertModelConnectionAllowsTurn,
+  getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
+} from "./workspace-model-connection-access";
+export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -493,6 +510,7 @@ export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 export * from "./connection-authority";
 export * from "./xai-subscription";
+export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -616,7 +634,11 @@ import {
   resolveAcceptedConnectionUse,
   resolveConnectionUseAuthority,
 } from "./connection-authority";
-import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
+import {
+  resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
+  xaiCredentialWorkspacePredicate,
+  xaiRotationWorkspacePredicate,
+} from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
   value: unknown,
@@ -14093,6 +14115,7 @@ async function loadWorkspaceProviderApiKey(
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
+  turnModelId?: string | null,
 ): Promise<string | null> {
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
@@ -14120,6 +14143,14 @@ async function loadWorkspaceProviderApiKey(
   ) {
     return null;
   }
+  if (turnModelId) {
+    await assertModelConnectionAllowsTurn(db, {
+      workspaceId,
+      subjectId: "worker:model-access",
+      modelId: turnModelId,
+      workspaceProviderConnectionId: connection.id,
+    });
+  }
   const apiKey = connection.credential.apiKey;
   return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
@@ -14129,8 +14160,15 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  turnModelId?: string | null,
 ): Promise<string | null> {
-  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "vercel_gateway");
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "vercel_gateway",
+    turnModelId?.startsWith("workspace-gateway/") ? turnModelId : null,
+  );
 }
 
 /** Resolve only the reviewed workspace-shared OpenRouter credential shape. */
@@ -14138,8 +14176,15 @@ export async function loadWorkspaceOpenRouterApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  turnModelId?: string | null,
 ): Promise<string | null> {
-  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "openrouter");
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "openrouter",
+    turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+  );
 }
 
 /**
@@ -22416,6 +22461,11 @@ export async function upsertOrganizationCodexSubscriptionCredential(
       .for("update")
       .limit(1);
     if (!settings) throw new Error("organization Codex rotation settings are unavailable");
+    // Local administration has no managed-human reset-credit owner.
+    // Keep the same attribution boundary as workspace Codex connections.
+    const connectedBySubjectId = input.actorSubjectId.startsWith("user:")
+      ? input.actorSubjectId
+      : null;
     const now = new Date();
     const [row] = await scopedDb
       .insert(schema.codexSubscriptionCredentials)
@@ -22433,7 +22483,7 @@ export async function upsertOrganizationCodexSubscriptionCredential(
         lastRefreshAt: input.lastRefreshAt,
         accountEmail: input.accountEmail ?? null,
         label: input.label ?? null,
-        connectedBySubjectId: input.actorSubjectId,
+        connectedBySubjectId,
         status: "active",
         lastError: null,
       })
@@ -22452,7 +22502,7 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           lastRefreshAt: input.lastRefreshAt,
           accountEmail: input.accountEmail ?? null,
           label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-          connectedBySubjectId: input.actorSubjectId,
+          connectedBySubjectId: sql`coalesce(${connectedBySubjectId}, ${schema.codexSubscriptionCredentials.connectedBySubjectId})`,
           status: "active",
           lastError: null,
           version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
@@ -22512,6 +22562,7 @@ export async function listOrganizationCodexAccountStatuses(
       .select({
         id: schema.codexSubscriptionCredentials.id,
         chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+        allowedModelIds: schema.codexSubscriptionCredentials.allowedModelIds,
         label: schema.codexSubscriptionCredentials.label,
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
@@ -23433,21 +23484,29 @@ async function getCodexCredentialStatusScoped(
     [row] = await scopedDb
       .select(cols)
       .from(schema.codexSubscriptionCredentials)
-      .where(pool.condition)
-      .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
+      .where(
+        organizationSource
+          ? and(
+              pool.condition,
+              eq(schema.codexSubscriptionCredentials.status, "active"),
+              eq(schema.codexSubscriptionCredentials.allocatorEnabled, true),
+            )
+          : pool.condition,
+      )
+      .orderBy(
+        organizationSource
+          ? asc(schema.codexSubscriptionCredentials.createdAt)
+          : desc(schema.codexSubscriptionCredentials.createdAt),
+        asc(schema.codexSubscriptionCredentials.id),
+      )
       .limit(1);
-    if (row && settingsRow && settingsRow.activeCredentialId !== row.id) {
-      if (organizationSource) {
-        await scopedDb
-          .update(schema.organizationCodexRotationSettings)
-          .set({ activeCredentialId: row.id, updatedAt: new Date() })
-          .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId));
-      } else {
-        await scopedDb
-          .update(schema.codexRotationSettings)
-          .set({ activeCredentialId: row.id, updatedAt: new Date() })
-          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
-      }
+    // An organization default can be deliberately unassigned here. A local
+    // readiness read must never rewrite that organization's default.
+    if (row && settingsRow && !organizationSource && settingsRow.activeCredentialId !== row.id) {
+      await scopedDb
+        .update(schema.codexRotationSettings)
+        .set({ activeCredentialId: row.id, updatedAt: new Date() })
+        .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
     }
   }
   if (!row) {
@@ -23576,6 +23635,7 @@ export async function isCodexBilledTurn(input: {
 // ---------------------------------------------------------------------------
 
 export type CodexAccountStatus = {
+  allowedModelIds?: string[] | null;
   id: string;
   source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   chatgptAccountId: string | null;
@@ -23796,6 +23856,7 @@ function codexCredentialFailoverLimitForLease(
 export const CODEX_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
 
 type CodexLeaseCandidateRow = {
+  allowed_model_ids: string[] | null;
   id: string;
   chatgpt_account_id: string | null;
   label: string | null;
@@ -23830,6 +23891,7 @@ function mapCodexLeaseCandidate(
   return {
     id: row.id,
     chatgptAccountId: row.chatgpt_account_id,
+    allowedModelIds: row.allowed_model_ids,
     label: row.label,
     accountEmail: row.account_email,
     planType: row.plan_type,
@@ -23898,6 +23960,7 @@ async function listCodexLeaseCandidatesInTransaction(
     select
       c.id,
       c.chatgpt_account_id,
+      c.allowed_model_ids,
       c.label,
       c.account_email,
       c.plan_type,
@@ -24196,7 +24259,7 @@ export async function acquireCodexCredentialLease<
         );
       }
       const policyScope = input.resolvePolicyScope?.(turn.metadata ?? {}) ?? null;
-      const activeCredentialId = codexPolicySnapshot
+      let activeCredentialId = codexPolicySnapshot
         ? codexPolicySnapshot.activeCredentialId
         : settingsRow.active_credential_id;
       const rotationEnabled = codexPolicySnapshot
@@ -24234,6 +24297,10 @@ export async function acquireCodexCredentialLease<
             source: acceptedOrganizationSource ? "organization" : "workspace",
             excludeTurnId: input.turnId,
           });
+      if (organizationSource) {
+        activeCredentialId = assignedConnectionDefault(activeCredentialId, allAccounts);
+        for (const account of allAccounts) account.isActive = account.id === activeCredentialId;
+      }
       const sameTurnCredentialId = existingCredentialId;
       const selectionContext = (
         accounts: CodexLeaseAccountStatus[],
@@ -25725,7 +25792,7 @@ export type XaiCapacityWait = {
   blockedTurnId: string;
   blockedTurnGeneration: number;
   workflowId: string;
-  authorityScope: "workspace" | "user";
+  authorityScope: "workspace" | "user" | "organization";
   ownerOrganizationMembershipId: string | null;
   status: CodexCapacityWaitStatus;
   generation: number;
@@ -25768,7 +25835,7 @@ function mapXaiCapacityWaiter(row: typeof schema.xaiCapacityWaiters.$inferSelect
     blockedTurnId: row.blockedTurnId,
     blockedTurnGeneration: row.blockedTurnGeneration,
     workflowId: row.workflowId,
-    authorityScope: row.authorityScope as "workspace" | "user",
+    authorityScope: row.authorityScope as "workspace" | "user" | "organization",
     ownerOrganizationMembershipId: row.ownerOrganizationMembershipId,
     status: row.status as CodexCapacityWaitStatus,
     generation: row.generation,
@@ -25922,7 +25989,7 @@ async function resolveXaiPoolMembershipInTransaction(
     authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   },
 ): Promise<string | null> {
-  if (input.authoritySnapshot.scope === "workspace") return null;
+  if (input.authoritySnapshot.scope !== "user") return null;
   const rows = await rawRows<{ membership_id: string }>(
     tx,
     sql`select organization_membership_id as membership_id
@@ -25947,7 +26014,7 @@ function xaiSnapshotMatchesTurn(
   return (
     current.success &&
     stableJson(current.data) === stableJson(snapshot) &&
-    (snapshot.scope === "workspace" || turn.initiatingHumanSubjectId === subjectId)
+    (snapshot.scope !== "user" || turn.initiatingHumanSubjectId === subjectId)
   );
 }
 
@@ -26012,21 +26079,22 @@ export async function armXaiCapacityWait(
         if (snapshot.scope === "user" && !ownerOrganizationMembershipId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        await tx
-          .insert(schema.xaiRotationSettings)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId,
-          })
-          .onConflictDoNothing();
+        if (snapshot.scope !== "organization")
+          await tx
+            .insert(schema.xaiRotationSettings)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId,
+            })
+            .onConflictDoNothing();
         const [rotation] = await tx
           .select()
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
               ownerOrganizationMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -26179,7 +26247,7 @@ export async function armXaiCapacityWait(
             .where(
               and(
                 eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-                eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+                xaiCredentialWorkspacePredicate(input.workspaceId),
                 eq(schema.xaiSubscriptionCredentials.id, lease.credentialId),
               ),
             )
@@ -26544,7 +26612,7 @@ export async function reconcileXaiCapacityWait(
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, authority.snapshot.scope),
               ownerOrganizationMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -26702,7 +26770,7 @@ export async function reconcileXaiCapacityWait(
           .where(
             and(
               eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.authorityScope, authority.snapshot.scope),
               ownerOrganizationMembershipId === null
                 ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
@@ -27228,6 +27296,65 @@ export async function quarantineCodexCredentialForLease(
   );
 }
 
+/** Commit organization subscription policy and its durable capacity wake atomically. */
+export async function updateModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  if (target.workspaceId !== null || (target.kind !== "codex" && target.kind !== "supergrok")) {
+    return await updateModelConnectionAccessPolicy(db, target, policy);
+  }
+  const actor = { organizationId: target.accountId, actorSubjectId: target.subjectId };
+  return await withOrganizationCodexAdministrator(db, actor, async (tx) => {
+    if (target.kind === "supergrok") {
+      return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
+        updateModelConnectionAccessPolicy(scopedDb, target, policy),
+      );
+    }
+    // Match ordinary organization mutations: workspace source locks, then pool,
+    // then credential and waiter rows. Keep Personal inventory internal.
+    await lockOrganizationCodexSubscriptionSources(tx, target.accountId);
+    await tx
+      .select({ accountId: schema.organizationCodexRotationSettings.accountId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, target.accountId))
+      .for("update");
+    const updated = await updateModelConnectionAccessPolicy(tx, target, policy);
+    if (updated) {
+      await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+        accountId: target.accountId,
+        reason: "organization_codex_connection_access_changed",
+        restoreWorkspaceId: null,
+      });
+    }
+    return updated;
+  });
+}
+
+/** Compose existing pool metadata without a leaf-to-root database import cycle. */
+export async function getWorkspaceConnectionModelRestrictions(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
+) {
+  const [accounts, rotation] = await Promise.all([
+    listCodexAccountStatuses(db, workspaceId),
+    getCodexRotationSettings(db, workspaceId),
+  ]);
+  const selectableAccounts = rotation?.rotationEnabled
+    ? accounts
+    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
+  return await resolveWorkspaceConnectionModelRestrictions(
+    db,
+    workspaceId,
+    subjectId,
+    selectableAccounts,
+    authoritySnapshot,
+  );
+}
+
 /**
  * Metadata-only list of every connected Codex account in the workspace, for the
  * accounts UI + the worker's selection resolver. NEVER decrypts. `isActive` marks
@@ -27257,11 +27384,12 @@ export async function listCodexAccountStatuses(
             .from(schema.codexRotationSettings)
             .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
             .limit(1);
-    const activeId = settingsRow?.activeCredentialId ?? null;
+    let activeId = settingsRow?.activeCredentialId ?? null;
     const rows = await scopedDb
       .select({
         id: schema.codexSubscriptionCredentials.id,
         chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+        allowedModelIds: schema.codexSubscriptionCredentials.allowedModelIds,
         label: schema.codexSubscriptionCredentials.label,
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
@@ -27292,6 +27420,7 @@ export async function listCodexAccountStatuses(
         asc(schema.codexSubscriptionCredentials.createdAt),
         asc(schema.codexSubscriptionCredentials.id),
       );
+    if (accountSource === "organization") activeId = assignedConnectionDefault(activeId, rows);
     return rows.map((row) => ({
       ...row,
       source: accountSource,
@@ -28434,6 +28563,13 @@ export async function getCodexRotationSettings(
             .from(schema.codexRotationSettings)
             .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
             .limit(1);
+    if (row && source.effectiveSource === "organization") {
+      const accounts = await listCodexAccountStatuses(scopedDb, workspaceId);
+      return {
+        ...row,
+        activeCredentialId: assignedConnectionDefault(row.activeCredentialId, accounts),
+      };
+    }
     return row ?? null;
   });
 }
@@ -61743,7 +61879,7 @@ function frozenXaiExecutionAuthority(
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
     update.xaiProviderAccountAuthoritySnapshot,
   );
-  if (snapshot.scope === "workspace") return { snapshot, subjectId: null };
+  if (snapshot.scope !== "user") return { snapshot, subjectId: null };
   const subjectId = update.lineage.xaiAuthoritySubjectId;
   if (typeof subjectId !== "string" || subjectId.trim().length === 0) {
     throw new Error(`User-scoped xAI system update has no causal subject: ${update.id}`);

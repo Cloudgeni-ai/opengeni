@@ -3589,11 +3589,12 @@ export type CodexConnectPoll =
     };
 
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
-export type SuperGrokAccountScope = "workspace" | "user";
+export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
   email?: string | null;
@@ -3624,6 +3625,8 @@ export type SuperGrokRotationSettings = {
 
 /** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
 export type SuperGrokAccountsResponse = {
+  source?: "workspace" | "user" | "organization";
+  organizationId?: string;
   accounts: SuperGrokAccount[];
   activeAccountId: string | null;
   settings: SuperGrokRotationSettings;
@@ -8144,4 +8147,17 @@ export type EnrollTokenExchangeRequest = {
 /** POST /v1/enrollments/token/exchange response (wraps the credential shape). */
 export type EnrollTokenExchangeResponse = {
   credentials: EnrollmentCredentials;
+};
+
+export type ModelConnectionAccessPolicy = {
+  allowedModels: string[] | null;
+  allowedWorkspaces: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  version: number;
+};
+export type ModelConnectionAccessResponse = {
+  policy: ModelConnectionAccessPolicy;
+  models: Array<{ id: string; label: string }>;
+  workspaces: Array<{ id: string; name: string }>;
+  personalWorkspacesSupported: boolean;
 };

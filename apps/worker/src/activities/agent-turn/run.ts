@@ -1,3 +1,4 @@
+import { assertModelConnectionAllowsTurn } from "@opengeni/db";
 import {
   setSessionLastInputTokensForTurnAttempt,
   getMaterializedSandboxFileResources,
@@ -468,6 +469,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         requiredGeneratedVideoFiles,
       });
       if ("exit" in governance) return governance.exit;
+      await assertModelConnectionAllowsTurn(db, {
+        workspaceId: input.workspaceId,
+        subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
+        modelId: turnExecutionPolicy.productModelId,
+        codexCredentialId: providerTurn.effectiveCodexCredentialId,
+        xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+      });
       const {
         runtimePreparationStartedAt,
         packRuntime,
