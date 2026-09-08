@@ -29091,7 +29091,8 @@ export async function setSessionCodexPinInTransaction(
       codexPinnedCredentialId: pinnedCredentialId,
       // Source travels with the pin: a cleared pin (null) clears the source too.
       codexPinSource: pinnedCredentialId === null ? null : source,
-      updatedAt: new Date(),
+      // Only an explicit session account switch is conversation activity.
+      ...(source === "manual" ? { updatedAt: new Date() } : {}),
     })
     .where(and(...conditions))
     .returning({ id: schema.sessions.id });
@@ -29128,7 +29129,7 @@ export async function recordSessionActiveCodexCredential(
   await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     await scopedDb
       .update(schema.sessions)
-      .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
+      .set({ codexLastCredentialId: credentialId })
       .where(
         and(
           eq(schema.sessions.workspaceId, workspaceId),

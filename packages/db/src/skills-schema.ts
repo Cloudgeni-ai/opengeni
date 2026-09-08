@@ -49,7 +49,7 @@ export const skillConfigConversionReceipts = pgTable(
     sourceKind: text("source_kind").notNull(),
     sourceId: uuid("source_id").notNull(),
     conversionVersion: text("conversion_version").notNull().default("0426-v1"),
-    actor: text("actor").notNull().default("service:skill-migration:0426"),
+    actor: text("actor").notNull().default("service:skill-migration:0427"),
     originalConfiguration: jsonb("original_configuration").notNull(),
     originalHash: text("original_hash").notNull(),
     replacementHash: text("replacement_hash").notNull(),

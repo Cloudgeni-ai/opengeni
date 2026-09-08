@@ -9,7 +9,7 @@ import {
 describe("unified Skill migration boundary", () => {
   test("keeps one head and leaves historical hashes/snapshots untouched", async () => {
     const migration = await readFile(
-      new URL("../drizzle/0426_unified_skill_lifecycle.sql", import.meta.url),
+      new URL("../drizzle/0427_unified_skill_lifecycle.sql", import.meta.url),
       "utf8",
     );
     expect(migration).toContain("-- deployment-mode: maintenance");

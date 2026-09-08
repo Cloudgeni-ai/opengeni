@@ -7,14 +7,14 @@ DO $drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF to_regclass('pg_temp.skill_metadata_0426') IS NULL THEN
-    RAISE EXCEPTION '0426 requires the parser-backed TypeScript migration runner' USING ERRCODE='55000';
+    RAISE EXCEPTION '0427 requires the parser-backed TypeScript migration runner' USING ERRCODE='55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' OR jsonb_array_length(roles) NOT BETWEEN 1 AND 16
     OR EXISTS (SELECT 1 FROM jsonb_array_elements(roles) r WHERE jsonb_typeof(r) <> 'string' OR length(btrim(r #>> '{}')) NOT BETWEEN 1 AND 63)
-  THEN RAISE EXCEPTION '0426 requires explicit application database roles' USING ERRCODE = '55000'; END IF;
+  THEN RAISE EXCEPTION '0427 requires explicit application database roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON a.usename = r.value
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid())
-  THEN RAISE EXCEPTION '0426 requires drained application sessions' USING ERRCODE = '55000'; END IF;
+  THEN RAISE EXCEPTION '0427 requires drained application sessions' USING ERRCODE = '55000'; END IF;
 END $drain$;
 
 -- NULL means the historical single content file. Never rewrite old hashes or snapshots.
@@ -95,7 +95,7 @@ CREATE TABLE skill_config_conversion_receipts (
   source_kind text NOT NULL CHECK (source_kind IN ('session','workspace-pack')),
   source_id uuid NOT NULL,
   conversion_version text NOT NULL DEFAULT '0426-v1' CHECK (conversion_version='0426-v1'),
-  actor text NOT NULL DEFAULT 'service:skill-migration:0426' CHECK (actor='service:skill-migration:0426'),
+  actor text NOT NULL DEFAULT 'service:skill-migration:0427' CHECK (actor='service:skill-migration:0427'),
   original_configuration jsonb NOT NULL,
   original_hash text NOT NULL CHECK (original_hash=encode(sha256(convert_to(original_configuration::text,'UTF8')),'hex')),
   replacement_hash text NOT NULL CHECK (replacement_hash ~ '^[0-9a-f]{64}$'),
@@ -501,27 +501,27 @@ BEGIN
   LOOP
     IF NOT skill_files_valid(source.files) THEN RAISE EXCEPTION 'Installed Skill % has invalid text folder; repair before cutover',source.facet_id USING ERRCODE='22023'; END IF;
     IF NOT skill_source_has_effective_owner(source.account_id,source.workspace_id,source.facet_id) THEN
-      RAISE EXCEPTION '0426 requires completing or disabling unfinished composite Skill source %',source.facet_id USING ERRCODE='55000';
+      RAISE EXCEPTION '0427 requires completing or disabling unfinished composite Skill source %',source.facet_id USING ERRCODE='55000';
     END IF;
     skill_id := gen_random_uuid(); revision_id := gen_random_uuid();
     SELECT f->>'content' INTO main_content FROM jsonb_array_elements(source.files) f WHERE f->>'path'='SKILL.md';
     INSERT INTO preference_registry_preferences(id,account_id,stable_key,scope,scope_workspace_id,created_by_subject_id)
-      VALUES(skill_id,source.account_id,'installed-'||replace(skill_id::text,'-',''),'workspace',source.workspace_id,'service:skill-migration:0426');
+      VALUES(skill_id,source.account_id,'installed-'||replace(skill_id::text,'-',''),'workspace',source.workspace_id,'service:skill-migration:0427');
     INSERT INTO preference_registry_revisions(id,account_id,preference_id,title,description,content,content_hash,
       conflict_strategy,provenance_source,provenance_source_id,trust,created_by_subject_id,skill_files,skill_activation_mode)
       VALUES(revision_id,source.account_id,skill_id,source.name,source.description,main_content,
         encode(sha256(convert_to(main_content,'UTF8')),'hex'),'override','portable_skill',source.facet_id::text,
-        'workspace_managed','service:skill-migration:0426',source.files,source.activation_mode);
+        'workspace_managed','service:skill-migration:0427',source.files,source.activation_mode);
     INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,new_scope,new_workspace_id,actor_subject_id,reason)
       VALUES(source.account_id,skill_id,'proposal_created',1,revision_id,'workspace',source.workspace_id,
-        'service:skill-migration:0426','Preserve installed portable Skill at unified lifecycle cutover');
+        'service:skill-migration:0427','Preserve installed portable Skill at unified lifecycle cutover');
     PERFORM set_config('opengeni.preference_lifecycle_head_id',skill_id::text,true);
     PERFORM set_config('opengeni.preference_lifecycle_operation','activate',true);
     UPDATE preference_registry_preferences h SET status='active',active_revision_id=revision_id,
       active_revision=r.revision,active_content_hash=r.content_hash,activation_version=1
       FROM preference_registry_revisions r WHERE h.id=skill_id AND r.id=revision_id;
     INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,actor_subject_id,reason)
-      VALUES(source.account_id,skill_id,'activated',2,revision_id,'service:skill-migration:0426','Preserve existing installation activation');
+      VALUES(source.account_id,skill_id,'activated',2,revision_id,'service:skill-migration:0427','Preserve existing installation activation');
     INSERT INTO skill_source_bindings VALUES(source.account_id,source.workspace_id,source.plugin_id,source.facet_key,skill_id,source.facet_id);
   END LOOP;
   FOR legacy IN
@@ -542,7 +542,7 @@ BEGIN
       VALUES(revision_id,legacy.account_id,legacy.id,legacy.name,legacy.description,main_content,
         encode(sha256(convert_to(main_content,'UTF8')),'hex'),legacy.precedence_rank,legacy.conflict_strategy,
         legacy.conflicts_with,legacy.provenance_source,legacy.provenance_source_id,legacy.trust,legacy.expires_at,
-        'service:skill-migration:0426',legacy.active_revision_id,legacy.files,legacy.activation_mode);
+        'service:skill-migration:0427',legacy.active_revision_id,legacy.files,legacy.activation_mode);
     PERFORM set_config('opengeni.preference_lifecycle_head_id',legacy.id::text,true);
     PERFORM set_config('opengeni.preference_lifecycle_operation','correct',true);
     UPDATE preference_registry_preferences h SET active_revision_id=revision_id,active_revision=r.revision,
@@ -551,7 +551,7 @@ BEGIN
     SELECT coalesce(max(e.version),0)+1 INTO next_event FROM preference_registry_events e WHERE e.preference_id=legacy.id;
     INSERT INTO preference_registry_events(account_id,preference_id,type,version,old_revision_id,new_revision_id,actor_subject_id,reason)
       VALUES(legacy.account_id,legacy.id,'corrected',next_event,legacy.active_revision_id,revision_id,
-        'service:skill-migration:0426','Derive canonical Skill metadata; retain original immutable revision');
+        'service:skill-migration:0427','Derive canonical Skill metadata; retain original immutable revision');
   END LOOP;
 END $backfill$;
 -- Flush creation-event validation while its exact event is owner-visible, and
@@ -671,7 +671,7 @@ BEGIN
   IF (length(definition)-length(replace(definition,old_expression,'')))/length(old_expression) <> 1
     OR (length(definition)-length(replace(definition,old_end,'')))/length(old_end) <> 1
     OR (length(definition)-length(replace(definition,state_filter,'')))/length(state_filter) <> 1 THEN
-    RAISE EXCEPTION '0426 snapshot activation projection has drifted' USING ERRCODE='55000';
+    RAISE EXCEPTION '0427 snapshot activation projection has drifted' USING ERRCODE='55000';
   END IF;
   definition := replace(replace(definition,old_expression,new_expression),old_end,new_end);
   EXECUTE replace(definition,state_filter,state_filter || $new$ AND coalesce(revision.skill_activation_mode,'workspace_managed')='workspace_managed'$new$);

@@ -16,7 +16,7 @@ expose lazy search, install, save, checkout, and publish tools under workspace
 Learning policy. Preserve workspace customizations on source updates and let
 embedding hosts narrow bundled guidance independently of lazy tool discovery.
 
-Migration 0426 is a maintenance cutover: drain old runtimes and use the
+Migration 0427 is a maintenance cutover: drain old runtimes and use the
 parser-backed migration runner. Preserve historical snapshots and archive legacy
 configuration before conversion; invalid or pinned headerless configuration
 requires explicit repair before migration. See docs/skills-lifecycle.md for the
