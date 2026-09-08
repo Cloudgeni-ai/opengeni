@@ -68,7 +68,7 @@ export async function resolveSkillImport(
     }
     return pending;
   };
-  const sourcePath = await selectSkillRoot(parsed, tree, readBlob);
+  const sourcePath = await selectSkillRoot(parsed, tree, readBlob, sourceCommit);
   const entries = skillFilesUnderRoot(tree, sourcePath);
   const declaredBytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
   if (entries.length > PORTABLE_SKILL_MAX_FILES) {
@@ -253,6 +253,7 @@ async function selectSkillRoot(
   source: ParsedSkillSource,
   tree: readonly GitHubSkillTreeEntry[],
   readBlob: (sha: string) => Promise<Uint8Array>,
+  sourceCommit: string,
 ): Promise<string> {
   const skillFiles = tree
     .filter(
@@ -316,10 +317,15 @@ async function selectSkillRoot(
       );
     });
     candidates = skillFiles.filter((_, index) => matches[index]);
-    // Retain the existing directory-name form for old skills.sh links, but an
-    // actual frontmatter identity always takes precedence over this fallback.
     if (candidates.length === 0) {
-      candidates = skillFiles.filter((path) => path.split("/").at(-1) === source.skillSlug);
+      // A folder basename is not a skills.sh identity. Never silently import a
+      // different frontmatter name from a stale directory-shaped link.
+      const folders = skillFiles.filter((path) => path.split("/").at(-1) === source.skillSlug);
+      const exactPath =
+        folders.length === 1 ? encodeGitHubPath(folders[0]!) : "<exact-skill-folder-path>";
+      throw new HTTPException(422, {
+        message: `No Skill frontmatter name matches skills.sh slug "${source.skillSlug}"; the link may be stale. Check the current Skill name, or explicitly select the intended Skill using its exact GitHub folder URL: https://github.com/${source.owner}/${source.repository}/tree/${sourceCommit}/${exactPath}`,
+      });
     }
   }
   if (candidates.length === 0) {

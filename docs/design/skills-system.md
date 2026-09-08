@@ -112,7 +112,7 @@ naturally depends on that folder being accessible.
 ### Read
 
 ```text
-skill_read({ skill, paths? })
+skill_read({ skill, paths?, listFiles? })
 ```
 
 - Omit `paths`: return `SKILL.md`.
@@ -121,8 +121,10 @@ skill_read({ skill, paths? })
 - Proposed: return files with their paths; report missing paths explicitly.
   Never silently omit files or present truncation as complete content.
 - Resolve ambiguous names explicitly rather than choosing a source silently.
-- Include a bounded way to discover available paths on demand; do not put
-  every file path into every standing prompt.
+- Set `listFiles: true` without `paths`: return only relative `paths` (at most
+  128) and available revision identity, with no file bodies and no sandbox.
+  Combining inventory with `paths` is rejected. Inventory is on demand, never
+  part of the standing prompt; omitted/false `listFiles` preserves text reads.
 
 ### Search and install
 
@@ -375,11 +377,16 @@ tests is not evidence of correct activation timing.
 
 Final-head integration gates still open: merge refreshed `origin/main`, renumber
 the unpublished Skill migration after main's occupied ordinals, finish composite
-publication ordering, add sandbox-free supporting-path inventory, and resolve
-the new web startup bundle-budget regression. Independent review also identified
-a stale library slug/folder fallback to validate and a pre-existing lowercased
-source-path identity collision; changing existing installation keys requires a
-compatibility plan, not a silent key rewrite.
+publication ordering, and resolve the new web startup bundle-budget regression.
+Independent review also identified a pre-existing lowercased source-path identity
+collision; changing existing installation keys requires a compatibility plan,
+not a silent key rewrite.
+
+Sandbox-free supporting-path inventory is implemented on `skill_read` via
+`listFiles: true`. Public skills.sh imports require a matching current
+frontmatter name (case-insensitive), never a mismatching folder-name fallback.
+Stale slugs report an exact GitHub folder URL alternative; direct folder imports
+remain exact, and duplicate frontmatter names still require that override.
 
 Frontmatter migration uses the shared YAML parser, preserves valid YAML bytes,
 and derives database descriptor columns from those files. Current legacy

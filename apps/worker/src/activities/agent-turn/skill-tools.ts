@@ -26,7 +26,7 @@ import {
 } from "@opengeni/runtime/skill-library";
 import type { RuntimeSkillArtifact } from "@opengeni/runtime";
 import type { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { createSkillReadAttemptToolDefinition } from "./skill-read";
+import { createSkillReadAttemptToolDefinition, type SkillReadContent } from "./skill-read";
 import { createSkillSearchAttemptToolDefinition } from "./skill-search";
 import { createSkillSaveAttemptToolDefinition, type SkillSaveRequest } from "./skill-save";
 import { createSkillInstallAttemptToolDefinition } from "./skill-install";
@@ -58,7 +58,9 @@ export function createWorkspaceSkillTools(input: {
     (await listSkillDescriptors(input.db, context)).filter(
       (entry) => entry.activationMode === "workspace_managed",
     );
-  const load = async (identifier: string) => {
+  // Both text reads and inventory resolve through this same authorized source.
+  // Selected artifacts have no ledger revision identity; never synthesize one.
+  const load = async (identifier: string): Promise<readonly SkillTextFile[] | SkillReadContent> => {
     const exact = selected.get(identifier);
     if (exact) return exact.files;
     const descriptors = await list();

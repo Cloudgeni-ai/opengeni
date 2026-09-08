@@ -29,4 +29,6 @@ test("management guidance is a readable text Skill without a sandbox", () => {
   expect(result.files[0]!.content).toContain("Management tools are lazy");
   expect(result.files[0]!.content).toContain("Require approval");
   expect(result.files[0]!.content).toContain("Omitted files are preserved");
+  expect(result.files[0]!.content).toContain("`listFiles: true`");
+  expect(result.files[0]!.content).toContain("never file bodies");
 });

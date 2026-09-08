@@ -17,6 +17,11 @@ when you want it alongside other files. An empty paths list is not a default.
 Read supporting files only when needed. Reads return current saved content;
 you do not need to pin a version to follow a Skill.
 
+To discover supporting files, call `skill_read` with `listFiles: true` and no
+`paths`. This returns only relative `paths` (at most 128) and available revision
+identity, never file bodies. Then request only the paths you need. Inventory
+cannot be combined with `paths` and does not require sandbox checkout.
+
 ## Find and install
 
 Management tools are lazy: discover the relevant tool with tool search before
@@ -28,6 +33,10 @@ Keep the same `operationId` and original arguments when retrying an uncertain
 install. A committed install replays before fetching the source again. Updates
 must supply the reviewed installation version; do not substitute a newer value
 merely to get past a conflict.
+
+A skills.sh URL must match the current `SKILL.md` frontmatter name, not merely
+the folder basename. If a link is stale or ambiguous, check the current name or
+use the exact GitHub folder URL (`https://github.com/owner/repo/tree/ref/path`).
 
 ## Create and edit
 

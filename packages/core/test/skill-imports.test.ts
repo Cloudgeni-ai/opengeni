@@ -200,14 +200,30 @@ describe("remote Skill source resolution", () => {
     expect(resolved.preview.sourcePath).toBe("one");
   });
 
-  test("retains the legacy folder alias when no frontmatter identity matches", async () => {
+  test("rejects a stale slug even when its folder basename exists; exact folders still work", async () => {
     const client = sourceClient(
       [{ path: "alias/SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null }],
       { skill: skillMarkdown },
     );
+    await expect(resolveSkillImport("https://skills.sh/acme/skills/alias", client)).rejects.toThrow(
+      'No Skill frontmatter name matches skills.sh slug "alias"',
+    );
+    await expect(resolveSkillImport("https://skills.sh/acme/skills/alias", client)).rejects.toThrow(
+      `https://github.com/acme/skills/tree/${commit}/alias`,
+    );
+    await expect(
+      resolveSkillImport("https://skills.sh/acme/skills/deleted-name", client),
+    ).rejects.toThrow(`https://github.com/acme/skills/tree/${commit}/<exact-skill-folder-path>`);
+    const exact = await resolveSkillImport(
+      `https://github.com/acme/skills/tree/${commit}/alias`,
+      client,
+    );
+    expect(exact.preview.name).toBe("release-operator");
+    expect(exact.preview.sourcePath).toBe("alias");
     expect(
-      (await resolveSkillImport("https://skills.sh/acme/skills/alias", client)).preview.name,
-    ).toBe("release-operator");
+      (await resolveSkillImport("https://skills.sh/acme/skills/RELEASE-OPERATOR", client)).preview
+        .contentSha256,
+    ).toBe(exact.preview.contentSha256);
   });
 
   test("root Skill source URLs round trip through preview and exact commit URLs", async () => {
