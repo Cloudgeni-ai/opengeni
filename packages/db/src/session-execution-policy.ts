@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, inArray, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Database } from "./database";
 import * as schema from "./schema";
 
@@ -9,7 +9,12 @@ export function latestStartedSessionTurnQuery(
   sessionId: string | SQL,
 ) {
   return db
-    .select(getTableColumns(schema.sessionTurns))
+    .select({
+      id: schema.sessionTurns.id,
+      model: schema.sessionTurns.model,
+      reasoningEffort: schema.sessionTurns.reasoningEffort,
+      latencyMode: schema.sessionTurns.latencyMode,
+    })
     .from(schema.sessionEvents)
     .innerJoin(
       schema.sessionTurns,

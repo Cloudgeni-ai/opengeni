@@ -75365,8 +75365,14 @@ async function latestStartedSessionTurnRow(
   workspaceId: string,
   sessionId: string,
 ): Promise<typeof schema.sessionTurns.$inferSelect | null> {
-  const [row] = await latestStartedSessionTurnQuery(db, workspaceId, sessionId);
-  return row ?? null;
+  const latest = latestStartedSessionTurnQuery(db, workspaceId, sessionId).as(
+    "latest_started_turn",
+  );
+  const [row] = await db
+    .select({ turn: schema.sessionTurns })
+    .from(latest)
+    .innerJoin(schema.sessionTurns, eq(schema.sessionTurns.id, latest.id));
+  return row?.turn ?? null;
 }
 
 function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
