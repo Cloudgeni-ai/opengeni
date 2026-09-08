@@ -229,7 +229,7 @@ BEGIN
   END IF;
 
   IF operation = 'install' THEN
-    SELECT f.facet_key, f.activation_mode, v.plugin_id, sf.*, coalesce(jsonb_agg(jsonb_build_object('path',ff.path,'content',ff.content) ORDER BY ff.path)
+    SELECT f.facet_key, f.activation_mode, v.plugin_id, sf.*, coalesce(jsonb_agg(jsonb_build_object('path',ff.path,'content',ff.content) ORDER BY ff.path COLLATE "C")
       FILTER (WHERE ff.id IS NOT NULL),'[]'::jsonb) AS files INTO source
       FROM capability_skill_facets sf JOIN capability_facets f ON f.id=sf.facet_id
       JOIN capability_plugin_versions v ON v.id=f.plugin_version_id
