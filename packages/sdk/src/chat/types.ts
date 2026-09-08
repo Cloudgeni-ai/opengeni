@@ -109,10 +109,21 @@ export type ChatRespondInput =
   | { requestId: string; answers: HumanInputAnswer[] }
   | { requestId: string; skip: true };
 
+/** One earlier message from the product's own history, imported as context on the first send. */
+export type ChatImportedMessage = { role: "user" | "assistant" | "system"; text: string };
+
 export type ChatSendOptions = {
   signal?: AbortSignal | undefined;
   /** Supersede the current inference instead of queueing behind it. */
   steer?: boolean | undefined;
+  /**
+   * Earlier messages the product already holds, oldest first. Used only when
+   * this send creates the session: they become the first message's
+   * `modelContext` (skipped when `create.modelContext` was supplied), trimmed
+   * from the oldest end to 30,000 characters. Never resent on later turns:
+   * after the first message OpenGeni owns the history.
+   */
+  importedHistory?: ChatImportedMessage[] | undefined;
 };
 
 export type ChatSessionListOptions = ChatTarget & {

@@ -6,6 +6,7 @@ import {
 } from "@opengeni/sdk/chat";
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -15,9 +16,10 @@ import {
 import { Markdown } from "./components/markdown";
 
 /**
- * Drop-in chat that talks only to the host's `createChatHandler` endpoint:
- * it POSTs `{ message }` (native format), renders the streamed reply, shows a
- * card for a pending approval or human-input request, and answers it through
+ * Chat component that talks only to the host's `createChatHandler` endpoint:
+ * it restores the conversation with `GET` on mount, POSTs `{ message }`
+ * (native format), renders the streamed reply, shows a card for a pending
+ * approval or human-input request, and answers it through
  * `${handlerUrl}/respond`. No provider or OpenGeni credentials in the browser.
  */
 
@@ -112,6 +114,30 @@ function uid(): string {
     : Math.random().toString(36).slice(2);
 }
 
+type HostHeaders = OpenGeniChatProps["headers"];
+
+function requestHeaders(conversation: string | undefined, headers: HostHeaders) {
+  return {
+    [CHAT_FORMAT_HEADER]: "native",
+    ...(conversation ? { [CHAT_CONVERSATION_HEADER]: conversation } : {}),
+    ...(typeof headers === "function" ? headers() : (headers ?? {})),
+  };
+}
+
+/** Messages from the handler's `GET` history response; anything unexpected is dropped. */
+function restoredMessages(payload: unknown): OpenGeniChatMessage[] {
+  const list = (payload as { messages?: unknown } | null)?.messages;
+  if (!Array.isArray(list)) return [];
+  const restored: OpenGeniChatMessage[] = [];
+  for (const entry of list) {
+    const record = (entry ?? {}) as { role?: unknown; text?: unknown };
+    if ((record.role !== "user" && record.role !== "assistant") || typeof record.text !== "string")
+      continue;
+    restored.push({ id: uid(), role: record.role, text: record.text, streaming: false, tools: [] });
+  }
+  return restored;
+}
+
 export function OpenGeniChat({
   handlerUrl,
   conversation,
@@ -127,6 +153,32 @@ export function OpenGeniChat({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const headersRef = useRef<HostHeaders>(headers);
+  headersRef.current = headers;
+
+  // Restore the conversation on mount and whenever it changes. The composer
+  // stays usable meanwhile; a host without a GET route is ignored silently.
+  useEffect(() => {
+    const controller = new AbortController();
+    setMessages([]);
+    setPending(null);
+    void (async () => {
+      try {
+        const response = await fetch(handlerUrl, {
+          method: "GET",
+          headers: requestHeaders(conversation, headersRef.current),
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const restored = restoredMessages(await response.json());
+        if (controller.signal.aborted || restored.length === 0) return;
+        setMessages((prev) => [...restored, ...prev]);
+      } catch {
+        // History is a convenience; sending still works without it.
+      }
+    })();
+    return () => controller.abort();
+  }, [handlerUrl, conversation]);
 
   const update = useCallback(
     (id: string, patch: (message: OpenGeniChatMessage) => OpenGeniChatMessage) =>
@@ -145,12 +197,7 @@ export function OpenGeniChat({
       try {
         const response = await fetch(url, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            [CHAT_FORMAT_HEADER]: "native",
-            ...(conversation ? { [CHAT_CONVERSATION_HEADER]: conversation } : {}),
-            ...(typeof headers === "function" ? headers() : (headers ?? {})),
-          },
+          headers: { "Content-Type": "application/json", ...requestHeaders(conversation, headers) },
           body: JSON.stringify(body),
           signal: controller.signal,
         });

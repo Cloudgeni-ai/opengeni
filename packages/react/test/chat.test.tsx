@@ -11,7 +11,11 @@ function nativeSse(chunks: unknown[]): Response {
   return new Response(wire, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
-function stubFetch(respond: (request: Recorded) => Response): Recorded[] {
+/** Stub `fetch`; `respond` answers POSTs, `history` answers the mount-time GET (404 by default). */
+function stubFetch(
+  respond: (request: Recorded) => Response,
+  history: (request: Recorded) => Response = () => new Response("", { status: 404 }),
+): Recorded[] {
   const recorded: Recorded[] = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(
@@ -25,9 +29,13 @@ function stubFetch(respond: (request: Recorded) => Response): Recorded[] {
       body: init?.body ? JSON.parse(String(init.body)) : null,
     };
     recorded.push(entry);
-    return respond(entry);
+    return request.method === "GET" ? history(entry) : respond(entry);
   }) as typeof fetch;
   return recorded;
+}
+
+function posts(recorded: Recorded[]): Recorded[] {
+  return recorded.filter((request) => request.method === "POST");
 }
 
 const originalFetch = globalThis.fetch;
@@ -63,8 +71,8 @@ describe("OpenGeniChat", () => {
     await actRun(() => r.container.querySelector("form")!.requestSubmit());
     await flush(10);
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({
+    expect(posts(requests)).toHaveLength(1);
+    expect(posts(requests)[0]).toMatchObject({
       url: "http://localhost:3000/api/chat",
       method: "POST",
       headers: {
@@ -112,12 +120,73 @@ describe("OpenGeniChat", () => {
     await actRun(() => approve.click());
     await flush(10);
 
-    expect(requests[1]).toMatchObject({
+    expect(posts(requests)[1]).toMatchObject({
       url: "http://localhost:3000/api/chat/respond",
       body: { requestId: "call_9", decision: "approve" },
     });
     expect(r.container.querySelector(".og-chat-pending")).toBeNull();
     expect(r.container.querySelector(".og-chat-assistant")?.textContent).toContain("May I? Done.");
+    await r.unmount();
+  });
+
+  test("restores the conversation history from GET on mount and when the conversation changes", async () => {
+    const histories: Record<string, unknown[]> = {
+      c_9: [
+        { role: "user", text: "earlier question", sequence: 2 },
+        { role: "assistant", text: "earlier **answer**", sequence: 5 },
+      ],
+      c_10: [{ role: "user", text: "other thread", sequence: 2 }],
+    };
+    const requests = stubFetch(
+      () => nativeSse([{ type: "done", reply: { text: "", status: "completed" } }]),
+      (request) => {
+        const conversation = request.headers["x-opengeni-conversation"] ?? "";
+        return new Response(
+          JSON.stringify({
+            conversation,
+            sessionId: "22222222-2222-4222-8222-222222222222",
+            created: true,
+            messages: histories[conversation] ?? [],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    const r = await renderComponent(
+      <OpenGeniChat handlerUrl="/api/chat" conversation="c_9" headers={{ "x-user": "u_42" }} />,
+    );
+    await flush(10);
+
+    expect(requests[0]).toMatchObject({
+      url: "http://localhost:3000/api/chat",
+      method: "GET",
+      headers: { "x-opengeni-conversation": "c_9", "x-user": "u_42" },
+    });
+    expect(r.container.querySelector(".og-chat-user")?.textContent).toBe("earlier question");
+    const assistant = r.container.querySelector(".og-chat-assistant")!;
+    expect(assistant.textContent).toContain("earlier answer");
+    expect(assistant.querySelector("strong")?.textContent).toBe("answer");
+    expect(r.container.querySelector("textarea")?.disabled).toBeFalsy();
+    expect(r.container.querySelector("button[type=submit]")).not.toBeNull();
+
+    await r.rerender(
+      <OpenGeniChat handlerUrl="/api/chat" conversation="c_10" headers={{ "x-user": "u_42" }} />,
+    );
+    await flush(10);
+    expect(requests.filter((request) => request.method === "GET")).toHaveLength(2);
+    expect([...r.container.querySelectorAll(".og-chat-user")].map((el) => el.textContent)).toEqual([
+      "other thread",
+    ]);
+    expect(r.container.querySelector(".og-chat-assistant")).toBeNull();
+    await r.unmount();
+  });
+
+  test("keeps working when the host does not serve history", async () => {
+    stubFetch(() => nativeSse([{ type: "done", reply: { text: "", status: "completed" } }]));
+    const r = await renderComponent(<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />);
+    await flush(10);
+    expect(r.container.querySelector(".og-chat-error")).toBeNull();
+    expect(r.container.querySelectorAll(".og-chat-user")).toHaveLength(0);
     await r.unmount();
   });
 

@@ -37,7 +37,7 @@ const og = new OpenGeni({
 const chat = await og.chat({
   tenant: "acme", // one workspace per customer, created on first use
   user: "u_42", // opaque end-user label (required for memory: "user")
-  conversation: "c_9", // stable id; the session id is derived from it
+  conversation: "c_9", // stable id, namespaced to user; the session id is derived from both
   agentAccess: "session", // "session" (default) | "user" | "workspace"
   memory: "user", // "session" | "user" | "workspace" | false; default follows agentAccess
   create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
@@ -52,21 +52,29 @@ for await (const chunk of chat.stream("and then?")) {
 }
 
 // Your endpoint. `resolve` is your auth hook: identity comes from the request
-// you authenticated, never from the body.
-export const POST = createChatHandler(og, {
+// you authenticated, never from the body. The handler reads the client's
+// conversation id itself (x-opengeni-conversation header, or the wire format's
+// own field) and scopes it to `user`; return `conversation` from resolve only
+// when the host names it, which is required when there is no `user`.
+export const handler = createChatHandler(og, {
   resolve: async (request) => {
     const session = await getSessionFromCookie(request);
     if (!session) return new Response("Unauthorized", { status: 401 });
-    return {
-      tenant: session.accountId,
-      user: session.userId,
-      conversation: request.headers.get("x-opengeni-conversation") ?? undefined,
-    };
+    return { tenant: session.accountId, user: session.userId };
   },
   // format: "vercel" | "openai-chat" | "openai-responses" (default "native");
   // a request may override it with the x-opengeni-chat-format header.
 });
+export const GET = handler; // conversation history, for restoring the chat on reload
+export const POST = handler; // send a message, or answer a pending request at .../respond
 ```
+
+Conversation ids are namespaced per user: the same `conversation` for two
+`user` labels reaches two sessions, so a client cannot continue another user's
+chat by guessing its id. Without a `user`, the host must name the conversation
+from `resolve`. The Vercel and OpenAI adapters send only the latest user
+message; the earlier messages in that request are imported once, as context on
+the first message of a conversation, after which OpenGeni owns the history.
 
 Pick the isolation per session with `agentAccess` (which other sessions the
 agent may reach) and `memory` (what it remembers), all inside one workspace that
@@ -80,9 +88,11 @@ shares the customer's documents, instructions, and integrations:
 | Shared agent access, no memory                    | any           | `false`       |
 
 `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
-`@opengeni/react/chat` is the matching drop-in browser component (it talks only
-to your handler). Graduate to `OpenGeniClient` below when you need the full
-session surface: files, tools, approvals with policies, forks, realtime voice.
+`@opengeni/react/chat` is the browser component to swap in for your chat box:
+it talks only to your handler, sends the conversation id as the
+`x-opengeni-conversation` header, and restores the history on reload. Graduate
+to `OpenGeniClient` below when you need the full session surface: files, tools,
+approvals with policies, forks, realtime voice.
 
 ## Quick start
 

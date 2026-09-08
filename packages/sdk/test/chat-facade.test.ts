@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { chatSessionId, OpenGeniChatError, uuidV5, type ChatChunk } from "../src/chat";
+import {
+  CHAT_SESSION_NAMESPACE,
+  chatIdempotencyKey,
+  chatSessionId,
+  OpenGeniChatError,
+  uuidV5,
+  type ChatChunk,
+} from "../src/chat";
 import { OPENGENI_API_CONTRACT_HEADER } from "../src/types";
 import { fakeServer, helloReply, ORGANIZATION_ID, type ScriptedEvent } from "./chat-helpers";
 import { collect, WORKSPACE_ID } from "./helpers";
@@ -38,6 +45,25 @@ describe("chat identities", () => {
     expect(ensures[0]!.headers.authorization).toBe("Bearer og_test_key");
     expect(server.requestsTo("GET", `/sessions/${first.sessionId}`)).toHaveLength(2);
   });
+
+  test("the session id differs per user for one conversation and matches the RFC v5 derivation", async () => {
+    const server = fakeServer();
+    const anonymous = await server.og.chat({ tenant: "acme", conversation: "c_9" });
+    const alice = await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+    const bob = await server.og.chat({ tenant: "acme", user: "u_43", conversation: "c_9" });
+
+    expect(alice.sessionId).not.toBe(anonymous.sessionId);
+    expect(alice.sessionId).not.toBe(bob.sessionId);
+    expect(alice.sessionId).toBe(
+      await uuidV5(`${WORKSPACE_ID}:app:u_42:c_9`, CHAT_SESSION_NAMESPACE),
+    );
+    expect(alice.sessionId).toBe(
+      await chatSessionId(WORKSPACE_ID, "c_9", { source: "app", id: "u_42" }),
+    );
+    expect(anonymous.sessionId).toBe(await uuidV5(`${WORKSPACE_ID}:c_9`, CHAT_SESSION_NAMESPACE));
+    expect(chatIdempotencyKey("c_9", { source: "app", id: "u_42" })).toBe("chat:app:u_42:c_9");
+    expect(chatIdempotencyKey("c_9")).toBe("chat:c_9");
+  });
 });
 
 describe("Chat.send", () => {
@@ -63,11 +89,67 @@ describe("Chat.send", () => {
       endUser: { source: "app", id: "u_42" },
       initialMessage: "hello",
       requestedSessionId: chat.sessionId,
-      idempotencyKey: "chat:c_9",
+      idempotencyKey: "chat:app:u_42:c_9",
     });
     const stream = server.requestsTo("GET", "/events/stream");
     expect(stream).toHaveLength(1);
     expect(new URL(stream[0]!.url).searchParams.get("after")).toBe("0");
+  });
+
+  test("imported history lands in modelContext of the create body only once", async () => {
+    const server = fakeServer();
+    const chat = await server.og.chat({ tenant: "acme", conversation: "c_9" });
+    const importedHistory = [
+      { role: "system" as const, text: "Be terse." },
+      { role: "user" as const, text: "Earlier question" },
+      { role: "assistant" as const, text: "Earlier answer" },
+    ];
+    await chat.send("hello", { importedHistory });
+    expect(server.creates[0]!.modelContext).toBe(
+      [
+        "Earlier conversation imported from the product, oldest first:",
+        "system: Be terse.",
+        "user: Earlier question",
+        "assistant: Earlier answer",
+      ].join("\n"),
+    );
+    expect(server.creates[0]!.initialMessage).toBe("hello");
+
+    await chat.send("again", { importedHistory });
+    expect(server.creates).toHaveLength(1);
+    expect(server.requestsTo("POST", "/events")[0]!.json()).toEqual({
+      type: "user.message",
+      payload: { text: "again" },
+    });
+  });
+
+  test("imported history is truncated from the oldest end and yields to an explicit modelContext", async () => {
+    const server = fakeServer();
+    const oldest = "a".repeat(20_000);
+    const newest = "b".repeat(20_000);
+    const chat = await server.og.chat({ tenant: "acme", conversation: "c_9" });
+    await chat.send("hello", {
+      importedHistory: [
+        { role: "user", text: oldest },
+        { role: "assistant", text: newest },
+      ],
+    });
+    const context = server.creates[0]!.modelContext!;
+    expect(context.length).toBeLessThanOrEqual(30_000);
+    expect(context).toContain(`assistant: ${newest}`);
+    expect(context).not.toContain("aaaa");
+
+    const explicit = await server.og.chat({
+      tenant: "acme",
+      conversation: "c_10",
+      create: { modelContext: "host context" },
+    });
+    await explicit.send("hello", { importedHistory: [{ role: "user", text: "ignored" }] });
+    expect(server.creates[1]!.modelContext).toBe("host context");
+
+    const empty = await server.og.chat({ tenant: "acme", conversation: "c_11" });
+    await empty.send("hello", { importedHistory: [] });
+    expect(server.creates[2]!.modelContext).toBeUndefined();
   });
 
   test("a later send posts user.message and streams after the accepted sequence", async () => {
@@ -385,11 +467,50 @@ describe("Chat.steer, history, sessions.list, chatBySessionId", () => {
     const chat = await server.og.chatBySessionId({
       workspaceId: WORKSPACE_ID,
       sessionId: original.sessionId,
+      user: null,
     });
     expect(chat.created).toBe(true);
+    expect(chat.conversation).toBeNull();
     expect((await chat.send("again")).text).toBe("Hello");
     await expect(
-      server.og.chatBySessionId({ workspaceId: WORKSPACE_ID, sessionId: crypto.randomUUID() }),
+      server.og.chatBySessionId({
+        workspaceId: WORKSPACE_ID,
+        sessionId: crypto.randomUUID(),
+        user: null,
+      }),
     ).rejects.toMatchObject({ status: 404 });
+  });
+
+  test("chatBySessionId denies a session owned by another user and allows the same user", async () => {
+    const server = fakeServer();
+    const alice = await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+    await alice.send("hello");
+    const anonymous = await server.og.chat({ tenant: "acme", conversation: "c_9" });
+    await anonymous.send("hello");
+
+    const same = await server.og.chatBySessionId({
+      workspaceId: WORKSPACE_ID,
+      sessionId: alice.sessionId,
+      user: "u_42",
+    });
+    expect(same.sessionId).toBe(alice.sessionId);
+
+    const other = server.og.chatBySessionId({
+      workspaceId: WORKSPACE_ID,
+      sessionId: alice.sessionId,
+      user: "u_43",
+    });
+    await expect(other).rejects.toBeInstanceOf(OpenGeniChatError);
+    await expect(other).rejects.toMatchObject({ code: "conversation_not_authorized" });
+
+    // A session without an end user is not this user's either.
+    await expect(
+      server.og.chatBySessionId({
+        workspaceId: WORKSPACE_ID,
+        sessionId: anonymous.sessionId,
+        user: "u_42",
+      }),
+    ).rejects.toMatchObject({ code: "conversation_not_authorized" });
+    expect(server.requestsTo("POST", "/events")).toHaveLength(0);
   });
 });

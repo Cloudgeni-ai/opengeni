@@ -21,6 +21,7 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
 }
 
 const resolveTenant: ChatResolve = async () => ({ tenant: "acme", user: "u_42" });
+const U_42 = { source: "app", id: "u_42" };
 
 describe("handleChatCompletionsRequest", () => {
   test("streams chat.completion.chunk objects and terminates with [DONE]", async () => {
@@ -65,7 +66,50 @@ describe("handleChatCompletionsRequest", () => {
 
     expect(server.creates[0]!.initialMessage).toBe("hello");
     expect(server.creates[0]!.endUser).toEqual({ source: "app", id: "u_42" });
-    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
+    expect(server.creates[0]!.requestedSessionId).toBe(
+      await chatSessionId(WORKSPACE_ID, "c_9", U_42),
+    );
+    expect(server.creates[0]!.modelContext).toBe(
+      "Earlier conversation imported from the product, oldest first:\nsystem: ignored",
+    );
+  });
+
+  test("imports prior messages as context on the first create only", async () => {
+    const server = fakeServer();
+    const prior = [
+      { role: "system", content: "Be terse." },
+      { role: "user", content: [{ type: "input_text", text: "first" }] },
+      { role: "assistant", content: [{ type: "text", text: "one" }] },
+    ];
+    const send = async (messages: unknown[]) =>
+      readBody(
+        await handleChatCompletionsRequest(
+          server.og,
+          post("/chat/completions", { messages }, { "x-opengeni-conversation": "c_9" }),
+          resolveTenant,
+        ),
+      );
+    await send([...prior, { role: "user", content: "second" }]);
+    expect(server.creates[0]).toMatchObject({
+      initialMessage: "second",
+      modelContext: [
+        "Earlier conversation imported from the product, oldest first:",
+        "system: Be terse.",
+        "user: first",
+        "assistant: one",
+      ].join("\n"),
+    });
+    await send([
+      ...prior,
+      { role: "user", content: "second" },
+      { role: "assistant", content: "two" },
+      { role: "user", content: "third" },
+    ]);
+    expect(server.creates).toHaveLength(1);
+    expect(server.requestsTo("POST", "/events")[0]!.json()).toEqual({
+      type: "user.message",
+      payload: { text: "third" },
+    });
   });
 
   test("returns a chat.completion object without stream and reads metadata.conversation_id", async () => {
@@ -87,7 +131,9 @@ describe("handleChatCompletionsRequest", () => {
         { index: 0, message: { role: "assistant", content: "Hello" }, finish_reason: "stop" },
       ],
     });
-    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_meta"));
+    expect(server.creates[0]!.requestedSessionId).toBe(
+      await chatSessionId(WORKSPACE_ID, "c_meta", U_42),
+    );
   });
 
   test("returns 400 without a conversation and 5xx-class JSON for a failed turn", async () => {
@@ -160,7 +206,51 @@ describe("handleResponsesRequest", () => {
       ],
     });
     expect(decodeResponseId(completed.id)).toBe(sessionId);
-    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
+    expect(server.creates[0]!.requestedSessionId).toBe(
+      await chatSessionId(WORKSPACE_ID, "c_9", U_42),
+    );
+  });
+
+  test("imports prior array input items as context on the first create only", async () => {
+    const server = fakeServer();
+    const first = await handleResponsesRequest(
+      server.og,
+      post("/responses", {
+        conversation: "c_9",
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "first" }] },
+          { role: "assistant", content: [{ type: "output_text", text: "one" }] },
+          { type: "function_call", name: "search", arguments: "{}" },
+          { role: "user", content: [{ type: "input_text", text: "second" }] },
+        ],
+      }),
+      resolveTenant,
+    );
+    expect(first.status).toBe(200);
+    expect(server.creates[0]).toMatchObject({
+      initialMessage: "second",
+      modelContext: [
+        "Earlier conversation imported from the product, oldest first:",
+        "user: first",
+        "assistant: one",
+      ].join("\n"),
+    });
+    await handleResponsesRequest(
+      server.og,
+      post("/responses", {
+        conversation: "c_9",
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "second" }] },
+          { role: "user", content: [{ type: "input_text", text: "third" }] },
+        ],
+      }),
+      resolveTenant,
+    );
+    expect(server.creates).toHaveLength(1);
+    expect(server.requestsTo("POST", "/events")[0]!.json()).toEqual({
+      type: "user.message",
+      payload: { text: "third" },
+    });
   });
 
   test("continues a conversation from previous_response_id and accepts array input", async () => {
@@ -195,6 +285,60 @@ describe("handleResponsesRequest", () => {
       type: "user.message",
       payload: { text: "again" },
     });
+  });
+
+  test("previous_response_id of another user's session is 403", async () => {
+    const server = fakeServer();
+    const first = await handleResponsesRequest(
+      server.og,
+      post("/responses", { input: "hello", conversation: "c_9" }),
+      resolveTenant,
+    );
+    const firstBody = (await first.json()) as { id: string };
+
+    const other = await handleResponsesRequest(
+      server.og,
+      post("/responses", { input: "again", previous_response_id: firstBody.id }),
+      async () => ({ tenant: "acme", user: "u_43" }),
+    );
+    expect(other.status).toBe(403);
+    expect(await other.json()).toMatchObject({ error: { code: "conversation_not_authorized" } });
+
+    const anonymous = await handleResponsesRequest(
+      server.og,
+      post("/responses", { input: "again", previous_response_id: firstBody.id }),
+      async () => ({ tenant: "acme" }),
+    );
+    expect(anonymous.status).toBe(400);
+    expect(await anonymous.json()).toMatchObject({ error: { code: "conversation_required" } });
+    expect(server.requestsTo("POST", "/events")).toHaveLength(0);
+  });
+
+  test("previous_response_id that disagrees with the host-named conversation is 409", async () => {
+    const server = fakeServer();
+    const first = await handleResponsesRequest(
+      server.og,
+      post("/responses", { input: "hello" }),
+      async () => ({ tenant: "acme", conversation: "host_a" }),
+    );
+    const firstBody = (await first.json()) as { id: string };
+
+    const mismatch = await handleResponsesRequest(
+      server.og,
+      post("/responses", { input: "again", previous_response_id: firstBody.id }),
+      async () => ({ tenant: "acme", conversation: "host_b" }),
+    );
+    expect(mismatch.status).toBe(409);
+    expect(await mismatch.json()).toMatchObject({ error: { code: "conversation_mismatch" } });
+
+    const same = await handleResponsesRequest(
+      server.og,
+      post("/responses", { input: "again", previous_response_id: firstBody.id }),
+      async () => ({ tenant: "acme", conversation: "host_a" }),
+    );
+    expect(same.status).toBe(200);
+    expect(server.creates).toHaveLength(1);
+    expect(server.requestsTo("POST", "/events")).toHaveLength(1);
   });
 
   test("returns 400 without any conversation source", async () => {

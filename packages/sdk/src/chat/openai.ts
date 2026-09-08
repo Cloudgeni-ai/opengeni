@@ -1,6 +1,8 @@
 import {
   chatErrorSummary,
+  clientConversation,
   errorResponse,
+  importedHistoryBefore,
   jsonResponse,
   lastUserMessageText,
   messageContentText,
@@ -14,7 +16,7 @@ import {
 } from "./http";
 import { isUuid } from "./ids";
 import type { Chat, OpenGeni } from "./opengeni";
-import type { ChatChunk, ChatReply } from "./types";
+import { OpenGeniChatError, type ChatChunk, type ChatReply } from "./types";
 
 /**
  * OpenAI-compatible adapters over the stable subset of the Chat Completions
@@ -62,7 +64,7 @@ function wantsStream(body: Record<string, unknown> | null): boolean {
 
 // --- Chat Completions ---------------------------------------------------------
 
-export const CHAT_CONVERSATION_HEADER = "x-opengeni-conversation";
+const CHAT_COMPLETION_PART_TYPES = ["text", "input_text"];
 
 function chatCompletionChunk(
   sessionId: string,
@@ -139,7 +141,9 @@ export function chatCompletionObject(reply: ChatReply, model: string): Record<st
 /**
  * `POST /v1/chat/completions` shape: `{ messages, stream?, model?, user?, metadata? }`.
  * Conversation: the host's `resolve`, else the `x-opengeni-conversation` header,
- * else `metadata.conversation_id`; 400 when none.
+ * else `metadata.conversation_id`; 400 when none. Only the last user message
+ * is sent; the messages before it are imported once as context when this
+ * request creates the session.
  */
 export async function handleChatCompletionsRequest(
   og: OpenGeni,
@@ -148,7 +152,7 @@ export async function handleChatCompletionsRequest(
 ): Promise<Response> {
   const body = await readJsonObject(request);
   const prompt =
-    lastUserMessageText(body?.messages, ["text", "input_text"], "content")?.trim() ?? "";
+    lastUserMessageText(body?.messages, CHAT_COMPLETION_PART_TYPES, "content")?.trim() ?? "";
   if (!prompt) {
     return errorResponse(400, "The last user message has no text.", "message_required");
   }
@@ -159,22 +163,26 @@ export async function handleChatCompletionsRequest(
     metadata && typeof metadata === "object"
       ? (metadata as { conversation_id?: unknown }).conversation_id
       : undefined;
-  const conversation =
-    request.headers.get(CHAT_CONVERSATION_HEADER) ??
-    (typeof metadataConversation === "string" && metadataConversation
-      ? metadataConversation
-      : undefined);
-  const opened = await openResolvedChat(og, resolved.resolution, conversation);
+  const opened = await openResolvedChat(
+    og,
+    resolved.resolution,
+    clientConversation(request, metadataConversation),
+  );
   if (opened.response) return opened.response;
   const model = modelLabel(body);
+  const importedHistory = importedHistoryBefore(
+    body?.messages,
+    CHAT_COMPLETION_PART_TYPES,
+    "content",
+  );
   if (wantsStream(body)) {
-    const chunks = opened.chat.stream(prompt, { signal: request.signal });
+    const chunks = opened.chat.stream(prompt, { signal: request.signal, importedHistory });
     return new Response(sseByteStream(chatCompletionBlocks(opened.chat, chunks, model)), {
       headers: sseHeaders(),
     });
   }
   try {
-    const reply = await opened.chat.send(prompt, { signal: request.signal });
+    const reply = await opened.chat.send(prompt, { signal: request.signal, importedHistory });
     return jsonResponse(chatCompletionObject(reply, model));
   } catch (error) {
     const summary = chatErrorSummary(error);
@@ -292,8 +300,13 @@ export function responsesInputText(input: unknown): string | null {
 
 /**
  * `POST /v1/responses` shape: `{ input, previous_response_id?, conversation?, stream?, model?, user? }`.
- * Conversation: the host's `resolve`, else `conversation` / `conversation.id`,
- * else the session encoded in `previous_response_id`; 400 when none.
+ * Conversation: the host's `resolve`, else the `x-opengeni-conversation`
+ * header, else `conversation` / `conversation.id`. A `previous_response_id`
+ * may continue the session it encodes only when the host named the user that
+ * session belongs to (403 otherwise); when a conversation is named as well,
+ * the two must agree (409). 400 when nothing names a conversation. Only the
+ * last user item is sent; earlier array items are imported once as context
+ * when this request creates the session.
  */
 export async function handleResponsesRequest(
   og: OpenGeni,
@@ -307,13 +320,26 @@ export async function handleResponsesRequest(
   if (resolved.response) return resolved.response;
   const previousResponseId =
     typeof body?.previous_response_id === "string" ? body.previous_response_id : null;
-  const conversation = conversationFromBody(body);
-  let chat: Chat;
+  const conversation = clientConversation(request, conversationFromBody(body));
   const previousSessionId = decodeResponseId(previousResponseId);
-  if (!resolved.resolution.conversation && !conversation && previousSessionId) {
+  const namedConversation =
+    resolved.resolution.conversation ?? (resolved.resolution.user ? conversation : undefined);
+  let chat: Chat;
+  if (previousSessionId && !namedConversation) {
+    if (!resolved.resolution.user) {
+      return errorResponse(
+        400,
+        "Return a conversation from resolve, or a user so client conversation ids are scoped to that user.",
+        "conversation_required",
+      );
+    }
     try {
       const workspaceId = await og.workspaceId(resolved.resolution);
-      chat = await og.chatBySessionId({ workspaceId, sessionId: previousSessionId });
+      chat = await og.chatBySessionId({
+        workspaceId,
+        sessionId: previousSessionId,
+        user: resolved.resolution.user,
+      });
     } catch (error) {
       const summary = chatErrorSummary(error);
       return errorResponse(summary.status, summary.message, summary.code);
@@ -322,16 +348,30 @@ export async function handleResponsesRequest(
     const opened = await openResolvedChat(og, resolved.resolution, conversation);
     if (opened.response) return opened.response;
     chat = opened.chat;
+    if (previousSessionId && previousSessionId !== chat.sessionId) {
+      const summary = chatErrorSummary(
+        new OpenGeniChatError(
+          "conversation_mismatch",
+          "previous_response_id belongs to a different conversation than the one named for this request.",
+        ),
+      );
+      return errorResponse(summary.status, summary.message, summary.code);
+    }
   }
   const model = modelLabel(body);
+  const importedHistory = importedHistoryBefore(
+    body?.input,
+    ["input_text", "text", "output_text"],
+    "content",
+  );
   if (wantsStream(body)) {
-    const chunks = chat.stream(prompt, { signal: request.signal });
+    const chunks = chat.stream(prompt, { signal: request.signal, importedHistory });
     return new Response(sseByteStream(responsesBlocks(chat, chunks, model, previousResponseId)), {
       headers: sseHeaders(),
     });
   }
   try {
-    const reply = await chat.send(prompt, { signal: request.signal });
+    const reply = await chat.send(prompt, { signal: request.signal, importedHistory });
     return jsonResponse(
       responseObject(
         reply,

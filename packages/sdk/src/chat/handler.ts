@@ -2,7 +2,9 @@ import { parseSseStream } from "../sse";
 import type { HumanInputAnswer } from "../types";
 import {
   chatErrorSummary,
+  clientConversation,
   errorResponse,
+  jsonResponse,
   openResolvedChat,
   readJsonObject,
   resolveChatRequest,
@@ -16,7 +18,7 @@ import type { OpenGeni } from "./opengeni";
 import { OpenGeniChatError, type ChatChunk, type ChatRespondInput } from "./types";
 import { handleVercelChatRequest } from "./vercel";
 
-export type { ChatResolution, ChatResolve } from "./http";
+export { CHAT_CONVERSATION_HEADER, type ChatResolution, type ChatResolve } from "./http";
 
 export type ChatHandlerFormat = "native" | "vercel" | "openai-chat" | "openai-responses";
 
@@ -29,8 +31,6 @@ export type ChatHandlerOptions = {
 
 /** Per-request wire-format override header. */
 export const CHAT_FORMAT_HEADER = "x-opengeni-chat-format";
-/** Header the stock React component uses to tell the host which conversation it is on. */
-export const CHAT_CONVERSATION_HEADER = "x-opengeni-conversation";
 
 const CHAT_FORMATS: ReadonlySet<string> = new Set([
   "native",
@@ -39,34 +39,40 @@ const CHAT_FORMATS: ReadonlySet<string> = new Set([
   "openai-responses",
 ]);
 
+function methodNotAllowed(allow: string): Response {
+  return new Response(
+    JSON.stringify({ error: { message: `Use ${allow}.`, code: "method_not_allowed" } }),
+    { status: 405, headers: { Allow: allow, "Content-Type": "application/json; charset=utf-8" } },
+  );
+}
+
 /**
  * One request handler for a product's chat endpoint. `POST` with `{ message }`
  * streams the reply in the selected format; `POST .../respond` answers a
- * pending approval or human-input request and streams the continuation.
- * Every other method is a 405.
+ * pending approval or human-input request and streams the continuation;
+ * `GET` returns the conversation's history as JSON. Every other method is a
+ * 405. The conversation is the host's resolution, else the
+ * `x-opengeni-conversation` header, else the wire format's own field.
  */
 export function createChatHandler(
   og: OpenGeni,
   options: ChatHandlerOptions,
 ): (request: Request) => Promise<Response> {
   return async (request) => {
-    if (request.method !== "POST") {
-      return new Response(
-        JSON.stringify({ error: { message: "Use POST.", code: "method_not_allowed" } }),
-        {
-          status: 405,
-          headers: { Allow: "POST", "Content-Type": "application/json; charset=utf-8" },
-        },
-      );
+    const isRespond = new URL(request.url).pathname.replace(/\/+$/, "").endsWith("/respond");
+    if (isRespond) {
+      if (request.method !== "POST") return methodNotAllowed("POST");
+      return await handleNativeRespondRequest(og, request, options.resolve);
     }
+    if (request.method === "GET") {
+      return await handleNativeHistoryRequest(og, request, options.resolve);
+    }
+    if (request.method !== "POST") return methodNotAllowed("GET, POST");
     const headerFormat = request.headers.get(CHAT_FORMAT_HEADER);
     if (headerFormat !== null && !CHAT_FORMATS.has(headerFormat)) {
       return errorResponse(400, `Unknown chat format: ${headerFormat}`, "unknown_format");
     }
     const format = (headerFormat as ChatHandlerFormat | null) ?? options.format ?? "native";
-    if (new URL(request.url).pathname.replace(/\/+$/, "").endsWith("/respond")) {
-      return await handleNativeRespondRequest(og, request, options.resolve);
-    }
     switch (format) {
       case "vercel":
         return await handleVercelChatRequest(og, request, options.resolve);
@@ -93,9 +99,37 @@ export async function handleNativeChatRequest(
   }
   const resolved = await resolveChatRequest(request, resolve);
   if (resolved.response) return resolved.response;
-  const opened = await openResolvedChat(og, resolved.resolution, undefined);
+  const opened = await openResolvedChat(og, resolved.resolution, clientConversation(request, null));
   if (opened.response) return opened.response;
   return chatChunksToSseResponse(opened.chat.stream(message, { signal: request.signal }));
+}
+
+/**
+ * `GET` -> `{ conversation, sessionId, created, messages }`: the user and
+ * assistant text of the conversation so a client can restore it on reload
+ * (`messages` is empty and `created` false before the first message).
+ */
+export async function handleNativeHistoryRequest(
+  og: OpenGeni,
+  request: Request,
+  resolve: ChatResolve,
+): Promise<Response> {
+  const resolved = await resolveChatRequest(request, resolve);
+  if (resolved.response) return resolved.response;
+  const opened = await openResolvedChat(og, resolved.resolution, clientConversation(request, null));
+  if (opened.response) return opened.response;
+  try {
+    const messages = await opened.chat.history();
+    return jsonResponse({
+      conversation: opened.chat.conversation,
+      sessionId: opened.chat.sessionId,
+      created: opened.chat.created,
+      messages,
+    });
+  } catch (error) {
+    const summary = chatErrorSummary(error);
+    return errorResponse(summary.status, summary.message, summary.code);
+  }
 }
 
 /** `POST .../respond { requestId, decision | answers | skip }` -> native SSE of the continuation. */
@@ -115,7 +149,7 @@ export async function handleNativeRespondRequest(
   }
   const resolved = await resolveChatRequest(request, resolve);
   if (resolved.response) return resolved.response;
-  const opened = await openResolvedChat(og, resolved.resolution, undefined);
+  const opened = await openResolvedChat(og, resolved.resolution, clientConversation(request, null));
   if (opened.response) return opened.response;
   return chatChunksToSseResponse(opened.chat.respondStream(input, { signal: request.signal }));
 }

@@ -6,6 +6,7 @@ import { chatIdempotencyKey, chatSessionId } from "./ids";
 import {
   OpenGeniChatError,
   type ChatChunk,
+  type ChatImportedMessage,
   type ChatMessage,
   type ChatOptions,
   type ChatReply,
@@ -21,12 +22,23 @@ export const DEFAULT_CHAT_SOURCE = "app";
 
 type SubmittedTurn = { after: number; turnId: string | null };
 
+type BuildCreate = (
+  text: string,
+  importedHistory: ChatImportedMessage[] | undefined,
+) => CreateSessionRequest;
+
 type ChatInit = {
   workspaceId: string;
   sessionId: string;
+  conversation: string | null;
   session: Session | null;
-  buildCreate: ((text: string) => CreateSessionRequest) | null;
+  buildCreate: BuildCreate | null;
 };
+
+/** Upper bound on the `modelContext` built from `importedHistory`, header included. */
+export const IMPORTED_HISTORY_MAX_CHARS = 30_000;
+const IMPORTED_HISTORY_HEADER = "Earlier conversation imported from the product, oldest first:";
+const IMPORTED_HISTORY_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "system"]);
 
 /**
  * One-option-object entry point for products that already have a chat. Wraps
@@ -83,7 +95,11 @@ export class OpenGeni {
     return await pending;
   }
 
-  /** Address one conversation; the session is created lazily on the first send. */
+  /**
+   * Address one conversation; the session is created lazily on the first send.
+   * With a `user`, the conversation id is namespaced to that user (a different
+   * user with the same conversation id reaches a different session).
+   */
   async chat(options: ChatOptions): Promise<Chat> {
     if (!options.conversation) throw new TypeError("chat() requires a conversation id.");
     const agentAccess = options.agentAccess ?? "session";
@@ -99,32 +115,66 @@ export class OpenGeni {
         'memory: "user" requires a user label so memories can be scoped to that end user.',
       );
     }
-    const workspaceId = await this.workspaceId(options);
-    const sessionId = await chatSessionId(workspaceId, options.conversation);
-    const session = await this.findSession(workspaceId, sessionId);
     const endUser = options.user ? { source: this.source, id: options.user } : undefined;
-    const buildCreate = (text: string): CreateSessionRequest => ({
-      agentAccess,
-      memoryScope,
-      ...(endUser ? { endUser } : {}),
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
-      ...(options.skills !== undefined ? { skills: options.skills } : {}),
-      ...(options.tools !== undefined ? { tools: options.tools } : {}),
-      ...(options.create ?? {}),
-      initialMessage: text,
-      requestedSessionId: sessionId,
-      idempotencyKey: chatIdempotencyKey(options.conversation),
+    const workspaceId = await this.workspaceId(options);
+    const sessionId = await chatSessionId(workspaceId, options.conversation, endUser);
+    const session = await this.findSession(workspaceId, sessionId);
+    const buildCreate: BuildCreate = (text, importedHistory) => {
+      const context =
+        options.create?.modelContext === undefined && importedHistory
+          ? formatImportedHistory(importedHistory)
+          : undefined;
+      return {
+        agentAccess,
+        memoryScope,
+        ...(endUser ? { endUser } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
+        ...(options.skills !== undefined ? { skills: options.skills } : {}),
+        ...(options.tools !== undefined ? { tools: options.tools } : {}),
+        ...(context !== undefined ? { modelContext: context } : {}),
+        ...(options.create ?? {}),
+        initialMessage: text,
+        requestedSessionId: sessionId,
+        idempotencyKey: chatIdempotencyKey(options.conversation, endUser),
+      };
+    };
+    return new Chat(this, {
+      workspaceId,
+      sessionId,
+      conversation: options.conversation,
+      session,
+      buildCreate,
     });
-    return new Chat(this, { workspaceId, sessionId, session, buildCreate });
   }
 
-  /** Address an existing session by id (for example decoded from a response id). */
-  async chatBySessionId(target: { workspaceId: string; sessionId: string }): Promise<Chat> {
+  /**
+   * Address an existing session by id (for example decoded from a response id).
+   * `user` is the end user the caller authenticated: the session must carry
+   * exactly that end-user label (`{ source, id }`) or the call throws
+   * `conversation_not_authorized`. Pass `null` only from trusted server code
+   * that vouches for the session itself; a session reached with `null` is not
+   * checked against any user.
+   */
+  async chatBySessionId(target: {
+    workspaceId: string;
+    sessionId: string;
+    user: string | null;
+  }): Promise<Chat> {
     const session = await this.client.getSession(target.workspaceId, target.sessionId);
+    if (
+      target.user !== null &&
+      (session.endUser?.source !== this.source || session.endUser?.id !== target.user)
+    ) {
+      throw new OpenGeniChatError(
+        "conversation_not_authorized",
+        "This conversation belongs to a different user.",
+      );
+    }
     return new Chat(this, {
       workspaceId: target.workspaceId,
       sessionId: target.sessionId,
+      conversation: null,
       session,
       buildCreate: null,
     });
@@ -157,8 +207,10 @@ export class OpenGeni {
 export class Chat {
   readonly workspaceId: string;
   readonly sessionId: string;
+  /** The conversation id this chat was opened with; null when addressed by session id. */
+  readonly conversation: string | null;
   private session: Session | null;
-  private readonly buildCreate: ((text: string) => CreateSessionRequest) | null;
+  private readonly buildCreate: BuildCreate | null;
   private pendingTurnId: string | null = null;
 
   constructor(
@@ -167,6 +219,7 @@ export class Chat {
   ) {
     this.workspaceId = init.workspaceId;
     this.sessionId = init.sessionId;
+    this.conversation = init.conversation;
     this.session = init.session;
     this.buildCreate = init.buildCreate;
   }
@@ -186,7 +239,9 @@ export class Chat {
     text: string,
     options: ChatSendOptions = {},
   ): AsyncGenerator<ChatChunk, void, void> {
-    const submitted = options.steer ? await this.submitSteer(text) : await this.submit(text);
+    const submitted = options.steer
+      ? await this.submitSteer(text, options.importedHistory)
+      : await this.submit(text, options.importedHistory);
     yield* this.streamTurn(submitted, options.signal);
   }
 
@@ -252,12 +307,18 @@ export class Chat {
     return messages;
   }
 
-  private async submit(text: string): Promise<SubmittedTurn> {
+  private async submit(
+    text: string,
+    importedHistory: ChatImportedMessage[] | undefined,
+  ): Promise<SubmittedTurn> {
     if (!this.session) {
       if (!this.buildCreate) {
         throw new OpenGeniChatError("session_missing", "This session no longer exists.");
       }
-      const created = await this.og.client.createSession(this.workspaceId, this.buildCreate(text));
+      const created = await this.og.client.createSession(
+        this.workspaceId,
+        this.buildCreate(text, importedHistory),
+      );
       this.session = created;
       if (created.initialMessage === text) {
         return { after: 0, turnId: created.initialTurnId };
@@ -268,8 +329,11 @@ export class Chat {
     return submittedFrom(event);
   }
 
-  private async submitSteer(text: string): Promise<SubmittedTurn> {
-    if (!this.session) return await this.submit(text);
+  private async submitSteer(
+    text: string,
+    importedHistory: ChatImportedMessage[] | undefined,
+  ): Promise<SubmittedTurn> {
+    if (!this.session) return await this.submit(text, importedHistory);
     const result = await this.og.client.steerMessage(this.workspaceId, this.sessionId, text);
     return { after: result.accepted.sequence, turnId: result.turn.id ?? null };
   }
@@ -347,6 +411,39 @@ function submittedFrom(event: SessionEvent): SubmittedTurn {
     after: event.sequence,
     turnId: typeof event.turnId === "string" ? event.turnId : null,
   };
+}
+
+/**
+ * `modelContext` for imported history: a header line plus one `role: text`
+ * line per message, oldest first, trimmed from the oldest end to
+ * {@link IMPORTED_HISTORY_MAX_CHARS}. Undefined when nothing usable remains.
+ */
+export function formatImportedHistory(messages: ChatImportedMessage[]): string | undefined {
+  const lines = messages
+    .filter(
+      (message) =>
+        IMPORTED_HISTORY_ROLES.has(message.role) &&
+        typeof message.text === "string" &&
+        message.text.trim().length > 0,
+    )
+    .map((message) => `${message.role}: ${message.text}`);
+  if (lines.length === 0) return undefined;
+  let budget = IMPORTED_HISTORY_MAX_CHARS - IMPORTED_HISTORY_HEADER.length;
+  const kept: string[] = [];
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    const cost = line.length + 1;
+    if (cost <= budget) {
+      kept.unshift(line);
+      budget -= cost;
+      continue;
+    }
+    // The newest line alone overflows: keep its tail so the most recent text survives.
+    if (kept.length === 0 && budget > 1) kept.unshift(line.slice(line.length - (budget - 1)));
+    break;
+  }
+  if (kept.length === 0) return undefined;
+  return `${IMPORTED_HISTORY_HEADER}\n${kept.join("\n")}`;
 }
 
 function abortError(): Error {

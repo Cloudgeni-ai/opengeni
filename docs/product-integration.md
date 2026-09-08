@@ -72,12 +72,20 @@ for await (const chunk of chat.stream("And the next step?")) {
 
 `tenant` becomes one organization workspace, created idempotently on first use
 through `ensureWorkspace`; `conversation` becomes one deterministic session; and
-`send` or `stream` creates that session on the first message. The browser side
-is `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
-`@opengeni/react/chat`, which talks only to your handler. If the product already
-uses the Vercel AI SDK, pass `format: "vercel"` and keep `useChat` unchanged;
-for an OpenAI-shaped client pass `format: "openai-chat"` or
-`format: "openai-responses"`. The runnable
+`send` or `stream` creates that session on the first message. Conversation ids
+are namespaced per `user`: the handler reads the client's conversation id (the
+`x-opengeni-conversation` header, else the wire format's own field) and scopes
+it to the user `resolve` returned, so one user cannot continue another user's
+chat by guessing its id. Without a `user`, the host must name the
+`conversation` from `resolve`. The browser side is
+`<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
+`@opengeni/react/chat`, which talks only to your handler and restores the
+history on reload (`GET` on the same endpoint). If the product already uses the
+Vercel AI SDK, pass `format: "vercel"` and keep `useChat` unchanged; for an
+OpenAI-shaped client pass `format: "openai-chat"` or
+`format: "openai-responses"`. These adapters send only the latest user message
+and import the earlier messages in the request once, as context on the first
+message of a conversation; after that OpenGeni owns the history. The runnable
 [chat quickstart example](../examples/chat-quickstart) is this section as one
 server file and one page.
 
@@ -504,11 +512,13 @@ runtime agent.
 ## Browser and React integration
 
 The smallest browser surface is `OpenGeniChat` from `@opengeni/react/chat`. It
-needs no provider and no SDK client: it posts `{ message }` to the product's
-`createChatHandler` endpoint, renders the streamed reply, and shows a card with
-buttons for a pending approval or human-input request, which it answers through
-`POST <handlerUrl>/respond`. The `conversation` prop travels as the
-`x-opengeni-conversation` header so the host's `resolve` can pick it up.
+needs no provider and no SDK client: it restores the conversation with
+`GET <handlerUrl>` on mount and whenever `conversation` changes, posts
+`{ message }` to the product's `createChatHandler` endpoint, renders the
+streamed reply, and shows a card with buttons for a pending approval or
+human-input request, which it answers through `POST <handlerUrl>/respond`. The
+`conversation` prop travels as the `x-opengeni-conversation` header; the handler
+scopes it to the user `resolve` returned.
 
 Use `@opengeni/react/session` for headless session semantics, or the focused
 styled subpaths when the product wants packaged OpenGeni visuals. The React

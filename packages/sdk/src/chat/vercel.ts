@@ -1,7 +1,9 @@
 import { asRecord } from "./fold";
 import {
   chatErrorSummary,
+  clientConversation,
   errorResponse,
+  importedHistoryBefore,
   lastUserMessageText,
   openResolvedChat,
   readJsonObject,
@@ -140,8 +142,10 @@ export function lastUIMessageText(messages: unknown): string | null {
 
 /**
  * `useChat` request handler: body `{ id, messages, trigger, messageId }`.
- * The chat id is the conversation unless the host's `resolve` overrides it;
- * `regenerate-message` steers instead of queueing.
+ * Conversation: the host's `resolve`, else the `x-opengeni-conversation`
+ * header, else the chat `id`. Only the last user message is sent; the
+ * messages before it are imported once as context when this request creates
+ * the session. `regenerate-message` steers instead of queueing.
  */
 export async function handleVercelChatRequest(
   og: OpenGeni,
@@ -158,9 +162,12 @@ export async function handleVercelChatRequest(
   const opened = await openResolvedChat(
     og,
     resolved.resolution,
-    typeof body?.id === "string" && body.id ? body.id : undefined,
+    clientConversation(request, body?.id),
   );
   if (opened.response) return opened.response;
   const steer = body?.trigger === "regenerate-message";
-  return uiMessageStreamResponse(opened.chat.stream(prompt, { signal: request.signal, steer }));
+  const importedHistory = importedHistoryBefore(body?.messages, ["text"], "parts");
+  return uiMessageStreamResponse(
+    opened.chat.stream(prompt, { signal: request.signal, steer, importedHistory }),
+  );
 }

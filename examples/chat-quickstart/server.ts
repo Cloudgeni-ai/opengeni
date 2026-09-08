@@ -9,7 +9,10 @@ const og = new OpenGeni({
 });
 
 // Stand-in for your own authentication: a real product resolves tenant and
-// user from its session cookie or bearer, never from the request body.
+// user from its session cookie or bearer, never from the request body. The
+// handler reads the page's x-opengeni-conversation header itself and scopes
+// that conversation id to the resolved user, so a guessed id cannot reach
+// another user's chat.
 const tenant = process.env.DEMO_TENANT ?? "demo-tenant";
 
 const chat = createChatHandler(og, {
@@ -19,7 +22,6 @@ const chat = createChatHandler(og, {
     return {
       tenant,
       user,
-      conversation: request.headers.get("x-opengeni-conversation") ?? undefined,
       agentAccess: "session", // every chat isolated; "user" or "workspace" widen it
       memory: "user", // the agent remembers this user across their chats
       create: { sandboxBackend: "none" }, // pure chat, no sandbox

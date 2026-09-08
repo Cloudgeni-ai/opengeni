@@ -2,8 +2,13 @@
  * Deterministic chat identities. A conversation id maps to exactly one
  * session id per workspace, so any process can address the same session
  * without storing a mapping, and a double-submitted create collapses through
- * the idempotency key.
+ * the idempotency key. With an end-user label the conversation id is
+ * namespaced to that user, so one user cannot address another user's
+ * conversation by guessing its id.
  */
+
+/** The end-user label a conversation is namespaced to: the product `source` plus the opaque user id. */
+export type ChatUserLabel = { source: string; id: string };
 
 /** Fixed RFC 4122 namespace for chat session ids. Never change it. */
 export const CHAT_SESSION_NAMESPACE = "7c1e6d3a-5b2f-4e8a-9d4c-0f3b6a8e2c17";
@@ -23,12 +28,25 @@ export async function uuidV5(name: string, namespace: string): Promise<string> {
   return formatUuid(digest);
 }
 
-export async function chatSessionId(workspaceId: string, conversation: string): Promise<string> {
-  return await uuidV5(`${workspaceId}:${conversation}`, CHAT_SESSION_NAMESPACE);
+/**
+ * The session id of `conversation` in `workspaceId`: RFC 4122 v5 of
+ * `<workspaceId>:<conversation>`, or `<workspaceId>:<source>:<id>:<conversation>`
+ * when the conversation belongs to an end user.
+ */
+export async function chatSessionId(
+  workspaceId: string,
+  conversation: string,
+  user?: ChatUserLabel | undefined,
+): Promise<string> {
+  const name = user
+    ? `${workspaceId}:${user.source}:${user.id}:${conversation}`
+    : `${workspaceId}:${conversation}`;
+  return await uuidV5(name, CHAT_SESSION_NAMESPACE);
 }
 
-export function chatIdempotencyKey(conversation: string): string {
-  return `chat:${conversation}`;
+/** The create idempotency key: `chat:<conversation>`, or `chat:<source>:<id>:<conversation>` per user. */
+export function chatIdempotencyKey(conversation: string, user?: ChatUserLabel | undefined): string {
+  return user ? `chat:${user.source}:${user.id}:${conversation}` : `chat:${conversation}`;
 }
 
 export function isUuid(value: string): boolean {

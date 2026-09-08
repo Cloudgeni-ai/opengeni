@@ -84,9 +84,15 @@ const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields c
 ```
 
 Browser: `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
-`@opengeni/react/chat` (no provider, no SDK client). Every customer gets one
-workspace (`tenant`), every conversation one deterministic session, and each
-session picks its own isolation:
+`@opengeni/react/chat` (no provider, no SDK client); it sends the
+`x-opengeni-conversation` header and restores history on reload with `GET` on
+the same handler. Every customer gets one workspace (`tenant`), every
+conversation one deterministic session, and each session picks its own
+isolation. Conversation ids are namespaced per `user`: the handler scopes a
+client conversation id to the user `resolve` returned, and without a `user`,
+`resolve` must return the `conversation` itself. The Vercel and OpenAI adapters
+send only the latest user message and import earlier messages once as context
+on the first message; afterwards OpenGeni owns the history.
 
 | Scenario | `agentAccess` | `memory` |
 | --- | --- | --- |

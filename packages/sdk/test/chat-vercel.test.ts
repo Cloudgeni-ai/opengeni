@@ -19,6 +19,7 @@ function useChatRequest(body: unknown): Request {
 }
 
 const resolveTenant: ChatResolve = async () => ({ tenant: "acme", user: "u_42" });
+const U_42 = { source: "app", id: "u_42" };
 
 function parts(body: string): Array<Record<string, unknown>> {
   return sseDataLines(body)
@@ -77,7 +78,93 @@ describe("handleVercelChatRequest", () => {
     expect(typeof parts(body)[0]!.messageId).toBe("string");
 
     expect(server.creates[0]!.initialMessage).toBe("hello\nworld");
-    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
+    expect(server.creates[0]!.requestedSessionId).toBe(
+      await chatSessionId(WORKSPACE_ID, "c_9", U_42),
+    );
+    expect(server.creates[0]!.modelContext).toBe(
+      "Earlier conversation imported from the product, oldest first:\nassistant: earlier",
+    );
+  });
+
+  test("imports the messages before the last user message only on the first create", async () => {
+    const server = fakeServer();
+    const history = [
+      { id: "m0", role: "system", parts: [{ type: "text", text: "Be terse." }] },
+      { id: "m1", role: "user", parts: [{ type: "text", text: "first" }] },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "one" }] },
+    ];
+    await readBody(
+      await handleVercelChatRequest(
+        server.og,
+        useChatRequest({
+          id: "c_9",
+          messages: [
+            ...history,
+            { id: "m3", role: "user", parts: [{ type: "text", text: "second" }] },
+          ],
+        }),
+        resolveTenant,
+      ),
+    );
+    expect(server.creates[0]).toMatchObject({
+      initialMessage: "second",
+      modelContext: [
+        "Earlier conversation imported from the product, oldest first:",
+        "system: Be terse.",
+        "user: first",
+        "assistant: one",
+      ].join("\n"),
+    });
+
+    await readBody(
+      await handleVercelChatRequest(
+        server.og,
+        useChatRequest({
+          id: "c_9",
+          messages: [
+            ...history,
+            { id: "m3", role: "user", parts: [{ type: "text", text: "second" }] },
+            { id: "m4", role: "assistant", parts: [{ type: "text", text: "two" }] },
+            { id: "m5", role: "user", parts: [{ type: "text", text: "third" }] },
+          ],
+        }),
+        resolveTenant,
+      ),
+    );
+    expect(server.creates).toHaveLength(1);
+    expect(server.requestsTo("POST", "/events")[0]!.json()).toEqual({
+      type: "user.message",
+      payload: { text: "third" },
+    });
+
+    const fresh = fakeServer();
+    await readBody(
+      await handleVercelChatRequest(
+        fresh.og,
+        useChatRequest({
+          id: "c_1",
+          messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "only" }] }],
+        }),
+        resolveTenant,
+      ),
+    );
+    expect(fresh.creates[0]!.modelContext).toBeUndefined();
+  });
+
+  test("the conversation header wins over the chat id when the host names only the user", async () => {
+    const server = fakeServer();
+    const request = new Request(ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-opengeni-conversation": "header_c" },
+      body: JSON.stringify({
+        id: "c_9",
+        messages: [{ id: "m1", role: "user", parts: [{ type: "text", text: "hello" }] }],
+      }),
+    });
+    await readBody(await handleVercelChatRequest(server.og, request, resolveTenant));
+    expect(server.creates[0]!.requestedSessionId).toBe(
+      await chatSessionId(WORKSPACE_ID, "header_c", U_42),
+    );
   });
 
   test("the host's resolve can override the chat id and regenerate steers", async () => {
@@ -195,6 +282,21 @@ describe("handleVercelChatRequest", () => {
     );
     expect(parts(body).at(-1)).toEqual({ type: "error", errorText: "boom" });
     expect(body.trim().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  test("rejects a client chat id when the host names neither a user nor a conversation", async () => {
+    const server = fakeServer();
+    const response = await handleVercelChatRequest(
+      server.og,
+      useChatRequest({
+        id: "c_9",
+        messages: [{ role: "user", parts: [{ type: "text", text: "x" }] }],
+      }),
+      async () => ({ tenant: "acme" }),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "conversation_required" } });
+    expect(server.creates).toHaveLength(0);
   });
 
   test("rejects a request without user text or conversation", async () => {

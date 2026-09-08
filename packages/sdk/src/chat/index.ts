@@ -7,6 +7,7 @@ export {
   OpenGeniChatError,
   type ChatAgentAccess,
   type ChatChunk,
+  type ChatImportedMessage,
   type ChatMemory,
   type ChatMessage,
   type ChatOptions,
@@ -20,7 +21,13 @@ export {
   type ChatToolStatus,
   type OpenGeniOptions,
 } from "./types";
-export { CHAT_SESSION_NAMESPACE, chatIdempotencyKey, chatSessionId, uuidV5 } from "./ids";
+export {
+  CHAT_SESSION_NAMESPACE,
+  chatIdempotencyKey,
+  chatSessionId,
+  uuidV5,
+  type ChatUserLabel,
+} from "./ids";
 export {
   ChatTurnFold,
   approvalPending,
@@ -36,6 +43,7 @@ export {
   chatChunksToSseStream,
   createChatHandler,
   handleNativeChatRequest,
+  handleNativeHistoryRequest,
   handleNativeRespondRequest,
   parseChatChunkStream,
   respondInputFromBody,

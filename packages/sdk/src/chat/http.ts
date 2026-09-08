@@ -1,8 +1,21 @@
 import { OpenGeniApiError } from "../errors";
 import type { OpenGeni } from "./opengeni";
-import { OpenGeniChatError, type ChatOptions } from "./types";
+import { OpenGeniChatError, type ChatImportedMessage, type ChatOptions } from "./types";
 
 /** Internal HTTP plumbing shared by the native handler and the protocol adapters. */
+
+/**
+ * Header a client uses to name the conversation it is on. Every handler reads
+ * the client conversation as: the host's resolution, else this header, else
+ * the protocol's own field.
+ */
+export const CHAT_CONVERSATION_HEADER = "x-opengeni-conversation";
+
+const CHAT_ERROR_STATUS: Readonly<Record<string, number>> = {
+  memory_scope_requires_user: 400,
+  conversation_not_authorized: 403,
+  conversation_mismatch: 409,
+};
 
 /** What the host's auth hook returns: identity from the host, conversation optional per protocol. */
 export type ChatResolution = Omit<ChatOptions, "conversation"> & {
@@ -54,18 +67,43 @@ export async function resolveChatRequest(
   return { resolution: resolved };
 }
 
-/** Open a chat from a resolution plus the conversation the protocol supplied. */
+/** The client-supplied conversation: the header, else the protocol's own field. */
+export function clientConversation(request: Request, protocolField: unknown): string | undefined {
+  const header = request.headers.get(CHAT_CONVERSATION_HEADER);
+  if (header) return header;
+  return typeof protocolField === "string" && protocolField ? protocolField : undefined;
+}
+
+/**
+ * Open a chat from a resolution plus the conversation the client supplied.
+ * The host names the conversation, or the host names the user and the client
+ * conversation id is namespaced to that user; anything else is a 400, because
+ * an unscoped client id could address any conversation in the workspace.
+ */
 export async function openResolvedChat(
   og: OpenGeni,
   resolution: ChatResolution,
-  conversation: string | undefined,
+  clientConversationId: string | undefined,
 ): Promise<
   { chat: Awaited<ReturnType<OpenGeni["chat"]>>; response?: undefined } | { response: Response }
 > {
-  const conversationId = resolution.conversation ?? conversation;
+  if (!resolution.conversation && !resolution.user) {
+    return {
+      response: errorResponse(
+        400,
+        "Return a conversation from resolve, or a user so client conversation ids are scoped to that user.",
+        "conversation_required",
+      ),
+    };
+  }
+  const conversationId = resolution.conversation ?? clientConversationId;
   if (!conversationId) {
     return {
-      response: errorResponse(400, "A conversation id is required.", "conversation_required"),
+      response: errorResponse(
+        400,
+        `A conversation id is required: send the ${CHAT_CONVERSATION_HEADER} header or the protocol's conversation field.`,
+        "conversation_required",
+      ),
     };
   }
   try {
@@ -79,7 +117,7 @@ export async function openResolvedChat(
 
 export function chatErrorSummary(error: unknown): ChatErrorSummary {
   if (error instanceof OpenGeniChatError) {
-    const status = error.code === "memory_scope_requires_user" ? 400 : 502;
+    const status = CHAT_ERROR_STATUS[error.code] ?? 502;
     return { status, code: error.code, message: error.message };
   }
   if (error instanceof OpenGeniApiError) {
@@ -157,6 +195,29 @@ export function messageContentText(content: unknown, partTypes: string[]): strin
   return texts.length > 0 ? texts.join("\n") : null;
 }
 
+function lastUserMessageIndex(messages: unknown[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message && typeof message === "object" && (message as { role?: unknown }).role === "user") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function messageText(
+  message: unknown,
+  partTypes: string[],
+  partsField: "parts" | "content",
+): string | null {
+  if (!message || typeof message !== "object") return null;
+  const record = message as Record<string, unknown>;
+  return (
+    messageContentText(record[partsField], partTypes) ??
+    messageContentText(record.content, partTypes)
+  );
+}
+
 /** The last user-role message's text from an OpenAI/Vercel-style `messages` array. */
 export function lastUserMessageText(
   messages: unknown,
@@ -164,17 +225,31 @@ export function lastUserMessageText(
   partsField: "parts" | "content",
 ): string | null {
   if (!Array.isArray(messages)) return null;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message || typeof message !== "object") continue;
-    const record = message as Record<string, unknown>;
-    if (record.role !== "user") continue;
-    return (
-      messageContentText(record[partsField], partTypes) ??
-      messageContentText(record.content, partTypes)
-    );
+  const index = lastUserMessageIndex(messages);
+  return index < 0 ? null : messageText(messages[index], partTypes, partsField);
+}
+
+/**
+ * Every user/assistant/system message before the last user message, as
+ * imported history for the first create. Items without a role or text
+ * (tool calls, files) are skipped.
+ */
+export function importedHistoryBefore(
+  messages: unknown,
+  partTypes: string[],
+  partsField: "parts" | "content",
+): ChatImportedMessage[] {
+  if (!Array.isArray(messages)) return [];
+  const lastUser = lastUserMessageIndex(messages);
+  if (lastUser < 0) return [];
+  const imported: ChatImportedMessage[] = [];
+  for (const message of messages.slice(0, lastUser)) {
+    const role = (message as { role?: unknown } | null)?.role;
+    if (role !== "user" && role !== "assistant" && role !== "system") continue;
+    const text = messageText(message, partTypes, partsField);
+    if (text) imported.push({ role, text });
   }
-  return null;
+  return imported;
 }
 
 export function unixSeconds(): number {
