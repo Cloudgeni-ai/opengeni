@@ -6,7 +6,7 @@ import {
   topologicallySortedPackages,
   workspaceVersionMap,
 } from "./publishable-workspaces";
-import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
+import { rewriteEntryPointsToDist, srcToDist } from "./rewrite-entry-points";
 import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
 
 test("Docker dependency stages and Codemode runtimes retain the Connect SDK dependency", () => {
@@ -37,7 +37,7 @@ test("Connect is published before its SDK and React consumers without a React/se
   }
 });
 
-test("new public subpaths rewrite to actual built JS/declarations and typed CSS", () => {
+test("new public subpaths retain source entries and rewrite to JS/declarations and typed CSS", () => {
   const root = join(import.meta.dir, "..");
   for (const [directory, subpaths] of [
     ["packages/connect", ["."]],
@@ -45,13 +45,31 @@ test("new public subpaths rewrite to actual built JS/declarations and typed CSS"
     ["packages/react", ["./connect", "./sites", "./connect.css"]],
   ] as const) {
     const manifest = JSON.parse(readFileSync(join(root, directory, "package.json"), "utf8"));
+    const sourceEntries = structuredClone(manifest.exports);
     rewriteEntryPointsToDist(manifest);
     for (const subpath of subpaths) {
       const entry = manifest.exports[subpath];
       expect(entry).toBeDefined();
       expect(typeof entry.types).toBe("string");
-      expect(existsSync(join(root, directory, entry.types))).toBe(true);
-      expect(existsSync(join(root, directory, entry.import ?? entry.default))).toBe(true);
+      const source = sourceEntries[subpath];
+      expect(existsSync(join(root, directory, source.types))).toBe(true);
+      expect(existsSync(join(root, directory, source.import ?? source.default))).toBe(true);
+      expect(entry.types).toBe(srcToDist(source.types, "types"));
+      expect(entry.import ?? entry.default).toBe(
+        srcToDist(source.import ?? source.default, "runtime"),
+      );
+      // Unit shards intentionally have no dist. The package job repeats this
+      // same contract after the canonical build with emitted-file checks on.
+      if (process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES === "1") {
+        expect(
+          existsSync(join(root, directory, entry.types)),
+          `${directory}/${subpath} declarations`,
+        ).toBe(true);
+        expect(
+          existsSync(join(root, directory, entry.import ?? entry.default)),
+          `${directory}/${subpath} runtime`,
+        ).toBe(true);
+      }
     }
   }
 });

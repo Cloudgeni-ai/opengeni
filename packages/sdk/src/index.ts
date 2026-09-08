@@ -14,6 +14,7 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,

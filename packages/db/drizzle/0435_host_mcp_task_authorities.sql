@@ -1,6 +1,45 @@
 -- deployment-mode: maintenance
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
+-- Recording a revision reads and locks its exact organization membership.
+-- Preserve native checks under a NOSUPERUSER migration owner with FORCE RLS.
+-- Restore the constrained lifecycle marker on every return and exception.
+DO $revision_membership_read$
+DECLARE definition text; signature text;
+BEGIN
+  definition := pg_get_functiondef('record_scheduled_task_revision_authority(uuid,uuid,uuid,bigint)'::regprocedure);
+  IF strpos(definition, 'resource_bearing boolean;') = 0
+    OR strpos(definition, 'RETURN subject_value;') = 0 THEN
+    RAISE EXCEPTION 'scheduled revision membership reader drifted' USING ERRCODE = '55000';
+  END IF;
+  definition := replace(definition, 'resource_bearing boolean;',
+    'resource_bearing boolean; previous_membership_marker text := current_setting(''opengeni.organization_tenancy_lifecycle'', true);');
+  definition := replace(definition, E'BEGIN\n', E'BEGIN\n  PERFORM set_config(''opengeni.organization_tenancy_lifecycle'', ''personal_resource_grant_management'', true);\n');
+  definition := replace(definition, 'RETURN NULL;',
+    'PERFORM set_config(''opengeni.organization_tenancy_lifecycle'', coalesce(previous_membership_marker, ''''), true); RETURN NULL;');
+  definition := replace(definition, E'RETURN subject_value;\nEND',
+    E'PERFORM set_config(''opengeni.organization_tenancy_lifecycle'', coalesce(previous_membership_marker, ''''), true); RETURN subject_value;\nEXCEPTION WHEN OTHERS THEN\n  PERFORM set_config(''opengeni.organization_tenancy_lifecycle'', coalesce(previous_membership_marker, ''''), true);\n  RAISE;\nEND');
+  EXECUTE definition;
+  -- Admission and physical-use revalidation read the same membership. Retain
+  -- their exact native revision/workspace checks; do not add an owner bypass.
+  FOREACH signature IN ARRAY ARRAY[
+    'admit_scheduled_agent_run_execution()',
+    'validate_scheduled_agent_run_live_authority(uuid,uuid,uuid)'
+  ] LOOP
+    definition := pg_get_functiondef(signature::regprocedure);
+    IF strpos(definition, E'DECLARE\n') = 0 OR strpos(definition, E'BEGIN\n') = 0
+      OR strpos(definition, 'organization_memberships') = 0 THEN
+      RAISE EXCEPTION 'scheduled membership reader drifted: %', signature USING ERRCODE = '55000';
+    END IF;
+    definition := regexp_replace(definition, E'DECLARE\n', E'DECLARE\n  previous_membership_marker text := current_setting(''opengeni.organization_tenancy_lifecycle'', true);\n');
+    definition := regexp_replace(definition, E'BEGIN\n', E'BEGIN\n  PERFORM set_config(''opengeni.organization_tenancy_lifecycle'', ''personal_resource_grant_management'', true);\n');
+    definition := regexp_replace(definition, 'RETURN (NEW|NULL|''[^'']*'');',
+      E'PERFORM set_config(''opengeni.organization_tenancy_lifecycle'', coalesce(previous_membership_marker, ''''), true); RETURN \\1;', 'g');
+    -- An exception unwinds the statement/subtransaction and its LOCAL marker.
+    EXECUTE definition;
+  END LOOP;
+END
+$revision_membership_read$;
 DO $drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN

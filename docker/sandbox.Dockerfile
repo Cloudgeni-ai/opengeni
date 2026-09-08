@@ -28,6 +28,14 @@ RUN apt-get update \
 
 WORKDIR /src/agent
 ARG TARGETPLATFORM
+# Multi-Arch:same headers must have identical versions. Security mirrors can
+# publish architectures at different times; use bookworm's matching header pair
+# in this build-only stage, without changing the runtime image's packages.
+RUN set -eux; \
+    dpkg --add-architecture "$(xx-info debian-arch)"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"
 RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
 # Cache mounts keep the crates.io registry and the per-target build directory
@@ -80,6 +88,7 @@ COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json

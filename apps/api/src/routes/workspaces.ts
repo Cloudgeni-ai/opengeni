@@ -1,5 +1,6 @@
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
+import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -410,6 +411,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [
+      connectionModelRestrictions,
       resolvedCatalog,
       policy,
       codexSubscriptionActive,
@@ -423,6 +425,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationGatewayCustomModels,
       organizationOpenRouterCustomModels,
     ] = await Promise.all([
+      getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
       deps.resolveCatalogSettings(),
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
@@ -462,6 +465,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       WorkspaceModelCatalogResponse.parse(
         buildWorkspaceModelCatalog({
+          connectionModelRestrictions,
           settings: resolvedCatalog.settings,
           policy,
           codexSubscriptionActive,

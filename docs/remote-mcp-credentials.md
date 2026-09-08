@@ -117,7 +117,7 @@ revoked grant. A failed capture leaves no initial turn, events, or authority row
 bind the canonical selection, and failed capture rolls back the prompt receipt,
 events and turn. Realtime initial capture remains unsupported.
 Same-session goal continuations and child-result resumptions use a separate
-causal capture path. Migration 0432 proves the consumed machine update names
+causal capture path. Migration 0434 proves the consumed machine update names
 the exact source turn, matches the unchanged session epoch and visibility, and
 copies its immutable snapshot with only the new work/source identifiers changed.
 The worker rechecks owner, binding and grant generations at use. Revoked selections

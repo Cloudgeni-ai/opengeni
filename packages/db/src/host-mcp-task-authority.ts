@@ -10,7 +10,8 @@ import {
   HostMcpBindingDefinition,
   HostMcpOwnerSubject,
 } from "@opengeni/contracts/host-mcp-bindings";
-import { getScheduledTaskRevisionAuthority, getSessionTurnForAttempt } from "./index";
+import { getScheduledTaskRevisionAuthority } from "./scheduled-task-revision-authority";
+import { getHostMcpLiveAttempt } from "./live-session-attempt";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import {
   getHostMcpBinding,
@@ -299,7 +300,7 @@ export async function inheritHostMcpTaskAuthoritiesFromAttempt(
     taskAuthorityRevision: task.authorityRevision,
   });
   if (!proof || !HostMcpOwnerSubject.safeParse(proof.subjectId).success) return;
-  const current = await getSessionTurnForAttempt(
+  const current = await getHostMcpLiveAttempt(
     db,
     task.workspaceId,
     source.sessionId,

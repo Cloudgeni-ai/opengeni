@@ -455,6 +455,8 @@ const effectiveBudgets = {
     // and server-only SDK administration: 650,609 gzip bytes. Retain the
     // established platform-skew allowance and all unrelated limits.
     wholeKibEnvelope(650_609, 1.5 * kib),
+    // Same graph plus main0c39126f's subscription/model-access contract.
+    wholeKibEnvelope(653_880, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

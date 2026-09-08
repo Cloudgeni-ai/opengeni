@@ -36,4 +36,15 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // actor-aware transport and main's identified product-journey capture.
   // Keep the measured envelope rather than relaxing startup/chunk/file limits.
   wholeKibEnvelope(2_333_201),
+  wholeKibEnvelope(2_315_348),
+  // September 8: organization subscription SDK methods and connection-policy
+  // contracts add 4,920 raw / 1,330 gzip bytes over e30c35f07 on macOS.
+  // Combined with main's invitation chrome and journey analytics, the integrated
+  // graph measures 2,321,561 raw on macOS/Bun 1.3.14. Settings stay route-lazy;
+  // retain all gzip, file-count, initial-load, and lazy-chunk ceilings.
+  wholeKibEnvelope(2_321_561),
+  // Exact Linux/x64 Bun1.4 merge with main0c39126f's organization subscriptions
+  // and per-account model access: 2,345,266 raw bytes. Keep settings lazy and
+  // all startup, file-count and per-chunk caps unchanged.
+  wholeKibEnvelope(2_345_266),
 );

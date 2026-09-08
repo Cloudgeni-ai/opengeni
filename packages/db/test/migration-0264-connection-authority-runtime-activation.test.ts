@@ -15,6 +15,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import { migrate } from "../src/migrate";
+import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationUrl = new URL(
   "../drizzle/0264_connection_authority_runtime_activation.sql",
@@ -112,6 +113,7 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${scheduledProducerMaterializationMigrationName}),
           (${scheduledInheritedToolAdmissionMigrationName})
       `;
+      await sql`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(blank.databaseUrl);
       // Current session adapters select the complete sessions row while this
       // fixture intentionally withholds 0402. Supply only its later columns
@@ -216,7 +218,7 @@ describe("migration 0264 connection authority runtime activation", () => {
       `;
       await sql`
         delete from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
@@ -280,7 +282,7 @@ describe("migration 0264 connection authority runtime activation", () => {
       await migrate(blank.databaseUrl);
       const receipts = await sql<Array<{ name: string }>>`
         select name from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
@@ -315,6 +317,7 @@ describe("migration 0264 connection authority runtime activation", () => {
         scheduledSessionTargetIndexMigrationName,
         scheduledProducerMaterializationMigrationName,
         scheduledInheritedToolAdmissionMigrationName,
+        ...embeddingMigrationTail,
       ]);
     } finally {
       await sql.end({ timeout: 1 });

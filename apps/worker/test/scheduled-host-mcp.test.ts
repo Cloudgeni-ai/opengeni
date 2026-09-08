@@ -1,10 +1,13 @@
+// opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
-  acquireSharedTestDatabase,
+  acquireOwnerMigratedTestDatabase,
   MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 import {
   createDb,
   createWorkspace,
@@ -30,8 +33,14 @@ import type { ActivityServices } from "../src/activities/types";
 let shared: SharedTestDatabase | null;
 let client: DbClient;
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("scheduled-host-mcp");
-  if (!shared) throw new Error("This host authority test requires PostgreSQL");
+  const owned = await acquireOwnerMigratedTestDatabase("scheduled-host-mcp");
+  if (!owned) throw new Error("This host authority test requires PostgreSQL");
+  await migrate(owned.ownerUrl);
+  await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
+  const appUrl = new URL(owned.ownerUrl);
+  appUrl.username = "opengeni_app";
+  appUrl.password = owned.appPassword;
+  shared = { ...owned, appUrl: appUrl.toString() };
   client = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {
@@ -162,7 +171,9 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
       producerKey: crypto.randomUUID(),
     };
     const dispatched = await activities.dispatchScheduledTaskRun(dispatchInput);
-    expect(dispatched.action).toBe(target ? "signal" : "start");
+    expect(dispatched.action, JSON.stringify({ runMode, dispatched })).toBe(
+      target ? "signal" : "start",
+    );
     if (dispatched.action !== "signal" && dispatched.action !== "start")
       throw new Error(JSON.stringify(dispatched));
     const replay = await activities.dispatchScheduledTaskRun(dispatchInput);

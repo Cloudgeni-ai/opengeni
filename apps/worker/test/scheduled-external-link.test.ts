@@ -1,10 +1,13 @@
+// opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
-  acquireSharedTestDatabase,
+  acquireOwnerMigratedTestDatabase,
   MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 import {
   createDb,
   createWorkspace,
@@ -38,9 +41,17 @@ import type { ActivityServices } from "../src/activities/types";
 let shared: SharedTestDatabase;
 let client: DbClient;
 beforeAll(async () => {
-  const database = await acquireSharedTestDatabase("scheduled-external-link");
+  const database = await acquireOwnerMigratedTestDatabase("scheduled-external-link");
   if (!database) throw new Error("Linked execution requires real PostgreSQL");
-  shared = database;
+  await migrate(database.ownerUrl);
+  await provisionRoles(database.adminUrl, {
+    appPassword: database.appPassword,
+    rlsStrategy: "force",
+  });
+  const appUrl = new URL(database.ownerUrl);
+  appUrl.username = "opengeni_app";
+  appUrl.password = database.appPassword;
+  shared = { ...database, appUrl: appUrl.toString() };
   client = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {

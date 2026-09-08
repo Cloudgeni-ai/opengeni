@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 test("external lifecycle extends native guarded routines and keeps service attribution distinct", async () => {
   const source = await readFile(
-    new URL("../drizzle/0427_external_identity_membership_lifecycle.sql", import.meta.url),
+    new URL("../drizzle/0429_external_identity_membership_lifecycle.sql", import.meta.url),
     "utf8",
   );
   expect(source).toStartWith("-- deployment-mode: rolling\n");

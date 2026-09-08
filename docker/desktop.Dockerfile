@@ -82,6 +82,7 @@ COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json

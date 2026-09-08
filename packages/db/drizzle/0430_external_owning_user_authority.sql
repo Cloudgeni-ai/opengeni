@@ -4,6 +4,24 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- The native xAI lifecycle locks the owning membership with SELECT FOR UPDATE.
+-- FORCE RLS requires an UPDATE policy for that lock in addition to SELECT.
+-- Permit only the table owner's private transaction-local lifecycle capability;
+-- WITH CHECK false forbids using this policy to actually rewrite a membership.
+CREATE POLICY xai_subscription_membership_lock ON organization_memberships
+  FOR UPDATE USING (
+    current_user = pg_catalog.pg_get_userbyid(
+      (SELECT relowner FROM pg_catalog.pg_class
+       WHERE oid = 'organization_memberships'::regclass)
+    )
+    AND EXISTS (
+      SELECT 1 FROM opengeni_private.xai_subscription_runtime_capabilities capability
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability.capability_kind = 'lifecycle'
+    )
+  ) WITH CHECK (false);
+
 CREATE FUNCTION opengeni_private.active_external_owning_subject(p_account_id uuid, p_subject_id text)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
 AS $body$

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { stableJson, type McpCredentialsRequest } from "@opengeni/contracts";
-import { getSessionTurnForAttempt } from "./index";
+import { getHostMcpLiveAttempt } from "./live-session-attempt";
 import { hostMcpBindingMatchesRequest } from "./host-mcp-binding-match";
 import {
   HostMcpBinding,
@@ -590,7 +590,7 @@ export async function authorizeDirectHostMcpUse(
   request: McpCredentialsRequest,
 ): Promise<boolean> {
   if (!request.attemptId || !request.connectionRef.hostBinding) return false;
-  const current = await getSessionTurnForAttempt(
+  const current = await getHostMcpLiveAttempt(
     db,
     request.workspaceId,
     request.sessionId,
@@ -726,7 +726,7 @@ export async function authorizeDirectHostMcpUse(
       !hostMcpBindingMatchesRequest(binding, request)
     )
       return false;
-    const live = await getSessionTurnForAttempt(
+    const live = await getHostMcpLiveAttempt(
       tx,
       request.workspaceId,
       request.sessionId,
