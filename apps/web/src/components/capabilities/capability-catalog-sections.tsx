@@ -19,37 +19,22 @@ import type { CapabilityCatalogItem } from "@/types";
 
 /**
  * The kinds the Connectors grid can actually show. Skills, Plugins, and Packs
- * are Bundles and live in their own section with their own search, so offering
+ * are Bundles and live in their own section, so offering
  * them here would only ever produce an empty grid.
  */
 export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
 
 export function CapabilityDiscoveryControls({
-  query,
   filter,
   counts,
-  onQueryChange,
   onFilterChange,
 }: {
-  query: string;
   filter: CapabilityFilter;
   counts: Record<CapabilityFilter, number>;
-  onQueryChange: (query: string) => void;
   onFilterChange: (filter: CapabilityFilter) => void;
 }) {
   return (
     <>
-      <div className="relative mt-6">
-        <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
-        <Input
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="Search connectors"
-          className="h-12 rounded-xl pl-11 text-base transition-none placeholder:text-fg"
-          aria-label="Search connectors"
-        />
-      </div>
-
       <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Plugin type filters">
         {CAPABILITY_FILTERS.map((kind) => (
           <button
@@ -72,6 +57,30 @@ export function CapabilityDiscoveryControls({
         ))}
       </div>
     </>
+  );
+}
+
+/** One query for every section of the Plugins page. */
+export function PluginSearch({
+  query,
+  onQueryChange,
+}: {
+  query: string;
+  onQueryChange: (query: string) => void;
+}) {
+  return (
+    <div className="relative mt-6">
+      <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
+      <Input
+        type="search"
+        suppressAutofill
+        value={query}
+        onChange={(event) => onQueryChange(event.target.value)}
+        placeholder="Search apps, MCP servers, APIs, skills, plugins, and packs"
+        className="h-12 rounded-xl pl-11 text-base transition-none placeholder:text-fg"
+        aria-label="Search all plugins"
+      />
+    </div>
   );
 }
 
