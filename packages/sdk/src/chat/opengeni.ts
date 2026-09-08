@@ -119,6 +119,15 @@ export class OpenGeni {
     const workspaceId = await this.workspaceId(options);
     const sessionId = await chatSessionId(workspaceId, options.conversation, endUser);
     const session = await this.findSession(workspaceId, sessionId);
+    // Reopening an existing session re-verifies the label it was created with.
+    // The tuple derivation already makes a collision impossible; this keeps a
+    // relabelled or hand-addressed session from crossing users regardless.
+    if (session && endUser && !sameEndUser(session.endUser ?? null, endUser)) {
+      throw new OpenGeniChatError(
+        "conversation_not_authorized",
+        "This conversation belongs to a different user.",
+      );
+    }
     const buildCreate: BuildCreate = (text, importedHistory) => {
       const context =
         options.create?.modelContext === undefined && importedHistory
@@ -136,7 +145,7 @@ export class OpenGeni {
         ...(options.create ?? {}),
         initialMessage: text,
         requestedSessionId: sessionId,
-        idempotencyKey: chatIdempotencyKey(options.conversation, endUser),
+        idempotencyKey: chatIdempotencyKey(sessionId),
       };
     };
     return new Chat(this, {
@@ -164,7 +173,7 @@ export class OpenGeni {
     const session = await this.client.getSession(target.workspaceId, target.sessionId);
     if (
       target.user !== null &&
-      (session.endUser?.source !== this.source || session.endUser?.id !== target.user)
+      !sameEndUser(session.endUser ?? null, { source: this.source, id: target.user })
     ) {
       throw new OpenGeniChatError(
         "conversation_not_authorized",
@@ -450,4 +459,11 @@ function abortError(): Error {
   const error = new Error("The chat request was aborted.");
   error.name = "AbortError";
   return error;
+}
+
+function sameEndUser(
+  left: { source: string; id: string } | null,
+  right: { source: string; id: string },
+): boolean {
+  return left !== null && left.source === right.source && left.id === right.id;
 }

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CHAT_SESSION_NAMESPACE,
   chatIdempotencyKey,
+  chatIdentityName,
   chatSessionId,
   OpenGeniChatError,
   uuidV5,
@@ -54,15 +55,62 @@ describe("chat identities", () => {
 
     expect(alice.sessionId).not.toBe(anonymous.sessionId);
     expect(alice.sessionId).not.toBe(bob.sessionId);
-    expect(alice.sessionId).toBe(
-      await uuidV5(`${WORKSPACE_ID}:app:u_42:c_9`, CHAT_SESSION_NAMESPACE),
+    const aliceLabel = { source: "app", id: "u_42" };
+    expect(chatIdentityName(WORKSPACE_ID, "c_9", aliceLabel)).toBe(
+      JSON.stringify([WORKSPACE_ID, "app", "u_42", "c_9"]),
     );
+    expect(chatIdentityName(WORKSPACE_ID, "c_9")).toBe(JSON.stringify([WORKSPACE_ID, "c_9"]));
     expect(alice.sessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_9", { source: "app", id: "u_42" }),
+      await uuidV5(chatIdentityName(WORKSPACE_ID, "c_9", aliceLabel), CHAT_SESSION_NAMESPACE),
     );
-    expect(anonymous.sessionId).toBe(await uuidV5(`${WORKSPACE_ID}:c_9`, CHAT_SESSION_NAMESPACE));
-    expect(chatIdempotencyKey("c_9", { source: "app", id: "u_42" })).toBe("chat:app:u_42:c_9");
-    expect(chatIdempotencyKey("c_9")).toBe("chat:c_9");
+    expect(alice.sessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9", aliceLabel));
+    expect(anonymous.sessionId).toBe(
+      await uuidV5(chatIdentityName(WORKSPACE_ID, "c_9"), CHAT_SESSION_NAMESPACE),
+    );
+    expect(chatIdempotencyKey(alice.sessionId)).toBe(`chat:${alice.sessionId}`);
+  });
+
+  test("delimiters inside a user or conversation id never merge two identities", async () => {
+    // "alice:team" + "thread" and "alice" + "team:thread" concatenate to the
+    // same colon-joined string; the JSON tuple keeps them distinct.
+    const first = await chatSessionId(WORKSPACE_ID, "thread", { source: "app", id: "alice:team" });
+    const second = await chatSessionId(WORKSPACE_ID, "team:thread", { source: "app", id: "alice" });
+    expect(first).not.toBe(second);
+    expect(chatIdempotencyKey(first)).not.toBe(chatIdempotencyKey(second));
+    const sourceShift = await chatSessionId(WORKSPACE_ID, "thread", {
+      source: "app:alice",
+      id: "team",
+    });
+    expect(sourceShift).not.toBe(first);
+    const quoted = await chatSessionId(WORKSPACE_ID, '"], "x", ["', { source: "app", id: "u" });
+    const plain = await chatSessionId(WORKSPACE_ID, "x", { source: "app", id: "u" });
+    expect(quoted).not.toBe(plain);
+    // Labelled and unlabelled tuples differ in length, so they can never meet either.
+    expect(await chatSessionId(WORKSPACE_ID, "app:u:c")).not.toBe(
+      await chatSessionId(WORKSPACE_ID, "c", { source: "app", id: "u" }),
+    );
+  });
+
+  test("reopening a session created under another user's label is refused", async () => {
+    const server = fakeServer();
+    const chat = await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+    await chat.send("hello");
+    // Simulate a session at this id that carries a different label (a relabelled
+    // or hand-addressed row): the facade must not hand it to u_42.
+    const state = server.sessions.get(chat.sessionId)!;
+    (state.session as { endUser: unknown }).endUser = { source: "app", id: "u_99" };
+    let caught: unknown;
+    try {
+      await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(OpenGeniChatError);
+    expect((caught as OpenGeniChatError).code).toBe("conversation_not_authorized");
+    // A host-named reopen without a user still vouches for the session it named.
+    (state.session as { endUser: unknown }).endUser = null;
+    const unlabelled = await server.og.chat({ tenant: "acme", conversation: "c_9" });
+    expect(unlabelled.sessionId).not.toBe(chat.sessionId);
   });
 });
 
@@ -89,7 +137,7 @@ describe("Chat.send", () => {
       endUser: { source: "app", id: "u_42" },
       initialMessage: "hello",
       requestedSessionId: chat.sessionId,
-      idempotencyKey: "chat:app:u_42:c_9",
+      idempotencyKey: `chat:${chat.sessionId}`,
     });
     const stream = server.requestsTo("GET", "/events/stream");
     expect(stream).toHaveLength(1);
@@ -230,7 +278,7 @@ describe("Chat.send", () => {
       sandboxBackend: "none",
       initialMessage: "hello",
       requestedSessionId: chat.sessionId,
-      idempotencyKey: "chat:c_9",
+      idempotencyKey: `chat:${chat.sessionId}`,
     });
     expect(server.requestsTo("PUT", "/v1/workspaces/external")).toHaveLength(0);
   });

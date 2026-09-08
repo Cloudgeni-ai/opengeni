@@ -29,24 +29,38 @@ export async function uuidV5(name: string, namespace: string): Promise<string> {
 }
 
 /**
- * The session id of `conversation` in `workspaceId`: RFC 4122 v5 of
- * `<workspaceId>:<conversation>`, or `<workspaceId>:<source>:<id>:<conversation>`
- * when the conversation belongs to an end user.
+ * The session id of `conversation` in `workspaceId`: RFC 4122 v5 of the JSON
+ * tuple `[workspaceId, conversation]`, or `[workspaceId, source, id, conversation]`
+ * when the conversation belongs to an end user. JSON encoding keeps the tuple
+ * unambiguous: an id containing `:` or any other delimiter can never make two
+ * different (user, conversation) pairs share a session.
  */
 export async function chatSessionId(
   workspaceId: string,
   conversation: string,
   user?: ChatUserLabel | undefined,
 ): Promise<string> {
-  const name = user
-    ? `${workspaceId}:${user.source}:${user.id}:${conversation}`
-    : `${workspaceId}:${conversation}`;
-  return await uuidV5(name, CHAT_SESSION_NAMESPACE);
+  return await uuidV5(chatIdentityName(workspaceId, conversation, user), CHAT_SESSION_NAMESPACE);
 }
 
-/** The create idempotency key: `chat:<conversation>`, or `chat:<source>:<id>:<conversation>` per user. */
-export function chatIdempotencyKey(conversation: string, user?: ChatUserLabel | undefined): string {
-  return user ? `chat:${user.source}:${user.id}:${conversation}` : `chat:${conversation}`;
+/** The exact v5 name behind {@link chatSessionId}; exported for tests and audits. */
+export function chatIdentityName(
+  workspaceId: string,
+  conversation: string,
+  user?: ChatUserLabel | undefined,
+): string {
+  return JSON.stringify(
+    user ? [workspaceId, user.source, user.id, conversation] : [workspaceId, conversation],
+  );
+}
+
+/**
+ * The create idempotency key for a chat session: `chat:<sessionId>`. The
+ * session id already encodes the workspace, user label, and conversation as an
+ * unambiguous tuple, so the key inherits that and stays bounded.
+ */
+export function chatIdempotencyKey(sessionId: string): string {
+  return `chat:${sessionId}`;
 }
 
 export function isUuid(value: string): boolean {

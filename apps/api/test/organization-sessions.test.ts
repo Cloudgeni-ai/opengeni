@@ -17,6 +17,7 @@ import {
   listSessionsForSubject,
   transitionSessionVisibility,
   type DbClient,
+  setSessionPin,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
@@ -559,6 +560,46 @@ describe("organization-wide session list", () => {
       expect(ids).not.toContain(id);
     }
     expect(ids).not.toContain(fixture.personalSessionId);
+  });
+
+  test("pinned sessions count toward the page limit and never repeat or vanish", async () => {
+    if (!shared || !client || !app || !fixture) return;
+    const headers = { cookie: fixture.cookie };
+    const workspaceASessions = fixture.sharedSessionIds.get(fixture.workspaceA.id)!;
+    // Pin more sessions than one page holds so a page boundary falls inside
+    // the owner's pinned prefix and another inside the ordinary keyset page.
+    const pinnedIds = workspaceASessions.slice(0, 3);
+    for (const sessionId of pinnedIds) {
+      expect(
+        await setSessionPin(client.db, {
+          workspaceId: fixture.workspaceA.id,
+          subjectId: fixture.subjectId,
+          sessionId,
+          pinned: true,
+        }),
+      ).not.toBeNull();
+    }
+    try {
+      for (const limit of ["1", "2", "4"]) {
+        const pages = await collectPages(headers, { limit });
+        for (const page of pages) expect(page.sessions.length).toBeLessThanOrEqual(Number(limit));
+        const ids = pages.flatMap((page) => page.sessions).map((session) => session.id);
+        expect(new Set(ids).size).toBe(ids.length);
+        for (const id of workspaceASessions) expect(ids).toContain(id);
+        expect(ids).toContain(fixture.privateSessionId);
+        // Pinned rows lead the workspace exactly once, in pin order.
+        expect(ids.slice(0, pinnedIds.length).sort()).toEqual([...pinnedIds].sort());
+      }
+    } finally {
+      for (const sessionId of pinnedIds) {
+        await setSessionPin(client.db, {
+          workspaceId: fixture.workspaceA.id,
+          subjectId: fixture.subjectId,
+          sessionId,
+          pinned: false,
+        });
+      }
+    }
   });
 
   test("status filter keeps exact lifecycle matches and reports the end", async () => {

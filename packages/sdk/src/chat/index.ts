@@ -24,6 +24,7 @@ export {
 export {
   CHAT_SESSION_NAMESPACE,
   chatIdempotencyKey,
+  chatIdentityName,
   chatSessionId,
   uuidV5,
   type ChatUserLabel,

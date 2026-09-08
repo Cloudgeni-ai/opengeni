@@ -37,10 +37,17 @@ import { z } from "zod";
  */
 export const ORGANIZATION_SESSION_LIST_MAX_WORKSPACE_READS = 25;
 
-/** Base64url JSON `{ workspaceId, cursor }`; `cursor` is the workspace list cursor or null. */
+/**
+ * Base64url JSON `{ workspaceId, cursor, pinnedOffset? }`; `cursor` is the
+ * workspace list cursor or null. A subject's pinned sessions precede the
+ * ordinary keyset page of a workspace; when a page boundary falls inside that
+ * pinned prefix, `pinnedOffset` records how many pinned rows were already
+ * returned so the next page resumes after them instead of repeating them.
+ */
 export type OrganizationSessionListCursor = {
   workspaceId: string;
   cursor: string | null;
+  pinnedOffset?: number | undefined;
 };
 
 const OrganizationId = z.string().uuid();
@@ -49,6 +56,7 @@ const OrganizationSessionListCursorEnvelope = z
   .object({
     workspaceId: z.string().uuid(),
     cursor: z.string().min(1).nullable(),
+    pinnedOffset: z.number().int().nonnegative().max(10_000).optional(),
   })
   .strict();
 
@@ -158,10 +166,14 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
     );
     let index = 0;
     let innerCursor: string | null = null;
+    let pinnedOffset = 0;
     if (cursor) {
       index = workspaces.findIndex((workspace) => workspace.id >= cursor.workspaceId);
       if (index === -1) index = workspaces.length;
-      if (workspaces[index]?.id === cursor.workspaceId) innerCursor = cursor.cursor;
+      if (workspaces[index]?.id === cursor.workspaceId) {
+        innerCursor = cursor.cursor;
+        pinnedOffset = cursor.cursor === null ? (cursor.pinnedOffset ?? 0) : 0;
+      }
     }
 
     const sessions: Session[] = [];
@@ -177,6 +189,7 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
         workspace,
         readAuthority,
         innerCursor,
+        pinnedOffset,
         limit: query.limit - sessions.length,
         query,
       });
@@ -185,9 +198,17 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
         // (an organization owner who is not a member). Skip it entirely.
         index += 1;
         innerCursor = null;
+        pinnedOffset = 0;
         continue;
       }
       sessions.push(...page.sessions);
+      if (page.nextPinnedOffset !== null) {
+        // The page ended inside this workspace's pinned prefix.
+        innerCursor = null;
+        pinnedOffset = page.nextPinnedOffset;
+        break;
+      }
+      pinnedOffset = 0;
       if (page.nextCursor) {
         innerCursor = page.nextCursor;
       } else {
@@ -203,6 +224,7 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
         ? encodeOrganizationSessionListCursor({
             workspaceId: nextWorkspace.id,
             cursor: innerCursor,
+            ...(innerCursor === null && pinnedOffset > 0 ? { pinnedOffset } : {}),
           })
         : null,
     };
@@ -225,10 +247,17 @@ async function listWorkspaceSessionPage(
     workspace: Workspace;
     readAuthority: OrganizationSessionReadAuthority;
     innerCursor: string | null;
+    /** Pinned rows already returned from this workspace's first page. */
+    pinnedOffset: number;
     limit: number;
     query: ListOrganizationSessionsQuery;
   },
-): Promise<{ sessions: Session[]; nextCursor: string | null } | null> {
+): Promise<{
+  sessions: Session[];
+  nextCursor: string | null;
+  /** Set when the page boundary fell inside the pinned prefix; resume there with a null cursor. */
+  nextPinnedOffset: number | null;
+} | null> {
   let authorization: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>;
   try {
     authorization = await requireAccessGrantAuthorization(
@@ -259,26 +288,45 @@ async function listWorkspaceSessionPage(
     throw new HTTPException(400, { message: "cursor is invalid" });
   }
   try {
-    const page = await listSessionsForSubject(deps.db, input.workspace.id, {
-      subjectId: grant.subjectId,
-      limit: input.limit,
-      materializeSnapshot: true,
-      ...(cursor ? { cursor } : {}),
-      ...(input.query.endUserSource !== undefined && input.query.endUserId !== undefined
-        ? { endUser: { source: input.query.endUserSource, id: input.query.endUserId } }
-        : {}),
-      ...(authorizationScope ? { authorizationScope } : {}),
-      personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
-    });
-    // Pinned rows are excluded from the ordinary page and belong to the
-    // subject's first page of this workspace only.
-    const rows = cursor ? page.sessions : [...page.pinned, ...page.sessions];
-    return {
-      sessions: input.query.status
-        ? rows.filter((session) => session.status === input.query.status)
-        : rows,
-      nextCursor: page.nextCursor,
-    };
+    const list = async (limit: number) =>
+      await listSessionsForSubject(deps.db, input.workspace.id, {
+        subjectId: grant.subjectId,
+        limit,
+        materializeSnapshot: true,
+        ...(cursor ? { cursor } : {}),
+        ...(input.query.endUserSource !== undefined && input.query.endUserId !== undefined
+          ? { endUser: { source: input.query.endUserSource, id: input.query.endUserId } }
+          : {}),
+        ...(authorizationScope ? { authorizationScope } : {}),
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+      });
+    const withStatus = (rows: Session[]) =>
+      input.query.status ? rows.filter((session) => session.status === input.query.status) : rows;
+    let page = await list(input.limit);
+    let rows: Session[];
+    let nextPinnedOffset: number | null = null;
+    if (cursor) {
+      // A keyset continuation never carries pinned rows.
+      rows = page.sessions;
+    } else {
+      // The subject's pinned sessions are excluded from the ordinary keyset
+      // page and lead this workspace's first page. They count toward the
+      // requested limit like any other row: when the boundary falls inside
+      // the pinned prefix the caller resumes at `nextPinnedOffset`, and
+      // otherwise the ordinary page is re-read at exactly the remaining
+      // budget so its keyset cursor lands after the last returned row.
+      const pinned = page.pinned.slice(input.pinnedOffset);
+      if (pinned.length >= input.limit) {
+        rows = pinned.slice(0, input.limit);
+        nextPinnedOffset = input.pinnedOffset + input.limit;
+        return { sessions: withStatus(rows), nextCursor: null, nextPinnedOffset };
+      }
+      if (pinned.length > 0 && page.sessions.length > input.limit - pinned.length) {
+        page = await list(input.limit - pinned.length);
+      }
+      rows = [...pinned, ...page.sessions];
+    }
+    return { sessions: withStatus(rows), nextCursor: page.nextCursor, nextPinnedOffset };
   } catch (error) {
     if (error instanceof SessionListAccessError) {
       throw new HTTPException(403, { message: error.message });
