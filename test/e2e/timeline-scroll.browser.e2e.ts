@@ -157,9 +157,20 @@ describe("timeline scroll ownership browser regression", () => {
 
     const scroller = page.locator("[data-timeline-test] .og-root > div");
     await scroller.hover();
-    await page.mouse.wheel(0, -96);
-    await page.waitForTimeout(100);
+    // wheel() dispatches input without waiting for native scrolling to finish.
+    // Capture the reader's new anchor at scrollend, not at an arbitrary timer
+    // that can expire before the compositor applies the gesture on a busy runner.
+    await Promise.all([
+      scroller.evaluate(
+        (node) =>
+          new Promise<void>((resolve) =>
+            node.addEventListener("scrollend", () => resolve(), { once: true }),
+          ),
+      ),
+      page.mouse.wheel(0, -96),
+    ]);
     const afterWheel = await visible(page);
+    expect(afterWheel.id).not.toBe(duringPrepend.id);
 
     await page.locator('[data-timeline-row="row-900"]').waitFor({ timeout: 15_000 });
     await page.waitForTimeout(100);
