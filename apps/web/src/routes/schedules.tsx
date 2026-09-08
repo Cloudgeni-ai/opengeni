@@ -646,32 +646,19 @@ export function SchedulesRoute({
         title="Schedules"
         description="Create and manage recurring work."
         actions={
-          <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void refresh()}
-              disabled={loading}
-              className="h-9 pointer-coarse:min-h-10"
-            >
-              <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
-              Refresh
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="h-9 pointer-coarse:min-h-10"
-              onClick={() => {
-                clearRecurringLaunch();
-                setOpen((value) => !value);
-                setEditingTaskId(null);
-              }}
-            >
-              <PlusIcon className="size-3.5" />
-              New schedule
-            </Button>
-          </>
+          <Button
+            type="button"
+            size="sm"
+            className="h-9 pointer-coarse:min-h-10"
+            onClick={() => {
+              clearRecurringLaunch();
+              setOpen((value) => !value);
+              setEditingTaskId(null);
+            }}
+          >
+            <PlusIcon className="size-3.5" />
+            New schedule
+          </Button>
         }
       />
 

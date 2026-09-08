@@ -11,7 +11,6 @@ import {
   ChevronRightIcon,
   Loader2Icon,
   PlusIcon,
-  RefreshCwIcon,
   ServerCogIcon,
   StarIcon,
 } from "lucide-react";
@@ -95,30 +94,17 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
         title="Rigs"
         description="The team's machine, versioned and self-healing: setup and health checks layered on the deployment-managed platform sandbox."
         actions={
-          <>
+          canManage ? (
             <Button
               type="button"
-              variant="ghost"
               size="sm"
-              onClick={() => void rigs.refresh()}
-              disabled={rigs.loading}
+              onClick={() => setCreateOpen((open) => !open)}
               className="h-9"
             >
-              <RefreshCwIcon className={rigs.loading ? "size-3.5 animate-spin" : "size-3.5"} />
-              Refresh
+              <PlusIcon className="size-3.5" />
+              New rig
             </Button>
-            {canManage ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => setCreateOpen((open) => !open)}
-                className="h-9"
-              >
-                <PlusIcon className="size-3.5" />
-                New rig
-              </Button>
-            ) : null}
-          </>
+          ) : null
         }
       />
 
