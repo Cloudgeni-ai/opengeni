@@ -634,7 +634,6 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
-  "feedback_submissions",
   "additional_organization_creation_receipts",
   "agent_run_states",
   "api_keys",
@@ -726,6 +725,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_versions",
   "editable_artifacts",
   "enrollments",
+  "feedback_submissions",
   "file_uploads",
   "files",
   "generated_image_artifacts",
@@ -1223,7 +1223,6 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
-  "feedback_submissions",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -1238,6 +1237,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "feedback_submissions",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
   "knowledge_change_proposals",
