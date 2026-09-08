@@ -43,8 +43,8 @@ test.skipIf(!baseUrl)(
       ).text();
       const modulePath = source.match(/import\("([^"]*posthog-js[^"]*)"\)/)?.[1];
       if (!modulePath) throw new Error("Vite analytics module did not resolve PostHog");
-      await page.evaluate(async (modulePath: string) => {
-        const { default: posthog } = await import(modulePath);
+      await page.evaluate(async (providerModulePath: string) => {
+        const { default: posthog } = await import(providerModulePath);
         const capture = posthog.capture.bind(posthog);
         posthog.capture = (name: string, properties: Record<string, unknown>) => {
           (
