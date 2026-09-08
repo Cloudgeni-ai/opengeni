@@ -74,8 +74,37 @@ describe("MCP OAuth discovery", () => {
     expect(protectedResourceMetadataCandidates("https://mcp.example.test/")).toEqual([
       "https://mcp.example.test/.well-known/oauth-protected-resource",
     ]);
+    expect(
+      protectedResourceMetadataCandidates("https://mcp.example.test/v1/mcp/?tenant=a%2Fb"),
+    ).toEqual([
+      "https://mcp.example.test/.well-known/oauth-protected-resource/v1/mcp/?tenant=a%2Fb",
+      "https://mcp.example.test/.well-known/oauth-protected-resource",
+    ]);
+    expect(protectedResourceMetadataCandidates("https://mcp.example.test//v1/mcp/")[0]).toBe(
+      "https://mcp.example.test/.well-known/oauth-protected-resource//v1/mcp/",
+    );
     const advertised = `${resourceUrl}/.well-known/oauth-protected-resource`;
     expect(protectedResourceMetadataCandidates(resourceUrl, advertised)[0]).toBe(advertised);
+  });
+
+  test("uses slash-preserving modern metadata without falling back to legacy", async () => {
+    const slashResource = `${resourceUrl}/`;
+    const slashMetadata = `${modernPrmUrl}/`;
+    const result = await resolveMcpOAuthDiscovery({
+      resourceUrl: slashResource,
+      challenge: { scheme: "bearer", scope: [] },
+      fetchMetadata: metadataFetcher({
+        [slashMetadata]: {
+          resource: slashResource,
+          authorization_servers: [modernAs.issuer],
+        },
+        [modernAsMetadataUrl]: modernAs,
+      }),
+      validateEndpoint,
+      canonicalizeResource,
+    });
+    expect(result.mode).toBe("rfc9728_protected_resource");
+    expect(result.provenance.protectedResourceMetadataUrl).toBe(slashMetadata);
   });
 
   test("legacy discovery does not probe a protected resource catch-all as metadata", async () => {
