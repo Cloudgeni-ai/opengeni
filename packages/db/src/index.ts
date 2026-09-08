@@ -36314,6 +36314,26 @@ export async function countActiveSessionsForWorkspace(
   });
 }
 
+/** Immutable creation evidence for scheduled-session binding checks, never continuation defaults. */
+export async function getSessionCreationExecutionPolicy(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+) {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
 export async function requireSession(
   db: Database,
   workspaceId: string,
