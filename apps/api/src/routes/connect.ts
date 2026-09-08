@@ -63,7 +63,10 @@ import { githubAppMissingSettings, prReviewGitHubAppMissingSettings } from "@ope
 import { requireGitHubLensConnect } from "../integrations/github-lens-connect";
 import { isPersonalGitHubConnection } from "@opengeni/contracts/personal-github";
 import { startGoogleDriveOAuth } from "../integrations/google-drive";
-import { GOOGLE_DRIVE_CREDENTIAL_ROLE } from "@opengeni/contracts/google-drive";
+import {
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  googleDriveScopesAllowCapability,
+} from "@opengeni/contracts/google-drive";
 import { ATLASSIAN_CREDENTIAL_ROLE } from "@opengeni/contracts/atlassian";
 import {
   curatedOAuthReadiness,
@@ -474,7 +477,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             ConnectAccount.parse({
               id: connection.id,
               version: connection.version,
-              providerId: "google-drive-knowledge",
+              providerId: googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
+                ? "google-drive-publish"
+                : "google-drive-knowledge",
               label: String(
                 connection.metadata.googleEmail ??
                   connection.metadata.googleDisplayName ??

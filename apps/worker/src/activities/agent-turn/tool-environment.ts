@@ -533,16 +533,21 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       title: session.title,
       titleSource: session.titleSource,
       firstPartyMcpTools: selectedFirstPartyMcpTools,
-      firstPartyMcpPermissions: session.firstPartyMcpPermissions,
+      firstPartyMcpPermissions: effectiveFirstPartyPermissions,
     }),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
     selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
-    (!session.firstPartyMcpPermissions?.length ||
-      (session.firstPartyMcpPermissions.includes("artifacts:read") &&
-        session.firstPartyMcpPermissions.includes("artifacts:publish")));
+    hasPermission(
+      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
+      "artifacts:read",
+    ) &&
+    hasPermission(
+      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
+      "artifacts:publish",
+    );
   const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
     googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
       ? [
