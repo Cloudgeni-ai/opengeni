@@ -71,6 +71,7 @@ export * from "./billing/limits";
 export * from "./domain/capabilities";
 export * from "./domain/host-mcp-authority-source-admission";
 export * from "./domain/skill-imports";
+export * from "./domain/skill-search";
 export * from "./domain/environments";
 export * from "./rigs";
 export * from "./domain/packs";
