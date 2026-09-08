@@ -607,12 +607,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         : action.type === "credentials"
           ? "connections:write"
           : "workspace:read";
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "workspace:read",
-    );
+    // Resolve the authenticated workspace actor first, then enforce the exact
+    // stored provider/action permission below. Setup managers need not also
+    // carry the unrelated workspace metadata read permission.
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, { message: "Verified Connect authority required" });
@@ -1195,12 +1193,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/connect/attempts/:attemptId/cancel", async (c) => {
     const input = ConnectOperationRequest.parse(await c.req.json());
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "workspace:read",
-    );
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const continuation = externalActorContinuationForAuthorization(authorization);
     if (!authorization.contextIntegrity)
       throw new HTTPException(403, { message: "Verified Connect authority required" });
@@ -1845,7 +1838,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId);
     return c.json(
       (
         await listPendingConnectAttempts(deps.db, {
@@ -1858,7 +1851,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts/:attemptId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const { grant } = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const { attempt } = await getConnectAttempt(
       deps.db,
       { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },

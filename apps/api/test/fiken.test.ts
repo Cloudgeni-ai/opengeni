@@ -334,6 +334,8 @@ describe("fiken install route", () => {
     });
     expect(begin.status).toBe(200);
     const attempt = (await begin.json()) as { id: string; revision: number };
+    expect((await server.request(`${base}/${attempt.id}`, { headers })).status).toBe(200);
+    expect((await server.request(base, { headers })).status).toBe(200);
     const input = {
       expectedRevision: attempt.revision,
       idempotencyKey: crypto.randomUUID(),
@@ -348,6 +350,16 @@ describe("fiken install route", () => {
         headers,
         body: JSON.stringify(input),
       });
+    const readOnly = await server.request(`${base}/${attempt.id}/advance`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+      },
+      body: JSON.stringify(input),
+    });
+    expect(readOnly.status).toBe(403);
+    expect(fiken.calls).toHaveLength(0);
     const complete = await submit();
     expect(complete.status).toBe(200);
     const result = (await complete.json()) as { account: { id: string }; state: string };
@@ -363,6 +375,28 @@ describe("fiken install route", () => {
       kind: "api_key",
       metadata: { defaultCompanySlug: "demo-as", credentialRole: FIKEN_CREDENTIAL_ROLE },
     });
+    const pending = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "fiken-token",
+        ownership: "workspace",
+        returnUrl: "https://product.example/settings#fiken",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(pending.status).toBe(200);
+    const cancellable = (await pending.json()) as { id: string; revision: number };
+    const cancelled = await server.request(`${base}/${cancellable.id}/cancel`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: cancellable.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json()).state).toBe("cancelled");
   });
   test("verifies the token and stores a workspace-owned api_key connection", async () => {
     if (!available) return;
