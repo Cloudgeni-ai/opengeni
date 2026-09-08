@@ -109,6 +109,26 @@ describe("model request capture", () => {
 });
 
 describe("final HTTP body capture", () => {
+  test("invalid UTF-8 records unavailability and preserves upload bytes", async () => {
+    const { captureProviderRequestBody } = await import("../src/model-request-capture");
+    const receipts: unknown[] = [];
+    const observer = Object.assign(() => {}, {
+      onProviderRequest: (_provider: string, body: string | null, reason?: string) => {
+        receipts.push({ body, reason });
+      },
+    });
+    await withModelRequestCapture(observer, async () => {
+      const bytes = new Uint8Array([0xc3, 0x28]);
+      const capture = captureProviderRequestBody("test", "https://example.com", {
+        body: new Blob([bytes]).stream(),
+      });
+      expect(new Uint8Array(await new Response(capture.init?.body).arrayBuffer())).toEqual(bytes);
+      await capture.captured;
+    });
+    expect(receipts).toEqual([
+      { body: null, reason: "The provider body could not be read as UTF-8." },
+    ]);
+  });
   test("observes exact provider-transformed bytes without consuming the upload", async () => {
     const { captureProviderRequestBody } = await import("../src/model-request-capture");
     const { buildProviderRequestSnapshot } = await import("../src/model-context-inspector");

@@ -90,6 +90,11 @@ export function captureProviderRequestBody(
         if (cancelled) return;
         chunks.push(decoder.decode());
         text = chunks.join("");
+      } catch {
+        void reader.cancel().catch(() => undefined);
+        if (!cancelled)
+          await observer(provider, null, "The provider body could not be read as UTF-8.");
+        return;
       } finally {
         signal?.removeEventListener("abort", cancel);
         reader.releaseLock();
