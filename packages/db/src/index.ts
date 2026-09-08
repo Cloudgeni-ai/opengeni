@@ -48638,6 +48638,15 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const locked = await lockWorkspaceMutationAuthorityTx(tx, authority);
+        // Keep the admission UPDATE and its rejection diagnostic on one lease
+        // state. A concurrent capture release between these READ COMMITTED
+        // statements otherwise turns a recoverable capture wait into a false
+        // lease_fenced error. Take this after the canonical actor/attempt prefix.
+        await tx.execute(sql`select id from sandbox_leases
+          where account_id = ${locked.accountId}
+            and workspace_id = ${locked.workspaceId}
+            and sandbox_group_id = ${locked.sandboxGroupId}
+          for update`);
         const rows = await tx.execute<{
           id: string;
           lease_id: string;

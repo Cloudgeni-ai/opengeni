@@ -37,5 +37,6 @@ BEGIN
   RETURN NEW;
 END
 $body$;
+REVOKE ALL ON FUNCTION opengeni_private.guard_connect_attempt_origin() FROM PUBLIC;
 CREATE TRIGGER connect_attempt_origin_guard BEFORE UPDATE ON connect_attempts
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_connect_attempt_origin();

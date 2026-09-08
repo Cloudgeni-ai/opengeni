@@ -36,6 +36,9 @@ CREATE TABLE host_mcp_turn_authorities (
 );
 ALTER TABLE host_mcp_turn_authorities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE host_mcp_turn_authorities FORCE ROW LEVEL SECURITY;
+CREATE POLICY session_visibility_isolation ON host_mcp_turn_authorities AS RESTRICTIVE
+  USING (session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));
 CREATE POLICY host_mcp_turn_authorities_owner_scope ON host_mcp_turn_authorities
   USING (account_id = opengeni_private.current_account_id()
     AND workspace_id = opengeni_private.current_workspace_id()

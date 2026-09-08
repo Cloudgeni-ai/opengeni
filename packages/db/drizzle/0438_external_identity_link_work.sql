@@ -54,6 +54,9 @@ CREATE TABLE external_link_task_authorities (
 );
 ALTER TABLE external_link_turn_authorities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE external_link_turn_authorities FORCE ROW LEVEL SECURITY;
+CREATE POLICY session_visibility_isolation ON external_link_turn_authorities AS RESTRICTIVE
+  USING (session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));
 ALTER TABLE external_link_task_authorities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE external_link_task_authorities FORCE ROW LEVEL SECURITY;
 CREATE POLICY external_link_turn_authorities_scope ON external_link_turn_authorities

@@ -1506,6 +1506,9 @@ function slackInstallCallbackFailure(
   if (error instanceof SlackBotLifecycleSuccessAuditError) {
     return { stage: "persistence", reason: "success_audit_failed" };
   }
+  if (stage === "permission_check" && error instanceof HTTPException && error.status === 403) {
+    return { stage, reason: "permission_lost" };
+  }
   if (stage === "code_exchange") {
     return { stage, reason: "exchange_failed" };
   }

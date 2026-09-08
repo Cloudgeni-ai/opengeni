@@ -141,6 +141,10 @@ goal snapshots. `scheduled-task-revision-authority.ts` reads the native frozen
 revision without importing the DB root barrel. Owner-migrated PostgreSQL tests
 exercise both schedules and private SuperGrok connections under FORCE RLS;
 the scoped lifecycle routines retain membership locks and restore their markers.
+Turn authority ledgers also use the native restrictive session-reference policy;
+owning a host credential does not bypass private-session visibility. Private
+Connect origin triggers have no PUBLIC execution grant, including to artifact
+materializer roles.
 Child initialization (0436) copies only selected `always` grants from the exact
 stored spawning turn; session-bound grants cannot cross that boundary.
 Scheduled origin survives descendants and is revalidated at physical use.

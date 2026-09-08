@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "7f7d0789340532930e525dad9494d1c65a5fe48fc8ccdef2bca5808f3c6d5f01"
+      "sha256": "68dae20ea38829ceeab0d3f2bde10e0e878e13061aec6619e2f023ee04407847"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -618,6 +618,12 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
+      "step": "Built embedding package exports",
+      "sha256": "e9fd69268d8d35f117eaf01cd4e99ab65e3d471dd58885c69b56f101760f246c"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
       "step": "Clean published consumer",
       "sha256": "d326dc84fc2a13a7f0c9d41e79fbc52abc77750b39811c0e882acfe42a99810c"
     },
@@ -661,7 +667,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "React Native Metro to Hermes session bundle",
-      "sha256": "5fc90e18d6cdd6cbd01d27071f39984a32a0bf6ae957cacd94311546249d973f"
+      "sha256": "9cf92763ca740af1fd88793a21615322f6955f480ffdfda9aa05fa7cc65acfbe"
     },
     {
       "workflow": ".github/workflows/ci.yml",

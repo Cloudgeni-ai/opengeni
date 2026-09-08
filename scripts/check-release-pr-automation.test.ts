@@ -4004,7 +4004,7 @@ describe("workflow contracts", () => {
     expect(shards.if).not.toContain("github.event_name == 'pull_request'");
     expect(shards.if).toContain("needs.plan.outputs.unit_count != '0'");
     expect(shards.strategy).toEqual({
-      "fail-fast": true,
+      "fail-fast": false,
       matrix: { include: "${{ fromJSON(needs.plan.outputs.unit_matrix) }}" },
     });
     const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");

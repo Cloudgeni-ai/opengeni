@@ -1020,12 +1020,13 @@ jobs:
           --timeout-seconds 1200
           -- bun scripts/ci/run-build-plan.ts --plan impact-plan.json
 
-      - name: React Native Metro to Hermes session bundle
+      - name: Built embedding package exports
         # Build-independent unit shards verify source exports; this job proves
         # their actual emitted files using the canonical package build above.
-        run: |
-          OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES=1 bun test scripts/embedding-package-contract.test.ts
-          bun run test:react-native-hermes-bundle
+        run: OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES=1 bun test scripts/embedding-package-contract.test.ts
+
+      - name: React Native Metro to Hermes session bundle
+        run: bun run test:react-native-hermes-bundle
 
       - name: Reproduce committed modality WASM packages from clean Rust sources
         run: bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check

@@ -2010,6 +2010,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         expectedInstanceId: "box-capture-gate",
       }),
     ).toBe(true);
+    // Capture release racing the waiter's UPDATE/diagnostic must not manufacture
+    // lease_fenced while the same epoch, instance and holder remain current.
     const admission = await waitingAdmission;
     expect(admission.workspaceGeneration).toBe(1);
     const acquiredAfterCapture = await waitingAcquire;
