@@ -85,6 +85,59 @@ describe("MCP OAuth discovery", () => {
     expect(requested).toEqual([modernPrmUrl, modernAsMetadataUrl, openidUrl]);
   });
 
+  test("falls back to appended OpenID metadata only after standard predecessors are absent", async () => {
+    const requested: string[] = [];
+    const inserted = "https://auth.example.test/.well-known/openid-configuration/tenant";
+    const appended = "https://auth.example.test/tenant/.well-known/openid-configuration";
+    await resolveMcpOAuthDiscovery({
+      resourceUrl,
+      challenge: { scheme: "bearer", scope: [] },
+      validateEndpoint,
+      canonicalizeResource,
+      fetchMetadata: async ({ url }) => {
+        requested.push(url);
+        if (url === modernPrmUrl)
+          return {
+            status: "present",
+            url,
+            document: {
+              resource: resourceUrl,
+              authorization_servers: [modernAs.issuer],
+            },
+          };
+        if (url === appended) return { status: "present", url, document: modernAs };
+        return { status: "absent", url, httpStatus: 404 };
+      },
+    });
+    expect(requested).toEqual([modernPrmUrl, modernAsMetadataUrl, inserted, appended]);
+  });
+
+  test("does not skip a failed standard authorization-server metadata endpoint", async () => {
+    const requested: string[] = [];
+    await expect(
+      resolveMcpOAuthDiscovery({
+        resourceUrl,
+        challenge: { scheme: "bearer", scope: [] },
+        validateEndpoint,
+        canonicalizeResource,
+        fetchMetadata: async ({ url }) => {
+          requested.push(url);
+          if (url === modernPrmUrl)
+            return {
+              status: "present",
+              url,
+              document: {
+                resource: resourceUrl,
+                authorization_servers: [modernAs.issuer],
+              },
+            };
+          throw new Error("HTTP 401 standard metadata denied");
+        },
+      }),
+    ).rejects.toThrow("HTTP 401 standard metadata denied");
+    expect(requested).toEqual([modernPrmUrl, modernAsMetadataUrl]);
+  });
+
   test("does not downgrade an authorization failure at advertised or standard metadata", async () => {
     for (const advertised of [undefined, `${resourceUrl}/.well-known/oauth-protected-resource`]) {
       const requested: string[] = [];
