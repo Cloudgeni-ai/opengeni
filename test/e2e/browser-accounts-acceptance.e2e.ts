@@ -406,6 +406,10 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     (pathname === "/v1/auth/get-session" ||
       pathname === "/v1/auth/session-set" ||
       pathname === "/v1/workspaces" ||
+      (pathname === "/v1/billing" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+          requestUrl.searchParams.get("accountId") ?? "",
+        )) ||
       pathname.startsWith("/v1/workspaces/"));
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
@@ -2685,6 +2689,26 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const billingRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
+    };
+    expect(requestFailureProblem(billingRead)).toBeNull();
+    expect(requestFailureProblem({ ...billingRead, method: "POST" })).toContain("POST");
+    expect(requestFailureProblem({ ...billingRead, actorEpoch: null })).toContain("actor=missing");
+    expect(requestFailureProblem({ ...billingRead, url: `${publicOrigin}/v1/billing` })).toContain(
+      "/v1/billing",
+    );
+    expect(
+      requestFailureProblem({
+        ...billingRead,
+        dispatchPhase: "initialization",
+        responsePhase: "initialization",
+      }),
+    ).toContain("/v1/billing");
+    expect(requestFailureProblem({ ...billingRead, failure: "NS_ERROR_NET_RESET" })).toContain(
+      "/v1/billing",
+    );
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
