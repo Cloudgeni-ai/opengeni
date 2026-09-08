@@ -370,16 +370,18 @@ file readback, and overflow/error checks. HTTP lifecycle and service-install
 Learning-mode tests have passed on PostgreSQL on intermediate branch heads;
 the integrated final head still requires re-verification. The typed public
 bundled selection and composite per-Skill outcome notices are implemented.
-Composite publication ordering remains open below; passing its receipt-shape
-tests is not evidence of correct activation timing.
+Composite publication now waits for enclosing Pack/Plugin ownership finalization;
+the latest integrated PostgreSQL run remains a release gate.
 
-Final-head integration gates still open: merge refreshed `origin/main`, renumber
-the unpublished Skill migration after main's occupied ordinals, finish composite
-publication ordering, add sandbox-free supporting-path inventory, and resolve
-the new web startup bundle-budget regression. Independent review also identified
-a stale library slug/folder fallback to validate and a pre-existing lowercased
-source-path identity collision; changing existing installation keys requires a
-compatibility plan, not a silent key rewrite.
+Current main has been merged and the unpublished Skill migration renumbered to
+0426 without repinning published migration hashes. The browser tree-shaking fix
+is integrated; final production budget verification is still required.
+Remaining integration gates include sandbox-free supporting-path inventory,
+validation of library slug/folder resolution, and bringing main's new Projects
+guidance into the same host-controlled bundle selection and eager reader.
+Legacy lowercased source IDs are retained for compatibility. Imports reject a
+different case-sensitive folder that would collide with an existing ID; installing
+both case variants is unsupported until a dedicated identity migration exists.
 
 Frontmatter migration uses the shared YAML parser, preserves valid YAML bytes,
 and derives database descriptor columns from those files. Current legacy
@@ -397,15 +399,14 @@ Worker install retries consult their original-request receipt before remote
 source resolution. Startup contribution accounting now uses the actual bounded
 index text rather than loading every installed Skill folder.
 
-Composite-install audit still open: registry publication must not expose a
-source-managed Skill before its owning Pack/Plugin becomes effective. The old
-portable runtime filters effective owners, but the shared registry descriptor
-and snapshot paths need equivalent protection. Do not fix historical snapshots
-by filtering their canonical as-of content against mutable current owner state.
-Verify admission/publication ordering, incomplete operation recovery, and
-customization preservation with real PostgreSQL before rollout. Composite
-responses now retain per-Skill publication receipts and the existing UI notice
-distinguishes pending changes from installed distribution components.
+Composite installs stage revisions without making them active. Finalization
+publishes eligible guidance atomically with effective ownership, rechecking
+Learning, authority, concurrency, expiry, and customization. Manual approval
+cannot bypass unfinished ownership. Historical snapshots are never filtered
+against mutable current owner state. Composite responses retain separate original
+write and final publication receipts; the UI uses the final receipt when present.
+Re-run admission/publication, recovery, and customization tests on the final
+integrated PostgreSQL head before rollout.
 
 ## 6. Current implementation: verified baseline
 
@@ -482,15 +483,10 @@ may land alongside writes; do not leave a second live editor until the end.
 
 ## 8. Remaining decisions, not hidden assumptions
 
-Before implementation:
-
-- Exact shared identity/schema and registry migration, preserving current scope
-  and ownership semantics without adding new personal/org agent-write scope.
-- Map the agreed simple Learning behavior onto a safe shared write lifecycle.
-- Exact text validation, import failure policy, and bounded read/path discovery.
-- Final file-save/publish inputs and concurrency/retry conventions.
-- Concrete search provider and source resolution without a mandatory preview.
-- Compatibility behavior for native, repo, session and Pack sources.
+The shared schema, Learning write rules, text validation, save/publication
+concurrency, and source compatibility are specified above and implemented on the
+working branch. The remaining integration and verification gates are recorded
+in section 5; they are not new product decisions or claims of completion.
 
 Deferred rather than blocking this iteration: remote pre-install reading,
 Skills-over-MCP transport, automatic upstream merging, sophisticated review UI,

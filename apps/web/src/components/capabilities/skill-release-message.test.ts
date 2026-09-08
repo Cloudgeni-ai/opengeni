@@ -51,3 +51,33 @@ test("installed sources do not imply their pending Skill changes are live", () =
     ),
   ).toContain("awaiting approval. The source was removed");
 });
+
+test("final publication supersedes the original deferred receipt", () => {
+  const deferred = {
+    operationId: "child-write",
+    skillId: "skill",
+    revisionId: "revision",
+    outcome: "pending" as const,
+    pendingReason: "source_finalization" as const,
+    replayed: false,
+  };
+  const publication = {
+    ...deferred,
+    operationId: "publication",
+    sourceOperationId: "child-write",
+    activationEventId: "event",
+    outcome: "applied" as const,
+  };
+  expect(skillInstallationMessage([deferred], undefined)).toContain("waiting for installation");
+  expect(skillInstallationMessage([deferred], undefined, [publication])).toBeUndefined();
+  expect(
+    skillInstallationMessage([deferred], undefined, [
+      { ...publication, outcome: "pending", pendingReason: "approval", activationEventId: null },
+    ]),
+  ).toBe("1 Skill change is awaiting approval.");
+  expect(
+    skillInstallationMessage([deferred], undefined, [
+      { ...publication, outcome: "preserved", activationEventId: null },
+    ]),
+  ).toBe("Your customized Skill was preserved.");
+});

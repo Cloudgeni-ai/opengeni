@@ -140,7 +140,7 @@ not fabricated human execution identity.
 
 There is no current-owner filter in historical snapshot reads. Owner readiness is
 checked only at activation, and before/after snapshots retain the exact historical
-event boundary. Pre-0423 active child installations lacking an effective owner
+event boundary. Pre-0426 active child installations lacking an effective owner
 must be completed or disabled before migration; cutover fails clearly rather
 than inventing publication authority for unfinished historical composite work.
 
@@ -175,7 +175,7 @@ cross-tenant identity preservation, folder content, and the restored posture.
 Migration `0426_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never
-restart a pre-0423 binary: its installed reads bypass the registry content head.
+restart a pre-0426 binary: its installed reads bypass the registry content head.
 The migration preserves existing source ownership, backfills installed Skills
 by portable identity, and rejects invalid existing folders for repair rather
 than silently truncating them. New binding/write-receipt tables are FORCE-RLS and

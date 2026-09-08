@@ -1614,7 +1614,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           : preview.action === "update"
             ? `Updated ${pack.name}`
             : `Repaired ${pack.name}`,
-        { description: skillInstallationMessage(installed.skillWrites, installed.skillReleases) },
+        {
+          description: skillInstallationMessage(
+            installed.skillWrites,
+            installed.skillReleases,
+            installed.skillPublications,
+          ),
+        },
       );
       return true;
     } catch (error) {

@@ -23,7 +23,12 @@ export type SkillWriteReceipt = {
   skillId: string;
   revisionId: string;
   outcome: "applied" | "pending" | "preserved";
+  pendingReason?: "approval" | "source_finalization" | undefined;
   replayed: boolean;
+};
+export type SkillPublicationReceipt = SkillWriteReceipt & {
+  sourceOperationId: string;
+  activationEventId: string | null;
 };
 export type SkillSourceReleaseReceipt = {
   skillId: string;

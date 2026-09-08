@@ -1,4 +1,8 @@
-import type { SkillSourceReleaseReceipt, SkillWriteReceipt } from "@opengeni/sdk";
+import type {
+  SkillSourceReleaseReceipt,
+  SkillWriteReceipt,
+  SkillPublicationReceipt,
+} from "@opengeni/sdk";
 
 /** Source removal and removal of customized instructions are different outcomes. */
 export function skillReleaseMessage(
@@ -15,14 +19,27 @@ export function skillReleaseMessage(
 export function skillInstallationMessage(
   writes: readonly SkillWriteReceipt[] | undefined,
   releases: readonly SkillSourceReleaseReceipt[] | undefined,
+  publications?: readonly SkillPublicationReceipt[],
 ): string | undefined {
   let pending = 0;
+  let unfinished = 0;
   let preserved = 0;
+  const finalized = new Map(
+    (publications ?? []).map((receipt) => [receipt.sourceOperationId, receipt]),
+  );
   for (const write of writes ?? []) {
-    if (write.outcome === "pending") pending++;
-    if (write.outcome === "preserved") preserved++;
+    const effective = finalized.get(write.operationId) ?? write;
+    if (effective.outcome === "pending") {
+      if (effective.pendingReason === "source_finalization") unfinished++;
+      else pending++;
+    }
+    if (effective.outcome === "preserved") preserved++;
   }
   const notices: string[] = [];
+  if (unfinished)
+    notices.push(
+      `${unfinished} Skill ${unfinished === 1 ? "change is" : "changes are"} waiting for installation to finish.`,
+    );
   if (pending)
     notices.push(
       pending === 1

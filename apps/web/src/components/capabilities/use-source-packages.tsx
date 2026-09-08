@@ -212,7 +212,11 @@ export function useSourcePackages({
             : `${preview.manifest.name} installed`,
           {
             description:
-              skillInstallationMessage(installed.skillWrites, installed.skillReleases) ??
+              skillInstallationMessage(
+                installed.skillWrites,
+                installed.skillReleases,
+                installed.skillPublications,
+              ) ??
               `${preview.components.length} immutable components are owned by this Plugin installation.`,
           },
         );
