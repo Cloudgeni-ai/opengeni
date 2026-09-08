@@ -61,6 +61,18 @@ function catalogModel(
 }
 
 describe("preferredConnectedModelId", () => {
+  test("still offers explicitly free deployment models without credit onboarding", () => {
+    expect(
+      preferredConnectedModelId([
+        catalogModel({ id: "paid" }),
+        catalogModel({
+          id: "free",
+          cost: "free",
+          billing: { upstreamPayer: "deployment", metering: "external" },
+        }),
+      ]),
+    ).toBe("free");
+  });
   test("prefers a selectable connected subscription over OpenGeni credits", () => {
     expect(
       preferredConnectedModelId([
