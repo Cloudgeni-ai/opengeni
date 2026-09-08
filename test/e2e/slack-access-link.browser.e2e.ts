@@ -531,6 +531,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`) {
+      return json({ skills: [], nextCursor: null });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
