@@ -1,7 +1,7 @@
 import { ChatComposer } from "@opengeni/react";
 import { createRoot } from "react-dom/client";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
-import { ModelPicker, SessionToolPicker } from "../src/components/pickers";
+import { ModelPicker } from "../src/components/pickers";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import {
   emptyAttachments,
@@ -20,7 +20,7 @@ createRoot(document.getElementById("root")!).render(
         responsiveBasis="container"
         composer={idleComposer()}
         attachments={emptyAttachments()}
-        attachButtonClassName="console-composer-wide-control max-sm:hidden"
+        attachButtonClassName="hidden"
         controlsLeading={
           <>
             <ComposerMobilePlus
@@ -30,13 +30,8 @@ createRoot(document.getElementById("root")!).render(
               selection={galleryToolSelection}
               onToolSelectionChange={() => {}}
               repositories={{ selectedCount: 2, panel: <div>Repository options</div> }}
+              variableSets={{ selectedCount: 2, panel: <div>Variable set options</div> }}
             />
-            <button
-              className="console-composer-compact-control size-8 shrink-0 sm:hidden"
-              aria-label="Variable sets"
-            >
-              V
-            </button>
             <button className="size-8 shrink-0" aria-label="Dictate">
               Mic
             </button>
@@ -53,19 +48,6 @@ createRoot(document.getElementById("root")!).render(
               onEffortChange={() => {}}
               onLatencyModeChange={() => {}}
             />
-            <SessionToolPicker
-              servers={galleryToolServers}
-              firstPartyTools={galleryFirstPartyTools}
-              selection={galleryToolSelection}
-              onChange={() => {}}
-              triggerClassName="console-composer-wide-control max-sm:hidden"
-            />
-            <button className="console-composer-wide-control h-8 shrink-0 max-sm:hidden">
-              2 repos
-            </button>
-            <button className="console-composer-wide-control h-8 shrink-0 max-sm:hidden">
-              Variable sets · 2
-            </button>
           </div>
         }
         actionsStart={

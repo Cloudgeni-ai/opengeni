@@ -354,8 +354,8 @@ OpenRouter routes—default to `credits` unless
 `OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
 groups all deployment-provided models under OpenGeni, regardless of upstream
 provider or settlement. Only explicitly free models receive a Free badge; paid
-rows omit repetitive credit labels. Payment descriptions remain available to
-assistive technology and on hover, and `list_models` retains the explicit cost.
+rows omit repetitive credit labels. Subscription descriptions appear once per
+provider group; the Free badge stays explicit, and `list_models` retains the cost.
 Workspace/organization connections and connected subscriptions stay separate.
 
 ### OpenCode Zen temporary free contributor model
@@ -567,8 +567,10 @@ On August 27, 2026, OpenRouter advertised that slug with a 262,144-token context
 window, a 235,929-token completion ceiling, text input/output, function tools,
 tool choice, structured outputs, and reasoning controls. A live forced-function
 probe completed with `finish_reason=tool_calls`. OpenGeni therefore marks
-function calling and structured output runnable, while reasoning effort remains
-non-runnable until a reviewed effort vocabulary is mapped.
+function calling and structured output runnable. On September 8, 2026, OpenRouter
+`GET /api/v1/models` explicitly advertised reasoning efforts `low` and `medium`,
+with `medium` as default. Both are runnable; the Chat Completions adapter sends
+the selected value as `reasoning_effort`. Higher levels are not exposed.
 
 OpenRouter membership is curated and production never mirrors `GET /models`.
 The v1 database schema accepts reviewed `:free` slugs only; a key does not make
