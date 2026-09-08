@@ -18,7 +18,7 @@ test("every compute backend indexes and loads the project skill without a sandbo
       [],
       {
         activeSandboxBackend: sandboxBackend,
-        ...(sandboxBackend === "selfhosted" ? { sandboxWorkspaceRoot: "/Users/test/project" } : {}),
+        ...(sandboxBackend === "selfhosted" ? { sandboxWorkspaceRoot: "/srv/project" } : {}),
       },
     );
     const instructions = persistentAgentInstructionInspectionFor(agent).composed;
