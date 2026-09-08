@@ -414,7 +414,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      # Finish independent shards so one failure cannot hide other regressions.
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
