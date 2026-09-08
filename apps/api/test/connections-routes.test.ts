@@ -2820,7 +2820,7 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth start/callback supports same-origin 2025-03-26 metadata without RFC 8707 resource parameters", async () => {
+  test("oauth start/callback supports legacy metadata behind a protected API catch-all", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const upstreamMcp = startTestMcpServer();
@@ -2849,6 +2849,9 @@ describe("connections routes", () => {
               ? {}
               : { body: await request.arrayBuffer() }),
           });
+        }
+        if (url.pathname.startsWith("/mcp/")) {
+          return new Response("protected API route", { status: 401 });
         }
         if (url.pathname.includes("oauth-protected-resource")) {
           metadataRequests.push(url.pathname);
@@ -2923,7 +2926,6 @@ describe("connections routes", () => {
       expect(tokenRequests[0]!.get("resource")).toBeNull();
       expect(metadataRequests).toEqual([
         "/.well-known/oauth-protected-resource/mcp",
-        "/mcp/.well-known/oauth-protected-resource",
         "/.well-known/oauth-protected-resource",
         "/.well-known/oauth-authorization-server",
       ]);

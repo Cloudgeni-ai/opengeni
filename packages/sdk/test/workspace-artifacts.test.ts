@@ -23,12 +23,13 @@ describe("workspace artifacts SDK", () => {
         limit: 25,
         cursor: "opaque-cursor",
         status: "active",
+        sourceSessionId: WORKSPACE_ID,
       }),
     ).toEqual({ artifacts: [], nextCursor: null, truncated: false });
     expect(requests.map((request) => [request.method, request.url])).toEqual([
       [
         "GET",
-        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/published-artifacts?limit=25&cursor=opaque-cursor&status=active`,
+        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/published-artifacts?limit=25&cursor=opaque-cursor&status=active&sourceSessionId=${WORKSPACE_ID}`,
       ],
     ]);
   });

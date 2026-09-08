@@ -107,6 +107,9 @@ test("complete conversation loads queue and provides queue actions beside compos
     await flush(100);
     expect(streams).toBe(1);
     expect(view.container.querySelector("textarea")).not.toBeNull();
+    const surface = view.container.querySelector("[data-og-conversation]");
+    expect(surface?.classList.contains("bg-og-bg")).toBe(true);
+    expect(surface?.classList.contains("text-og-fg")).toBe(true);
     expect(view.container.textContent).toContain("2 queued");
     const button = [...view.container.querySelectorAll("button")].find((node) =>
       node.textContent?.includes("2 queued"),

@@ -78,7 +78,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
-import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
@@ -360,7 +359,10 @@ export function SessionRoute({
     windowFocused: document.hasFocus(),
   }));
   const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
-  const reconciledSessionRead = useRef<{ sessionId: string; revision: number } | null>(null);
+  const reconciledSessionRead = useRef<{
+    sessionId: string;
+    revision: number;
+  } | null>(null);
   useEffect(() => {
     if (!fetchedSession || sessionReadRevision === 0) return;
     if (
@@ -369,7 +371,10 @@ export function SessionRoute({
     ) {
       return;
     }
-    reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    reconciledSessionRead.current = {
+      sessionId,
+      revision: sessionReadRevision,
+    };
     const accepted = context.sessionChannelProjectionAuthority.recordRead(
       fetchedSession,
       sessionReadGeneration,
@@ -1122,7 +1127,7 @@ function useSessionEditableArtifactSummaries(input: {
   const [loaded, setLoaded] = useState<{
     key: string;
     status: SessionEditableArtifactsStatus;
-    artifacts: readonly EditableArtifactResource[];
+    artifacts: readonly SessionEditableArtifactSummary[];
   } | null>(null);
 
   useEffect(() => {
@@ -1136,24 +1141,18 @@ function useSessionEditableArtifactSummaries(input: {
             artifacts: previous?.key === authorityKey ? previous.artifacts : [],
           },
     );
-    void Promise.all([
-      import("@/lib/editable-artifact-client"),
-      import("@/lib/editable-artifact-browser"),
-    ])
-      .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
-        const result = await editableArtifactClient.listSessionEditableArtifacts(
+    void import("@/lib/session-artifact-discovery")
+      .then(async ({ discoverSessionArtifacts }) => {
+        const reconcile = await discoverSessionArtifacts(
           input.workspaceId,
           input.sessionId,
-          {
-            replicaId: createConsoleEditableArtifactReplicaId(),
-          },
+          () => current,
         );
         if (current) {
-          setLoaded({
+          setLoaded((previous) => ({
             key: authorityKey,
-            status: "ready",
-            artifacts: result.artifacts,
-          });
+            ...reconcile(previous?.key === authorityKey ? previous.artifacts : []),
+          }));
         }
       })
       .catch(() => {
