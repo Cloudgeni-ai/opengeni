@@ -148,6 +148,11 @@ Children inherit and can only narrow; scheduled-task `agentConfig` and automatio
 Skills, grant tools, or disable eager `skill_read`. Keep the selection stable on
 keyed-create retries. Never try to control it through arbitrary session metadata.
 
+Pack installation `manifestSnapshot` is historical JSON, not a current admission
+contract. Preserve it alongside `manifestDigest`; do not normalize its Skill
+labels or replay old headerless Skills as new session input. New inputs require
+valid `SKILL.md` frontmatter, which owns the name and description.
+
 ## Prompt And Context Contract
 
 Use each prompt surface for its exact authority and lifetime:

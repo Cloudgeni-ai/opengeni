@@ -161,14 +161,23 @@ metadata and overflow are repair-required, not silently normalized or dropped.
 Before replacing any current configuration, the migration inserts its original
 JSON, PostgreSQL JSONB-text SHA-256, replacement hash, tenant/source identity,
 conversion version and truthful migration actor into
-`skill_config_conversion_receipts` in the same transaction. This is immutable
-maintenance evidence, not another Skill head. The table has FORCE RLS and **no
+`skill_config_conversion_receipts` in the same transaction. These receipts survive
+source replacement, but cascade with deletion of their owning workspace, using
+the existing document-migration receipt retention pattern. Direct updates and
+deletes remain forbidden. This is immutable maintenance evidence, not another
+Skill head. The table has FORCE RLS and **no
 runtime table privileges**, including SELECT: an archived private Session's
 configuration must not become workspace-readable audit content. Authorized
 database maintenance uses explicit account/workspace context to inspect it.
 Workspace tenancy advisory locks, table locks and old-value CAS protect writes;
 the migration ledger makes committed retries no-ops. A failure rolls back all
 configuration changes, receipts, registry conversion and schema changes.
+
+Pack installation `manifestSnapshot` is returned as exact saved JSON alongside
+its unchanged digest, not parsed through current admission rules. This keeps
+disabled historical snapshots readable and does not turn them into executable
+configuration. Execution explicitly uses `StoredCapabilityPack`, deriving labels
+from valid frontmatter and rejecting headerless or malformed Skills.
 
 The owner-only RLS window also covers current configurations and the exact
 Session/automation/Pack tables read by preflight; FORCE is restored before commit.

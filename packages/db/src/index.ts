@@ -75711,9 +75711,7 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     packId: row.packId,
     status: row.status as PackInstallationStatus,
     version: row.version,
-    manifestSnapshot: row.manifestSnapshot
-      ? (row.manifestSnapshot as unknown as CapabilityPack)
-      : null,
+    manifestSnapshot: row.manifestSnapshot,
     manifestDigest: row.manifestDigest,
     selectedRigId: row.selectedRigId,
     installedBySubjectId: row.installedBySubjectId,

@@ -87,8 +87,8 @@ CREATE TABLE skill_write_receipts (
 CREATE TRIGGER skill_write_receipts_immutable BEFORE UPDATE OR DELETE ON skill_write_receipts
 FOR EACH ROW EXECUTE FUNCTION preference_registry_reject_history_mutation();
 
--- Maintenance audit only: never a current Skill/content authority. No runtime
--- writes or deletes; original JSON and hashes survive source replacement.
+-- Maintenance audit only: never a current Skill/content authority. Original
+-- JSON survives source replacement, but not deletion of its owning workspace.
 CREATE TABLE skill_config_conversion_receipts (
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
@@ -101,10 +101,19 @@ CREATE TABLE skill_config_conversion_receipts (
   replacement_hash text NOT NULL CHECK (replacement_hash ~ '^[0-9a-f]{64}$'),
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id,source_kind,source_id,conversion_version),
-  FOREIGN KEY (workspace_id,account_id) REFERENCES workspaces(id,account_id) ON DELETE RESTRICT
+  FOREIGN KEY (workspace_id,account_id) REFERENCES workspaces(id,account_id) ON DELETE CASCADE
 );
+CREATE FUNCTION opengeni_private.reject_skill_config_receipt_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- Same workspace-retention boundary as 0339 document migration receipts:
+  -- only a parent referential cascade may remove otherwise immutable evidence.
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'Skill configuration receipts are immutable' USING ERRCODE='55000';
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.reject_skill_config_receipt_mutation() FROM PUBLIC;
 CREATE TRIGGER skill_config_conversion_receipts_immutable BEFORE UPDATE OR DELETE ON skill_config_conversion_receipts
-FOR EACH ROW EXECUTE FUNCTION preference_registry_reject_history_mutation();
+FOR EACH ROW EXECUTE FUNCTION opengeni_private.reject_skill_config_receipt_mutation();
 
 DO $rls$
 DECLARE t text;

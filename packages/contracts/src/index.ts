@@ -10163,7 +10163,10 @@ export const PackInstallation = z.object({
   packId: z.string().min(1),
   status: PackInstallationStatus,
   version: z.number().int().positive(),
-  manifestSnapshot: CapabilityPack.nullable(),
+  // Exact accepted audit data, including historical fields and legacy Skills.
+  // Execution must explicitly parse StoredCapabilityPack; response validation
+  // must not project metadata, apply defaults, or change manifestDigest input.
+  manifestSnapshot: z.record(z.string(), z.unknown()).nullable(),
   manifestDigest: z
     .string()
     .regex(/^[0-9a-f]{64}$/)

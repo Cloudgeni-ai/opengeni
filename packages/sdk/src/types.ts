@@ -6471,7 +6471,8 @@ export type PackInstallation = {
   packId: string;
   status: PackInstallationStatus;
   version: number;
-  manifestSnapshot: CapabilityPack | null;
+  /** Exact accepted manifest, not a normalized executable Pack. */
+  manifestSnapshot: Record<string, unknown> | null;
   manifestDigest: string | null;
   selectedRigId: string | null;
   installedBySubjectId: string | null;

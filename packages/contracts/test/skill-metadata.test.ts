@@ -7,6 +7,7 @@ import {
   StoredSessionSkills,
   StoredAutomationSessionTemplate,
   StoredCapabilityPack,
+  PackInstallation,
 } from "../src/index";
 
 const files = [
@@ -15,6 +16,50 @@ const files = [
     content: "---\nname: deploy\ndescription: Run deployment checks\n---\n# Deploy",
   },
 ];
+
+test("installation audit snapshots preserve historical manifests instead of admitting them again", () => {
+  const historical = {
+    id: "legacy-pack",
+    name: "Historical Pack",
+    description: "Original description",
+    role: "agent",
+    category: "test",
+    version: "1",
+    skills: [
+      {
+        name: "Original Name",
+        description: "Original descriptor",
+        files: [{ path: "SKILL.md", content: "Original headerless instructions" }],
+      },
+    ],
+    extension: { retained: true },
+  };
+  const wire = {
+    id: crypto.randomUUID(),
+    accountId: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    packId: historical.id,
+    status: "disabled" as const,
+    version: 1,
+    manifestSnapshot: historical,
+    manifestDigest: "a".repeat(64),
+    selectedRigId: null,
+    installedBySubjectId: "user:original",
+    metadata: {},
+    enabledAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  };
+  expect(PackInstallation.parse(wire)).toEqual(wire);
+  expect(StoredCapabilityPack.safeParse(historical).success).toBe(false);
+  const yamlManifest = { ...historical, skills: [{ ...historical.skills[0], files }] };
+  expect(
+    PackInstallation.parse({ ...wire, manifestSnapshot: yamlManifest }).manifestSnapshot,
+  ).toEqual(yamlManifest);
+  expect(StoredCapabilityPack.parse(yamlManifest).skills[0]!.description).toBe(
+    "Run deployment checks",
+  );
+  expect(PackInstallation.safeParse({ ...wire, manifestSnapshot: [] }).success).toBe(false);
+});
 
 test("inline and Pack Skills derive metadata from files without duplicate input fields", () => {
   expect(SessionSkill.parse({ files })).toEqual({

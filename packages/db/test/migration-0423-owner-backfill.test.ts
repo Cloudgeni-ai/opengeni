@@ -463,6 +463,28 @@ describe("0423 owner-only Skill backfill", () => {
       expect(await owner`select id from capability_plugin_installations`).toHaveLength(0);
       expect(await owner`select id from preference_registry_preferences`).toHaveLength(0);
       expect(await owner`select preference_id from skill_source_bindings`).toHaveLength(0);
+      // Conversion archives are private workspace-owned evidence, not a reason
+      // to retain a deleted workspace or grant its runtime access to old text.
+      const archiveWorkspaceId = crypto.randomUUID();
+      const archiveSourceId = crypto.randomUUID();
+      await admin`INSERT INTO workspaces(id,account_id,name)
+        VALUES(${archiveWorkspaceId},${config.accountId},'Archive retention test')`;
+      await admin`INSERT INTO skill_config_conversion_receipts(account_id,workspace_id,source_kind,source_id,original_configuration,original_hash,replacement_hash)
+        VALUES(${config.accountId},${archiveWorkspaceId},'session',${archiveSourceId},'[]',${digest("[]")},${digest("[]")})`;
+      await expect(
+        admin`DELETE FROM skill_config_conversion_receipts WHERE workspace_id=${archiveWorkspaceId}`.execute(),
+      ).rejects.toThrow("immutable");
+      await expect(
+        admin.begin(async (tx) => {
+          await tx`SET LOCAL ROLE opengeni_app`;
+          await tx`SELECT set_config('opengeni.account_id',${config.accountId},true),set_config('opengeni.workspace_id',${archiveWorkspaceId},true)`;
+          await tx`SELECT original_configuration FROM skill_config_conversion_receipts`;
+        }),
+      ).rejects.toThrow("permission denied");
+      await admin`DELETE FROM workspaces WHERE id=${archiveWorkspaceId}`;
+      expect(
+        await admin`SELECT source_id FROM skill_config_conversion_receipts WHERE workspace_id=${archiveWorkspaceId}`,
+      ).toHaveLength(0);
     } finally {
       await owner.end();
     }
