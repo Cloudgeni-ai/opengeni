@@ -4,6 +4,13 @@ export function annotationHasNote(note: string): boolean {
   return note.trim().length > 0;
 }
 
+export function annotationDisplayOrdinal(
+  annotation: { ordinal?: number | undefined },
+  index: number,
+): number {
+  return typeof annotation.ordinal === "number" ? annotation.ordinal : index + 1;
+}
+
 export function sourceKindLabel(kind: TimelineAnnotationSource["kind"]): string {
   switch (kind) {
     case "user_message":

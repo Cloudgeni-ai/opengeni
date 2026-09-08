@@ -88,10 +88,12 @@ export function AnnotationNoteField({
   annotation,
   inputRef,
   onUpdate,
+  onCommit,
 }: {
   annotation: TimelineAnnotationLike;
   inputRef?: ((node: HTMLTextAreaElement | null) => void) | undefined;
   onUpdate: (id: string, note: string) => void;
+  onCommit?: (() => void) | undefined;
 }) {
   const localRef = useRef<HTMLTextAreaElement | null>(null);
   const setRef = (node: HTMLTextAreaElement | null) => {
@@ -116,6 +118,13 @@ export function AnnotationNoteField({
       onInput={(event) => {
         autosizeNote(event.currentTarget);
         onUpdate(annotation.id, event.currentTarget.value);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.currentTarget.value.trim().length === 0) return;
+        onCommit?.();
       }}
     />
   );

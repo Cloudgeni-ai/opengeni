@@ -2,4 +2,4 @@
 "@opengeni/react": patch
 ---
 
-Treat timeline annotations as quote-replies: compact accent quotes in the composer and sent messages, notes as the primary field, and incomplete-note guidance only at send.
+Keep composer timeline annotations as numbered pills: collapsed by default, popover for the note, Enter to commit, Escape to close.

@@ -9,6 +9,7 @@ import {
   AnnotationQuoteSourceButton,
   type TimelineAnnotationLike,
 } from "./timeline-annotation-chrome";
+import { annotationDisplayOrdinal } from "./timeline-annotation-shared";
 
 function focusableElements(root: HTMLElement): HTMLElement[] {
   return [
@@ -46,6 +47,13 @@ export function TimelineAnnotationsDialog({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const noteRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const portalStyle = usePortalTokenStyle(triggerRef.current);
+  const commitNotes = () => {
+    const complete = annotations.every((annotation) => {
+      const live = noteRefs.current.get(annotation.id);
+      return (live?.value ?? annotation.note).trim().length > 0;
+    });
+    if (complete) onDismiss(true);
+  };
 
   useLayoutEffect(() => {
     if (!focusAnnotationId) return;
@@ -149,51 +157,58 @@ export function TimelineAnnotationsDialog({
         </button>
       </div>
       <div className="grid gap-3">
-        {annotations.map((annotation, index) => (
-          <section key={annotation.id} aria-label={`Note ${index + 1}`}>
-            <AnnotationAccentRow>
-              <div className="flex items-start gap-1">
-                <div className="min-w-0 flex-1">
-                  <AnnotationQuoteSourceButton
-                    annotation={annotation}
-                    lines={2}
-                    onRevealSource={onRevealSource}
-                    onUnavailable={setUnavailableId}
-                  />
+        {annotations.map((annotation, index) => {
+          const ordinal = annotationDisplayOrdinal(annotation, index);
+          return (
+            <section key={annotation.id} aria-label={`Annotation ${ordinal}`}>
+              <AnnotationAccentRow>
+                <div className="flex items-start gap-1">
+                  <div className="min-w-0 flex-1">
+                    <p className="mb-0.5 text-og-xs font-medium tabular-nums text-og-fg-subtle">
+                      Annotation {ordinal}
+                    </p>
+                    <AnnotationQuoteSourceButton
+                      annotation={annotation}
+                      lines={2}
+                      onRevealSource={onRevealSource}
+                      onUnavailable={setUnavailableId}
+                    />
+                  </div>
+                  {editable && onRemove ? (
+                    <button
+                      type="button"
+                      className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
+                      aria-label={`Remove annotation ${ordinal}`}
+                      onClick={() => onRemove(annotation.id)}
+                    >
+                      <XIcon className="size-3.5" aria-hidden="true" />
+                    </button>
+                  ) : null}
                 </div>
-                {editable && onRemove ? (
-                  <button
-                    type="button"
-                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
-                    aria-label={`Remove annotation ${index + 1}`}
-                    onClick={() => onRemove(annotation.id)}
-                  >
-                    <XIcon className="size-3.5" aria-hidden="true" />
-                  </button>
+                {unavailableId === annotation.id ? (
+                  <p role="status" className="text-og-xs text-og-status-waiting">
+                    Source is outside the loaded timeline window.
+                  </p>
                 ) : null}
-              </div>
-              {unavailableId === annotation.id ? (
-                <p role="status" className="text-og-xs text-og-status-waiting">
-                  Source is outside the loaded timeline window.
-                </p>
-              ) : null}
-              {editable && onUpdate ? (
-                <AnnotationNoteField
-                  annotation={annotation}
-                  inputRef={(node) => {
-                    if (node) noteRefs.current.set(annotation.id, node);
-                    else noteRefs.current.delete(annotation.id);
-                  }}
-                  onUpdate={onUpdate}
-                />
-              ) : annotation.note ? (
-                <p className="mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
-                  {annotation.note}
-                </p>
-              ) : null}
-            </AnnotationAccentRow>
-          </section>
-        ))}
+                {editable && onUpdate ? (
+                  <AnnotationNoteField
+                    annotation={annotation}
+                    inputRef={(node) => {
+                      if (node) noteRefs.current.set(annotation.id, node);
+                      else noteRefs.current.delete(annotation.id);
+                    }}
+                    onUpdate={onUpdate}
+                    onCommit={commitNotes}
+                  />
+                ) : annotation.note ? (
+                  <p className="mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
+                    {annotation.note}
+                  </p>
+                ) : null}
+              </AnnotationAccentRow>
+            </section>
+          );
+        })}
       </div>
     </div>,
     document.body,

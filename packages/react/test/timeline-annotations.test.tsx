@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
-import { act } from "react";
+import { act, useState } from "react";
 import { MessageTimeline } from "../src";
 import {
   TimelineAnnotationDraftList,
@@ -215,7 +215,8 @@ describe("timeline annotations", () => {
     await rendered.unmount();
   });
 
-  test("shows quoted notes inline in the composer draft list", async () => {
+  test("keeps composer annotations as numbered pills until a note is opened", async () => {
+    await import("../src/components/timeline-annotations-dialog");
     let note = "";
     let removed = "";
     const rendered = await renderComponent(
@@ -230,13 +231,20 @@ describe("timeline annotations", () => {
         }}
       />,
     );
-    expect(rendered.container.textContent).toContain("Quoted note");
-    expect(rendered.container.textContent).toContain("beta");
+    const pill = rendered.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Annotation 1, needs a note: beta"]',
+    );
+    expect(pill).not.toBeNull();
+    expect(pill?.textContent).toContain("1");
+    expect(pill?.textContent).toContain("beta");
+    expect(rendered.container.textContent).not.toContain("Quoted note");
     expect(rendered.container.textContent).not.toContain("Add a note to send this quote.");
-    const textarea = rendered.container.querySelector("textarea");
+    expect(rendered.container.querySelector("textarea")).toBeNull();
+    const textarea = document.body.querySelector("textarea");
     expect(textarea).not.toBeNull();
     expect(textarea?.getAttribute("placeholder")).toBe("Add a note…");
     expect(document.activeElement).toBe(textarea);
+    expect(document.body.textContent).toContain("Annotation 1");
     await act(async () => {
       if (textarea) {
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
@@ -246,14 +254,104 @@ describe("timeline annotations", () => {
     });
     expect(note).toBe("Keep this exact constraint.");
     const remove = rendered.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Remove quoted note 1"]',
+      'button[aria-label="Remove annotation 1"]',
     );
     await act(async () => remove?.click());
     expect(removed).toBe("00000000-0000-4000-8000-000000000502");
     await rendered.unmount();
   });
 
-  test("keeps a full sentence quote visible in the composer draft", async () => {
+  test("keeps numbered composer pills collapsed until clicked", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const second: DraftTimelineAnnotation = {
+      ...annotation(""),
+      id: "00000000-0000-4000-8000-000000000522",
+      quote: "gamma",
+    };
+    const rendered = await renderComponent(
+      <TimelineAnnotationDraftList
+        annotations={[annotation("Keep this exact constraint."), second]}
+        onUpdate={() => undefined}
+        onRemove={() => undefined}
+      />,
+    );
+    expect(
+      rendered.container.querySelector('button[aria-label="Annotation 1: beta"]'),
+    ).not.toBeNull();
+    expect(
+      rendered.container.querySelector('button[aria-label="Annotation 2, needs a note: gamma"]'),
+    ).not.toBeNull();
+    expect(document.body.querySelector("textarea")).toBeNull();
+    await act(async () => {
+      rendered.container
+        .querySelector<HTMLButtonElement>('button[aria-label="Annotation 2, needs a note: gamma"]')
+        ?.click();
+    });
+    await waitFor(
+      () => document.body.querySelector("textarea") !== null,
+      "annotation 2 popover did not open",
+    );
+    expect(document.body.textContent).toContain("Annotation 2");
+    expect(document.body.querySelector("textarea")).not.toBeNull();
+    await rendered.unmount();
+  });
+
+  test("commits a completed note with Enter and closes the popover with Escape", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    function Harness() {
+      const [items, setItems] = useState([annotation("")]);
+      return (
+        <TimelineAnnotationDraftList
+          annotations={items}
+          focusAnnotationId={items[0]?.id}
+          onUpdate={(id, next) => {
+            setItems((current) =>
+              current.map((item) => (item.id === id ? { ...item, note: next } : item)),
+            );
+          }}
+          onRemove={() => undefined}
+        />
+      );
+    }
+    const rendered = await renderComponent(<Harness />);
+    const textarea = document.body.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    await act(async () => {
+      if (textarea) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        setter?.call(textarea, "Keep this exact constraint.");
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      }
+    });
+    await act(async () => {
+      textarea?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+    await waitFor(
+      () => document.body.querySelector('[role="dialog"]') === null,
+      "Enter did not close the annotation popover",
+    );
+    await act(async () => {
+      rendered.container
+        .querySelector<HTMLButtonElement>('button[aria-label="Annotation 1: beta"]')
+        ?.click();
+    });
+    await waitFor(
+      () => document.body.querySelector('[role="dialog"]') !== null,
+      "annotation popover did not reopen",
+    );
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await waitFor(
+      () => document.body.querySelector('[role="dialog"]') === null,
+      "Escape did not close the annotation popover",
+    );
+    await rendered.unmount();
+  });
+
+  test("keeps a full sentence quote visible on the numbered composer pill", async () => {
     const rendered = await renderComponent(
       <TimelineAnnotationDraftList
         annotations={[
@@ -267,6 +365,7 @@ describe("timeline annotations", () => {
       />,
     );
     expect(rendered.container.textContent).toContain("OpenGeni stack is working.");
+    expect(rendered.container.querySelector("textarea")).toBeNull();
     await rendered.unmount();
   });
 
