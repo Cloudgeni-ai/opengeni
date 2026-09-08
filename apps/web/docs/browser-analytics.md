@@ -47,3 +47,10 @@ legacy managed sign-in UI, not broker account-slot additions. Never count agent
 continuations, session creation, or recent page events as successful logins or
 current online users. Always state the product, environment, time zone, interval,
 and event definition used.
+
+For a manual browser check, run an isolated full dev stack with an empty-credit
+workspace, then run `OPENGENI_ANALYTICS_E2E_URL=http://127.0.0.1:3000 bun
+apps/web/test/validate-analytics-browser.ts`. The script intercepts telemetry
+locally and verifies consent, navigation, foreground activity and the visible
+credit notice against the real app. It requires the Vite development server and
+is separate from the default CI browser fixtures.
