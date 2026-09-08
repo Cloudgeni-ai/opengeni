@@ -71,10 +71,17 @@ export function createSiteToolBridge(input: {
 
   return {
     fetch: async (message, signal) => {
-      const path = siteSessionPath(message.path, input.workspaceId, message.method);
+      const path = siteSessionPath(
+        message.path,
+        input.workspaceId,
+        message.method,
+        input.artifactId,
+      );
       // The host owns auth and tenant selection. Only content negotiation and
       // event replay headers come from the embedded SDK.
       const headers = new Headers();
+      headers.set("x-opengeni-site-id", input.artifactId);
+      headers.set("x-opengeni-site-version", input.siteVersionId);
       for (const [name, value] of message.headers) {
         if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
           headers.set(name, value);

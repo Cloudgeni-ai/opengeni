@@ -451,6 +451,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      "X-OpenGeni-Site-Id",
+      "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
     ],
     exposeHeaders: [

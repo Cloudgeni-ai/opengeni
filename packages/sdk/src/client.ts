@@ -579,17 +579,21 @@ import {
 } from "./types";
 
 function sessionListQuery(options: {
+  originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
 }): Record<string, string> {
   const { limit, parentSessionId } = options;
   return {
+    ...(options.originSiteId ? { originSiteId: options.originSiteId } : {}),
     ...(limit === undefined ? {} : { limit: String(limit) }),
     ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
   };
 }
 
 export type SessionListPageOptions = {
+  /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
+  originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
   cursor?: string;
@@ -616,6 +620,7 @@ export type SessionListPageOptions = {
 
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
+    options.originSiteId !== undefined ||
     options.channelId !== undefined ||
     options.createdBy !== undefined ||
     options.updatedFrom !== undefined ||
@@ -1256,18 +1261,19 @@ export class OpenGeniClient {
   async listSessions(
     workspaceId: string,
     options: {
+      originSiteId?: string;
       limit?: number;
       parentSessionId?: string | null;
       search?: string;
     } = {},
   ): Promise<Session[]> {
-    // Search was added with the pin-aware page endpoint. An older API silently
+    // Search and Site filtering use the pin-aware page endpoint. An older API silently
     // ignores unknown query parameters on the historical array endpoint, which
     // would turn a search into a plausible-looking unfiltered result. Route
-    // searches through listSessionPage so its rolling-version shape check can
+    // these calls through listSessionPage so its rolling-version shape check can
     // fail explicitly on an older server; retain the array endpoint for every
     // pre-existing call shape.
-    if (options.search?.trim()) {
+    if (options.search?.trim() || options.originSiteId) {
       const page = await this.listSessionPage(workspaceId, options);
       return [...page.pinned, ...page.sessions];
     }
@@ -1377,6 +1383,13 @@ export class OpenGeniClient {
     }
     if (hasSessionPageFilters(options) && response.filtersApplied !== true) {
       throw new Error("The connected OpenGeni API does not support filtered session lists");
+    }
+    if (
+      options.originSiteId &&
+      (!response.originSiteId ||
+        (options.originSiteId !== "current" && response.originSiteId !== options.originSiteId))
+    ) {
+      throw new Error("The connected OpenGeni API does not support Site-filtered session lists");
     }
     return response;
   }

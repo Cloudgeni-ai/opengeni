@@ -3,6 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { formatWaitingSince } from "@/lib/format";
+import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { Session, SessionStatus } from "@/types";
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
@@ -161,6 +162,8 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
    -------------------------------------------------------------------------- */
 
 export type SessionTreeNode = {
+  /** Presentation-only group; never persisted or used for session actions. */
+  siteGroup?: SessionSiteOrigin;
   session: Session;
   children: SessionTreeNode[];
   /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
@@ -252,6 +255,23 @@ function railStatusCounts(
   node: SessionTreeNode,
   localDeliveryAttention: ReadonlyMap<string, number>,
 ): RailStatusCounts {
+  if (node.siteGroup) {
+    const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
+    for (const key of [
+      "total",
+      "sendFailed",
+      "attention",
+      "failed",
+      "active",
+      "unread",
+      "activeWork",
+    ] as const)
+      counts[key] = 0;
+    counts.attentionSince = null;
+    for (const child of node.children)
+      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+    return counts;
+  }
   const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
   const stats = node.session.treeStats;
   if (stats) {
@@ -729,6 +749,39 @@ export function groupScheduledRuns(roots: SessionTreeNode[]): SessionTreeNode[] 
   return grouped;
 }
 
+/** Explicit project placement wins; pins have already been split out. */
+export function groupSiteConversations(roots: SessionTreeNode[]): SessionTreeNode[] {
+  const groups = new Map<string, SessionTreeNode[]>();
+  for (const node of roots) {
+    const origin = sessionSiteOrigin(node.session);
+    if (!origin || node.session.channelId || node.session.parentSessionId) continue;
+    const members = groups.get(origin.siteId) ?? [];
+    members.push(node);
+    groups.set(origin.siteId, members);
+  }
+  const emitted = new Set<string>();
+  return roots.flatMap((node) => {
+    const origin = sessionSiteOrigin(node.session);
+    const members =
+      origin && !node.session.channelId && !node.session.parentSessionId
+        ? groups.get(origin.siteId)
+        : undefined;
+    if (!members || !origin) return [node];
+    if (emitted.has(origin.siteId)) return [];
+    emitted.add(origin.siteId);
+    members.sort((a, b) => compareSessionActivity(a.session, b.session));
+    const latest = members[0]!;
+    return [
+      {
+        siteGroup: origin,
+        session: { ...latest.session, id: `site:${origin.siteId}`, treeStats: undefined },
+        children: members,
+        hasActiveDescendant: members.some(nodeIsActive),
+      },
+    ];
+  });
+}
+
 export function categorizeRailRoots(
   rootNodes: SessionTreeNode[],
   now: Date = new Date(),
@@ -991,6 +1044,7 @@ export function projectRailSessions(sessions: Session[], hierarchyMode: boolean)
 export function buildPinnedRailSections(
   sessions: Session[],
   now: Date = new Date(),
+  options: { groupSites?: boolean } = {},
 ): PinnedRailSections {
   const complete = buildRailForest(sessions, now);
   const roots = forestRoots(complete);
@@ -1020,7 +1074,12 @@ export function buildPinnedRailSections(
   return {
     complete,
     pinned,
-    ordinary: categorizeRailRoots(groupScheduledRuns(ordinaryRoots), now),
+    ordinary: categorizeRailRoots(
+      options.groupSites === false
+        ? groupScheduledRuns(ordinaryRoots)
+        : groupSiteConversations(groupScheduledRuns(ordinaryRoots)),
+      now,
+    ),
   };
 }
 
@@ -1049,7 +1108,7 @@ export function visibleTreeRows(
 ): { node: SessionTreeNode; depth: number }[] {
   const rows: { node: SessionTreeNode; depth: number }[] = [];
   const walk = (node: SessionTreeNode, depth: number): void => {
-    rows.push({ node, depth });
+    if (!node.siteGroup) rows.push({ node, depth });
     if (node.children.length > 0 && expanded.has(node.session.id)) {
       for (const child of node.children) {
         walk(child, depth + 1);

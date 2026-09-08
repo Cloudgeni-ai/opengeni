@@ -1269,6 +1269,11 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
+Sessions created through published Sites carry host-stamped origin independently
+of project/parentage. Origin-filtered session pages back both generated selectors
+and the host Conversations sheet; unfiled chats group under a Site activity row,
+while project placement and pins win. See [`site-conversations.md`](site-conversations.md).
+
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
