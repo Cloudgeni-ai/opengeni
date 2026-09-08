@@ -111,6 +111,27 @@ async function wakeOrganizationPool(tx: Database, input: OrganizationActor) {
   }
 }
 
+/** Policy writes share the pool-before-credential lock order and durable wake. */
+export async function withOrganizationXaiCapacityMutation<T>(
+  db: Database,
+  input: OrganizationActor,
+  mutate: (tx: Database) => Promise<T | null>,
+): Promise<T | null> {
+  return await withAdministrator(db, input, async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-xai:${input.organizationId}`}, 0))`,
+    );
+    await tx
+      .select({ id: schema.xaiRotationSettings.id })
+      .from(schema.xaiRotationSettings)
+      .where(organizationRotation(input.organizationId))
+      .for("update");
+    const updated = await mutate(tx);
+    if (updated !== null) await wakeOrganizationPool(tx, input);
+    return updated;
+  });
+}
+
 export async function upsertOrganizationXaiSubscription(
   db: Database,
   input: OrganizationActor & {

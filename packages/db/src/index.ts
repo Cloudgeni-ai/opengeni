@@ -1,4 +1,10 @@
-import { assignedConnectionDefault } from "./model-connection-access";
+import {
+  assignedConnectionDefault,
+  updateModelConnectionAccess as updateModelConnectionAccessPolicy,
+  type ModelConnectionAccess,
+  type ModelConnectionTarget,
+} from "./model-connection-access";
+import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
 export {
   assertModelConnectionAllowsTurn,
   modelAllowedByConnections,
@@ -27262,6 +27268,42 @@ export async function quarantineCodexCredentialForLease(
         return { action: "recorded", failoverCount, maxFailovers, exhausted } as const;
       }),
   );
+}
+
+/** Commit organization subscription policy and its durable capacity wake atomically. */
+export async function updateModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  if (target.workspaceId !== null || (target.kind !== "codex" && target.kind !== "supergrok")) {
+    return await updateModelConnectionAccessPolicy(db, target, policy);
+  }
+  const actor = { organizationId: target.accountId, actorSubjectId: target.subjectId };
+  return await withOrganizationCodexAdministrator(db, actor, async (tx) => {
+    if (target.kind === "supergrok") {
+      return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
+        updateModelConnectionAccessPolicy(scopedDb, target, policy),
+      );
+    }
+    // Match ordinary organization mutations: workspace source locks, then pool,
+    // then credential and waiter rows. Keep Personal inventory internal.
+    await lockOrganizationCodexSubscriptionSources(tx, target.accountId);
+    await tx
+      .select({ accountId: schema.organizationCodexRotationSettings.accountId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, target.accountId))
+      .for("update");
+    const updated = await updateModelConnectionAccessPolicy(tx, target, policy);
+    if (updated) {
+      await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+        accountId: target.accountId,
+        reason: "organization_codex_connection_access_changed",
+        restoreWorkspaceId: null,
+      });
+    }
+    return updated;
+  });
 }
 
 /** Compose existing pool metadata without a leaf-to-root database import cycle. */

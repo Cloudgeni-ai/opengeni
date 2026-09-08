@@ -682,3 +682,91 @@ realTest.each(["shared", "personal"] as const)(
     ).toEqual({ disconnected: true });
   },
 );
+
+realTest.each([
+  ["codex", "shared"],
+  ["codex", "personal"],
+  ["supergrok", "shared"],
+  ["supergrok", "personal"],
+] as const)(
+  "restoring %s access wakes an armed %s workspace waiter atomically",
+  async (kind, workspaceKind) => {
+    const actor = await fixture();
+    const workspaceId =
+      workspaceKind === "personal" ? actor.personalWorkspaceId : actor.workspaceId;
+    const connectionId =
+      kind === "codex"
+        ? (
+            await upsertOrganizationCodexSubscriptionCredential(client.db, {
+              ...actor,
+              credentialEncrypted: "test-encrypted-envelope",
+              chatgptAccountId: "restore-account",
+              scopes: null,
+              planType: "team",
+              isFedramp: false,
+              expiresAt: null,
+              lastRefreshAt: null,
+            })
+          ).id
+        : (await connect(actor, "restore-account")).account.id;
+    const target = {
+      accountId: actor.organizationId,
+      workspaceId: null,
+      subjectId: actor.actorSubjectId,
+      kind,
+      connectionId,
+    };
+    const initial = await getModelConnectionAccess(client.db, target);
+    const sessionId = crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+    await withSessionActivityRlsContext(
+      client.db,
+      { accountId: actor.organizationId, workspaceId },
+      async (tx) => {
+        await tx.execute(sql`insert into sessions(id,account_id,workspace_id,initial_message,model,reasoning_effort,latency_mode,sandbox_backend,sandbox_group_id,status,temporal_workflow_id,tool_policy)
+      values (${sessionId},${actor.organizationId},${workspaceId},'test','test-model','medium','standard','none',${sessionId},'running',${`test-${sessionId}`},'{"mode":"explicit","inheritedFromSessionId":null}'::jsonb)`);
+        await tx.execute(sql`insert into session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,status,source,position,prompt,model,reasoning_effort,latency_mode,sandbox_backend,execution_generation,xai_provider_account_authority_snapshot)
+      values (${turnId},${actor.organizationId},${workspaceId},${sessionId},${crypto.randomUUID()},${`test-${sessionId}`},'running','user',1,'test','test-model','medium','standard','none',1,'{"version":1,"scope":"organization"}'::jsonb)`);
+      },
+    );
+    const waiterTable = kind === "codex" ? "codex_capacity_waiters" : "xai_capacity_waiters";
+    if (kind === "codex") {
+      await shared.admin`insert into codex_capacity_waiters(account_id,workspace_id,session_id,blocked_turn_id,blocked_turn_generation,workflow_id,next_check_at,reset_kind)
+      values (${actor.organizationId},${workspaceId},${sessionId},${turnId},1,${`test-${sessionId}`},now() + interval '1 day','bounded_refresh')`;
+    } else {
+      await shared.admin`insert into xai_capacity_waiters(account_id,workspace_id,session_id,blocked_turn_id,blocked_turn_generation,workflow_id,authority_scope,next_check_at)
+      values (${actor.organizationId},${workspaceId},${sessionId},${turnId},1,${`test-${sessionId}`},'organization',now() + interval '1 day')`;
+    }
+    const revision = async () => {
+      const [row] = await shared.admin<
+        { wake_revision: number }[]
+      >`select wake_revision from ${shared.admin(waiterTable)} where session_id = ${sessionId}`;
+      return Number(row!.wake_revision);
+    };
+    const removed = await updateModelConnectionAccess(client.db, target, {
+      ...initial!,
+      allowedWorkspaces: [],
+      allowPersonalWorkspaces: false,
+    });
+    const beforeRestore = await revision();
+    const restore = { ...removed!, allowedWorkspaces: null, allowPersonalWorkspaces: true };
+    await expect(
+      client.db.transaction(async (tx) => {
+        await updateModelConnectionAccess(tx, target, restore);
+        throw new Error("roll back policy and wake");
+      }),
+    ).rejects.toThrow("roll back policy and wake");
+    expect(await revision()).toBe(beforeRestore);
+    expect(await getModelConnectionAccess(client.db, target)).toEqual(removed);
+    expect(await updateModelConnectionAccess(client.db, target, restore)).not.toBeNull();
+    expect(await revision()).toBeGreaterThan(beforeRestore);
+    const afterRestore = await revision();
+    expect(await updateModelConnectionAccess(client.db, target, restore)).toBeNull();
+    expect(await revision()).toBe(afterRestore);
+    const [wake] = await shared.admin<
+      { reason: string; due: boolean }[]
+    >`select reason, next_attempt_at <= now() as due from session_workflow_wake_outbox where session_id = ${sessionId}`;
+    expect(wake?.reason).toBe(kind === "codex" ? "codex_capacity" : "xai_capacity");
+    expect(wake?.due).toBe(true);
+  },
+);

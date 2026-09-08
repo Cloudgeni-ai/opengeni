@@ -19,7 +19,12 @@ assignment in addition to existing FORCE-RLS tenant and subject policies. The
 update guard prevents a workspace caller from changing inherited policies.
 Updates require an independent compare-and-set version and record the actor and
 time without changing the token or API-key revision. Key replacement and
-subscription reconnection retain the connection's policy.
+subscription reconnection retain the connection's policy. Organization subscription
+policy writes enter through `updateModelConnectionAccess` in `packages/db/src/index.ts`,
+which preserves each provider's pool lock order and commits capacity-waiter wakes
+with the policy update. Restoring shared or Personal-workspace access therefore
+rechecks queued turns promptly; failed compare-and-set writes and rollbacks emit
+no wake. The inventory and wake targets remain internal.
 
 Canonical storage helpers are `packages/db/src/model-connection-access.ts` and
 `packages/db/src/workspace-model-connection-access.ts`. The metadata-only
