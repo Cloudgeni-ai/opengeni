@@ -83,7 +83,9 @@ import { useAppContext } from "@/context";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
+  applySessionArchiveProjection,
   authoritativeSessionContinuationChannels,
+  compareSessionArchiveOrder,
   emptySessionContinuation,
   mergeSessionContinuation,
   projectSessionArchiveMembership,
@@ -1302,7 +1304,10 @@ export function SessionList() {
         rail.workspaceId,
       ).filter((session) => !archiveTransitions.has(session.rootSessionId)),
     ).complete;
-    return [...archiveForest.running, ...archiveForest.grouped.flatMap((group) => group.sessions)];
+    return [
+      ...archiveForest.running,
+      ...archiveForest.grouped.flatMap((group) => group.sessions),
+    ].sort((a, b) => compareSessionArchiveOrder(a.session, b.session));
   }, [
     archiveMembershipEvidence,
     archiveTransitions,
@@ -1508,7 +1513,7 @@ export function SessionList() {
     [context, rail.workspaceId, refreshSessionPages],
   );
   const onArchive = useCallback<ArchiveFn>(
-    async (session, archived, restoreFocusTo = "row") => {
+    async function archiveSession(session, archived, restoreFocusTo = "row") {
       if (archiving.current.has(session.id)) return;
       const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
       if (!acceptedTransition) return;
@@ -1522,29 +1527,21 @@ export function SessionList() {
       };
       archiving.current.add(session.id);
       setArchiveTransitions((current) => new Set(current).add(session.id));
+      let archivedResult: Session | undefined;
       try {
         const updated = await context.client.updateSessionArchive(rail.workspaceId, session.id, {
           archived,
           expectedVersion: session.archiveVersion ?? 0,
         });
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         setArchiveOverrides((current) => {
           const next = new Map(current).set(updated.id, updated);
           if (next.size > 64) next.delete(next.keys().next().value!);
           return next;
         });
         context.setSession((current) =>
-          current?.id === updated.id
-            ? {
-                ...current,
-                archived: updated.archived,
-                archivedAt: updated.archivedAt,
-                archiveVersion: updated.archiveVersion,
-                pinned: updated.pinned,
-                pinnedAt: updated.pinnedAt,
-                pinVersion: updated.pinVersion,
-                activelyWorking: updated.activelyWorking,
-                attentionVersion: updated.attentionVersion,
-              }
+          current?.id === updated.id && current.workspaceId === updated.workspaceId
+            ? applySessionArchiveProjection(current, updated)
             : current,
         );
         notifySessionListChanged({
@@ -1552,9 +1549,10 @@ export function SessionList() {
           sessionId: session.id,
           archived: updated.archived,
         });
-        toast.success(archived ? "Chat archived" : "Chat restored");
+        archivedResult = updated;
         await refreshSessionPages();
       } catch (archiveError) {
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
           description: archiveError instanceof Error ? archiveError.message : String(archiveError),
         });
@@ -1574,6 +1572,27 @@ export function SessionList() {
           next.delete(session.id);
           return next;
         });
+        if (
+          archivedResult &&
+          context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          const updated = archivedResult;
+          toast.success(archived ? "Chat archived" : "Chat restored", {
+            ...(archived
+              ? {
+                  duration: 8000,
+                  action: {
+                    label: "Undo",
+                    onClick: () => {
+                      if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition))
+                        return;
+                      void archiveSession(updated, false);
+                    },
+                  },
+                }
+              : {}),
+          });
+        }
       }
     },
     [context, rail.workspaceId, refreshSessionPages],
@@ -2999,7 +3018,6 @@ function SessionGroupPaginationControl(
   props: SessionGroupPaginationProps & { className?: string; fallbackFocusId?: string },
 ) {
   const { failed, group, hasMore, loading, onLoadMore } = props;
-  const sentinelRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const groupRef = useRef(group);
   groupRef.current = group;
@@ -3028,33 +3046,10 @@ function SessionGroupPaginationControl(
     });
   }, [onLoadMore, props.fallbackFocusId]);
   const isActiveGroup = group.kind === "activity" && group.group === "active";
-  useEffect(() => {
-    // Active is derived from root and descendant state after hydration. Its
-    // query can span history, so discovery is explicitly user-driven.
-    if (isActiveGroup) return;
-    if (!hasMore || loading || failed) return;
-    const sentinel = sentinelRef.current;
-    if (!sentinel || typeof IntersectionObserver === "undefined") return;
-    const root =
-      sentinel.closest<HTMLElement>("[data-rail-scroll-viewport]") ??
-      sentinel.closest<HTMLElement>("[data-sessionpin-session-list]");
-    if (!root) return;
-    let requested = false;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (requested || !entries.some((entry) => entry.isIntersecting)) return;
-        requested = true;
-        void loadWithFocus();
-      },
-      { root, rootMargin: "0px 0px 80px 0px" },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [failed, group.key, isActiveGroup, hasMore, loading, loadWithFocus]);
 
   const action = loading ? "Loading" : failed ? "Retry" : "Load";
   return (
-    <div ref={sentinelRef} className={cn("px-2 py-1 text-center", props.className)}>
+    <div className={cn("px-2 py-1 text-center", props.className)}>
       <button
         ref={buttonRef}
         type="button"
