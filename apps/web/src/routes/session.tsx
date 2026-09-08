@@ -2183,7 +2183,7 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
+              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5 max-sm:flex-nowrap">
                 <ModelPicker
                   open={modelPickerSession === props.session.id}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}

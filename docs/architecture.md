@@ -57,9 +57,9 @@ The product has several deliberately separate surfaces:
 - **Operations** include usage metering, entitlement admission, billing,
   deployment contracts, observability, and release evidence.
 
-The core design goal is not merely to call a model. It is to make a long-lived,
-interruptible, multi-tenant agent run durable and recoverable without turning
-live transports, workflow memory, or provider state into accidental authority.
+OpenGeni makes long-lived, interruptible, multi-tenant agent runs durable and
+recoverable without turning live transports, workflow memory, or provider state
+into authority.
 
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
