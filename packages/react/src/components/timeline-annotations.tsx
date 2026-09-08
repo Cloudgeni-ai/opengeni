@@ -35,7 +35,7 @@ export function TimelineAnnotationCards({
       className={cn(
         "grid gap-2",
         annotations.length >= ANNOTATION_CARD_STACK_SCROLL_AT &&
-          "max-h-[min(28rem,55vh)] overflow-y-auto overscroll-contain pr-1",
+          "max-h-[min(28rem,55vh)] overflow-x-hidden overflow-y-auto overscroll-contain pr-1",
         className,
       )}
     >

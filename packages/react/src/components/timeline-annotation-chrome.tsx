@@ -107,7 +107,7 @@ export function AnnotationNotePreview({
         data-og-annotation-note=""
         data-og-annotation-note-expanded={expanded ? "true" : "false"}
         className={cn(
-          "mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg",
+          "mt-0.5 break-words whitespace-pre-wrap text-og-sm leading-5 text-og-fg",
           !expanded && "line-clamp-4",
         )}
       >
@@ -159,7 +159,7 @@ export function AnnotationNoteField({
       maxLength={2048}
       placeholder="Add a note…"
       aria-label="Note"
-      className="mt-0.5 max-h-40 min-h-8 w-full resize-none overflow-y-auto border-0 bg-transparent px-0 py-1 text-og-sm leading-5 text-og-fg outline-hidden placeholder:text-og-fg-subtle focus-visible:ring-0"
+      className="mt-0.5 max-h-40 min-h-8 w-full resize-none overflow-y-auto break-words border-0 bg-transparent px-0 py-1 text-og-sm leading-5 text-og-fg outline-hidden placeholder:text-og-fg-subtle focus-visible:ring-0"
       onInput={(event) => {
         autosizeNote(event.currentTarget);
         onUpdate(annotation.id, event.currentTarget.value);

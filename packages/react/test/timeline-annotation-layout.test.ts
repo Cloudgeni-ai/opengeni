@@ -5,6 +5,7 @@ import {
   annotationViewportBox,
   clampAnnotationDialogPlacement,
   layoutAnnotationBadges,
+  scrollAnnotationRowIntoList,
 } from "../src/components/timeline-annotation-layout";
 
 describe("timeline annotation density layout", () => {
@@ -20,8 +21,8 @@ describe("timeline annotation density layout", () => {
     );
     expect(new Set(laid.map((marker) => `${marker.left},${marker.top}`)).size).toBe(3);
     expect(laid[0]?.left).toBe(120);
-    expect(laid[1]?.left).toBe(140);
-    expect(laid[2]?.left).toBe(160);
+    expect(laid[1]?.left).toBe(152);
+    expect(laid[2]?.left).toBe(184);
   });
 
   test("wraps a dense badge cluster before it leaves the viewport", () => {
@@ -37,7 +38,26 @@ describe("timeline annotation density layout", () => {
       viewport,
     );
     expect(laid.every((marker) => marker.left <= viewport.right - 12)).toBe(true);
+    expect(laid.every((marker) => marker.top <= viewport.bottom - 12)).toBe(true);
     expect(laid.some((marker) => marker.top > 40)).toBe(true);
+  });
+
+  test("keeps a twelve-badge pile inside a short bottom-right viewport", () => {
+    const viewport = { left: 0, top: 0, right: 220, bottom: 160 };
+    const laid = layoutAnnotationBadges(
+      Array.from({ length: 12 }, (_, index) => ({
+        id: String(index + 1),
+        ordinal: index + 1,
+        left: 210,
+        top: 148,
+        incomplete: false,
+      })),
+      viewport,
+    );
+    expect(laid).toHaveLength(12);
+    expect(new Set(laid.map((marker) => `${marker.left},${marker.top}`)).size).toBeGreaterThan(1);
+    expect(laid.every((marker) => marker.left >= 12 && marker.left <= 208)).toBe(true);
+    expect(laid.every((marker) => marker.top >= 8 && marker.top <= 148)).toBe(true);
   });
 
   test("hides quote geometry that has scrolled out of the timeline", () => {
@@ -88,5 +108,18 @@ describe("timeline annotation density layout", () => {
     expect(annotationNoteNeedsDisclosure("Keep this exact constraint.")).toBe(false);
     expect(annotationNoteNeedsDisclosure("Keep this exact constraint.\n".repeat(40))).toBe(true);
     expect(annotationNoteNeedsDisclosure("x".repeat(281))).toBe(true);
+  });
+
+  test("scrolls only the review list when a later row is focused", () => {
+    const list = {
+      contains: () => true,
+      getBoundingClientRect: () => ({ top: 0, bottom: 120, left: 0, right: 240 }),
+      scrollTop: 0,
+    };
+    const row = {
+      getBoundingClientRect: () => ({ top: 180, bottom: 240, left: 0, right: 240 }),
+    };
+    scrollAnnotationRowIntoList(list as unknown as HTMLElement, row as unknown as HTMLElement);
+    expect(list.scrollTop).toBe(120);
   });
 });

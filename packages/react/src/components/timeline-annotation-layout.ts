@@ -13,13 +13,17 @@ export type AnnotationBadgeAnchor = {
   incomplete: boolean;
 };
 
-export const ANNOTATION_BADGE_GAP_PX = 20;
+export const ANNOTATION_BADGE_GAP_PX = 32;
 export const ANNOTATION_REVIEW_DIALOG_WIDTH_PX = 400;
 export const ANNOTATION_REVIEW_DIALOG_MAX_HEIGHT_PX = 32 * 16;
 export const ANNOTATION_REVIEW_DIALOG_MIN_HEIGHT_PX = 160;
 export const ANNOTATION_REVIEW_MARGIN_PX = 12;
 export const ANNOTATION_NOTE_PREVIEW_CHARS = 280;
 export const ANNOTATION_CARD_STACK_SCROLL_AT = 4;
+
+function clampAnnotationAxis(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
 
 export function annotationBoxIntersects(a: AnnotationBox, b: AnnotationBox): boolean {
   return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
@@ -61,30 +65,59 @@ export function layoutAnnotationBadges(
   const minLeft = viewport.left + ANNOTATION_REVIEW_MARGIN_PX;
   const maxLeft = viewport.right - ANNOTATION_REVIEW_MARGIN_PX;
   const minTop = viewport.top + 8;
+  const maxTop = viewport.bottom - ANNOTATION_REVIEW_MARGIN_PX;
   const placed: AnnotationBadgeAnchor[] = [];
   for (const anchor of [...anchors].sort((left, right) => left.ordinal - right.ordinal)) {
     const next: AnnotationBadgeAnchor = {
       ...anchor,
-      left: Math.min(Math.max(anchor.left, minLeft), Math.max(minLeft, maxLeft)),
-      top: Math.max(minTop, anchor.top),
+      left: clampAnnotationAxis(anchor.left, minLeft, maxLeft),
+      top: clampAnnotationAxis(anchor.top, minTop, maxTop),
     };
     let guard = 0;
-    while (guard++ < 32) {
+    while (guard++ < 48) {
       const collider = placed.find(
         (other) => Math.hypot(next.left - other.left, next.top - other.top) < gap,
       );
       if (!collider) break;
-      const shifted = collider.left + gap;
-      if (shifted <= maxLeft) {
-        next.left = shifted;
+      const shiftedRight = collider.left + gap;
+      if (shiftedRight <= maxLeft) {
+        next.left = shiftedRight;
         continue;
       }
-      next.left = Math.min(Math.max(anchor.left, minLeft), Math.max(minLeft, maxLeft));
-      next.top = collider.top + gap;
+      const shiftedDown = collider.top + gap;
+      if (shiftedDown <= maxTop) {
+        next.left = clampAnnotationAxis(anchor.left, minLeft, maxLeft);
+        next.top = shiftedDown;
+        continue;
+      }
+      const shiftedLeft = collider.left - gap;
+      if (shiftedLeft >= minLeft) {
+        next.left = shiftedLeft;
+        continue;
+      }
+      next.left = maxLeft;
+      next.top = maxTop;
+      break;
     }
     placed.push(next);
   }
   return placed;
+}
+
+export function scrollAnnotationRowIntoList(
+  list: HTMLElement | null | undefined,
+  row: HTMLElement | null | undefined,
+): void {
+  if (!list || !row || !list.contains(row)) return;
+  const listRect = list.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  if (rowRect.top < listRect.top) {
+    list.scrollTop -= listRect.top - rowRect.top;
+    return;
+  }
+  if (rowRect.bottom > listRect.bottom) {
+    list.scrollTop += rowRect.bottom - listRect.bottom;
+  }
 }
 
 export function clampAnnotationDialogPlacement(input: {

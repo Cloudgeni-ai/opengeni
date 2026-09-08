@@ -149,7 +149,7 @@ export function TimelineAnnotationMarkers({
           data-og-annotation-badge-ordinal={marker.ordinal}
           style={{ left: marker.left, top: marker.top, zIndex: marker.ordinal }}
           className={cn(
-            "pointer-events-auto absolute flex size-4 -translate-x-1/2 -translate-y-[110%] items-center justify-center rounded-full bg-og-accent text-[10px] font-semibold tabular-nums text-white shadow-sm outline-hidden select-none after:absolute after:-inset-2 after:content-[''] focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:after:-inset-2.5",
+            "pointer-events-auto absolute flex h-4 min-w-4 -translate-x-1/2 -translate-y-[110%] items-center justify-center rounded-full bg-og-accent px-0.5 text-[10px] font-semibold tabular-nums text-white shadow-sm outline-hidden select-none after:absolute after:-inset-2 after:content-[''] focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:after:-inset-2.5",
             marker.incomplete && "ring-1 ring-og-accent-fg/35",
           )}
           aria-label={`Annotation ${marker.ordinal}`}

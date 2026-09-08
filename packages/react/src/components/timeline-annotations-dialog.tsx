@@ -13,6 +13,7 @@ import {
 import {
   ANNOTATION_REVIEW_DIALOG_WIDTH_PX,
   clampAnnotationDialogPlacement,
+  scrollAnnotationRowIntoList,
 } from "./timeline-annotation-layout";
 import { annotationDisplayOrdinal, cssEscapeAttribute } from "./timeline-annotation-shared";
 
@@ -54,12 +55,29 @@ export function TimelineAnnotationsDialog({
   const listRef = useRef<HTMLDivElement | null>(null);
   const noteRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const portalStyle = usePortalTokenStyle(triggerRef.current);
-  const commitNotes = () => {
-    const complete = annotations.every((annotation) => {
+  const revealNote = (id: string) => {
+    const row = listRef.current?.querySelector<HTMLElement>(
+      `[data-og-annotation-id="${cssEscapeAttribute(id)}"]`,
+    );
+    scrollAnnotationRowIntoList(listRef.current, row);
+    noteRefs.current.get(id)?.focus();
+  };
+
+  const commitNotes = (fromId: string) => {
+    const incomplete = annotations.filter((annotation) => {
       const live = noteRefs.current.get(annotation.id);
-      return (live?.value ?? annotation.note).trim().length > 0;
+      return (live?.value ?? annotation.note).trim().length === 0;
     });
-    if (complete) onDismiss(true);
+    if (incomplete.length === 0) {
+      onDismiss(true);
+      return;
+    }
+    const fromIndex = annotations.findIndex((annotation) => annotation.id === fromId);
+    const next =
+      incomplete.find(
+        (item) => annotations.findIndex((annotation) => annotation.id === item.id) > fromIndex,
+      ) ?? incomplete[0]!;
+    revealNote(next.id);
   };
 
   useLayoutEffect(() => {
@@ -91,12 +109,8 @@ export function TimelineAnnotationsDialog({
 
   useLayoutEffect(() => {
     if (!focusAnnotationId) return;
-    const row = listRef.current?.querySelector<HTMLElement>(
-      `[data-og-annotation-id="${cssEscapeAttribute(focusAnnotationId)}"]`,
-    );
-    row?.scrollIntoView({ block: "nearest" });
+    revealNote(focusAnnotationId);
     const note = noteRefs.current.get(focusAnnotationId);
-    note?.focus();
     if (note && document.activeElement === note) onFocusConsumed?.();
   }, [focusAnnotationId, onFocusConsumed, annotations.length]);
 
@@ -174,7 +188,7 @@ export function TimelineAnnotationsDialog({
       <div
         ref={listRef}
         data-og-annotation-review-list=""
-        className="grid min-h-0 flex-1 gap-2.5 overflow-y-auto overscroll-contain px-3 pb-3"
+        className="grid min-h-0 flex-1 gap-2.5 overflow-x-hidden overflow-y-auto overscroll-contain px-3 pb-3"
       >
         {annotations.map((annotation, index) => {
           const ordinal = annotationDisplayOrdinal(annotation, index);
@@ -221,7 +235,7 @@ export function TimelineAnnotationsDialog({
                       else noteRefs.current.delete(annotation.id);
                     }}
                     onUpdate={onUpdate}
-                    onCommit={commitNotes}
+                    onCommit={() => commitNotes(annotation.id)}
                   />
                 ) : (
                   <AnnotationNotePreview

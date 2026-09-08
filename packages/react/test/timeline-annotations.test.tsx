@@ -562,13 +562,6 @@ describe("timeline annotations", () => {
           : `quote-${index + 1}`,
     }));
     const focusId = items[11]!.id;
-    const scrolled: string[] = [];
-    const originalScrollIntoView = Element.prototype.scrollIntoView;
-    Element.prototype.scrollIntoView = function scrollIntoView() {
-      if (this instanceof HTMLElement) {
-        scrolled.push(this.getAttribute("data-og-annotation-id") ?? "");
-      }
-    };
     const rendered = await renderComponent(
       <TimelineAnnotationsChip
         annotations={items}
@@ -578,28 +571,64 @@ describe("timeline annotations", () => {
         onRemove={() => undefined}
       />,
     );
-    try {
-      expect(rendered.container.textContent).toContain("12 annotations");
-      expect(
-        rendered.container.querySelector('button[aria-label="Review 12 annotations"]'),
-      ).not.toBeNull();
-      const dialog = document.body.querySelector<HTMLElement>("[data-og-annotation-review]");
-      const list = document.body.querySelector<HTMLElement>("[data-og-annotation-review-list]");
-      const header = document.body.querySelector<HTMLElement>("[data-og-annotation-review-header]");
-      expect(dialog).not.toBeNull();
-      expect(header).not.toBeNull();
-      expect(list?.className).toContain("overflow-y-auto");
-      expect(document.body.querySelectorAll("textarea")).toHaveLength(12);
-      expect(document.body.querySelectorAll("textarea")[0]?.className).toContain("max-h-40");
-      expect(scrolled).toContain(focusId);
-      const quoteButton = [...document.body.querySelectorAll("button")].find((button) =>
-        button.getAttribute("aria-label")?.includes("OpenGeni stack is working"),
+    expect(rendered.container.textContent).toContain("12 annotations");
+    expect(
+      rendered.container.querySelector('button[aria-label="Review 12 annotations"]'),
+    ).not.toBeNull();
+    const dialog = document.body.querySelector<HTMLElement>("[data-og-annotation-review]");
+    const list = document.body.querySelector<HTMLElement>("[data-og-annotation-review-list]");
+    const header = document.body.querySelector<HTMLElement>("[data-og-annotation-review-header]");
+    expect(dialog).not.toBeNull();
+    expect(header).not.toBeNull();
+    expect(list?.className).toContain("overflow-y-auto");
+    const notes = document.body.querySelectorAll("textarea");
+    expect(notes).toHaveLength(12);
+    expect(notes[0]?.className).toContain("max-h-40");
+    expect(notes[0]?.className).toContain("break-words");
+    expect(document.activeElement).toBe(notes.item(11));
+    const quoteButton = [...document.body.querySelectorAll("button")].find((button) =>
+      button.getAttribute("aria-label")?.includes("OpenGeni stack is working"),
+    );
+    expect(quoteButton?.querySelector("span")?.className).toContain("line-clamp-2");
+    await rendered.unmount();
+  });
+
+  test("Enter in a complete note focuses the next empty note instead of closing", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    function Harness() {
+      const [items, setItems] = useState(() =>
+        Array.from({ length: 3 }, (_, index) => ({
+          ...annotation(index === 0 ? "First note is done." : ""),
+          id: `00000000-0000-4000-8000-${String(0x801 + index).padStart(12, "0")}`,
+          quote: `quote-${index + 1}`,
+        })),
       );
-      expect(quoteButton?.querySelector("span")?.className).toContain("line-clamp-2");
-    } finally {
-      Element.prototype.scrollIntoView = originalScrollIntoView;
-      await rendered.unmount();
+      return (
+        <TimelineAnnotationsChip
+          annotations={items}
+          editable
+          focusAnnotationId={items[0]!.id}
+          onUpdate={(id, note) => {
+            setItems((current) =>
+              current.map((item) => (item.id === id ? { ...item, note } : item)),
+            );
+          }}
+          onRemove={() => undefined}
+        />
+      );
     }
+    const rendered = await renderComponent(<Harness />);
+    const notes = document.body.querySelectorAll("textarea");
+    expect(notes).toHaveLength(3);
+    await act(async () => {
+      notes[0]?.focus();
+      notes[0]?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(document.body.querySelector("[data-og-annotation-review]")).not.toBeNull();
+    await rendered.unmount();
   });
 
   test("clamps long sent annotation notes and scrolls a dense card stack", async () => {
