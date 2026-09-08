@@ -8,6 +8,8 @@ import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { readSkillMetadata } from "@opengeni/contracts";
+import { createDb } from "../src/database";
+import { listSkillDescriptors, listSkillRecords } from "../src/skills";
 
 const cutover = "0423_unified_skill_lifecycle.sql";
 const windowTables = [
@@ -137,6 +139,7 @@ describe("0423 owner-only Skill backfill", () => {
         content: string,
         title: string,
         legacyDescription: string,
+        expiresAt: string | null = null,
       ) => {
         const fixture = fixtures[0]!;
         const id = crypto.randomUUID();
@@ -144,8 +147,8 @@ describe("0423 owner-only Skill backfill", () => {
         await admin.begin(async (tx) => {
           await tx`INSERT INTO preference_registry_preferences(id,account_id,stable_key,scope,scope_workspace_id,scope_subject_id,created_by_subject_id)
             VALUES(${id},${fixture.accountId},${`legacy-${id}`},${scope},${scope === "workspace" ? fixture.workspaceId : null},${scope === "user" ? "user:original" : null},'user:original')`;
-          await tx`INSERT INTO preference_registry_revisions(id,account_id,preference_id,title,description,content,content_hash,conflict_strategy,provenance_source,trust,created_by_subject_id)
-            VALUES(${revisionId},${fixture.accountId},${id},${title},${legacyDescription},${content},${digest(content)},'override','human','workspace_managed','user:original')`;
+          await tx`INSERT INTO preference_registry_revisions(id,account_id,preference_id,title,description,content,content_hash,conflict_strategy,provenance_source,trust,created_by_subject_id,expires_at)
+            VALUES(${revisionId},${fixture.accountId},${id},${title},${legacyDescription},${content},${digest(content)},'override','human','workspace_managed','user:original',${expiresAt})`;
           await tx`INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,new_scope,new_workspace_id,new_subject_id,actor_subject_id,reason)
             VALUES(${fixture.accountId},${id},'proposal_created',1,${revisionId},${scope},${scope === "workspace" ? fixture.workspaceId : null},${scope === "user" ? "user:original" : null},'user:original','Legacy fixture')`;
           await tx`SELECT set_config('opengeni.preference_lifecycle_head_id',${id},true),set_config('opengeni.preference_lifecycle_operation','activate',true)`;
@@ -167,7 +170,15 @@ describe("0423 owner-only Skill backfill", () => {
       );
       const yaml =
         "---\r\nname: yaml-original\r\ndescription: |-\r\n  First line\r\n  Second line\r\n---\r\nBody\r\n";
-      legacyRows.push(await seedLegacy("organization", yaml, "Stale title", "Stale description"));
+      legacyRows.push(
+        await seedLegacy(
+          "organization",
+          yaml,
+          "Stale title",
+          "Stale description",
+          "2000-01-01T00:00:00Z",
+        ),
+      );
       legacyRows.push(
         await seedLegacy("user", yaml, "Other stale title", "Other stale description"),
       );
@@ -361,6 +372,24 @@ describe("0423 owner-only Skill backfill", () => {
       });
       await migrate(ownerUrl);
       expect(await admin`SELECT source_id FROM skill_config_conversion_receipts`).toHaveLength(4);
+      const reader = createDb(owned!.adminUrl);
+      try {
+        const context = { accountId: config.accountId, workspaceId: config.workspaceId };
+        const expiredId = legacyRows.find((row) => row.scope === "organization")!.id;
+        expect((await listSkillDescriptors(reader.db, context)).map((row) => row.id)).not.toContain(
+          expiredId,
+        );
+        const [expired] = await listSkillRecords(reader.db, context, { skillId: expiredId });
+        expect(expired!.status).toBe("expired");
+        expect(expired!.files[0]!.content).toBe(yaml);
+        const [historical] = await listSkillRecords(reader.db, context, {
+          skillId: expiredId,
+          revisionId: legacyRows.find((row) => row.id === expiredId)!.revisionId,
+        });
+        expect(historical!.status).toBe("expired");
+      } finally {
+        await reader.close();
+      }
       const migratedFiles = [
         {
           path: "SKILL.md",

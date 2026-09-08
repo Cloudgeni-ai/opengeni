@@ -158,6 +158,7 @@ export async function listSkillDescriptors(
     LEFT JOIN capability_plugin_installations pi ON pi.plugin_id=b.plugin_id
       AND pi.account_id=h.account_id AND pi.workspace_id=b.workspace_id AND pi.status='active'
     WHERE h.account_id=${context.accountId}::uuid AND h.status='active'
+      AND (r.expires_at IS NULL OR r.expires_at > transaction_timestamp())
       AND (h.scope='organization' OR (h.scope='workspace' AND h.scope_workspace_id=${context.workspaceId}::uuid)
         OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
     ORDER BY h.stable_key,h.id
@@ -185,7 +186,12 @@ export async function listSkillRecords(
       sql`
       SELECT jsonb_build_object(
         'id',h.id,'stableKey',h.stable_key,'scope',h.scope,'scopeVersion',h.scope_version,
-        'status',h.status,'activeRevisionId',h.active_revision_id,'revisionId',r.id,
+        'status',CASE WHEN h.status='active' AND EXISTS (
+          SELECT 1 FROM preference_registry_revisions active
+          WHERE active.id=h.active_revision_id AND active.preference_id=h.id
+            AND active.account_id=h.account_id AND active.expires_at <= transaction_timestamp()
+        ) THEN 'expired' ELSE h.status END,
+        'activeRevisionId',h.active_revision_id,'revisionId',r.id,
         'activationMode',coalesce(r.skill_activation_mode,'workspace_managed'),
         'pendingRevisionIds',coalesce((SELECT jsonb_agg(DISTINCT pending.receipt->>'revisionId')
           FROM skill_write_receipts pending WHERE pending.account_id=h.account_id
