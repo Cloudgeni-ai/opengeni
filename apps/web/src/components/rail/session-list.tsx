@@ -3651,9 +3651,12 @@ function SessionRow(props: {
                   }
                   rail.setDrawerOpen(false);
                 }}
-                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface pointer-fine:group-has-[[data-session-quick-actions]]:group-hover:pr-14 pointer-fine:group-has-[[data-session-quick-actions]]:group-focus-within:pr-14"
+                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
               >
                 <SessionRowContent
+                  quickActionSlots={
+                    Number(!props.session.archived) + Number(props.session.parentSessionId === null)
+                  }
                   title={title}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
@@ -3816,7 +3819,7 @@ export function RowQuickActions({
 
   return (
     <div
-      className="absolute right-0.5 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-surface-2 p-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden"
+      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md bg-surface-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
       data-session-quick-actions={session.id}
     >
       {canPin ? (

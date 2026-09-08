@@ -25,7 +25,7 @@ const cases = [
     depth: 0,
     summary: neutral,
     scheduled: true,
-    relativeTime: "1 Aug",
+    relativeTime: "12 Aug",
   },
   { id: "no-metadata", active: false, depth: 0, summary: neutral },
   { id: "selected-child", active: true, depth: 1, summary: neutral, relativeTime: "1h" },
@@ -68,9 +68,12 @@ function SessionRailRowMetadataFixture() {
                     href={`#${scenario.id}`}
                     aria-current={scenario.active ? "page" : undefined}
                     aria-label={`Open ${longTitle}. Idle`}
-                    className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none pointer-fine:group-has-[[data-session-quick-actions]]:group-hover:pr-14 pointer-fine:group-has-[[data-session-quick-actions]]:group-focus-within:pr-14"
+                    className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
                   >
                     <SessionRowContent
+                      quickActionSlots={
+                        Number(!quickActionSession.archived) + Number(scenario.depth === 0)
+                      }
                       title={longTitle}
                       stateLabel="Idle"
                       depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}
@@ -79,11 +82,15 @@ function SessionRailRowMetadataFixture() {
                       summary={scenario.summary}
                       scheduled={"scheduled" in scenario ? scenario.scheduled : false}
                       relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
-                      creator={{
-                        kind: "subject",
-                        subjectId: "user:bendik",
-                        label: "Bendik Nyheim",
-                      }}
+                      creator={
+                        scenario.depth > 0
+                          ? null
+                          : {
+                              kind: "subject",
+                              subjectId: "user:bendik",
+                              label: "Bendik Nyheim",
+                            }
+                      }
                     />
                   </a>
                 </HoverCardTrigger>
