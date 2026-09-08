@@ -799,3 +799,8 @@ nested page. Model changes preserve supported reasoning effort and latency;
 unsupported effort falls back to the new model's default, and unsupported speed
 returns to Standard. A model with one reasoning level displays a disabled effort
 control. Availability and Codex-only session restrictions still disable choices.
+
+The trigger renders immediately; the searchable popover loads when opened. Hosts
+can translate its search, current-selection, empty-result, attachment-warning, and
+thinking labels through `messages`, and override payment descriptions through
+`messages.billingHints`.

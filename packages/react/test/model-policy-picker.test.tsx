@@ -1,11 +1,12 @@
+import { ModelPolicyPickerMenu } from "../src/components/model-policy-picker-menu";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ClientModel } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   BillingClassMark,
+  defaultModelPolicyPickerMessages,
   ModelPolicyPicker,
-  ModelPolicyPickerMenu,
   useModelPolicyPickerState,
 } from "../src/components/model-policy-picker";
 import { actRun, registerDom, renderHook } from "./render-hook";
@@ -322,6 +323,54 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector<HTMLButtonElement>('button[aria-label="Modell og tenking"]'),
     ).toBeTruthy();
+  });
+
+  test("translates search, selection, billing, and thinking in the open menu", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="high"
+        latencyMode="standard"
+        messages={{
+          searchLabel: "Søk etter modell",
+          searchPlaceholder: "Søk…",
+          currentModel: "Valgt modell",
+          noMatches: "Ingen treff",
+          unsupportedAttachments: "Denne modellen kan ikke se vedleggene.",
+          thinking: "Tenking",
+          thinkingEffort: "Tenkenivå",
+          selected: "Valgt",
+          billingHints: {
+            ...defaultModelPolicyPickerMessages.billingHints,
+            codex_subscription: "Codex-abonnement",
+          },
+        }}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Søk etter modell"]',
+    )!;
+    expect(input.placeholder).toBe("Søk…");
+    expect(container.textContent).toContain("Valgt modell");
+    expect(container.textContent).toContain("Codex-abonnement");
+    expect(container.textContent).toContain("Denne modellen kan ikke se vedleggene.");
+    expect(container.querySelector('select[aria-label="Tenkenivå"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="Valgt"]')).toBeTruthy();
+    input.value = "no-such-model";
+    const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+    const handler = (
+      input as unknown as Record<
+        string,
+        { onChange: (event: { target: HTMLInputElement }) => void }
+      >
+    )[key]!;
+    await act(async () => handler.onChange({ target: input }));
+    expect(container.textContent).toContain("Ingen treff");
+    expect(container.textContent).not.toContain("No matching models");
   });
 
   test("can hide latency controls on policy surfaces that do not persist latency", async () => {
