@@ -206,7 +206,7 @@ prefer one reader where bytes are available without a sandbox, but do not promis
 remote reads of repository files that only exist on a machine. Define any
 temporary filesystem-loader exception explicitly before retiring `load_skill`.
 
-### Bundled guidance and embedded products: open integration detail
+### Bundled guidance: one selector, individual inclusion rules
 
 The September 8 implementation review identified inconsistent bundled selection:
 artifact guidance follows the tool catalog, Sites is selected by compute backend,
@@ -218,15 +218,91 @@ The new server-readable native artifact loader has no compute-backend input and
 does not stage files. Live selection remains to be wired. Preserve generated
 Sites package-version metadata when reading or checking out its folder.
 
-Proposed, not yet approved: make bundled guidance follow enabled capabilities
-by default, with an optional embedding-product allowlist to restrict that set
-(omitted = defaults; empty = no bundled guidance). Resolve selection once for
-prompt descriptors, search and read; hiding a descriptor alone is insufficient.
-This also needs to cover the built-in management Skill, which the current
-foundation adds unconditionally. Do not confuse this platform-bundle selection
-with per-agent permissions for ordinary shared workspace Skills. The exact
-public configuration placement and how host restrictions propagate to child
-sessions remain open; do not ship a runtime-only flag as an embedding contract.
+User clarification, September 8: use one mechanism for bundled selection, but
+choose the inclusion rule separately for each Skill. Do not impose a universal
+"all related tools must exist" rule. An artifact Skill can be included whenever
+its chosen condition holds; Sites, video and management can have different
+conditions. The exact per-Skill conditions are product choices, not new storage
+types, permission systems, or sandbox-provider branches.
+
+**Startup invariant:** evaluate these conditions from already-resolved local
+configuration and packaged metadata. Never await MCP discovery, lazy tool
+schemas, credential materialization, a provider health probe, sandbox startup,
+or filesystem staging to build the initial bundled index. Configured/enabled
+does not mean loaded/healthy. Tool execution still uses its normal live checks.
+
+Proposed implementation: a small typed built-in definition list containing
+stable id, packaged content source, descriptor, and a synchronous inclusion
+predicate over the resolved session configuration. Use ordinary code, not a
+user-authored condition language or generic dependency engine. Keep the rules
+together and test each independently. A rule may consult configured tool names
+and permission selections when useful, but never the prepared tool catalog.
+Do not require unrelated optional helpers (such as export) to include guidance
+for a supported core workflow. Instructions must describe optional operations
+honestly rather than promising that every referenced tool is enabled.
+
+Resolve the effective set once for the accepted attempt and use it for the
+prompt index, built-in search, reader, and checkout. Stable built-in ids must
+not collide with installed or inline Skills of the same name; ambiguous names
+require an id. An excluded built-in must not remain reachable via its short
+name or a legacy loader. Existing history may still contain prior instructions;
+selection is not retroactive erasure or a security boundary for public text.
+No selected Skill grants tool authority.
+
+Proposed embedding control, not yet approved: an optional host allowlist that
+narrows the per-Skill defaults (omitted = defaults; empty = no bundled guidance).
+Allowlisting must not force a Skill whose inclusion condition is false. Keep
+host restrictions separate from model-chosen settings; children must not widen
+the host's ceiling. Reuse the existing session configuration/inheritance path,
+including scheduled sessions, rather than introducing worker-only overrides.
+Choose the exact public field and placement before implementation; persist the
+distinction between omitted and empty. Unknown explicit ids should fail clearly.
+Adding a new bundled Skill must not expand an explicit host selection.
+
+This covers `opengeni-skills` as well: do not unconditionally inject management
+guidance outside the selector. Eager `skill_read` remains available even if no
+bundled Skills are selected; an empty index must not advertise a hidden
+management Skill. Learning Off does not itself disable Skill reading or imply
+that management guidance should disappear. Installed workspace Skills remain
+shared as agreed; restricting platform bundles is not a new per-agent ACL for
+authored, installed, repository, Pack, or inline session content.
+
+Compute backend does not determine whether packaged bytes can be read. Actual
+workflow requirements may still matter to a specific inclusion rule, but do not
+equate Connected Machine with unsupported execution. Read packaged references
+server-side; checkout only when scripts/templates must exist on disk. Update
+bundled instructions that assume their supporting files already have sandbox
+paths. Preserve generated Sites package-version metadata through both paths.
+
+For new attempts, recompute selection from the normal resolved configuration.
+Do not mutate an in-flight prompt index when lazy discovery completes. Continue
+to apply live authorization at execution. Newly installed workspace Skills can
+be found/read through the shared service without rebuilding the standing index.
+Remote MCP Skill discovery is a later adapter, not a prerequisite for this
+bundled path; an unknown remote index must not delay the first model request.
+
+Implementation checks required before rollout:
+
+- A deferred tool-preparation promise that never resolves does not prevent the
+  first model request from containing the expected bundled descriptors or
+  prevent a selected built-in `skill_read` from executing.
+- Managed, Connected Machine, and sandbox-free configurations yield identical
+  bundled content when the per-Skill conditions are otherwise identical; no
+  create/start/stage operation occurs during selection or reading.
+- Each inclusion predicate has positive/negative tests, including partial tool
+  selections, disabled optional helpers, and configured-but-unavailable tools.
+- Explicit host exclusions, empty selection, child inheritance and scheduled
+  sessions agree across index/search/read/checkout/legacy paths. Read-only and
+  Learning Off configurations remain able to read permitted guidance.
+- Duplicate names resolve by stable id; excluded built-ins cannot be reached
+  by alias. Selected generated/supporting files preserve exact bytes.
+- Product integration docs, SDK contracts, examples, and customer coding-agent
+  Skills explain the actual public control. No new control is documented as
+  shipped from a runtime helper alone.
+
+Remaining choices are the exact predicate for each built-in and the public
+host-selection field. The shared mechanism must support those choices without
+requiring all bundled Skills to use the same policy.
 
 ## 6. Current implementation: verified baseline
 
@@ -275,6 +351,11 @@ this dossier; this document does not assert they have been updated.
    bounded output, and a no-sandbox session. Separately measure whether ordinary
    worker startup still provisions a sandbox; lazy file loading is not proof
    that startup is avoided.
+   Implement the bundled selector described above in this slice, using
+   individual synchronous inclusion rules and one effective set across all
+   delivery paths. Add a stalled-lazy-discovery first-request test; do not gate
+   descriptors on `hasCanonicalEditableArtifactToolSurface`. Coordinate the
+   embedding contract and child/schedule inheritance before exposing overrides.
 3. **Direct saving and migration.** Add lazy file saves through the shared write
    lifecycle, preserve omitted files, record history and handle stale writes.
    Move registry writes and UI editing to that same authority, or use a bounded
