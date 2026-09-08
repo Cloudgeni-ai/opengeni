@@ -61,6 +61,7 @@ import {
   nestedPostgresSqlState,
   removeWorkspaceMember,
   requireWorkspace,
+  updateWorkspaceSettings,
   getRig,
   setWorkspaceDefaultRig,
   updateWorkspace,
@@ -385,6 +386,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.db,
       workspaceId,
       parsed.data,
+      { requireWorkspace, updateWorkspaceSettings },
       {
         controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
       },
