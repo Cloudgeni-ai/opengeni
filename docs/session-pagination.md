@@ -6,6 +6,10 @@ The workspace activity revision excludes rows changed after a continuation snaps
 
 Creator filters use the equality prefix `(workspace_id, created_by_kind, created_by_subject_id)` followed by descending `(updated_at, id)`. This keeps sparse creator pages from scanning every more recent session in a workspace.
 
+Archived pages instead order by descending `(root archive timestamp, session id)`, using the requesting subject's root `session_pins.archived_at` for both ordering and the keyset boundary. Child rows inherit this timestamp even without a personal pin row. Active pages retain `(updated_at, id)` ordering, and date filters still refer to session activity/creation timestamps. Archive timestamps retain PostgreSQL microseconds in cursors. Personal archive state remains live between page requests; restoring and re-archiving a root moves its tree to the top of a fresh traversal.
+
+Archive keysets use cursor version 3. Older archive keysets and legacy archive snapshots expire through the existing typed rebase path rather than interpreting an activity timestamp as an archive timestamp. Version 3 retains the reserved nonexistent snapshot envelope so older replicas also expire it safely during rolling upgrades. Active version-2 keysets and legacy active snapshots remain compatible. No schema migration is required for this ordering change.
+
 The API's `updatedFrom`, `updatedBefore`, `createdFrom`, and `createdBefore` filters accept ISO-8601 offsets with at most millisecond precision. More precise fractions receive HTTP400 instead of silently losing precision through JavaScript Date. Internal keyset timestamps continue to retain PostgreSQL microseconds.
 
 ## Deployment
