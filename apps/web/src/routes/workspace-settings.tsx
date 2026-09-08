@@ -383,7 +383,7 @@ function OperationalWorkspaceSettingsRoute({
                   }}
                 >
                   <div className="grid min-w-0 gap-1.5">
-                    <Label htmlFor="workspace-name" className="text-xs text-fg-muted">
+                    <Label htmlFor="workspace-name" className="text-fg-muted">
                       Workspace name
                     </Label>
                     <Input
