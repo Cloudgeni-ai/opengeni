@@ -140,6 +140,14 @@ OpenGeni, then pass the selected definitions inline in
 organization-wide Skill registry or Skill inheritance in this integration
 contract.
 
+Use `CreateSessionRequest.bundledSkillIds` to narrow OpenGeni's bundled guidance
+independently: omitted means defaults, `[]` means none, and explicit IDs such as
+`builtin:opengeni-documents` allow only those whose normal inclusion rules hold.
+Children inherit and can only narrow; scheduled-task `agentConfig` and automation
+`sessionTemplate` accept the same field. This does not hide workspace or inline
+Skills, grant tools, or disable eager `skill_read`. Keep the selection stable on
+keyed-create retries. Never try to control it through arbitrary session metadata.
+
 ## Prompt And Context Contract
 
 Use each prompt surface for its exact authority and lifetime:

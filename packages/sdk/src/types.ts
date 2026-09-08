@@ -1,5 +1,13 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
+export type BundledSkillId =
+  | "builtin:opengeni-skills"
+  | "builtin:opengeni-documents"
+  | "builtin:opengeni-spreadsheets"
+  | "builtin:opengeni-presentations"
+  | "builtin:opengeni-sites"
+  | "builtin:opengeni-video-generation";
+
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
 // runtime; `test/contract-parity.test.ts` pins these types to the contracts
@@ -1333,6 +1341,7 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;
   accountId: string;
@@ -2738,6 +2747,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
@@ -2821,6 +2831,8 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
+  bundledSkillIds?: BundledSkillId[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -6190,6 +6202,7 @@ export type CapabilityPackAutomationTemplate = {
   adapterId: string;
   eventTypes: string[];
   sessionTemplate: {
+    bundledSkillIds?: BundledSkillId[] | undefined;
     prompt: string;
     instructions: string | null;
     resources: ResourceRef[];
@@ -6411,6 +6424,7 @@ export type RegisterCapabilityPackRequest = {
         adapterId: string;
         eventTypes: string[];
         sessionTemplate: {
+          bundledSkillIds?: BundledSkillId[] | undefined;
           prompt: string;
           instructions?: string | null | undefined;
           resources?: ResourceRef[] | undefined;

@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { StoredSessionSkills } from "@opengeni/contracts";
+import {
+  StoredSessionSkills,
+  withBundledSkillSelectionMetadata,
+  bundledSkillSelectionFromMetadata,
+  type BundledSkillId,
+} from "@opengeni/contracts";
 import {
   applySkillLifecycle,
   assertSkillReadAttempt,
@@ -30850,6 +30855,7 @@ async function setScheduledTaskAuthorityRlsContext(
 }
 
 export type SessionCreateInput = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   accountId: string;
   workspaceId: string;
@@ -31169,6 +31175,7 @@ async function existingSessionForCreateKey(
 }
 
 type SessionCreateReplayIdentity = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
@@ -31207,6 +31214,12 @@ function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
   input: SessionCreateReplayIdentity,
 ): void {
+  if (
+    stableJson(bundledSkillSelectionFromMetadata(existing.metadata) ?? null) !==
+    stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
   if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
     throw new SessionIdConflictError(input.requestedSessionId);
   }
@@ -31321,7 +31334,7 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    input.metadata,
+    withBundledSkillSelectionMetadata(input.metadata, input.bundledSkillIds),
     selectedInstalledSkillIds,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
@@ -31371,6 +31384,7 @@ async function createSessionInTransaction(
       // before any first-turn repair so a retry cannot hide a requested-ID
       // conflict behind an apparently successful replay.
       assertSessionCreateReplayIdentity(existing, {
+        bundledSkillIds: input.bundledSkillIds,
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
@@ -31577,6 +31591,7 @@ async function createSessionInTransaction(
       );
       if (existing) {
         assertSessionCreateReplayIdentity(existing, {
+          bundledSkillIds: input.bundledSkillIds,
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
@@ -31763,6 +31778,7 @@ export type InitializedSessionCreateReplay =
 export async function getInitializedSessionCreateReplay(
   db: Database,
   input: {
+    bundledSkillIds?: BundledSkillId[] | undefined;
     accountId: string;
     workspaceId: string;
     subjectId: string;
@@ -75354,6 +75370,9 @@ function mapSession(
     policyRole: row.policyRole ?? null,
     resources: row.resources as ResourceRef[],
     skills: StoredSessionSkills.parse(row.skills ?? []),
+    ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
+      ? { bundledSkillIds: bundledSkillSelectionFromMetadata(row.metadata) }
+      : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),

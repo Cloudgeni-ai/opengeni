@@ -46,3 +46,33 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
     }),
   ).toEqual(["opengeni-skills"]);
 });
+
+test("host selection narrows every bundled source without forcing unavailable workflows", () => {
+  const context = {
+    firstPartyTools: [
+      "editable_artifact_list",
+      "editable_artifact_get",
+      "artifacts_create",
+      "artifacts_publish",
+    ],
+    videoGenerationEnabled: true,
+  };
+  expect(loadConfiguredBundledSkills({ ...context, bundledSkillIds: [] })).toEqual([]);
+  const selected = loadConfiguredBundledSkills({
+    ...context,
+    bundledSkillIds: ["builtin:opengeni-documents"],
+  });
+  expect(selected.map((entry) => entry.id)).toEqual(["builtin:opengeni-documents"]);
+  expect(selected[0]!.artifact.files.some((file) => file.path === "SKILL.md")).toBe(true);
+  expect(
+    configuredBundledSkillNames({
+      firstPartyTools: [],
+      videoGenerationEnabled: false,
+      bundledSkillIds: [
+        "builtin:opengeni-documents",
+        "builtin:opengeni-sites",
+        "builtin:opengeni-video-generation",
+      ],
+    }),
+  ).toEqual([]);
+});

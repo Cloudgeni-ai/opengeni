@@ -1,0 +1,53 @@
+import { expect, test } from "bun:test";
+import {
+  CreateSessionRequest,
+  ScheduledTaskAgentConfig,
+  AutomationSessionTemplate,
+  BundledSkillSelection,
+  resolveBundledSkillSelection,
+  withBundledSkillSelectionMetadata,
+  bundledSkillSelectionFromMetadata,
+} from "../src";
+
+const documents = "builtin:opengeni-documents" as const;
+const sites = "builtin:opengeni-sites" as const;
+
+test("bundle selection preserves omitted versus empty across public creation contracts", () => {
+  expect(CreateSessionRequest.parse({ initialMessage: "Run" }).bundledSkillIds).toBeUndefined();
+  expect(
+    CreateSessionRequest.parse({ initialMessage: "Run", bundledSkillIds: [] }).bundledSkillIds,
+  ).toEqual([]);
+  expect(
+    ScheduledTaskAgentConfig.parse({ prompt: "Run", bundledSkillIds: [] }).bundledSkillIds,
+  ).toEqual([]);
+  expect(
+    AutomationSessionTemplate.parse({ prompt: "Run", bundledSkillIds: [documents] })
+      .bundledSkillIds,
+  ).toEqual([documents]);
+  expect(BundledSkillSelection.safeParse(["builtin:unknown"]).success).toBe(false);
+  expect(BundledSkillSelection.safeParse([documents, documents]).success).toBe(false);
+});
+
+test("children inherit or narrow bundle selection but cannot widen it", () => {
+  expect(resolveBundledSkillSelection(undefined, undefined)).toBeUndefined();
+  expect(resolveBundledSkillSelection(undefined, [])).toEqual([]);
+  expect(resolveBundledSkillSelection(undefined, [documents])).toEqual([documents]);
+  expect(resolveBundledSkillSelection([], [documents])).toEqual([]);
+  expect(resolveBundledSkillSelection([documents], [sites, documents])).toEqual([documents]);
+  expect(() => resolveBundledSkillSelection([sites], [documents])).toThrow("cannot widen");
+});
+
+test("arbitrary metadata cannot override typed selection at admission", () => {
+  const metadata = withBundledSkillSelectionMetadata({ label: "Keep" }, [sites]);
+  const original = JSON.stringify(metadata);
+  expect(
+    bundledSkillSelectionFromMetadata(withBundledSkillSelectionMetadata(metadata, undefined)),
+  ).toBeUndefined();
+  expect(
+    bundledSkillSelectionFromMetadata(withBundledSkillSelectionMetadata(metadata, [])),
+  ).toEqual([]);
+  expect(
+    bundledSkillSelectionFromMetadata(withBundledSkillSelectionMetadata(metadata, [documents])),
+  ).toEqual([documents]);
+  expect(JSON.stringify(metadata)).toBe(original);
+});

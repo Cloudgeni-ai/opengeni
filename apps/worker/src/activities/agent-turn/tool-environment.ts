@@ -563,6 +563,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   };
   const skillConfiguration = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
   const bundledSkills = loadConfiguredBundledSkills({
+    bundledSkillIds: session.bundledSkillIds,
     firstPartyTools: selectedFirstPartyMcpTools,
     videoGenerationEnabled:
       skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,

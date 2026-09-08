@@ -288,14 +288,19 @@ name or a legacy loader. Existing history may still contain prior instructions;
 selection is not retroactive erasure or a security boundary for public text.
 No selected Skill grants tool authority.
 
-Proposed embedding control, not yet approved: an optional host allowlist that
-narrows the per-Skill defaults (omitted = defaults; empty = no bundled guidance).
+Implementation choice: optional `bundledSkillIds` on session creation and
+scheduled/automation session configuration narrows the per-Skill defaults
+(omitted = defaults or parent inheritance; empty = no bundled guidance).
 Allowlisting must not force a Skill whose inclusion condition is false. Keep
 host restrictions separate from model-chosen settings; children must not widen
 the host's ceiling. Reuse the existing session configuration/inheritance path,
 including scheduled sessions, rather than introducing worker-only overrides.
-Choose the exact public field and placement before implementation; persist the
-distinction between omitted and empty. Unknown explicit ids should fail clearly.
+Persist the distinction between omitted and empty. Unknown explicit ids fail
+validation. Store the resolved choice in sanitized immutable session metadata,
+following the existing create-identity convention; expose it as a typed session
+field. Raw caller metadata cannot override it. Keyed create retries must retain
+the same effective selection. Agent-created schedules inherit or narrow their
+creator's choice; an existing-session schedule cannot override its target.
 Adding a new bundled Skill must not expand an explicit host selection.
 
 This covers `opengeni-skills` as well: do not unconditionally inject management
@@ -339,23 +344,23 @@ Implementation checks required before rollout:
   Skills explain the actual public control. No new control is documented as
   shipped from a runtime helper alone.
 
-Remaining choices are the exact predicate for each built-in and the public
-host-selection field. The shared mechanism must support those choices without
+The exact predicates remain ordinary product defaults. The shared mechanism
+supports changing each independently without
 requiring all bundled Skills to use the same policy.
 
 Initial implementation defaults, subject to product refinement: artifact
 guidance requires configured `editable_artifact_list` and `editable_artifact_get`
 (not the entire family or optional exports); Sites requires configured
 `artifacts_create` and `artifacts_publish`; video follows enabled workspace video
-policy without resolving credentials; management is currently included for all
-workspace agents. These defaults do not constitute the proposed public host
-allowlist. A stalled-discovery regression test now exercises first-request
+policy without resolving credentials; management is included by default.
+`bundledSkillIds` can narrow all of these, including management. A
+stalled-discovery regression test exercises first-request
 index visibility and eager reads on all three lazy-tool transports.
 
 Management guidance now enters through that same selector: the formatter and
 reader do not inject it independently. The selected management folder is also
 available to search and checkout. This removes the hidden read/index exception;
-it does not ship or approve a new public host-selection field.
+the typed host selection uses that same effective set.
 
 Implementation verification in progress (September 8): the shared web editor
 and SDK/API folder routes are wired. Component tests cover metadata-first reads,

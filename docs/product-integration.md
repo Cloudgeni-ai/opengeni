@@ -256,6 +256,19 @@ operation.
 
 ## Skills are external product data
 
+Control OpenGeni's bundled guidance separately from your product Skills with
+`CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
+`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. Selection
+only narrows each bundle's normal inclusion conditions and grants no tool
+permissions. Child sessions inherit the choice and may only narrow it.
+Scheduled-task `agentConfig` and automation `sessionTemplate` accept the same
+field. Keep the same effective choice when retrying keyed session creation.
+
+This does not disable workspace-authored/installed Skills or your inline
+`skills`. Those keep their own ownership and sharing rules. The eager
+`skill_read` tool remains available even with no bundled guidance. Bundle
+selection does not wait for lazy tool discovery or sandbox startup.
+
 The external backend owns its reusable Skills. Store and version them with the
 product's integration code or in the product's own Skill store, then pass the
 selected Skill definitions inline in `CreateSessionRequest.skills` for each

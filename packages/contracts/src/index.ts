@@ -1,4 +1,6 @@
 export * from "./skills";
+export * from "./bundled-skills";
+import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
 import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
@@ -8884,6 +8886,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     })
     .strict();
   return {
+    bundledSkillIds: BundledSkillSelection.optional(),
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
       : z.string().min(1),
@@ -9464,6 +9467,7 @@ export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEn
 
 export const AutomationSessionTemplate = z
   .object({
+    bundledSkillIds: BundledSkillSelection.optional(),
     prompt: z
       .string()
       .trim()
@@ -12064,6 +12068,7 @@ export type CancelSessionBackgroundCommandResult = z.infer<
 >;
 
 export const Session = z.object({
+  bundledSkillIds: BundledSkillSelection.optional(),
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -14562,6 +14567,8 @@ export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
 export const CreateSessionRequest = withVariableSetIdAlias(
   {
+    /** Omission inherits/defaults; [] disables bundles. Children may only narrow. */
+    bundledSkillIds: BundledSkillSelection.optional(),
     /**
      * Optional UUID preallocated by an embedding host. This lets the host durably
      * link its own projection before OpenGeni admits the initial turn. Replays

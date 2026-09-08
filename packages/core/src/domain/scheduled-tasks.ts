@@ -17,6 +17,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceSessionToolDefaults,
+  resolveBundledSkillSelection,
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
@@ -409,6 +410,14 @@ export async function validateScheduledTaskTarget(input: {
   const session = await getSession(input.db, input.grant.workspaceId, input.targetSessionId);
   if (!session || session.accountId !== input.grant.accountId) {
     throw new HTTPException(404, { message: "target session not found" });
+  }
+  if (
+    input.agentConfig.bundledSkillIds !== undefined &&
+    !isDeepStrictEqual(input.agentConfig.bundledSkillIds, session.bundledSkillIds)
+  ) {
+    throw new HTTPException(422, {
+      message: "An existing-session schedule cannot change that session's bundled Skill selection",
+    });
   }
   if (session.status === "cancelled") {
     throw new HTTPException(409, {
@@ -1231,6 +1240,24 @@ async function validateScheduledTaskAgentConfig(input: {
   workspaceId: string;
   toolsProvided?: boolean;
 }): Promise<ScheduledTaskAgentConfig> {
+  const actor = creationInitiatorForGrant(input.grant).actor;
+  const parent = actor ? await getSession(input.db, input.workspaceId, actor.sessionId) : null;
+  if (actor && (!parent || parent.accountId !== input.grant.accountId)) {
+    throw new HTTPException(403, {
+      message: "Scheduled Skill selection requires the creating agent's session",
+    });
+  }
+  let bundledSkillIds: ScheduledTaskAgentConfig["bundledSkillIds"];
+  try {
+    bundledSkillIds = resolveBundledSkillSelection(
+      input.payload.agentConfig.bundledSkillIds,
+      parent?.bundledSkillIds,
+    );
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
+    });
+  }
   // Reject a curated-out model before touching the DB: a scheduled task is a
   // session the worker runs later, so it must pass the same allow-list as the
   // session choke points (a `scheduled_tasks:manage` holder could otherwise set
@@ -1312,6 +1339,7 @@ async function validateScheduledTaskAgentConfig(input: {
   }
   const validated = {
     ...input.payload.agentConfig,
+    ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,

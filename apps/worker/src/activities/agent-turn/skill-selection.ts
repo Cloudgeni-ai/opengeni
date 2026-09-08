@@ -1,10 +1,12 @@
 import { loadNativeToolSkillArtifacts } from "@opengeni/runtime";
 import { loadSkillManagementSkill } from "@opengeni/runtime/skill-library";
+import type { BundledSkillId } from "@opengeni/contracts";
 
 export type BundledSkillConfiguration = {
   /** Already resolved names, not discovered schemas or an attempt catalog. */
   firstPartyTools: readonly string[];
   videoGenerationEnabled: boolean;
+  bundledSkillIds?: readonly BundledSkillId[] | undefined;
 };
 
 /** Individual ordinary-code defaults, evaluated without async tool preparation. */
@@ -23,7 +25,12 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
     { name: "opengeni-video-generation", include: () => context.videoGenerationEnabled },
   ];
   return definitions
-    .filter((definition) => definition.include())
+    .filter(
+      (definition) =>
+        definition.include() &&
+        (context.bundledSkillIds === undefined ||
+          context.bundledSkillIds.includes(`builtin:${definition.name}` as BundledSkillId)),
+    )
     .map((definition) => definition.name);
 }
 
