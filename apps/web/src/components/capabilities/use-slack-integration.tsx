@@ -24,11 +24,13 @@ import type {
 } from "@/components/capabilities/integration-view-model";
 import { SlackChannelRoutingDialog } from "@/components/capabilities/slack-channel-routing-dialog";
 import { SlackReactionChannelsDialog } from "@/components/capabilities/slack-reaction-channels-dialog";
+import { useSlackInstallationDiscovery } from "@/components/capabilities/use-slack-installation-discovery";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
   personalSlackAccountState,
   personalSlackCapability,
@@ -224,6 +226,7 @@ export function useSlackIntegration({
   );
 
   const [botBusy, setBotBusy] = useState(false);
+  const botOperationPending = useRef(false);
   const [personalBusy, setPersonalBusy] = useState(false);
   const [destinationBusy, setDestinationBusy] = useState(false);
   const [reactionBusy, setReactionBusy] = useState(false);
@@ -251,6 +254,10 @@ export function useSlackIntegration({
   const [routingOpen, setRoutingOpen] = useState(false);
   const [publication, setPublication] = useState<MemorySlackPublicationConfiguration | null>(null);
   const [publicationLoaded, setPublicationLoaded] = useState(false);
+  const [installError, setInstallError] = useState<{
+    workspaceId: string;
+    feedback: ReturnType<typeof slackInstallFeedback>;
+  } | null>(null);
 
   const preview = localConnectedSlackPreview(window.location.search, workspaceId);
   const readOnly = preview !== null;
@@ -263,7 +270,13 @@ export function useSlackIntegration({
     : null;
   const bindingActive = readOnly || binding?.state === "active";
   const botActive = botConnection?.status === "active";
-  const botHealthy = Boolean(botConnection && botActive && bindingActive);
+  const botHealthy = Boolean(botConnection && botMetadata && botActive && bindingActive);
+  // A known local installation owns its recovery, even if a sibling has a
+  // different Slack team. Replacing it would hide Reconnect or create loops.
+  const discovery = useSlackInstallationDiscovery(
+    workspaceId,
+    loaded && !botConnection && slackInstallationBindings.length === 0 && !readOnly,
+  );
   const canMutateInstalledBot = canInstallBot && bindingActive;
   // Reaction summon, knowledge destination, and decision publication remain
   // admin-gated even though any connections:write holder sees the bot sheet.
@@ -279,21 +292,22 @@ export function useSlackIntegration({
   const personalAvailable = personalItem !== null || readOnly;
 
   // Slack install callback (bot).
-  const slackInstallHandled = useRef(false);
+  const slackInstallHandled = useRef<string | null>(null);
   useEffect(() => {
-    if (slackInstallHandled.current) return;
+    if (slackInstallHandled.current === workspaceId) return;
     const params = new URLSearchParams(window.location.search);
     const outcome = params.get("slack");
     if (!outcome) return;
-    slackInstallHandled.current = true;
-    window.history.replaceState(null, "", window.location.pathname);
+    slackInstallHandled.current = workspaceId;
     if (outcome === "connected") {
+      clearSlackInstallResult();
+      setInstallError(null);
       void refresh();
       toast.success("OpenGeni installed in Slack");
     } else {
-      toast.error("Couldn't install OpenGeni in Slack", {
-        description: "Try again, or reinstall the bot from the Slack integration.",
-      });
+      // Leave the bounded outcome in the URL so a reload cannot erase the
+      // failure. It is explanatory text only, never installation authority.
+      setInstallError({ workspaceId, feedback: slackInstallFeedback(params.get("reason")) });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
@@ -429,12 +443,15 @@ export function useSlackIntegration({
   }
 
   async function installBot() {
+    if (botOperationPending.current) return;
+    if (discovery.loading || discovery.failed || discovery.bindings.length > 0) return;
     if (botConnection && !bindingActive) {
       toast.error("Slack installation repair is blocked", {
         description: "A verified active installation binding is required before Slack can change.",
       });
       return;
     }
+    botOperationPending.current = true;
     setBotBusy(true);
     try {
       const installation = await client.startOpenGeniSlackBotInstall(
@@ -443,15 +460,26 @@ export function useSlackIntegration({
       );
       window.location.assign(installation.authorizationUrl);
     } catch (error) {
+      setInstallError({
+        workspaceId,
+        feedback: {
+          title: "Couldn't start Slack setup",
+          description: error instanceof Error ? error.message : "Try connecting again.",
+          retryable: true,
+        },
+      });
       toast.error("Couldn't start the OpenGeni Slack installation", {
         description: error instanceof Error ? error.message : String(error),
       });
       setBotBusy(false);
+      botOperationPending.current = false;
     }
   }
 
   async function disconnectBot(): Promise<boolean> {
+    if (botOperationPending.current) return false;
     if (!botConnection) return true;
+    botOperationPending.current = true;
     setBotBusy(true);
     try {
       await client.deleteConnection(workspaceId, botConnection.id);
@@ -465,6 +493,7 @@ export function useSlackIntegration({
       return false;
     } finally {
       setBotBusy(false);
+      botOperationPending.current = false;
     }
   }
 
@@ -593,16 +622,98 @@ export function useSlackIntegration({
 
   // Anyone who can manage workspace connections (connections:write or admin)
   // manages the bot; everyone else sees their own personal Slack account.
-  const model = canInstallBot ? botModel() : memberModel();
+  const model =
+    discovery.bindings.length > 0 || discovery.loading || discovery.failed
+      ? organizationModel()
+      : canInstallBot
+        ? botModel()
+        : memberModel();
+
+  function organizationModel(): IntegrationViewModel {
+    const bindings = discovery.bindings;
+    const healthy =
+      bindings.length > 0 &&
+      bindings.every((row) => row.state === "active" && discovery.verifiedIds.includes(row.id));
+    const openSettings = (row: SlackInstallationBinding) => {
+      window.location.assign(
+        `/workspaces/${encodeURIComponent(row.workspaceId)}/plugins?integration=slack`,
+      );
+    };
+    return {
+      id: "slack",
+      name: "Slack",
+      description: SLACK_APP_DESCRIPTION,
+      mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
+      chip: discovery.loading
+        ? { label: "Loading", tone: "plain" }
+        : discovery.failed || !healthy
+          ? { label: "Needs attention", tone: "warn" }
+          : { label: "Connected", tone: "ok" },
+      connection: [],
+      options: [],
+      presentation: {
+        summary: {
+          title: bindings.length === 1 ? bindings[0]!.slackTeamName : "Slack in your organization",
+          description:
+            "Manage the existing Slack connection in the workspace where it was set up. You do not need a separate installation for each workspace.",
+        },
+      },
+      access:
+        bindings.length > 1
+          ? {
+              title: "Connections",
+              items: bindings.map((row) => ({
+                id: row.id,
+                name: row.slackTeamName,
+                meta: row.workspaceName,
+                status:
+                  row.state === "active" && discovery.verifiedIds.includes(row.id) ? "ok" : "warn",
+                actions: [{ label: "Open settings", onClick: () => openSettings(row) }],
+              })),
+            }
+          : undefined,
+      footer:
+        bindings.length === 1
+          ? {
+              kind: "actions",
+              primary: { label: "Open Slack settings", onClick: () => openSettings(bindings[0]!) },
+            }
+          : {
+              kind: "locked",
+              message: discovery.loading
+                ? "Checking your organization's Slack connections…"
+                : "Connections are managed in their original workspace.",
+            },
+      notice: discovery.failed
+        ? {
+            tone: "waiting",
+            title: "Couldn't check all Slack connections",
+            description: "Retry before setting up another installation.",
+            action: { label: "Retry", onClick: discovery.retry },
+          }
+        : !discovery.loading && !healthy
+          ? {
+              tone: "waiting",
+              title: "The existing Slack connection needs attention",
+              description:
+                "Open its settings to review the connection and available recovery steps.",
+            }
+          : undefined,
+    };
+  }
 
   function botModel(): IntegrationViewModel {
+    const feedback = installError?.workspaceId === workspaceId ? installError.feedback : null;
+    const unresolvedLocalBinding = !botConnection && slackInstallationBindings.length > 0;
     const chip: IntegrationChip = !loaded
       ? { label: "Loading", tone: "plain" }
-      : !botConnection
-        ? { label: "Not connected", tone: "idle" }
-        : botHealthy
-          ? { label: "Connected", tone: "ok" }
-          : { label: "Needs attention", tone: "warn" };
+      : feedback || unresolvedLocalBinding
+        ? { label: "Needs attention", tone: "warn" }
+        : !botConnection
+          ? { label: "Not connected", tone: "idle" }
+          : botHealthy
+            ? { label: "Connected", tone: "ok" }
+            : { label: "Needs attention", tone: "warn" };
 
     const facts: IntegrationFact[] = [];
     if (botConnection && botMetadata) {
@@ -761,38 +872,76 @@ export function useSlackIntegration({
 
     const footer: IntegrationFooter = !loaded
       ? { kind: "setup", onSetup: () => {}, disabled: true }
-      : !botConnection
-        ? canInstallBot
-          ? { kind: "setup", onSetup: () => void installBot(), busy: botBusy, disabled: readOnly }
-          : { kind: "locked" }
-        : {
-            kind: botHealthy ? "connected" : "repair",
-            onReconnect: () => void installBot(),
-            onDisconnect: () => setBotDisconnectOpen(true),
-            reconnectDisabled: !canMutateInstalledBot || readOnly,
-            disconnectDisabled: !canInstallBot || !botActive || readOnly,
-            busy: botBusy,
-          };
+      : unresolvedLocalBinding || (feedback && !feedback.retryable)
+        ? {
+            kind: "locked",
+            message:
+              "Your organization owner needs to resolve the existing Slack installation before setup can continue.",
+          }
+        : !botConnection
+          ? canInstallBot
+            ? { kind: "setup", onSetup: () => void installBot(), busy: botBusy, disabled: readOnly }
+            : { kind: "locked" }
+          : {
+              kind: botHealthy ? "connected" : "repair",
+              onReconnect: () => void installBot(),
+              onDisconnect: () => setBotDisconnectOpen(true),
+              reconnectDisabled: !canMutateInstalledBot || readOnly,
+              disconnectDisabled: !canInstallBot || !botActive || readOnly,
+              busy: botBusy,
+            };
 
     const quarantine = binding?.quarantineReason;
-    const notice: IntegrationViewModel["notice"] = botConnection
-      ? quarantine
+    const notice: IntegrationViewModel["notice"] = feedback
+      ? {
+          tone: "waiting",
+          title: feedback.title,
+          description: feedback.description,
+          onDismiss: () => {
+            clearSlackInstallResult();
+            setInstallError(null);
+          },
+          ...(feedback.retryable && canMutateInstalledBot && botConnection
+            ? {
+                action: { label: "Try again", onClick: () => void installBot(), disabled: botBusy },
+              }
+            : {}),
+        }
+      : unresolvedLocalBinding
         ? {
-            tone: "failed",
-            title: "Slack installation needs repair",
+            tone: "waiting",
+            title: "This Slack installation needs attention",
             description:
-              quarantine === "legacy_conflicting_installations"
-                ? "Legacy installations conflict; repair is blocked until the binding is reconciled."
-                : quarantine,
+              "Its connection could not be verified. Ask your organization owner to arrange connection recovery before setting it up again.",
           }
-        : !binding && !readOnly
-          ? {
-              tone: "waiting",
-              title: "No verified installation binding is available",
-              description: "Reconnect is blocked until the installation is verified.",
-            }
-          : undefined
-      : undefined;
+        : botConnection
+          ? quarantine
+            ? {
+                tone: "failed",
+                title: "The existing Slack connection needs attention",
+                description:
+                  quarantine === "legacy_conflicting_installations"
+                    ? "Older installations conflict. Ask your organization owner to arrange connection recovery. Repeating setup will not resolve this conflict."
+                    : "This installation could not be verified. Ask your organization owner to arrange connection recovery.",
+              }
+            : !binding && !readOnly
+              ? {
+                  tone: "waiting",
+                  title: "This Slack connection could not be verified",
+                  description:
+                    "Ask your organization owner to review the installation before reconnecting it.",
+                }
+              : !botHealthy
+                ? {
+                    tone: "waiting",
+                    title: "Slack needs your permission again",
+                    description: "Reconnect Slack to restore the connection.",
+                    ...(canMutateInstalledBot && !readOnly
+                      ? { action: { label: "Reconnect Slack", onClick: () => void installBot() } }
+                      : {}),
+                  }
+                : undefined
+          : undefined;
 
     return {
       id: "slack",
@@ -801,6 +950,35 @@ export function useSlackIntegration({
       mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
       chip,
       connection: facts,
+      ...(botConnection && botMetadata
+        ? {
+            presentation: {
+              summary: {
+                title: botMetadata.slackTeamName,
+                description: binding
+                  ? `${botHealthy ? "Connected for" : "Set up for"} ${binding.accountName}. ${routingEnabled === true ? "Start work in workspaces you have access to in this organization." : "Manage how OpenGeni connects to Slack here."}`
+                  : "Chat with OpenGeni and start work from Slack.",
+              },
+              ...(routingEnabled === true
+                ? {
+                    routing: {
+                      description:
+                        "Choose a workspace in Slack the first time you use a channel. Direct messages default to your Personal workspace. Existing threads keep their workspace.",
+                      ...(canManageReaction && botActive && !readOnly
+                        ? {
+                            action: {
+                              label: "Choose channel workspaces",
+                              onClick: () => setRoutingOpen(true),
+                            },
+                          }
+                        : {}),
+                    },
+                  }
+                : {}),
+              diagnostics: facts,
+            },
+          }
+        : {}),
       ...(access ? { access } : {}),
       options,
       footer,
@@ -931,7 +1109,7 @@ export function useSlackIntegration({
         open={botDisconnectOpen}
         onOpenChange={setBotDisconnectOpen}
         title="Disconnect the OpenGeni Slack bot?"
-        description="OpenGeni stops answering in this Slack workspace and its scheduled Slack posts stop. The app stays installed in Slack until you remove it there."
+        description="This disconnects the bot for the whole organization, including channels routed to other workspaces. OpenGeni stops answering and scheduled Slack posts stop. Existing tasks and history remain. The app stays installed in Slack until you remove it there."
         confirmLabel="Disconnect Slack bot"
         cancelAutoFocus
         onConfirm={disconnectBot}

@@ -103,32 +103,91 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
 
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
         {model.notice ? (
-          <Notice
-            tone={model.notice.tone}
-            title={model.notice.title}
-            action={
-              model.notice.action ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={model.notice.action.onClick}
-                >
-                  {model.notice.action.label}
-                </Button>
-              ) : undefined
-            }
-          >
-            {model.notice.description}
-          </Notice>
+          <div className="space-y-2">
+            <Notice
+              tone={model.notice.tone}
+              title={model.notice.title}
+              action={
+                model.notice.action ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={model.notice.action.onClick}
+                    disabled={model.notice.action.disabled}
+                  >
+                    {model.notice.action.label}
+                  </Button>
+                ) : undefined
+              }
+            >
+              {model.notice.description}
+            </Notice>
+            {model.notice.onDismiss ? (
+              <Button type="button" variant="ghost" size="sm" onClick={model.notice.onDismiss}>
+                Dismiss setup message
+              </Button>
+            ) : null}
+          </div>
         ) : null}
-        {model.connection.length > 0 ? (
+        {model.presentation ? (
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-fg">{model.presentation.summary.title}</p>
+            <p className="text-sm leading-6 text-fg-muted">
+              {model.presentation.summary.description}
+            </p>
+          </div>
+        ) : null}
+        {model.presentation?.routing ? (
+          <DetailDisclosure title="Where work starts">
+            <p className="text-sm leading-6 text-fg-muted">
+              {model.presentation.routing.description}
+            </p>
+            {model.presentation.routing.action ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={model.presentation.routing.action.disabled}
+                onClick={model.presentation.routing.action.onClick}
+              >
+                {model.presentation.routing.action.label}
+              </Button>
+            ) : null}
+          </DetailDisclosure>
+        ) : null}
+        {model.presentation &&
+        (model.access ||
+          model.options.length > 0 ||
+          model.presentation.diagnostics?.length ||
+          model.footer.kind === "connected" ||
+          model.footer.kind === "repair") ? (
+          <DetailDisclosure title="More options">
+            {model.access ? <AccessBlock access={model.access} /> : null}
+            {model.options.length > 0 ? (
+              <div className="space-y-2">
+                {model.options.map((option) => (
+                  <OptionRow key={option.id} option={option} />
+                ))}
+              </div>
+            ) : null}
+            {model.footer.kind === "connected" || model.footer.kind === "repair" ? (
+              <IntegrationFooterView footer={model.footer} inline />
+            ) : null}
+            {model.presentation.diagnostics?.length ? (
+              <DetailDisclosure title="Connection details">
+                <ConnectionFacts facts={model.presentation.diagnostics} />
+              </DetailDisclosure>
+            ) : null}
+          </DetailDisclosure>
+        ) : null}
+        {!model.presentation && model.connection.length > 0 ? (
           <Block title="Connection">
             <ConnectionFacts facts={model.connection} />
           </Block>
         ) : null}
-        {model.access ? <AccessBlock access={model.access} /> : null}
-        {model.options.length > 0 ? (
+        {!model.presentation && model.access ? <AccessBlock access={model.access} /> : null}
+        {!model.presentation && model.options.length > 0 ? (
           <Block title="Options">
             <div className="space-y-2">
               {model.options.map((option) => (
@@ -153,8 +212,24 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
         ) : null}
       </div>
 
-      <IntegrationFooterView footer={model.footer} />
+      {!(
+        model.presentation &&
+        (model.footer.kind === "connected" || model.footer.kind === "repair")
+      ) ? (
+        <IntegrationFooterView footer={model.footer} />
+      ) : null}
     </div>
+  );
+}
+
+function DetailDisclosure({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <details className="border-t border-border pt-4">
+      <summary className="cursor-pointer rounded-sm text-sm font-medium text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand">
+        {title}
+      </summary>
+      <div className="space-y-4 pt-4">{children}</div>
+    </details>
   );
 }
 
@@ -258,7 +333,7 @@ function AccessBlock({ access }: { access: IntegrationAccess }) {
                   )}
                   <span className="min-w-0 flex-1 truncate font-medium text-fg">{item.name}</span>
                   {item.meta ? (
-                    <span className="shrink-0 text-2xs text-fg-subtle">{item.meta}</span>
+                    <span className="min-w-0 text-right text-2xs text-fg-subtle">{item.meta}</span>
                   ) : null}
                   {(item.actions ?? []).map((itemAction) => (
                     <button
@@ -402,9 +477,20 @@ function OptionRow({ option }: { option: IntegrationOption }) {
   );
 }
 
-function IntegrationFooterView({ footer }: { footer: IntegrationFooter }) {
+function IntegrationFooterView({
+  footer,
+  inline = false,
+}: {
+  footer: IntegrationFooter;
+  inline?: boolean;
+}) {
   return (
-    <div className="flex items-center gap-2 border-t border-border bg-surface px-5 py-3">
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-2",
+        !inline && "border-t border-border bg-surface px-5 py-3",
+      )}
+    >
       {footer.kind === "locked" ? (
         <p className="text-xs leading-5 text-fg-muted">
           {footer.message ?? INTEGRATION_LOCKED_SENTENCE}

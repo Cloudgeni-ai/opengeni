@@ -27,6 +27,8 @@ const withheldMigrationNames = [
   "0402_session_input_wait_and_background_command_results.sql",
   "0407_connected_command_tracking_retirement.sql",
   "0408_scheduled_session_target_index.sql",
+  "0414_scheduled_generated_producer_materialization.sql",
+  "0416_scheduled_inherited_tool_admission.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -108,7 +110,8 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       // resulting provider-deadline branch. The 0402 session-wait cutover also
       // inventories the scheduled accepted-execution columns created by 0275,
       // so it must remain behind the same withheld boundary. The 0408 target
-      // index depends on the deleted_at column introduced by 0275.
+      // index depends on the deleted_at column introduced by 0275. Migration 0414
+      // patches the exact scheduled producer fence created by that same 0275.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;

@@ -1636,6 +1636,7 @@ describe("summarizeSessionFailure", () => {
       reason: null,
       safetyRefusal: false,
       failedAt: null,
+      failureEventId: null,
       recoveryCount: 0,
       failedTurnCount: 0,
     });
@@ -1647,6 +1648,7 @@ describe("summarizeSessionFailure", () => {
         "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
     });
     expect(summarizeSessionFailure([refusal], "failed")).toMatchObject({
+      failureEventId: refusal.id,
       safetyRefusal: true,
       reason:
         "The model provider blocked this request. This request was blocked by our safety systems. Reason: Potentially unintended activity.",

@@ -1,10 +1,6 @@
 ARG BUN_VERSION=1.4.0
-FROM oven/bun:${BUN_VERSION} AS source-base
-
-WORKDIR /app
-
-ARG OPENGENI_SERVER_VERSION
-ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+# Share the frozen-install inputs without tying them to a CPU architecture.
+FROM scratch AS workspace-manifests
 
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
@@ -12,6 +8,7 @@ COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -42,6 +39,11 @@ COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
+FROM oven/bun:${BUN_VERSION} AS source-base
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+COPY --from=workspace-manifests / /app/
 RUN bun install --frozen-lockfile
 
 COPY --chown=bun:bun . .
@@ -194,11 +196,32 @@ RUN bun scripts/build-runtime-processes.ts artifact-materializer
 EXPOSE 9465
 CMD ["bun", "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js"]
 
-FROM base AS web-build
+# Browser assets and the Bun server bundle are architecture-independent. Run
+# Vite/Rolldown only on the builder CPU: ARM emulation can stall demo bundling.
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS web-build
+WORKDIR /app
+COPY --from=workspace-manifests / /app/
+RUN bun install --frozen-lockfile
+COPY --chown=bun:bun . .
+RUN install -d -o bun -g bun -m 0755 /workspace /app/web-server
+ARG OPENGENI_SERVER_VERSION
 ARG OPENGENI_DEPLOYMENT_REVISION=dev
-ENV VITE_OPENGENI_DEPLOYMENT_REVISION=$OPENGENI_DEPLOYMENT_REVISION
-RUN bun run --cwd apps/web build
+ENV NODE_ENV=production \
+  OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION \
+  VITE_OPENGENI_DEPLOYMENT_REVISION=$OPENGENI_DEPLOYMENT_REVISION
+USER bun
+RUN bun run --cwd apps/web build \
+  && bun build apps/web/src/server.ts --target=bun --outfile=/app/web-server/server.ts
 
-FROM web-build AS web
+# No target-architecture RUN steps or copied native build dependencies.
+FROM oven/bun:${BUN_VERSION} AS web
+WORKDIR /app
+ARG OPENGENI_SERVER_VERSION
+ENV NODE_ENV=production OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+COPY --from=web-build --chown=bun:bun /app/apps/web/dist ./apps/web/dist
+COPY --from=web-build --chown=bun:bun /app/apps/web/package.json ./apps/web/package.json
+COPY --from=web-build --chown=bun:bun /app/web-server/server.ts ./apps/web/src/server.ts
+COPY --from=web-build --chown=bun:bun /workspace /workspace
+USER bun
 EXPOSE 3000
 CMD ["bun", "run", "--cwd", "apps/web", "start"]

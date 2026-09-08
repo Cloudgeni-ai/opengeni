@@ -7,6 +7,9 @@ import {
   isOpenGeniSiteBridgeConnectMessage,
   isOpenGeniSiteBridgeRequestMessage,
   sanitizeOpenGeniSiteToolCallRequest,
+  isSiteHttpRequest,
+  serveSiteHttp,
+  type SiteHttpRequest,
   type OpenGeniSiteBridgeResponseMessage,
   type OpenGeniSiteToolCatalog,
 } from "@opengeni/sdk/site";
@@ -38,6 +41,7 @@ export type PublishedHtmlArtifactFrameProps = {
 };
 
 export type PublishedHtmlArtifactToolBridge = {
+  fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -96,11 +100,29 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     const attachToolPort = (data: unknown, ports: readonly MessagePort[]) => {
       const port = openGeniSiteBridgePortFromBootstrap(data, ports);
       if (!port) return;
-      requests.replacePort(port);
+      requests.addPort(port);
       port.addEventListener("message", (portEvent: MessageEvent<unknown>) => {
         const message = portEvent.data;
         if (isOpenGeniSiteBridgeCancelMessage(message)) {
           requests.cancel(port, message.requestId);
+          return;
+        }
+        if (isSiteHttpRequest(message) && portEvent.ports.length === 1) {
+          const controller = requests.start(port, message.requestId);
+          if (!controller) {
+            portEvent.ports[0]!.close();
+            return;
+          }
+          void serveSiteHttp(
+            message,
+            portEvent.ports[0]!,
+            async (request, signal) => {
+              const fetch = bridgeRef.current?.fetch;
+              if (!fetch) throw new Error("This Site host does not support the session SDK");
+              return fetch(request, signal);
+            },
+            controller.signal,
+          ).finally(() => requests.complete(port, message.requestId, controller));
           return;
         }
         if (!isOpenGeniSiteBridgeRequestMessage(message)) return;
@@ -188,9 +210,10 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
 export class SiteBridgeRequestRegistry {
   private readonly controllersByPort = new Map<MessagePort, Map<string, AbortController>>();
 
-  replacePort(port: MessagePort): void {
-    this.closeAll();
-    this.controllersByPort.set(port, new Map());
+  addPort(port: MessagePort): void {
+    // Several SDK clients may share one document bootstrap. Document teardown,
+    // not another client connecting, revokes all of that document's ports.
+    if (!this.controllersByPort.has(port)) this.controllersByPort.set(port, new Map());
   }
 
   start(port: MessagePort, requestId: string): AbortController | null {

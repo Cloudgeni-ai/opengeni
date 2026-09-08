@@ -147,6 +147,8 @@ export interface OpStreamExecClientDeps {
  *  telemetry the session folds into its op observation. */
 export interface OpStreamExecOutcome {
   response: ExecResponse;
+  /** Runner transport failure is independent of the process exit code. */
+  failure?: Pick<OpExit, "failureCode" | "failureDetail">;
   /** Attach/query heals that occurred after streaming began (gap replays,
    *  silence probes that re-attached). >0 marks the op `healed`. */
   heals: number;
@@ -176,7 +178,10 @@ export type OpStreamYieldOptions = {
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
+  captureOutput?: (frames: OpStreamOutputFrame[]) => Promise<void>;
 };
+
+export type OpStreamOutputFrame = { sequence: string; stream: "stdout" | "stderr"; chunk: string };
 
 export type ExactSelfhostedOpControlInput = {
   controlRpc: ControlRpc;
@@ -257,6 +262,8 @@ export class OpStreamExecClient {
   private readonly deps: OpStreamExecClientDeps;
   private readonly settled: SettledOp[] = [];
   private readonly inFlight = new Set<string>();
+  private readonly readCheckpoints = new Map<string, OpReadCheckpoint>();
+  private lastReadGeneration = 0n;
 
   constructor(deps: OpStreamExecClientDeps) {
     this.deps = deps;
@@ -264,6 +271,21 @@ export class OpStreamExecClient {
 
   private generation(): string {
     return this.deps.journal?.attachGeneration() ?? "1";
+  }
+
+  /** Adopted-command reads are new consumers, not recovery of the launching
+   * activity. Use the same epoch-millisecond generation domain as reconciliation
+   * so a later owning-runtime read can follow a reaper attach. Execution and
+   * its recovery continue to use the immutable journal generation. Equal
+   * generations are accepted by the runner; never decrease within this client. */
+  private readGeneration(): string {
+    const journal = BigInt(this.generation());
+    const now = BigInt(Date.now());
+    this.lastReadGeneration = [this.lastReadGeneration, journal, now].reduce(
+      (highest, generation) => (generation > highest ? generation : highest),
+      1n,
+    );
+    return this.lastReadGeneration.toString();
   }
 
   /**
@@ -359,6 +381,50 @@ export class OpStreamExecClient {
     }
   }
 
+  /** Observe an already-adopted operation. Never issues OpStart, cancellation,
+   * final ACK, or terminal model-observation acknowledgment. Output is delivered
+   * through captureOutput, not accumulated in response stdout/stderr. Successful
+   * running reads reuse local integrity state; a new client replays from zero. */
+  async readExisting(
+    opId: string,
+    yieldMs: number,
+    captureOutput: (frames: OpStreamOutputFrame[]) => Promise<void>,
+  ): Promise<OpStreamExecResult> {
+    if (this.inFlight.has(opId)) throw protocolError("op-stream read: duplicate concurrent op id");
+    const consumer = new OpConsumer(
+      this.deps,
+      opId,
+      this.readGeneration(),
+      this.readCheckpoints.get(opId),
+    );
+    this.inFlight.add(opId);
+    this.readCheckpoints.delete(opId);
+    try {
+      const result = await consumer.run(
+        null,
+        0,
+        Math.max(yieldMs + this.deps.controlTimeoutMs, 1000),
+        {
+          yieldMs: Math.max(1, yieldMs),
+          onYield: () => {},
+          captureOutput,
+        },
+      );
+      // Only a successful capture may advance this local replay optimization.
+      // A fresh client or failed persistence always replays retained truth.
+      consumer.teardown();
+      if (result.status === "running" && !result.terminal) {
+        this.readCheckpoints.set(opId, consumer.readCheckpoint());
+      }
+      return result.status === "completed"
+        ? { status: "completed", outcome: result.outcome }
+        : result;
+    } finally {
+      consumer.teardown();
+      this.inFlight.delete(opId);
+    }
+  }
+
   /**
    * The turn-end durability hook (the hard gate's ordering): for every op whose
    * result the turn has durably consumed — (1) already true when this runs —
@@ -395,6 +461,14 @@ export class OpStreamExecClient {
   }
 }
 
+/** In-memory only: never licenses runner GC or substitutes for durable output. */
+type OpReadCheckpoint = {
+  lastApplied: bigint;
+  hashes: { stdout: ReturnType<typeof blake3.create>; stderr: ReturnType<typeof blake3.create> };
+  totals: { stdout: bigint; stderr: bigint };
+  decoders: { stdout: TextDecoder; stderr: TextDecoder };
+};
+
 /** Internal per-op consumer: subscription, reassembly, flow, liveness. */
 class OpConsumer {
   private readonly deps: OpStreamExecClientDeps;
@@ -410,6 +484,11 @@ class OpConsumer {
     stdout: [],
     stderr: [],
   };
+  private readonly outputFrames: OpStreamOutputFrame[] = [];
+  private readonly outputDecoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  private readonly hashes = { stdout: blake3.create(), stderr: blake3.create() };
+  private readonly totals = { stdout: 0n, stderr: 0n };
+  private captureOnly = false;
   private receivedPayloadBytes = 0n;
   private creditAtLastAck = 0n;
   private exit: OpExit | undefined;
@@ -424,12 +503,32 @@ class OpConsumer {
   private settleReject: ((error: unknown) => void) | undefined;
   private torn = false;
 
-  constructor(deps: OpStreamExecClientDeps, opId: string, generation: string) {
+  constructor(
+    deps: OpStreamExecClientDeps,
+    opId: string,
+    generation: string,
+    checkpoint?: OpReadCheckpoint,
+  ) {
     this.deps = deps;
     this.opId = opId;
     this.generation = generation;
     this.windowBytes = deps.windowBytes ?? OP_STREAM_DEFAULT_WINDOW_BYTES;
     this.lastFrameAt = Date.now();
+    if (checkpoint) {
+      this.lastApplied = checkpoint.lastApplied;
+      this.hashes = checkpoint.hashes;
+      this.totals = checkpoint.totals;
+      this.outputDecoders = checkpoint.decoders;
+    }
+  }
+
+  readCheckpoint(): OpReadCheckpoint {
+    return {
+      lastApplied: this.lastApplied,
+      hashes: this.hashes,
+      totals: this.totals,
+      decoders: this.outputDecoders,
+    };
   }
 
   private get ackIntervalMs(): number {
@@ -453,7 +552,7 @@ class OpConsumer {
   }
 
   async run(
-    exec: ExecRequest,
+    exec: ExecRequest | null,
     deadlineMs: number,
     wallMs: number,
     yieldOptions: OpStreamYieldOptions | null,
@@ -465,6 +564,7 @@ class OpConsumer {
       }
     | Extract<OpStreamExecResult, { status: "running" }>
   > {
+    this.captureOnly = exec === null;
     // Arm the settle promise FIRST: frames can start applying the moment the
     // attach below returns (replay is asynchronous), and a completion that
     // fires before the resolver exists would strand the op on its wall.
@@ -485,7 +585,7 @@ class OpConsumer {
       (payload) => this.onFramePayload(payload),
     );
 
-    const startRetries = await this.startOp(exec, deadlineMs);
+    const startRetries = exec === null ? 0 : await this.startOp(exec, deadlineMs);
 
     // The universal begin (B2): attach from our contiguous frontier under the
     // initial window — for a FRESH op that is seq 0 (replay nothing, start live
@@ -525,8 +625,13 @@ class OpConsumer {
           // receipt. A completion racing the transaction is handled below as
           // terminal proof for the adopted command, never returned inline too.
           if (this.exitSeq === undefined) {
+            // Freeze a read's exact local frontier before persistence can block.
+            // The runner retains later output; do not accumulate it while the
+            // database is slow. Foreground/adoption receipt behavior is unchanged.
+            if (this.captureOnly) this.teardown();
             await this.sendBackgroundCredit();
             const partial = this.snapshotOutput();
+            await yieldOptions.captureOutput?.(this.outputFrames.splice(0));
             return {
               status: "running",
               opId: this.opId,
@@ -551,11 +656,15 @@ class OpConsumer {
     // Settled: the exit frame and every frame before it are applied.
     const exit = this.exit as OpExit;
     const exitSeq = this.exitSeq as bigint;
-    if (exit.failureCode) {
+    if (exit.failureCode && exec !== null && !adopted) {
       throw runnerFailureToControlError(exit);
     }
     const { stdout, stderr } = this.assembleAndVerify(exit);
+    if (adopted || exec === null) await yieldOptions?.captureOutput?.(this.outputFrames.splice(0));
     const outcome: OpStreamExecOutcome = {
+      ...(exit.failureCode
+        ? { failure: { failureCode: exit.failureCode, failureDetail: exit.failureDetail } }
+        : {}),
       response: {
         exitCode: exit.exitCode,
         stdout,
@@ -810,6 +919,7 @@ class OpConsumer {
   }
 
   private onFramePayload(payload: Uint8Array): void {
+    if (this.torn) return;
     let frame: OpFrame;
     try {
       frame = OpFrame.decode(payload);
@@ -869,7 +979,14 @@ class OpConsumer {
       case "data": {
         const channel = OP_CHANNEL_NAMES[body.data.channel];
         if (channel) {
-          this.chunks[channel].push(body.data.bytes);
+          if (this.captureOnly) {
+            this.hashes[channel].update(body.data.bytes);
+            this.totals[channel] += BigInt(body.data.bytes.byteLength);
+          } else {
+            this.chunks[channel].push(body.data.bytes);
+          }
+          const chunk = this.outputDecoders[channel].decode(body.data.bytes, { stream: true });
+          if (chunk) this.outputFrames.push({ sequence: frame.seq, stream: channel, chunk });
         }
         this.receivedPayloadBytes += BigInt(body.data.bytes.byteLength);
         break;
@@ -879,6 +996,10 @@ class OpConsumer {
         void this.sendAck();
         break;
       case "exit":
+        for (const stream of ["stdout", "stderr"] as const) {
+          const chunk = this.outputDecoders[stream].decode();
+          if (chunk) this.outputFrames.push({ sequence: frame.seq, stream, chunk });
+        }
         this.exit = body.exit;
         this.exitSeq = BigInt(frame.seq);
         break;
@@ -1022,15 +1143,18 @@ class OpConsumer {
     for (const channel of ["stdout", "stderr"] as const) {
       const bytes = assembled[channel];
       const declaredTotal = exit.totals[channel];
-      if (declaredTotal !== undefined && BigInt(declaredTotal) !== BigInt(bytes.byteLength)) {
+      const total = this.captureOnly ? this.totals[channel] : BigInt(bytes.byteLength);
+      if (declaredTotal !== undefined && BigInt(declaredTotal) !== total) {
         throw protocolError(
-          `op-stream reassembly: ${channel} total mismatch (got ${bytes.byteLength}, ` +
+          `op-stream reassembly: ${channel} total mismatch (got ${total}, ` +
             `runner declared ${declaredTotal})`,
         );
       }
       const declaredDigest = exit.digests[channel];
       if (declaredDigest) {
-        const digest = bytesToHex(blake3(bytes));
+        const digest = bytesToHex(
+          this.captureOnly ? this.hashes[channel].clone().digest() : blake3(bytes),
+        );
         if (digest !== declaredDigest) {
           throw protocolError(
             `op-stream reassembly: ${channel} digest mismatch (got ${digest}, ` +
@@ -1093,7 +1217,9 @@ function lostToControlError(status: OpStatus): SelfhostedControlError {
  * output, redirect to a file, read it back in ranges — so it gets the same
  * actionable rendering, with the runner's exact counters in the detail.
  */
-function runnerFailureToControlError(exit: OpExit): SelfhostedControlError {
+export function runnerFailureToControlError(
+  exit: Pick<OpExit, "failureCode" | "failureDetail">,
+): SelfhostedControlError {
   if (exit.failureCode === "OP_OVERFLOW") {
     return new SelfhostedControlError({
       message:

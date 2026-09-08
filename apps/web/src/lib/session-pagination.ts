@@ -15,7 +15,7 @@ export type SessionContinuationState = {
   /** Shared causal generation captured when that snapshot's page-one read started. */
   snapshotGeneration: number;
   /** Root-hook snapshots and direct cursor-rebase snapshots have independent identities. */
-  source: "root" | "rebase";
+  source: "root" | "rebase" | "group";
   /** Rows fetched from that snapshot, excluding display-only rows retained from older snapshots. */
   authoritativeIds: ReadonlySet<string>;
   /** Actual request-start generation for each accepted continuation row's live channel fields. */
@@ -26,6 +26,59 @@ export type SessionContinuationChannelEvidence = readonly [
   session: Session,
   readGeneration: number,
 ];
+
+/**
+ * Apply the exact archive mutation fields without allowing its full response
+ * object to overwrite unrelated list projections that may have advanced while
+ * the request was in flight.
+ */
+export function applySessionArchiveProjection(current: Session, updated: Session): Session {
+  if ((current.archiveVersion ?? 0) > (updated.archiveVersion ?? 0)) return current;
+  return {
+    ...current,
+    archived: updated.archived,
+    archivedAt: updated.archivedAt,
+    archiveVersion: updated.archiveVersion,
+    ...((current.pinVersion ?? 0) <= (updated.pinVersion ?? 0)
+      ? {
+          pinned: updated.pinned,
+          pinnedAt: updated.pinnedAt,
+          pinVersion: updated.pinVersion,
+        }
+      : {}),
+    ...((current.attentionVersion ?? 0) <= (updated.attentionVersion ?? 0)
+      ? {
+          activelyWorking: updated.activelyWorking,
+          attentionVersion: updated.attentionVersion,
+        }
+      : {}),
+  };
+}
+
+/** Keep successful archive/restore writes authoritative over retained pages. */
+export function projectSessionArchiveMembership(
+  sessions: readonly Session[],
+  overrides: ReadonlyMap<string, Session>,
+  archived: boolean,
+  workspaceId: string,
+): Session[] {
+  const rows = new Map(sessions.map((session) => [session.id, session]));
+  for (const [id, override] of overrides) {
+    if (override.workspaceId !== workspaceId) continue;
+    const current = rows.get(id);
+    rows.set(id, current ? applySessionArchiveProjection(current, override) : override);
+  }
+  return [...rows.values()].flatMap((session) => {
+    // A cached descendant follows its root instead of becoming an orphan row.
+    const root = rows.get(session.rootSessionId ?? session.id);
+    if (Boolean(root?.archived ?? session.archived) !== archived) return [];
+    return [
+      root && root.id !== session.id
+        ? { ...session, archived: root.archived, archivedAt: root.archivedAt }
+        : session,
+    ];
+  });
+}
 
 export function sessionPageKey(workspaceId: string, search: string): string {
   return `${workspaceId}\u0000${search}`;
@@ -72,7 +125,7 @@ export function mergeSessionContinuation(
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotRevision: number,
   snapshotGeneration = 0,
-  source: "root" | "rebase" = "root",
+  source: "root" | "rebase" | "group" = "root",
   pageReadGeneration = snapshotGeneration,
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) {
@@ -211,7 +264,7 @@ export function rebaseSessionContinuation(
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotRevision: number,
   snapshotGeneration = 0,
-  source: "root" | "rebase" = "root",
+  source: "root" | "rebase" | "group" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) return state;
   const active = activeSessionContinuation(state, activeGeneration);

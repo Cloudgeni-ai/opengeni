@@ -12,6 +12,7 @@ import {
 import { lazy, Suspense } from "react";
 import { toast } from "sonner";
 
+import { AppearanceMenu } from "@/components/appearance-menu";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationCountBadge,
@@ -103,7 +104,7 @@ export function RailFooter() {
                     displayName,
                     pendingCount: organizationInvitations.pendingCount,
                   })}
-                  className="flex min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none pointer-coarse:py-2"
+                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
                 >
                   <span className="relative shrink-0">
                     <Avatar size="sm">
@@ -131,7 +132,7 @@ export function RailFooter() {
               <DropdownMenuContent
                 align="start"
                 side={rail.collapsed ? "right" : "top"}
-                className="min-w-56"
+                className="w-[min(18rem,calc(100vw-1rem))]"
               >
                 <DropdownMenuLabel className="grid gap-0.5">
                   <span className="truncate text-sm">{displayName}</span>
@@ -143,6 +144,7 @@ export function RailFooter() {
                 {managed ? (
                   <OrganizationInvitationsMenuItem controller={organizationInvitations} />
                 ) : null}
+                <AppearanceMenu />
                 {showAnalyticsPreferences ? (
                   <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
                     <ChartColumnIcon className="size-4" />

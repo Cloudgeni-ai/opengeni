@@ -257,7 +257,7 @@ describe("API component integration", () => {
         body: JSON.stringify({ initialMessage, model: "scripted-model" }),
         headers: { "content-type": "application/json" },
       });
-      expect(response.status).toBe(202);
+      expect(response.status, await response.clone().text()).toBe(202);
       return (await response.json()) as {
         id: string;
         updatedAt: string;
@@ -363,6 +363,36 @@ describe("API component integration", () => {
       pinned: [{ id: pinnedTarget.id }],
       sessions: [],
     });
+    const currentDateFiltered = await app.request(
+      workspacePath(
+        workspaceId,
+        "/sessions?view=page&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z",
+      ),
+    );
+    expect(currentDateFiltered.status).toBe(200);
+    expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
+    for (const name of ["updatedFrom", "updatedBefore", "createdFrom", "createdBefore"]) {
+      const response = await app.request(
+        workspacePath(workspaceId, `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("millisecond precision");
+    }
+
+    expect(
+      (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            "/sessions?view=page&updatedFrom=2026-09-05T00%3A00%3A00.000Z&updatedBefore=2026-09-04T00%3A00%3A00.000Z",
+          ),
+        )
+      ).status,
+    ).toBe(400);
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
@@ -412,6 +442,16 @@ describe("API component integration", () => {
         )
       ).status,
     ).toBe(200);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&channelId=null&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
@@ -8515,12 +8555,19 @@ describe("API component integration", () => {
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
     ).rejects.toThrow("session not found");
 
+    const conversation = await callMcpTool<{ view: string; events: unknown[] }>(
+      mcp,
+      "session_events",
+      { sessionId: created.id },
+    );
+    expect(conversation.view).toBe("conversation");
+    expect(conversation.events).toEqual([]);
     const timeline = await callMcpTool<{
       events: Array<{ type: string; sequence: number }>;
       direction: "before";
       nextBefore: number;
       nextAfter: null;
-    }>(mcp, "session_events", { sessionId: created.id });
+    }>(mcp, "session_events", { sessionId: created.id, view: "debug" });
     // The MCP monitoring read omits the human prompt while its turn is unclaimed;
     // the exact row remains in forensic mode and in the REST events API.
     expect(timeline.events.map((event) => event.type)).toEqual([
@@ -8553,6 +8600,7 @@ describe("API component integration", () => {
     }>(mcp, "session_events", {
       sessionId: created.id,
       after: lastTimelineSequence,
+      view: "debug",
     });
     expect(caughtUp.events).toHaveLength(0);
     expect(caughtUp.direction).toBe("after");

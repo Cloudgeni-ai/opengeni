@@ -560,6 +560,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       if (state.connectionsUnavailable)
         return json({ message: "Connection data unavailable" }, 503);

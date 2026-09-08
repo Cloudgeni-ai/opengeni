@@ -225,6 +225,15 @@ export type IntegrationViewModel = {
   access?: IntegrationAccess;
   options: IntegrationOption[];
   footer: IntegrationFooter;
+  /** Optional progressive disclosure for integrations with a simple everyday surface. */
+  presentation?: {
+    summary: { title: string; description: string };
+    routing?: {
+      description: string;
+      action?: { label: string; onClick: () => void; disabled?: boolean };
+    };
+    diagnostics?: IntegrationFact[];
+  };
   /** The tools this connection actually publishes; omitted when unavailable. */
   tools?: IntegrationToolsBlock;
   /** Optional plain-language notice shown above the blocks (state explanations). */
@@ -233,7 +242,8 @@ export type IntegrationViewModel = {
     title: string;
     description?: string;
     /** Optional recovery affordance (e.g. Retry after a failed load). */
-    action?: { label: string; onClick: () => void };
+    action?: { label: string; onClick: () => void; disabled?: boolean };
+    onDismiss?: () => void;
   };
   /** Provider disclosures rendered after the blocks, before the footer. */
   disclosures?: IntegrationDisclosure[];

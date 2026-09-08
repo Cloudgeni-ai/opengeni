@@ -1,3 +1,4 @@
+import { ChildSessionLink } from "./child-session-link";
 /**
  * SessionChrome — compact merged session signals above the composer.
  *
@@ -28,11 +29,23 @@
  * Inbox has no product dismiss API; pass `onDismissIncoming` when the host
  * wants a visible action (dev harness may use a local dummy).
  *
+ * Queue opens by default when chrome is idle and at least one authoritative
+ * prompt is queued. Closing the queue dismisses that session's offer until
+ * occupancy drains; a different session on the same chrome instance may
+ * offer again. An in-flight optimistic Send never opens the drawer —
+ * admission stays a paint-only receipt on the chip so layout does not jump
+ * under the pointer.
+ *
  * Segment switches keep the panel shell mounted and crossfade content. The
  * shell uses one CSS grid-track transition for deliberate open/close actions;
  * live queue reconciliation never feeds measurements back into layout.
  */
-import type { SessionGoal, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
+import type {
+  SessionGoal,
+  SessionPendingInputPreview,
+  SessionStatus,
+  SessionTurn,
+} from "@opengeni/sdk";
 import {
   ActivityIcon,
   AudioLinesIcon,
@@ -82,6 +95,8 @@ export type SessionChromeAgentsSignal = {
 
 export type SessionChromeProps = {
   compact?: boolean;
+  /** Authoritative execution status; omitted by older embedding hosts. */
+  sessionStatus?: SessionStatus | undefined;
   queue: UseTurnQueueResult;
   /** Needed for queue edit → composer checkout. Omit with `readOnly`. */
   composer?: ComposerState | undefined;
@@ -98,6 +113,8 @@ export type SessionChromeProps = {
    * (and the gallery) may still pass a handler so the action is visible.
    */
   onDismissIncoming?: ((inputId: string) => void) | undefined;
+  /** Open a typed child update's source through the host's normal authorized route. */
+  onOpenSession?: ((sessionId: string) => void) | undefined;
   readOnly?: boolean | undefined;
   className?: string | undefined;
   /** Controlled active segment; omit for uncontrolled. */
@@ -110,6 +127,7 @@ type GoalPillState =
   | "pursuing"
   | "waiting"
   | "scheduled"
+  | "session_failed"
   | "blocked"
   | "held"
   | "paused"
@@ -126,6 +144,7 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
   waiting: "Waiting",
   scheduled: "Waiting",
   blocked: "Blocked",
+  session_failed: "Blocked by session failure",
   held: "Held",
   paused: "Paused",
   invariant_broken: "Needs attention",
@@ -180,6 +199,9 @@ export function sessionChromeGoalPillExplanation(
   record: GoalPillRecord | null | undefined,
 ): string | null {
   const continuation = record?.continuation ?? null;
+  if (state === "session_failed") {
+    return "Resolve the session failure, then use Continue or send a message to continue this active goal.";
+  }
   if (state === "paused") {
     return record?.pausedReason
       ? (GOAL_PAUSED_REASON_EXPLANATION[record.pausedReason] ?? null)
@@ -216,6 +238,82 @@ function isSteeringTurn(turn: SessionTurn): boolean {
   return turn.metadata.delivery === "steer";
 }
 
+function isAuthoritativeQueuedTurn(
+  turn: SessionTurn,
+  mutationFor: UseTurnQueueResult["mutationFor"],
+): boolean {
+  return !isSteeringTurn(turn) && mutationFor(turn.id) !== "steer";
+}
+
+export function countAuthoritativeQueuedTurns(
+  turns: readonly SessionTurn[],
+  mutationFor: UseTurnQueueResult["mutationFor"],
+): number {
+  return turns.filter((turn) => isAuthoritativeQueuedTurn(turn, mutationFor)).length;
+}
+
+function isOptimisticQueuedMessage(
+  message: ComposerOptimisticMessage,
+  queuedTurnIds: ReadonlySet<string>,
+  snapshot: UseTurnQueueResult["snapshot"],
+): boolean {
+  return (
+    message.delivery === "send" &&
+    message.destination === "queue" &&
+    (!message.turnId || !queuedTurnIds.has(message.turnId)) &&
+    !(
+      message.turnId &&
+      message.appliedQueueVersion !== null &&
+      message.appliedQueueVersion !== undefined &&
+      snapshot &&
+      snapshot.version >= message.appliedQueueVersion
+    )
+  );
+}
+
+export function countOptimisticQueuedMessages(
+  messages: readonly ComposerOptimisticMessage[] | undefined,
+  queuedTurnIds: ReadonlySet<string>,
+  snapshot: UseTurnQueueResult["snapshot"],
+): number {
+  return (messages ?? []).filter((message) =>
+    isOptimisticQueuedMessage(message, queuedTurnIds, snapshot),
+  ).length;
+}
+
+/**
+ * First uncontrolled segment. An existing authoritative queue opens itself
+ * when the host did not pick another default; optimistic-only occupancy
+ * stays collapsed so a live Send does not shove a drawer under the pointer.
+ */
+export function sessionChromeInitialActive(input: {
+  defaultActive: SessionChromeSignalId | null;
+  authoritativeQueuedCount: number;
+}): SessionChromeSignalId | null {
+  if (input.defaultActive != null) return input.defaultActive;
+  return input.authoritativeQueuedCount >= 1 ? "queue" : null;
+}
+
+/**
+ * Whether idle chrome should offer the queue panel. A dismissed session
+ * stays collapsed until occupancy drains. Controlled hosts own this.
+ */
+export function sessionChromeShouldOfferQueue(input: {
+  controlled: boolean;
+  active: SessionChromeSignalId | null;
+  activityOpen: boolean;
+  authoritativeQueuedCount: number;
+  suppressed: boolean;
+}): boolean {
+  return (
+    !input.controlled &&
+    input.active === null &&
+    !input.activityOpen &&
+    input.authoritativeQueuedCount >= 1 &&
+    !input.suppressed
+  );
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -226,9 +324,11 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 export function sessionChromeGoalPillState(
   goalStatus: "active" | "paused" | "completed",
   continuation: SessionGoal["continuation"] | null | undefined,
+  sessionStatus?: SessionStatus,
 ): GoalPillState {
   if (goalStatus === "completed") return "completed";
   if (goalStatus === "paused") return "paused";
+  if (sessionStatus === "failed") return "session_failed";
   if (!continuation) return "invariant_broken";
   if (continuation.state === "running") {
     return continuation.reason === "goal_turn_running"
@@ -328,6 +428,7 @@ function toneClass(tone: SessionChromeSignalTone, selected: boolean): string {
 
 export function SessionChrome({
   compact = false,
+  sessionStatus,
   queue,
   composer,
   goal,
@@ -336,6 +437,7 @@ export function SessionChrome({
   commandsCount = 0,
   agentsSignal,
   onDismissIncoming,
+  onOpenSession,
   readOnly = false,
   className,
   active: activeControlled,
@@ -353,24 +455,14 @@ export function SessionChrome({
   const turns = queue.queue;
   const queueMutationFor = queue.mutationFor;
   const queuedTurns = useMemo(
-    () => turns.filter((turn) => !isSteeringTurn(turn) && queueMutationFor(turn.id) !== "steer"),
+    () => turns.filter((turn) => isAuthoritativeQueuedTurn(turn, queueMutationFor)),
     [queueMutationFor, turns],
   );
   const queuedTurnIds = useMemo(() => new Set(queuedTurns.map((turn) => turn.id)), [queuedTurns]);
   const optimisticQueued = useMemo(
     () =>
-      (composer?.optimisticMessages ?? []).filter(
-        (message) =>
-          message.delivery === "send" &&
-          message.destination === "queue" &&
-          (!message.turnId || !queuedTurnIds.has(message.turnId)) &&
-          !(
-            message.turnId &&
-            message.appliedQueueVersion !== null &&
-            message.appliedQueueVersion !== undefined &&
-            queue.snapshot &&
-            queue.snapshot.version >= message.appliedQueueVersion
-          ),
+      (composer?.optimisticMessages ?? []).filter((message) =>
+        isOptimisticQueuedMessage(message, queuedTurnIds, queue.snapshot),
       ),
     [composer?.optimisticMessages, queue.snapshot, queuedTurnIds],
   );
@@ -385,10 +477,19 @@ export function SessionChrome({
   const canMutateQueue = !readOnly && composer !== undefined;
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
-  const goalState = record ? sessionChromeGoalPillState(record.status, record.continuation) : null;
+  const goalState = record
+    ? sessionChromeGoalPillState(record.status, record.continuation, sessionStatus)
+    : null;
 
-  const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
-    defaultActive,
+  const initialAuthoritativeQueuedCount = countAuthoritativeQueuedTurns(
+    queue.queue,
+    queue.mutationFor,
+  );
+  const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(() =>
+    sessionChromeInitialActive({
+      defaultActive,
+      authoritativeQueuedCount: initialAuthoritativeQueuedCount,
+    }),
   );
   const active = activeControlled !== undefined ? activeControlled : activeUncontrolled;
   const activityOpen =
@@ -396,7 +497,25 @@ export function SessionChrome({
     Boolean(compact && active && ["incoming", "agents", "commands"].includes(active));
   const activityVisibleRef = useRef(activityOpen);
   activityVisibleRef.current = activityOpen;
+  // Two independent suppressions, both occupancy-scoped:
+  // - admission: a live Send while idle must not open a drawer under the pointer
+  // - dismiss: closing the queue remembers that session until occupancy drains
+  const queueOfferAdmissionSuppressedRef = useRef(
+    defaultActive == null &&
+      initialAuthoritativeQueuedCount === 0 &&
+      countOptimisticQueuedMessages(composer?.optimisticMessages, queuedTurnIds, queue.snapshot) >
+        0,
+  );
+  const queueOfferDismissedSessionIdsRef = useRef<Set<string>>(new Set());
+  const occupancySessionId = queuedTurns[0]?.sessionId ?? null;
   const setActive = (next: SessionChromeSignalId | null) => {
+    if (active === "queue" && next === null) {
+      if (occupancySessionId) {
+        queueOfferDismissedSessionIdsRef.current.add(occupancySessionId);
+      } else {
+        queueOfferAdmissionSuppressedRef.current = true;
+      }
+    }
     if (activeControlled === undefined) setActiveUncontrolled(next);
     onActiveChange?.(next);
   };
@@ -473,6 +592,7 @@ export function SessionChrome({
       const waiting =
         goalState === "waiting" ||
         goalState === "blocked" ||
+        goalState === "session_failed" ||
         goalState === "held" ||
         goalState === "paused";
       const explanation = sessionChromeGoalPillExplanation(goalState, record);
@@ -538,7 +658,45 @@ export function SessionChrome({
     // the pointer. A stable, paint-only receipt on the queue chip communicates
     // destination without participating in layout.
     setQueueArrivalNonce((current) => current + 1);
-  }, [optimisticQueueKeys, optimisticQueued]);
+    if (activeControlled === undefined && active === null) {
+      queueOfferAdmissionSuppressedRef.current = true;
+    }
+  }, [active, activeControlled, optimisticQueueKeys, optimisticQueued]);
+  const queueOccupied = queuedTurns.length > 0 || optimisticQueued.length > 0;
+  useEffect(() => {
+    if (queueOccupied) return;
+    // A later wave may offer again. A prior session's dismiss must not stick
+    // after this instance has actually gone empty.
+    queueOfferAdmissionSuppressedRef.current = false;
+    queueOfferDismissedSessionIdsRef.current.clear();
+  }, [queueOccupied]);
+  const queueOfferSuppressed =
+    queueOfferAdmissionSuppressedRef.current ||
+    (occupancySessionId != null &&
+      queueOfferDismissedSessionIdsRef.current.has(occupancySessionId));
+  useEffect(() => {
+    if (
+      !sessionChromeShouldOfferQueue({
+        controlled: activeControlled !== undefined,
+        active,
+        activityOpen,
+        authoritativeQueuedCount: queuedTurns.length,
+        suppressed: queueOfferSuppressed,
+      })
+    ) {
+      return;
+    }
+    if (activeControlled === undefined) setActiveUncontrolled("queue");
+    onActiveChange?.("queue");
+  }, [
+    active,
+    activeControlled,
+    activityOpen,
+    occupancySessionId,
+    onActiveChange,
+    queueOfferSuppressed,
+    queuedTurns.length,
+  ]);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
 
   const chipRefs = useRef<Partial<Record<SessionChromeSignalId, HTMLButtonElement | null>>>({});
@@ -615,7 +773,11 @@ export function SessionChrome({
 
   const panelBody =
     active === "incoming" ? (
-      <IncomingPanel inputs={incoming} onDismiss={onDismissIncoming} />
+      <IncomingPanel
+        inputs={incoming}
+        onDismiss={onDismissIncoming}
+        onOpenSession={onOpenSession}
+      />
     ) : active === "queue" ? (
       <QueuePanel
         turns={queuedTurns}
@@ -1085,47 +1247,59 @@ export function SessionChrome({
 function IncomingPanel({
   inputs,
   onDismiss,
+  onOpenSession,
 }: {
   inputs: SessionPendingInputPreview[];
   onDismiss?: ((inputId: string) => void) | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   return (
-    <ul
-      className="flex flex-col gap-0.5"
-      aria-label="Incoming updates"
-      data-og-session-chrome-panel="incoming"
-    >
-      {inputs.map((input) => (
-        <li
-          key={input.id}
-          className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
-        >
-          <span
-            className={cn(
-              "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
-              input.classification === "action_required" || input.classification === "failure"
-                ? "bg-og-status-waiting/12 text-og-status-waiting"
-                : "bg-og-surface-3/80 text-og-fg-muted",
-            )}
+    <div>
+      <p className="mb-2 text-og-xs text-og-fg-subtle">Waiting to be included in an agent turn.</p>
+      <ul
+        className="flex flex-col gap-0.5"
+        aria-label="Incoming updates"
+        data-og-session-chrome-panel="incoming"
+      >
+        {inputs.map((input) => (
+          <li
+            key={input.id}
+            className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
           >
-            {pendingKindLabel(input.kind)}
-          </span>
-          <p className="min-w-0 flex-1 text-og-xs leading-4 text-og-fg">{input.summary}</p>
-          {onDismiss ? (
-            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
-              <IconAction
-                label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
-                tip="Dismiss"
-                onClick={() => onDismiss(input.id)}
-                danger
-              >
-                <Trash2Icon className="size-3" />
-              </IconAction>
+            <span
+              className={cn(
+                "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
+                input.classification === "action_required" || input.classification === "failure"
+                  ? "bg-og-status-waiting/12 text-og-status-waiting"
+                  : "bg-og-surface-3/80 text-og-fg-muted",
+              )}
+            >
+              {pendingKindLabel(input.kind)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="break-words text-og-xs leading-4 text-og-fg">{input.summary}</p>
+              <ChildSessionLink
+                kind={input.kind}
+                sourceId={input.sourceId}
+                onOpenSession={onOpenSession}
+              />
             </div>
-          ) : null}
-        </li>
-      ))}
-    </ul>
+            {onDismiss ? (
+              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+                <IconAction
+                  label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
+                  tip="Dismiss"
+                  onClick={() => onDismiss(input.id)}
+                  danger
+                >
+                  <Trash2Icon className="size-3" />
+                </IconAction>
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

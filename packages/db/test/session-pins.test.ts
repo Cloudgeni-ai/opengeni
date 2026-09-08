@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   appendSessionEvents,
+  createChannel,
   createDb,
   createSession,
   decodeSessionListCursor,
@@ -23,6 +24,7 @@ import {
   SessionArchiveVersionConflictError,
   setSessionArchive,
   setSessionAttention,
+  setSessionChannel,
   setSessionPin,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -57,6 +59,8 @@ async function session(input: {
   workspaceId: string;
   message: string;
   parentSessionId?: string;
+  channelId?: string | null;
+  createdBy?: { kind: "subject" | "service"; subjectId: string; label?: string };
 }) {
   return await createSession(db, {
     accountId: input.accountId,
@@ -69,6 +73,8 @@ async function session(input: {
     latencyMode: "standard" as const,
     sandboxBackend: "none",
     ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+    ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
   });
 }
 
@@ -177,6 +183,162 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("keeps filtered row content from the same statement as page selection", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:filtered-selection-race";
+    await grantMember(workspace, subjectId);
+    const channel = await createChannel(db, { ...workspace, name: "Before move" });
+    const target = await session({ ...workspace, message: "moving row", channelId: channel.id });
+    let changed = false;
+    const wrap = (value: any): any =>
+      new Proxy(value, {
+        get(proxiedQuery, property) {
+          if (property === "transaction")
+            return (callback: any, config: any) =>
+              proxiedQuery.transaction((tx: any) => callback(wrap(tx)), config);
+          if (property === "then" && typeof proxiedQuery.toSQL === "function") {
+            return (resolve: any, reject: any) =>
+              Promise.resolve(proxiedQuery)
+                .then(async (rows: any) => {
+                  const query = proxiedQuery.toSQL().sql;
+                  if (
+                    !changed &&
+                    query.includes('order by "sessions"."updated_at"') &&
+                    query.includes(" limit ")
+                  ) {
+                    changed = true;
+                    await setSessionChannel(db, {
+                      workspaceId: workspace.workspaceId,
+                      sessionId: targetId,
+                      channelId: null,
+                    });
+                  }
+                  return rows;
+                })
+                .then(resolve, reject);
+          }
+          const member = Reflect.get(proxiedQuery, property, proxiedQuery);
+          if (typeof member !== "function") return member;
+          return (...args: any[]) => {
+            const result = member.apply(proxiedQuery, args);
+            return result &&
+              typeof result === "object" &&
+              (typeof result.toSQL === "function" ||
+                typeof result.select === "function" ||
+                typeof result.from === "function")
+              ? wrap(result)
+              : result;
+          };
+        },
+      });
+    const targetId = target.id;
+    const page = await listSessionsForSubject(wrap(db), workspace.workspaceId, {
+      subjectId,
+      channelId: channel.id,
+      limit: 10,
+    });
+    expect(changed).toBe(true);
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]!.channelId).toBe(channel.id);
+    const fresh = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: channel.id,
+    });
+    expect(fresh.sessions).toHaveLength(0);
+  }, 60_000);
+
+  test("FK channel detachment advances activity even for rows outside an earlier scan", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const channel = await createChannel(db, { ...workspace, name: "Deleted concurrently" });
+    const target = await session({
+      ...workspace,
+      message: "late channel attachment",
+      channelId: channel.id,
+    });
+    const [before] =
+      await admin`select activity_revision::text as revision from sessions where id = ${target.id}`;
+    // The channel FK runs the same UPDATE channel_id = NULL for a row attached
+    // after deleteChannel's preliminary scan. Only the FK statement sees it.
+    await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`delete from channels where id = ${channel.id} and workspace_id = ${workspace.workspaceId}`,
+      );
+    });
+    const [after] =
+      await admin`select activity_revision::text as revision, channel_id from sessions where id = ${target.id}`;
+    expect(after!.channel_id).toBeNull();
+    expect(BigInt(after!.revision)).toBeGreaterThan(BigInt(before!.revision));
+  }, 60_000);
+
+  test("rejects an old ungated channel delete after activity trigger activation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const channel = await createChannel(db, { ...workspace, name: "Old caller rollback" });
+    const target = await session({
+      ...workspace,
+      message: "retained filing",
+      channelId: channel.id,
+    });
+    let failure: unknown;
+    try {
+      await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
+        await tx.execute(sql`delete from channels where id = ${channel.id}`);
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeDefined();
+    const [row] = await admin`select channel_id from sessions where id = ${target.id}`;
+    expect(row!.channel_id).toBe(channel.id);
+  }, 60_000);
+
+  test("uses a bounded creator-prefix index for sparse creator pages", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({
+      ...workspace,
+      message: "older sparse creator",
+      createdBy: { kind: "subject", subjectId: "user:sparse" },
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      insert into sessions (id, account_id, workspace_id, initial_message, model, reasoning_effort,
+        latency_mode, sandbox_backend, sandbox_group_id, tool_policy, created_by_kind, created_by_subject_id)
+      select generated.id, ${workspace.accountId}, ${workspace.workspaceId}, 'newer other creator',
+        'test-model', 'medium', 'standard', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), 'subject', 'user:other'
+      from (select gen_random_uuid() as id from generate_series(1, 5000)) generated
+    `,
+    );
+    await admin`analyze sessions`;
+    const plan = await withWorkspaceSubjectRls(
+      db,
+      workspace.workspaceId,
+      "user:sparse",
+      async (tx) =>
+        await tx.execute(sql`explain (analyze, format json) select id from sessions
+        where workspace_id = ${workspace.workspaceId} and created_by_kind = 'subject'
+          and created_by_subject_id = 'user:sparse'
+        order by updated_at desc, id desc limit 20`),
+    );
+    expect(JSON.stringify(plan)).toContain("sessions_workspace_creator_updated_id_idx");
+    const rows: Array<{ id: string }> = await withWorkspaceSubjectRls(
+      db,
+      workspace.workspaceId,
+      "user:sparse",
+      async (tx) =>
+        await tx.execute<{
+          id: string;
+        }>(sql`select id from sessions where workspace_id = ${workspace.workspaceId}
+        and created_by_kind = 'subject' and created_by_subject_id = 'user:sparse'
+        order by updated_at desc, id desc limit 20`),
+    );
+    expect(rows.map((row) => row.id)).toEqual([target.id]);
+  }, 60_000);
+
   test("rejects an unbounded host authorization scope before issuing SQL", () => {
     expect(() =>
       sessionAuthorizationScopeFilter({
@@ -969,6 +1131,130 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       where workspace_id = ${workspace.workspaceId}
         and subject_id = ${subjectId}`;
     expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("keeps project, creator, and date filters bound to their continuation cursor", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:filtered-pages";
+    await grantMember(workspace, subjectId);
+    const projectA = await createChannel(db, { ...workspace, name: "Filtered project A" });
+    const projectB = await createChannel(db, { ...workspace, name: "Filtered project B" });
+    const ada = { kind: "subject" as const, subjectId: "user:ada" };
+    const newerA = await session({
+      ...workspace,
+      message: "filtered newer A",
+      channelId: projectA.id,
+      createdBy: ada,
+    });
+    const olderA = await session({
+      ...workspace,
+      message: "filtered older A",
+      channelId: projectA.id,
+      createdBy: ada,
+    });
+    const projectBRow = await session({
+      ...workspace,
+      message: "filtered project B",
+      channelId: projectB.id,
+      createdBy: { kind: "service", subjectId: "service:scheduler" },
+    });
+    const unfiled = await session({
+      ...workspace,
+      message: "filtered unfiled",
+      channelId: null,
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set created_at = case id
+              when ${newerA.id} then '2026-09-04T08:00:00.000Z'::timestamptz
+              when ${olderA.id} then '2026-09-03T08:00:00.000Z'::timestamptz
+              when ${projectBRow.id} then '2026-09-04T07:00:00.000Z'::timestamptz
+              when ${unfiled.id} then '2026-09-02T08:00:00.000Z'::timestamptz
+              else created_at
+            end,
+            updated_at = case id
+              when ${newerA.id} then '2026-09-04T10:00:00.000Z'::timestamptz
+              when ${olderA.id} then '2026-09-03T10:00:00.000Z'::timestamptz
+              when ${projectBRow.id} then '2026-09-04T11:00:00.000Z'::timestamptz
+              when ${unfiled.id} then '2026-09-02T10:00:00.000Z'::timestamptz
+              else updated_at
+            end
+        where id in (${newerA.id}, ${olderA.id}, ${projectBRow.id}, ${unfiled.id})
+      `,
+    );
+
+    const firstProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: projectA.id,
+      limit: 1,
+    });
+    expect(firstProjectPage.sessions.map((row) => row.id)).toEqual([newerA.id]);
+    const projectCursor = decodeSessionListCursor(firstProjectPage.nextCursor!);
+    expect(projectCursor).toMatchObject({ kind: "keyset" });
+    const [beforeMove] = await admin<
+      { updated_at: Date; activity_revision: string }[]
+    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+    expect(
+      await setSessionChannel(db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: projectBRow.id,
+        channelId: projectA.id,
+      }),
+    ).toBe(true);
+    const [afterMove] = await admin<
+      { updated_at: Date; activity_revision: string }[]
+    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+    expect(afterMove!.updated_at.getTime()).toBe(beforeMove!.updated_at.getTime());
+    expect(BigInt(afterMove!.activity_revision)).toBeGreaterThan(
+      BigInt(projectCursor!.kind === "keyset" ? projectCursor!.snapshotRevision : "0"),
+    );
+    const secondProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: projectA.id,
+      cursor: projectCursor!,
+      limit: 1,
+    });
+    expect(secondProjectPage.sessions.map((row) => row.id)).toEqual([olderA.id]);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        channelId: projectB.id,
+        cursor: projectCursor!,
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    const creatorPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdBy: ada,
+    });
+    expect(creatorPage.sessions.map((row) => row.id)).toEqual([newerA.id, olderA.id]);
+
+    const currentDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      updatedFrom: new Date("2026-09-04T00:00:00.000Z"),
+      updatedBefore: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    expect(currentDatePage.sessions.map((row) => row.id)).toEqual([projectBRow.id, newerA.id]);
+
+    const createdCurrentDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdFrom: new Date("2026-09-04T00:00:00.000Z"),
+      createdBefore: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    expect(createdCurrentDatePage.sessions.map((row) => row.id)).toEqual([
+      projectBRow.id,
+      newerA.id,
+    ]);
+
+    const unfiledPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: null,
+    });
+    expect(unfiledPage.sessions.map((row) => row.id)).toEqual([unfiled.id]);
   }, 60_000);
 
   test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {

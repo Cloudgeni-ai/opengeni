@@ -17,7 +17,7 @@ export type WorkspaceArtifactVersion = {
   artifactId: string;
   revision: number;
   contentType: "text/html";
-  contentSha256: string;
+  contentSha256: string | null;
   sizeBytes: number;
   sourceSha256: string | null;
   sourceSizeBytes: number | null;
@@ -82,7 +82,7 @@ export type WorkspaceArtifactContentResponse = {
   artifactId: string;
   versionId: string;
   contentType: "text/html";
-  contentSha256: string;
+  contentSha256: string | null;
   html: string;
   source: WorkspaceArtifactSourceBundle;
   requestedTools: ToolGatewayIdentity[];
@@ -97,7 +97,8 @@ export type CreateWorkspaceArtifactRequest = {
   slug?: string;
   title: string;
   description?: string | null;
-  html: string;
+  html?: string;
+  uploadId?: string;
   source?: WorkspaceArtifactSourceBundle;
   requestedTools?: ToolGatewayIdentity[];
   idempotencyKey: string;
@@ -105,7 +106,8 @@ export type CreateWorkspaceArtifactRequest = {
 export type PublishWorkspaceArtifactVersionRequest = {
   title?: string;
   description?: string | null;
-  html: string;
+  html?: string;
+  uploadId?: string;
   source?: WorkspaceArtifactSourceBundle;
   requestedTools?: ToolGatewayIdentity[];
   expectedCurrentVersionId: string;

@@ -48,6 +48,10 @@ const acceptSetupInvitation = mock(async () => ({
 const setupClient = {
   listOrganizationInvitations: listSetupInvitations,
   acceptOrganizationInvitation: acceptSetupInvitation,
+  getBilling: mock(async () => ({
+    mode: "stripe" as const,
+    balance: { balanceMicros: 0 },
+  })),
 };
 
 class TestAuthApiError extends Error {
@@ -74,6 +78,7 @@ mock.module("@/api", () => ({
     state: "required" as const,
   })),
   sendVerificationEmail: resendVerification,
+  requestPasswordReset: mock(async () => ({ status: true })),
   subscribeManagedActorInvalidation: () => () => undefined,
   subscribeManagedActorMutationBusy: () => () => undefined,
 }));
@@ -86,6 +91,7 @@ mock.module("@tanstack/react-router", () => ({
 }));
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
+const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
 const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
@@ -344,10 +350,224 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Create your organization");
       expect(container.textContent).toContain("Organization name");
       expect(container.textContent).not.toContain("Workspace name");
+      expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.querySelectorAll("input")).toHaveLength(1);
+      expect(onComplete).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("after organization create, the model-access step stays until skip", async () => {
+    const onComplete = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={setupClient as never}
+            billingMode="stripe"
+            codexEnabled
+            supergrokEnabled
+            previewState="required"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(completeSelfServiceSetup).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
+      expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(setupClient.getBilling).not.toHaveBeenCalled();
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
+          .click(),
+      );
+      await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect OpenRouter"]')!
+          .click(),
+      );
+      expect(container.querySelector<HTMLInputElement>("#onboarding-provider-key")!.value).toBe("");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Skip for now")!
+          .click(),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the model-access step omits subscription providers disabled by the deployment", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={setupClient as never}
+            previewState="required"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).toBeNull();
+      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a connected provider stays in onboarding until its model becomes selectable", async () => {
+    const onComplete = mock(() => undefined);
+    const createConnection = mock(async () => undefined);
+    const client = {
+      createConnection,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
+          .click(),
+      );
+      await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Connect Vercel AI Gateway")!
+          .click(),
+      );
+      await flush();
+      expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Your service is connected");
+      expect(container.textContent).toContain("Try again");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("SuperGrok onboarding starts an actor-private connection", async () => {
+    const supergrokConnectStart = mock(async () => ({
+      state: "state-a",
+      userCode: "CODE-1234",
+      verificationUri: "https://example.test/authorize",
+      verificationUriComplete: null,
+      intervalSeconds: 60,
+      expiresInSeconds: 600,
+      scope: "user" as const,
+    }));
+    const client = {
+      supergrokConnectStart,
+      supergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const priorOpen = window.open;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            supergrokEnabled
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
+          .click(),
+      );
+      await flush();
+      expect(supergrokConnectStart).toHaveBeenCalledWith("personal-workspace", "user");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
+  test("Codex authorization keeps Skip disabled while device login is pending", async () => {
+    const codexConnectStart = mock(async () => ({
+      state: "state-a",
+      userCode: "CODE-1234",
+      verificationUri: "https://example.test/authorize",
+      intervalSeconds: 60,
+    }));
+    const client = {
+      codexConnectStart,
+      codexConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const priorOpen = window.open;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            codexEnabled
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
+      );
+      await flush();
+      expect(codexConnectStart).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Waiting for authorization");
+      expect(
+        Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent?.trim() === "Skip for now",
+        )!.disabled,
+      ).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
     }
   });
 

@@ -375,6 +375,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json(capabilityCatalog(state));
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: connections() });
     }

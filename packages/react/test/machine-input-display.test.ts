@@ -21,14 +21,14 @@ function member(
 }
 
 describe("machineInputBatchLabel", () => {
-  test("pluralizes identical agent-finished members", () => {
+  test("counts result receipts without claiming their agents finished", () => {
     expect(
       machineInputBatchLabel([
         member("child_terminal_result", "", "a"),
         member("child_terminal_result", "", "b"),
         member("child_terminal_result", "", "c"),
       ]),
-    ).toBe("3 agents finished");
+    ).toBe("3 agent results received");
   });
 
   test("labels child lifecycle notices", () => {
@@ -61,7 +61,7 @@ describe("machineInputBatchLabel", () => {
         member("agent_message", "", "a"),
         member("child_terminal_result", "", "b"),
       ]),
-    ).toBe("2 updates · Agent update, Agent finished");
+    ).toBe("2 updates · Agent update, Agent result received");
   });
 
   test("single member uses the typed meta label", () => {

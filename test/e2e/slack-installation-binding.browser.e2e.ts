@@ -98,7 +98,7 @@ describe("Slack installation binding browser acceptance", () => {
       await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
       settings = await openSlackSettings(page, "Needs attention");
       await expectText(settings, "quarantined · version 3");
-      await expectText(settings, "Legacy installations conflict");
+      await expectText(settings, "Older installations conflict");
       expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(true);
 
       state.bindingState = null;
@@ -119,6 +119,9 @@ async function openSlackSettings(page: Page, chip: string) {
   await row.click();
   const settings = page.getByRole("region", { name: "Slack settings" });
   await settings.waitFor({ state: "visible", timeout: 15_000 });
+  expect(await settings.getByRole("button", { name: "Reconnect" }).isVisible()).toBe(false);
+  await settings.getByText("More options", { exact: true }).click();
+  await settings.getByText("Connection details", { exact: true }).click();
   return settings;
 }
 

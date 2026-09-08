@@ -10,6 +10,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
+import { refreshExhaustedXaiQuota } from "../xai-quota";
 
 export async function selectXaiTurnCapacity(
   deps: CapacityPhaseDeps,
@@ -43,6 +44,16 @@ export async function selectXaiTurnCapacity(
       authoritySnapshot,
     });
     const leaseStartedAtMs = performance.now();
+    await refreshExhaustedXaiQuota({
+      db,
+      settings: deps.settings,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      authoritySnapshot,
+    });
     const leased = await acquireXaiCredentialLease(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

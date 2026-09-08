@@ -20,6 +20,58 @@ import {
   getCodemodeOperation,
   submitCodemodeOperation,
 } from "@opengeni/db";
+import { getSession } from "@opengeni/db";
+import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  signDelegatedAccessToken,
+  siteSessionPath,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+} from "@opengeni/contracts";
+
+/** Reuse normal REST handlers, including their resource/command authorization.
+ * The exact attempt is checked before issuing this internal-only credential. */
+export async function codemodeSessionRequest(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  request: Request,
+  path: string,
+): Promise<Request> {
+  siteSessionPath(path, grant.workspaceId, request.method);
+  const { authority } = await requireActiveCodemodeCatalog(deps, grant);
+  const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
+  const secret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
+  const permissions = (
+    session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
+  ).filter((p) =>
+    ["workspace:read", "sessions:read", "sessions:create", "sessions:control"].includes(p),
+  );
+  const token = await signDelegatedAccessToken(secret, {
+    ...authority,
+    permissions,
+    principalKind: "agent_attempt",
+    exp: Math.floor(Date.now() / 1000) + 60,
+  });
+  const target = new URL(request.url);
+  const rewritten = siteSessionPath(path, authority.workspaceId, request.method);
+  const url = new URL(rewritten, target.origin);
+  const headers = new Headers({
+    authorization: `Bearer ${token}`,
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+  });
+  for (const name of ["content-type", "accept", "last-event-id"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  return new Request(url, {
+    method: request.method,
+    headers,
+    signal: request.signal,
+    ...(request.body ? { body: await request.text() } : {}),
+  });
+}
 
 export type CodemodeGrantAuthority = {
   accountId: string;

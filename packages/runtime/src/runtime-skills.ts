@@ -1,4 +1,13 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { sitePackageVersions } from "./site-package-versions";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -103,7 +112,6 @@ const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
 });
 
 let stagedBundledArtifactSkillsDir: string | null = null;
-let stagedBundledSiteSkillsDir: string | null = null;
 let stagedBundledVideoSkillsDir: string | null = null;
 
 /**
@@ -132,7 +140,7 @@ export function composeRuntimeSkills(
   const children: Record<string, Entry> = {};
   for (const source of nativeSources) {
     for (const name of source.names) {
-      children[name] = localDir({ src: join(source.directory, name) });
+      children[name] = source.entries?.[name] ?? localDir({ src: join(source.directory, name) });
     }
   }
 
@@ -283,12 +291,14 @@ function selectionForActivation({
 
 function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
   directory: string;
+  entries?: Record<string, Entry>;
   lazySource: LocalDirLazySkillSource;
   names: string[];
   reason: string;
 }> {
   const sources: Array<{
     directory: string;
+    entries?: Record<string, Entry>;
     lazySource: LocalDirLazySkillSource;
     names: string[];
     reason: string;
@@ -303,10 +313,14 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     });
   }
   if (nativeTools.sites) {
-    const directory = bundledSiteSkillsDir();
+    const directory = packagedSkillDirectory("bundled_site_skills");
+    const site = bundledSkillEntry(join(directory, "opengeni-sites"), {
+      "package-versions.json": file({ content: JSON.stringify(sitePackageVersions(), null, 2) }),
+    });
     sources.push({
       directory,
-      lazySource: localDirLazySkillSource({ src: directory }),
+      entries: { "opengeni-sites": site },
+      lazySource: localDirLazySkillSource({ src: directory, baseDir: directory }),
       names: skillDirNames(directory),
       reason: "bundled Site authoring skill",
     });
@@ -346,16 +360,16 @@ function bundledArtifactSkillsDir(): string {
   return stagedBundledArtifactSkillsDir;
 }
 
-function bundledSiteSkillsDir(): string {
-  const packaged = packagedSkillDirectory("bundled_site_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledSiteSkillsDir) {
-    stagedBundledSiteSkillsDir = stageSkillDirectory(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_site_skills"),
-    );
+/** Compose generated metadata in the manifest, never in the installed application. */
+function bundledSkillEntry(directory: string, overrides: Record<string, Entry> = {}): Dir {
+  const children: Record<string, Entry> = {};
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    children[entry.name] = entry.isDirectory()
+      ? bundledSkillEntry(path)
+      : file({ content: readFileSync(path, "utf8") });
   }
-  return stagedBundledSiteSkillsDir;
+  return dir({ children: { ...children, ...overrides } });
 }
 
 function bundledVideoSkillsDir(): string {

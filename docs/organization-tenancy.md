@@ -108,13 +108,16 @@ same-turn recovery reuses once while goal/machine successors do not inherit it.
 The managed web console exposes that exact command for a new session and its
 existing-session Send/Steer composer. It discovers only the current managed
 human's active Variable Set/Rig/Connected Machine authorities through the bounded owner list,
-joins names from the server-issued personal workspace's metadata-only catalogs,
-and never lets an established session switch its fixed resource ids. Shared
-sessions require the version-1 output warning acknowledgement; authority-epoch,
-principal, organization, workspace, session, or source-access changes clear the
-local decision and require an authoritative reload plus reconfirmation. The UI
-does not project an attachment as accepted before the create/Send/Steer command
-commits. Cross-workspace grant/fork UX, standalone management of `once`,
+joins names from target-workspace metadata-only catalogs, and preserves the
+explicit selected-resource boundary. Shared sessions default to message-only
+authorization; the human may choose session-scoped ongoing work for the next
+submission, with the version-1 shared-output warning. Authority-epoch, principal,
+organization, workspace, session, or selected-source changes reset that local
+choice; the current authority closure must settle before submission. The choice
+does not revoke existing grants. Exact current grant metadata supplies a separate
+ongoing-authorization cue, never execution authority. The UI does not project an
+attachment as accepted before the Create/Send/Steer command commits. Continue
+uses that same human Send path. Cross-workspace grant/fork UX, standalone management of `once`,
 Documents/Connections without an exact runtime adapter, and
 MCP/agent administration remain outside this slice.
 
@@ -608,6 +611,16 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
+The stock web console may then show a skippable product step to connect a
+model or buy OpenGeni credits. Connecting selects the model in the human’s
+actor-private new-session draft with its expected revision, preserving the
+other draft fields. It never writes workspace settings or requires
+`workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
+accept still complete immediately. The step does not widen
+`POST /v1/auth/organization-onboarding`, invitation accept, or any worker
+surface. Empty OpenGeni-credit create and failed-session paths prompt the
+owner to buy credits or connect a model instead of a dead-end toast.
+
 ### Additional organization creation (0399)
 
 Migration `0399_additional_managed_organization_creation.sql` adds a separate
@@ -782,9 +795,9 @@ Better Auth handler and Hono API, migrates PostgreSQL through a dedicated
 `opengeni_app`, drives public operations through the SDK, and completes the
 human paths in a production-built web bundle under Chromium. Its process-local
 mail capture is count- and TTL-bounded, one-time readable, and never persists a
-bearer or rendered body. The lane proves ordinary named signup, the exact
-Personal-only owner graph, immediate private-session creation, unregistered
-setup, registered invitation choice, shared grant/revoke, stale and
+bearer or rendered body. The lane proves ordinary named signup, the skippable post-create model-access
+step, the exact Personal-only owner graph, immediate private-session creation,
+unregistered setup, registered invitation choice, shared grant/revoke, stale and
 cross-organization rejection, password reset, delivery refusal/ambiguity, RLS
 posture, accessibility, responsive layout, and browser-error cleanliness.
 

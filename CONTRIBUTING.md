@@ -55,6 +55,16 @@ bun run test:e2e
 - Treat candidate/version labels as substantive source revisions. Base-only
   evidence refreshes stay on the same head. Change the head only for a source
   defect, actual conflict, or material semantic incompatibility.
+- PR CI in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) checks out
+  the exact PR head, not GitHub's synthetic merge commit. Closing and reopening
+  an unchanged PR starts another run of the same source; it does not incorporate
+  fixes from a newer base. Keep current-main integration evidence separate from
+  exact-head CI evidence.
+- Before retrying a failed check, inspect its failing leaf and checkout SHA.
+  If the candidate contains a real defect already fixed on `main`, apply the
+  necessary scoped correction to the candidate and run review and CI on that new
+  head. An unchanged-head retry needs evidence of a transient failure, not an
+  expectation that moving `main` changed the tested source.
 
 ## Keeping Docs True
 

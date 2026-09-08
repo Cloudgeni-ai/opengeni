@@ -77,7 +77,7 @@ export type UseSessionEventsResult = {
 // Keep every browser history read inside one database batch, including the
 // server's one-row continuation lookahead. A large total session must never
 // turn one lazy page into dozens of sequential database round trips.
-const SESSION_HISTORY_PAGE_SIZE = 255;
+const SESSION_HISTORY_PAGE_SIZE = 1000;
 const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
