@@ -1,3 +1,4 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -1875,7 +1876,9 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  const [session] = await withLatestStartedSessionPolicy(db, input.workspaceId, [storedSession]);
+  if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -1956,9 +1959,15 @@ export async function submitHumanPromptInTransaction(
           resources: withCanonicalResourceMountPaths(
             input.composerDraftResources ?? input.resources,
           ),
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
         })
     ) {
       throw new QueueCommandConflictError(
@@ -2156,9 +2165,15 @@ export async function submitHumanPromptInTransaction(
           resources: input.resources,
           tools: [],
           toolsProvided: false,
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
             ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)

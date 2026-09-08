@@ -51,6 +51,7 @@ export type ModelPolicyPickerMessages = {
   unsupportedAttachments?: string;
   thinkingEffort?: string;
   selected?: string;
+  free?: string;
 
   billingHints: Record<PickerBillingClass, string>;
 };
@@ -71,9 +72,10 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     "Unsupported attachments stay in the session but are hidden from this model.",
   thinkingEffort: "Thinking effort",
   selected: "Selected",
+  free: "Free",
 
   billingHints: {
-    opengeni_credits: "Will use credits",
+    opengeni_credits: "Provided by OpenGeni",
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
@@ -249,6 +251,7 @@ export function PickerNavRow(props: {
   showChevron?: boolean | undefined;
   disabled?: boolean | undefined;
   title?: string | undefined;
+  description?: string | undefined;
   active?: boolean | undefined;
   testId?: string | undefined;
   onClick: () => void;
@@ -258,6 +261,7 @@ export function PickerNavRow(props: {
       type="button"
       disabled={props.disabled}
       title={props.title}
+      aria-description={props.description}
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(

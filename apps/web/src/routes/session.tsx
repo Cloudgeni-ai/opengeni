@@ -2141,7 +2141,7 @@ function SessionChatPane(props: {
                   sharedState={variableSetPickerState}
                   setSharedState={setVariableSetPickerState}
                   compact
-                  triggerClassName="sm:hidden"
+                  triggerClassName="console-composer-compact-control sm:hidden"
                   onReloadSession={props.onReloadSession}
                 />
               </>
@@ -2182,7 +2182,7 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5 max-sm:flex-nowrap">
+              <div className="@container/model-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
                 <ModelPicker
                   open={modelPickerSession === props.session.id}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
@@ -2205,7 +2205,7 @@ function SessionChatPane(props: {
                   servers={selectableSessionMcpServers}
                   firstPartyTools={firstPartyToolOptions}
                   selection={durableToolSelection}
-                  triggerClassName="max-sm:hidden"
+                  triggerClassName="console-composer-wide-control max-sm:hidden"
                   disabled={
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }
@@ -2214,7 +2214,7 @@ function SessionChatPane(props: {
                 />
                 <FollowUpRepositoryPicker
                   {...repositoryPickerProps}
-                  triggerClassName="max-sm:hidden"
+                  triggerClassName="console-composer-wide-control max-sm:hidden"
                 />
                 <SessionVariableSetPicker
                   session={props.session}
@@ -2236,7 +2236,7 @@ function SessionChatPane(props: {
                   voiceActive={voiceActive}
                   sharedState={variableSetPickerState}
                   setSharedState={setVariableSetPickerState}
-                  triggerClassName="max-sm:hidden"
+                  triggerClassName="console-composer-wide-control max-sm:hidden"
                   onReloadSession={props.onReloadSession}
                 />
                 {durableToolsError ? (

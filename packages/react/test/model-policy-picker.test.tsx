@@ -118,6 +118,76 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test("combines deployment providers, preserves connection groups, and badges only explicit free cost", async () => {
+    const deployment = (id: string, cost?: "free" | "credits"): ClientModel => ({
+      id,
+      label: id,
+      provider: id.split("/")[0]!,
+      providerLabel: id.split("/")[0]!,
+      api: "chat",
+      cost,
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+    const models: ClientModel[] = [
+      deployment("azure/model", "credits"),
+      deployment("gateway/model", "credits"),
+      deployment("openrouter/starter:free", "free"),
+      deployment("openrouter/charged:free", "credits"),
+      deployment("anonymous/legacy:free"),
+      { ...deployment("workspace-openrouter/model"), cost: "workspace" },
+      { ...deployment("organization-gateway/model"), cost: "organization" },
+      ...MODELS,
+    ];
+    const before = JSON.stringify(models);
+    const calls: string[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={models}
+        model="unselected"
+        effort="low"
+        latencyMode="standard"
+        messages={{ free: "Gratis" }}
+        onModelChange={(id) => calls.push(id)}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const group = container.querySelector('section[aria-label="OpenGeni"]')!;
+    expect(group.querySelectorAll("button").length).toBe(5);
+    expect(container.querySelector('section[aria-label="External"]')).toBeNull();
+    for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
+      expect(container.querySelector(`section[aria-label="${label}"]`)).toBeTruthy();
+    }
+    expect(group.textContent?.match(/Gratis/g)?.length).toBe(1);
+    expect(group.textContent).not.toContain("credits");
+    const paid = group.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-choice-openrouter/charged:free"]',
+    )!;
+    expect(paid.getAttribute("aria-description")).toBe("OpenGeni credits");
+    expect(paid.title).toBe("openrouter/charged:free · OpenGeni credits");
+    await act(async () => paid.click());
+    expect(calls).toEqual(["openrouter/charged:free"]);
+    expect(JSON.stringify(models)).toBe(before);
+  });
+
+  test("keeps the Free badge beside the current-model checkmark", async () => {
+    const model: ClientModel = { ...MODELS[0]!, id: "starter", source: "openrouter", cost: "free" };
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const row = container.querySelector('[data-testid="model-picker-choice-starter"]')!;
+    expect(row.textContent).toContain("Free");
+    expect(row.querySelector('[aria-label="Selected"]')).toBeTruthy();
+    expect(row.getAttribute("aria-description")).toBe("Free in this deployment");
+  });
   test("renders the polished model, effort, and Fast trigger from ClientModel data", async () => {
     const container = await mount(
       <ModelPolicyPicker
@@ -548,7 +618,7 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
-  test("renders the External rail mark for an anonymous provider", async () => {
+  test("renders the OpenGeni mark for an anonymous deployment provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
@@ -569,10 +639,12 @@ describe("ModelPolicyPicker", () => {
       />,
     );
 
-    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeTruthy();
   });
 
-  test("shows each deployment model's configured workspace-facing payment", async () => {
+  test("badges only explicitly free deployment models", async () => {
     const freeModel: ClientModel = {
       ...MODELS[0]!,
       id: "deployment/free-model",
@@ -606,10 +678,10 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector('[data-testid="model-picker-choice-deployment/free-model"]')
         ?.textContent,
-    ).toContain("Free in this deployment");
+    ).toContain("Free");
     expect(
       container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
         ?.textContent,
-    ).toContain("OpenGeni credits");
+    ).not.toContain("OpenGeni credits");
   });
 });

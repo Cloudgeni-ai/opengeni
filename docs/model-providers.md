@@ -352,8 +352,11 @@ The table describes credential and upstream-settlement identity, not the
 workspace-facing price. Deployment models—including anonymous and managed
 OpenRouter routes—default to `credits` unless
 `OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
-may still group such a route under External while the payment sentence and
-`list_models` output show its deployment-defined cost.
+groups all deployment-provided models under OpenGeni, regardless of upstream
+provider or settlement. Only explicitly free models receive a Free badge; paid
+rows omit repetitive credit labels. Payment descriptions remain available to
+assistive technology and on hover, and `list_models` retains the explicit cost.
+Workspace/organization connections and connected subscriptions stay separate.
 
 ### OpenCode Zen temporary free contributor model
 
@@ -419,7 +422,7 @@ promise:
 ```
 
 Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
-inference. Anonymous routes are shown on the External rail. To make this
+inference. Anonymous deployment routes are shown under OpenGeni. To make this
 temporary preview free to the workspace, set
 `OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/muse-spark-1.3-contributor-free":"free"}'`;
 external settlement alone does not bypass credits. A free route still emits
@@ -570,8 +573,8 @@ non-runnable until a reviewed effort vocabulary is mapped.
 OpenRouter membership is curated and production never mirrors `GET /models`.
 The v1 database schema accepts reviewed `:free` slugs only; a key does not make
 every upstream model visible, and workspace policy may hide the starter. The
-provider settles through the deployment's OpenRouter account and appears on the
-External picker rail, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
+provider settles through the deployment's OpenRouter account and appears in the
+OpenGeni picker group, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
 decides whether the workspace sees `free` or `credits`. The shipped default is
 `free`. If an operator changes it to `credits`, managed billing also requires a
 separate `OPENGENI_MODEL_PRICING_JSON` entry.

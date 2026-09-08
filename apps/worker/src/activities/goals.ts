@@ -104,7 +104,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       settings,
       workspaceModelPolicy,
       inheritedModel: inheritedContinuationModel,
-      sessionModel: session.model,
     });
     continuationModel = modelDecision.model;
     let modelPolicyBlocked = modelDecision.blocked;
@@ -207,7 +206,6 @@ export function goalContinuationModelDecision(input: {
   settings: Settings;
   workspaceModelPolicy: Awaited<ReturnType<typeof getWorkspaceModelPolicy>>;
   inheritedModel: string;
-  sessionModel: string;
 }): { model: string; blocked: string | null } {
   const catalogSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(
@@ -224,11 +222,11 @@ export function goalContinuationModelDecision(input: {
       providerId: policyProviderIdForModel(catalogSettings, modelId),
       modelId,
     }).allowed;
-  const candidates = [...new Set([input.inheritedModel, input.sessionModel])];
-  for (const model of candidates) {
-    if (resolveModelProvider(catalogSettings, model) && !policyBlocks(model)) {
-      return { model, blocked: null };
-    }
+  if (
+    resolveModelProvider(catalogSettings, input.inheritedModel) &&
+    !policyBlocks(input.inheritedModel)
+  ) {
+    return { model: input.inheritedModel, blocked: null };
   }
   if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
     return {

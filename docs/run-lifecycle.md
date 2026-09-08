@@ -117,6 +117,18 @@ nonempty composer is replaced only after explicit confirmation. An independent
 session fork copies the source session's exact typed reasoning and latency; it
 does not invent defaults or consult either composer.
 
+Session detail/list and Insights model labels project the newest turn with a
+durable `turn.started` event. Fresh actor drafts, omitted follow-up fields, voice
+delegations and voice-end handoffs inherit that same model, reasoning and latency
+policy through `packages/db/src/session-execution-policy.ts`. Creation settings
+are used only before any turn starts. Existing drafts and accepted queued turns
+keep their explicit settings; a rejected admission never changes inheritance.
+The stored session creation fields are not rewritten. Scheduled generated-session
+recovery validates those stored fields, not the public latest-turn projection. API admission freezes its
+resolved policy so billing validation and the accepted turn cannot disagree if
+another turn starts before the prompt transaction commits. A removed or blocked
+inherited model requires a new selection, never a silent switch to the original.
+
 On the server, prompt acceptance remains one canonical Postgres transaction:
 the user event, physically queued turn, immutable admission routing,
 session/queue state, optional realtime mirror, audit receipt,
@@ -2158,3 +2170,30 @@ An already-paused session can receive Pause with a new idempotency key to re-arm
 its own settled interruption's missing quiescence wake. This preserves control
 revision and paused admission; the existing worker still proves exact activity
 settlement and writer quiescence. Replaying the same key adds no wake revision.
+
+## Debug context capture
+
+The session Context inspector reads the latest attempt-fenced capture. The runtime
+observes the final HTTP body inside `instrumentedModelFetch`, after Responses/chat
+conversion and Codex, SuperGrok or gateway normalization. It stores the original
+JSON string, including instructions, tools, input and settings; it never rebuilds
+conversation content from events or current configuration. Dispatch proves an
+outbound body, not provider acceptance or expansion of server-side state.
+
+Streaming bodies are teed only when capture is enabled, capped at 4 MiB, and
+cancelled with a failed/aborted transport. Inspection and persistence do not block
+inference. Oversized/unsupported bodies produce an explicit unavailable receipt;
+historical SDK-prefix captures and non-HTTP transports are labeled incomplete.
+Capture ordinals are reserved before reading, so a slower older upload cannot
+replace a newer request. The existing 16 MiB snapshot storage limit still applies.
+
+Section and item token counts are character-based estimates, not provider usage.
+Instructions display as the captured string without reconstructed sub-sections. Media, encrypted state and provider overhead have no exact local count.
+The UI never substitutes the latest session usage event for usage of this exact
+capture. Headers (including provider credentials) are outside the body capture.
+
+The context browser shows 30 item previews per page and searches the full readable
+captured content. Detail views read continuously, virtualize large text internally, support full-text
+Find, and preserve full content for copying. New captures wait for an
+explicit Load latest action while a user inspects an existing request. This is the
+last captured model request, not an archive of the entire session.
