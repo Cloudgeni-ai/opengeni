@@ -77,6 +77,10 @@ Authored and installed Skills share the preference registry head/history;
 portable installations retain upstream ownership and bind to that identity.
 The core `domain/skills.ts` boundary owns Learning-controlled saves, installation,
 approval, and restore; migration 0423 is the maintenance activation boundary.
+Its parser-backed runner also archives and converts mutable legacy Session/Pack
+Skill configuration; immutable execution pins block cutover rather than being
+rewritten. `packages/db/src/skill-config-migration.ts` owns that maintenance seam,
+and runtime-inaccessible conversion receipts retain the original configuration.
 
 ---
 
