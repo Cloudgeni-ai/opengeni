@@ -1260,11 +1260,11 @@ Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
-Sites retain immutable HTML, optional source, tool allowlists and rollback;
-they remain separate from Documents and editable artifacts. Agents upload through
-signed URLs and publish upload IDs, without hashes or byte counts. Source JSON
-is capped at 64 MiB; HTML is streamed within storage limits. Retrieval returns
-download URLs; viewing loads HTML into the existing opaque-origin srcDoc frame.
+Sites retain immutable HTML, optional source, tool allowlists and rollback,
+separately from Documents/editable artifacts. Agents publish signed-upload IDs,
+without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
+Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
+serves session docks, filtered before pagination by version `sourceSessionId`.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1275,9 +1275,10 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
-`SessionConversation` is the complete embed: event feed, queue/actions, durable
-composer, model policy, human-input forms, and history. `ChatComposer` is input
-only. Sites use the same component with their Site-bound client.
+`SessionConversation` includes feed, queue/actions, durable composer, model policy,
+human-input forms and history. `ChatComposer` is input-only. Sites supply their
+Site-bound client. Foreground/background share tokens; light embeds set
+`data-og-theme="light"` inside the iframe.
 
 Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `package-versions.json`: source-manifest defaults or canary

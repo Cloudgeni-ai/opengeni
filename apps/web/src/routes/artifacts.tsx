@@ -197,9 +197,11 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
 export function ArtifactDetailRoute({
   workspaceId,
   artifactId,
+  embedded = false,
 }: {
   workspaceId: string;
   artifactId: string;
+  embedded?: boolean;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -338,6 +340,39 @@ export function ArtifactDetailRoute({
     }
   };
   const archived = detail?.artifact.status === "archived";
+  if (embedded) {
+    if (error)
+      return (
+        <LoadErrorState
+          title="Couldn't load Site"
+          error={asError(error)}
+          onRetry={() => void load()}
+        />
+      );
+    if (!detail || !content)
+      return (
+        <div role="status" className="p-4 text-sm text-fg-muted">
+          Loading Site…
+        </div>
+      );
+    if (archived)
+      return (
+        <div className="p-4 text-sm text-fg-muted">
+          This Site is archived. Open it full-page to restore it.
+        </div>
+      );
+    return (
+      <ArtifactSandbox
+        html={content.html}
+        title={detail.artifact.title}
+        versionLabel={`v${detail.artifact.currentVersion?.revision}`}
+        toolBridge={siteToolBridge}
+        connectedToolCount={content.requestedTools.length}
+        fill
+        className="h-full rounded-none border-0"
+      />
+    );
+  }
   return (
     <ContentPage width="wide">
       <div className="mb-5 border-b border-border pb-5">
