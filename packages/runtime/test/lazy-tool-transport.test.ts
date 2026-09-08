@@ -808,7 +808,7 @@ describe("generic lazy tool dispatch", () => {
       runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
     ).toEqual(["interaction__browser_act"]);
     expect(
-      runtime.search({ query: "Save workspace Skill file changes" }).map((tool) => tool.name),
+      runtime.search({ query: "Save workspace Skill file changes" }).map((entry) => entry.name),
     ).toContain("skill_save");
   });
 
