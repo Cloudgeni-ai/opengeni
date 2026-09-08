@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
 import {
-  createDb,
   appendSessionEventsAndUpdateSession,
+  addSessionSystemUpdate,
+  createDb,
   appendSessionEvents,
   createSession,
   grantWorkspaceAccess,
@@ -221,6 +222,175 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 60_000);
+
+  test("loads the settings interface only when opening a management page", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    const managementRequests: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (request.url().includes("/assets/workspace-management-surfaces-"))
+        managementRequests.push(request.url());
+    });
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      const settings = page.getByRole("link", { name: "Settings", exact: true });
+      await settings.waitFor();
+      expect(managementRequests).toHaveLength(0);
+      await settings.click();
+      await page.getByRole("heading", { name: "General", exact: true }).waitFor();
+      expect(managementRequests.length).toBeGreaterThan(0);
+      await page.getByRole("link", { name: "Back to sessions", exact: true }).click();
+      await page.getByRole("link", { name: "Settings", exact: true }).waitFor();
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
+  test("adapts rail shortcuts to viewport height without hiding them on tall screens", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
+      expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
+      await page.setViewportSize({ width: 1280, height: 600 });
+      await page.getByRole("button", { name: "More", exact: true }).click();
+      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Less", exact: true }).click();
+      expect(await page.getByRole("link", { name: "Plugins", exact: true }).count()).toBe(0);
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
+      expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
+  test("loads older sessions only in the project whose end enters the viewport", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const suffix = Date.now();
+      const projectA = await createChannelThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        `Pagination project A ${suffix}`,
+      );
+      const projectB = await createChannelThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        `Pagination project B ${suffix}`,
+      );
+      for (let index = 0; index < 56; index += 1) {
+        await createSession(dbClient.db, {
+          accountId: projectA.accountId,
+          workspaceId,
+          initialMessage: `Project A older row ${index + 1}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          channelId: projectA.id,
+        });
+        await createSession(dbClient.db, {
+          accountId: projectB.accountId,
+          workspaceId,
+          initialMessage: `Project B older row ${index + 1}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          channelId: projectB.id,
+        });
+      }
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const projectAGroup = page.getByRole("group", { name: projectA.name });
+      const projectBGroup = page.getByRole("group", { name: projectB.name });
+      await projectAGroup.waitFor();
+      await projectBGroup.waitFor();
+      const projectARows = projectAGroup.locator("a[data-session-row]");
+      const projectBRows = projectBGroup.locator("a[data-session-row]");
+      const initialProjectACount = await projectARows.count();
+      const initialProjectBCount = await projectBRows.count();
+      expect(initialProjectACount).toBeGreaterThan(0);
+      expect(initialProjectBCount).toBeGreaterThan(0);
+      expect(initialProjectACount + initialProjectBCount).toBe(50);
+
+      const filteredRequests: URL[] = [];
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (
+          request.method() === "GET" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
+          url.searchParams.get("view") === "page" &&
+          url.searchParams.has("channelId")
+        ) {
+          filteredRequests.push(url);
+        }
+      });
+      const loadProjectA = projectAGroup.getByRole("button", {
+        name: `Load older sessions in ${projectA.name}`,
+      });
+      await loadProjectA.waitFor();
+      const footerBefore = await page
+        .getByRole("link", { name: "Settings", exact: true })
+        .boundingBox();
+      await loadProjectA.scrollIntoViewIfNeeded();
+      await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
+        timeoutMs: 30_000,
+      });
+
+      const scroll = await page.locator("[data-rail-scroll-viewport]").evaluate((element) => ({
+        top: element.scrollTop,
+        height: element.clientHeight,
+        total: element.scrollHeight,
+        listOverflow: getComputedStyle(element.querySelector("[data-sessionpin-session-list]")!)
+          .overflowY,
+      }));
+      expect(scroll.top).toBeGreaterThan(0);
+      expect(scroll.total).toBeGreaterThan(scroll.height);
+      expect(scroll.listOverflow).toBe("visible");
+      const footerAfter = await page
+        .getByRole("link", { name: "Settings", exact: true })
+        .boundingBox();
+      expect(footerAfter?.y).toBe(footerBefore?.y);
+      expect(await projectBRows.count()).toBe(initialProjectBCount);
+      expect(filteredRequests.length).toBeGreaterThan(0);
+      expect(
+        filteredRequests.every((request) => request.searchParams.get("channelId") === projectA.id),
+      ).toBe(true);
+      expect(
+        filteredRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
+      ).toBe(false);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
 
   test("normalizes search-only creators and counts hierarchical browse roots", async () => {
     const context = await configuredContext(browser, {
@@ -1036,7 +1206,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 
-  test("rebases one expired cursor while retaining rows and leaves unrelated failures retryable", async () => {
+  test("retains group rows and leaves unrelated pagination failures retryable", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -1047,17 +1217,52 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const workspaceId = await workspaceFromPage(page);
       const batch = `Expired cursor batch ${Date.now()}`;
       let sentinel: BrowserSession | null = null;
-      for (let index = 0; index < 106; index += 1) {
-        const created = await createSessionThroughApi(
-          page,
-          apiBaseUrl,
+      // Bootstrap authority through the public API, then seed the remaining
+      // fixture rows through the normal DB lifecycle. Listing, pagination and
+      // mutations remain real API operations.
+      sentinel = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Pagination sentinel prompt",
+      );
+      // Search also matches the immutable initial prompt. Give this root a
+      // matching title only, so a later rename really removes its membership.
+      const namedSentinel = await page.request.patch(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel.id}`,
+        { data: { title: `${batch} oldest sentinel` } },
+      );
+      expect(namedSentinel.ok()).toBe(true);
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        sentinel.id,
+        [{ type: "agent.updated", payload: { source: "pagination fixture settled" } }],
+        { status: "idle" },
+      );
+      for (let index = 1; index < 106; index += 1) {
+        const seeded = await createTitledSession(dbClient.db, {
+          accountId: sentinel.accountId,
           workspaceId,
-          `${batch} ${index === 0 ? "oldest sentinel" : `row ${index + 1}`}`,
+          initialMessage: `${batch} row ${index + 1}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          seeded.id,
+          [{ type: "agent.updated", payload: { source: "pagination fixture settled" } }],
+          { status: "idle" },
         );
-        if (index === 0) sentinel = created;
       }
 
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      // Stay in the mounted workspace; search performs the real list refresh.
       const search = page.getByRole("searchbox", { name: "Search sessions" });
       await search.waitFor();
       await page.locator("[data-sessionpin-session-list] a[data-session-row]").first().waitFor({
@@ -1076,23 +1281,39 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(firstPage.sessions).toHaveLength(50);
       expect(firstPage.nextCursor).toBeTruthy();
 
-      const loadOlder = page.getByRole("button", { name: "Load older sessions" });
+      const todayGroup = page.getByRole("group", { name: "Today" });
+      const loadOlder = todayGroup.getByRole("button", {
+        name: "Load older sessions in Today",
+      });
       await loadOlder.waitFor({ timeout: 15_000 });
-      const secondPageResponse = page.waitForResponse(
-        (response) =>
-          successfulSessionPageResponse(response, workspaceId, {
-            search: batch,
-            cursor: firstPage.nextCursor,
-          }),
+      const filteredFirstPageResponse = page.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return (
+            successfulSessionPageResponse(response, workspaceId, {
+              search: batch,
+              cursor: null,
+            }) &&
+            url.searchParams.has("updatedFrom") &&
+            !url.searchParams.has("updatedBefore")
+          );
+        },
         { timeout: 10_000 },
       );
-      await loadOlder.click();
-      const secondPage = (await (await secondPageResponse).json()) as BrowserSessionPage;
-      expect(secondPage.sessions).toHaveLength(50);
-      expect(secondPage.nextCursor).toBeTruthy();
-      const retainedId = secondPage.sessions[0]!.id;
+      await loadOlder.scrollIntoViewIfNeeded();
+      const filteredFirstPage = (await (
+        await filteredFirstPageResponse
+      ).json()) as BrowserSessionPage;
+      expect(filteredFirstPage.sessions).toHaveLength(100);
+      expect(filteredFirstPage.nextCursor).toBeTruthy();
+      const retainedId = filteredFirstPage.sessions[0]!.id;
       const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll("[data-sessionpin-session-list] a[data-session-row]").length ===
+          100,
+      );
       expect(await visibleRows.count()).toBe(100);
 
       // A generic 500 is not treated as cursor expiry: loaded rows stay put and
@@ -1102,7 +1323,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         const url = new URL(route.request().url());
         if (
           !injectedFailure &&
-          url.searchParams.get("cursor") === secondPage.nextCursor &&
+          url.searchParams.get("cursor") === filteredFirstPage.nextCursor &&
           url.searchParams.get("search") === batch
         ) {
           injectedFailure = true;
@@ -1115,10 +1336,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         }
         await route.continue();
       });
-      await loadOlder.click();
-      const retryOlder = page.getByRole("button", { name: "Retry older sessions" });
+      await loadOlder.scrollIntoViewIfNeeded();
+      const retryOlder = todayGroup.getByRole("button", {
+        name: "Retry older sessions in Today",
+      });
       await retryOlder.waitFor({ timeout: 10_000 });
       expect(injectedFailure).toBe(true);
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll("[data-sessionpin-session-list] a[data-session-row]").length ===
+          100,
+      );
       expect(await visibleRows.count()).toBe(100);
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
@@ -1129,20 +1357,39 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
             search: batch,
-            cursor: secondPage.nextCursor,
+            cursor: filteredFirstPage.nextCursor,
           }),
         { timeout: 10_000 },
       );
-      await retryOlder.click();
+      await retryOlder.focus();
+      await retryOlder.press("Enter");
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
       await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
+      await page.waitForFunction(
+        () => document.activeElement?.id === "session-group-today",
+        undefined,
+        { timeout: 10_000 },
+      );
       const visibleIds = await visibleRows.evaluateAll((rows) =>
         rows.map((row) => row.getAttribute("data-session-row")),
       );
       expect(visibleIds).toHaveLength(106);
       expect(new Set(visibleIds).size).toBe(106);
+      // A write from another device can change membership outside page one.
+      // The exhausted group must revalidate its loaded window on the ordinary
+      // poll, without requiring navigation or discarding the other 105 rows.
+      const rename = await page.request.patch(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel!.id}`,
+        { data: { title: "Moved outside the current search" } },
+      );
+      expect(rename.ok()).toBe(true);
+      await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor({
+        state: "detached",
+        timeout: 30_000,
+      });
+      expect(await visibleRows.count()).toBe(105);
     } finally {
       await context.close();
     }
@@ -1461,7 +1708,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await chooseModel.waitFor();
       await waitFor(async () => !(await chooseModel.isDisabled()));
       await chooseModel.click();
-      await page.getByRole("menu").waitFor();
+      await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
+      await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
       await page.keyboard.press("Escape");
       const continueButton = banner.getByRole("button", { name: "Continue", exact: true });
       await waitFor(async () => !(await continueButton.isDisabled()));
@@ -1529,6 +1777,148 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 60_000);
+
+  test("opens the exact child from pending and delivered results without claiming the failed parent completed", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const parent = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Failed result parent",
+      );
+      const child = await createTitledSession(dbClient.db, {
+        accountId: parent.accountId,
+        workspaceId,
+        initialMessage: "Child with verified PR result",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        parentSessionId: parent.id,
+        createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+      });
+      // Historical delivered receipts and current pending receipts are distinct.
+      // Both travel through the actual API and event projection in the browser.
+      await appendSessionEvents(dbClient.db, workspaceId, parent.id, [
+        {
+          type: "system.update.delivered",
+          payload: {
+            historyItemId: crypto.randomUUID(),
+            count: 2,
+            members: [0, 1].map((index) => ({
+              id: crypto.randomUUID(),
+              kind: "child_terminal_result",
+              classification: index === 0 ? "success" : "failure",
+              sourceId: child.id,
+              summary:
+                index === 0
+                  ? "Earlier turn went idle waiting for CI."
+                  : "Earlier review turn failed.",
+            })),
+          },
+        },
+      ]);
+      for (let index = 0; index < 9; index += 1) {
+        await addSessionSystemUpdate(dbClient.db, {
+          accountId: parent.accountId,
+          workspaceId,
+          sessionId: parent.id,
+          kind: "child_terminal_result",
+          classification: "success",
+          sourceId: child.id,
+          dedupeKey: `child-result-browser:${parent.id}:${index}`,
+          summary:
+            index === 8
+              ? "The child reports that its PR merged after review and green CI."
+              : "The child went idle while waiting for CI; its goal is not complete.",
+          payload: { type: "child_terminal_result", childSessionId: child.id, status: "idle" },
+        });
+      }
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        parent.id,
+        [
+          {
+            type: "session.status.changed",
+            payload: { status: "failed", code: "pre_claim_failure" },
+          },
+        ],
+        { status: "failed" },
+      );
+      const parentUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${parent.id}`;
+      await page.goto(parentUrl);
+      await page.getByTestId("failed-session-banner").waitFor();
+      const delivered = page.locator("details[data-og-machine-input-batch]");
+      await delivered.getByText("2 agent results received", { exact: true }).click();
+      expect(
+        await delivered.getByRole("button", { name: "View session", exact: true }).count(),
+      ).toBe(2);
+      await delivered.getByRole("button", { name: "View session", exact: true }).first().click();
+      await page.waitForURL(`**/sessions/${child.id}`);
+      expect(new URL(page.url()).pathname.endsWith(child.id)).toBe(true);
+      await page.goBack();
+      await page.getByTestId("failed-session-banner").waitFor();
+      await page.getByRole("button", { name: "Session activity", exact: true }).click();
+      const incoming = page.getByRole("list", { name: "Incoming updates", exact: true });
+      await incoming.waitFor();
+      await page.getByText("Waiting to be included in an agent turn.", { exact: true }).waitFor();
+      expect(await incoming.getByRole("listitem").count()).toBe(9);
+      expect(
+        await incoming.getByRole("button", { name: "View session", exact: true }).count(),
+      ).toBe(9);
+      expect(await page.getByTestId("failed-session-banner").isVisible()).toBe(true);
+      const mobileContext = await configuredContext(browser, {
+        viewport: { width: 375, height: 812 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      try {
+        const mobilePage = await mobileContext.newPage();
+        mobilePage.on("pageerror", (error) => errors.push(error.message));
+        await mobilePage.goto(parentUrl);
+        await mobilePage.getByTestId("failed-session-banner").waitFor();
+        await mobilePage.getByRole("button", { name: "Session activity", exact: true }).click();
+        const mobileIncoming = mobilePage.getByRole("list", {
+          name: "Incoming updates",
+          exact: true,
+        });
+        await mobileIncoming.waitFor();
+        await mobilePage
+          .getByText("Waiting to be included in an agent turn.", { exact: true })
+          .scrollIntoViewIfNeeded();
+        expect(
+          await mobilePage.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
+          ),
+        ).toBe(true);
+        await mobilePage.screenshot({
+          path: `${process.env.TMPDIR ?? "/tmp"}/opengeni-child-results-mobile.png`,
+        });
+        await mobileIncoming
+          .getByRole("button", { name: "View session", exact: true })
+          .last()
+          .click();
+        await mobilePage.waitForURL(`**/sessions/${child.id}`);
+        expect(new URL(mobilePage.url()).pathname.endsWith(child.id)).toBe(true);
+      } finally {
+        await mobileContext.close();
+      }
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
 
   test("opens waiting descendants at every depth from a failed parent in For you", async () => {
     const context = await configuredContext(browser, {
@@ -2399,6 +2789,109 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close().catch(() => undefined);
     }
   }, 60_000);
+  test("discovers older active roots and active descendants through explicit Active pagination", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    let workspaceId = "";
+    const activatedIds: string[] = [];
+    try {
+      await page.goto(webBaseUrl);
+      workspaceId = await workspaceFromPage(page);
+      const bootstrap = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Active discovery bootstrap",
+      );
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        bootstrap.id,
+        [{ type: "agent.updated", payload: { source: "active pagination fixture settled" } }],
+        { status: "idle" },
+      );
+      const seed = async (title: string, parentSessionId?: string) => {
+        const seeded = await createTitledSession(dbClient.db, {
+          accountId: bootstrap.accountId,
+          workspaceId,
+          initialMessage: title,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          ...(parentSessionId ? { parentSessionId } : {}),
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          seeded.id,
+          [{ type: "agent.updated", payload: { source: "active pagination fixture settled" } }],
+          { status: "idle" },
+        );
+        return seeded;
+      };
+      const activeRoot = await seed("Older active root");
+      const ancestor = await seed("Older root with active child");
+      const activeChild = await seed("Older active child", ancestor.id);
+      for (const session of [activeRoot, activeChild]) {
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          session.id,
+          [{ type: "agent.updated", payload: { source: "active pagination fixture" } }],
+          { status: "running" },
+        );
+        activatedIds.push(session.id);
+      }
+      for (let index = 0; index < 60; index += 1) await seed(`Newer idle root ${index}`);
+      const discoveryPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("limit") === "50" &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          !url.searchParams.has("archivedOnly")
+        );
+      });
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      const discovery = (await (await discoveryPage).json()) as BrowserSessionPage;
+      expect(
+        discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
+      ).toBe(false);
+      expect(discovery.nextCursor).toBeTruthy();
+      await page.getByRole("button", { name: "Session filters", exact: true }).click();
+      await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
+      const activeGroup = page.getByRole("group", { name: "Active", exact: true });
+      const discoverOlder = activeGroup.getByRole("button", {
+        name: "Load older sessions in Active",
+        exact: true,
+      });
+      await discoverOlder.waitFor();
+      expect(await activeGroup.locator("a[data-session-row]").count()).toBe(0);
+      await discoverOlder.click();
+      await activeGroup.locator(`a[data-session-row="${activeRoot.id}"]`).waitFor();
+      await activeGroup.locator(`a[data-session-row="${ancestor.id}"]`).waitFor();
+      // Other scenarios in this shared workspace can also leave active roots.
+      expect(await activeGroup.locator("a[data-session-row]").count()).toBeGreaterThanOrEqual(2);
+    } finally {
+      for (const sessionId of activatedIds) {
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          sessionId,
+          [{ type: "agent.updated", payload: { source: "active pagination fixture cleanup" } }],
+          { status: "idle" },
+        );
+      }
+      await context.close();
+    }
+  }, 90_000);
 });
 
 type BrowserSession = {
@@ -2406,6 +2899,11 @@ type BrowserSession = {
   accountId: string;
   pinned: boolean;
   pinVersion: number;
+};
+type BrowserChannel = {
+  id: string;
+  accountId: string;
+  name: string;
 };
 type BrowserSessionPage = {
   pinned: BrowserSession[];
@@ -2549,6 +3047,7 @@ async function createSessionThroughApi(
   workspaceId: string,
   initialMessage: string,
   options: {
+    channelId?: string;
     goal?: {
       text: string;
       successCriteria?: string;
@@ -2600,6 +3099,35 @@ async function createSessionThroughApi(
       return (await renameResponse.json()) as BrowserSession;
     },
     { apiBaseUrl, workspaceId, initialMessage, options },
+  );
+}
+
+async function createChannelThroughApi(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+  name: string,
+): Promise<BrowserChannel> {
+  return await page.evaluate(
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      name: projectName,
+    }) => {
+      const response = await fetch(
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/channels`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: projectName }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`channel create failed: ${response.status} ${await response.text()}`);
+      }
+      return (await response.json()) as BrowserChannel;
+    },
+    { apiBaseUrl, workspaceId, name },
   );
 }
 

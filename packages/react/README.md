@@ -54,8 +54,8 @@ assuming every OAuth application or operator-managed provider is configured.
 
 Optional `@opengeni/react/sites` exports `SiteList`, `SiteDetail`, and `SiteClient`.
 Pass the public SDK client through your host proxy. `onOpen` owns list
-navigation; `onEditWithGeni` lets the host open an ordinary session with the
-selected Site/content. `SiteDetail` reuses `PublishedHtmlArtifactFrame`, accepts
+navigation. Authoring buttons and prompts belong to the host and use the ordinary
+session SDK; they are not part of the Site component API. `SiteDetail` reuses `PublishedHtmlArtifactFrame`, accepts
 an optional authenticated/filtered tool bridge, and removes the frame after
 read-authority refresh failure. Loaded Sites revalidate every 15 seconds;
 downloaded HTML cannot be recalled and every tool call still needs live authority.
@@ -832,3 +832,18 @@ with streaming, tool calls, and a worker spawn, plus fleet and scheduled-task
 views and a dark/light toggle. `realtime.html` is the public-package reference
 consumer described above, with deterministic mock and same-origin live modes.
 `bun run demo:build` is part of the repo gate.
+
+### Model selection
+
+`ModelPolicyPicker` opens a flat, searchable list grouped by payment source, with
+its current model first. Choosing a model applies it and closes the popover.
+Thinking and supported speed controls remain in a fixed footer instead of a
+nested page. Model changes preserve supported reasoning effort and latency;
+unsupported effort falls back to the new model's default, and unsupported speed
+returns to Standard. A model with one reasoning level displays a disabled effort
+control. Availability and Codex-only session restrictions still disable choices.
+
+The trigger renders immediately; the searchable popover loads when opened. Hosts
+can translate its search, current-selection, empty-result, attachment-warning, and
+thinking labels through `messages`, and override payment descriptions through
+`messages.billingHints`.

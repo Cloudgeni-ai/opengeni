@@ -18,7 +18,13 @@ describe("workspace artifact content persistence", () => {
     const prepared = prepareWorkspaceArtifactContent(
       storage,
       "11111111-1111-4111-8111-111111111111",
-      { html: "<!doctype html><h1>Site</h1>" },
+      {
+        html: "<!doctype html><h1>Site</h1>",
+        source: {
+          entrypoint: "index.html",
+          files: [{ path: "index.html", content: "<h1>Site</h1>" }],
+        },
+      },
     );
 
     await expect(prepared.persistContent()).rejects.toThrow("source upload failed");
@@ -41,7 +47,8 @@ describe("workspace artifact content persistence", () => {
     expect(first.contentSha256).toBe(second.contentSha256);
     expect(first.sourceSha256).toBe(second.sourceSha256);
     expect(first.contentKey).not.toBe(second.contentKey);
-    expect(first.sourceKey).not.toBe(second.sourceKey);
+    expect(first.sourceKey).toBeNull();
+    expect(second.sourceKey).toBeNull();
   });
 
   test("discards both unique objects after a later publication failure", async () => {
@@ -58,6 +65,6 @@ describe("workspace artifact content persistence", () => {
 
     await prepared.persistContent();
     await prepared.discardContent();
-    expect(deleted.sort()).toEqual([prepared.contentKey, prepared.sourceKey].sort());
+    expect(deleted).toEqual([prepared.contentKey]);
   });
 });

@@ -98,6 +98,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_workspace_kind(uuid, uuid)",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
+  "list_organization_codex_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -729,6 +730,9 @@ export const FORCE_RLS_TABLES = [
   "editable_artifacts",
   "enrollments",
   "external_identities",
+  "external_identity_links",
+  "external_link_task_authorities",
+  "external_link_turn_authorities",
   "file_uploads",
   "files",
   "generated_image_artifacts",
@@ -746,9 +750,6 @@ export const FORCE_RLS_TABLES = [
   "host_export_dead_letters",
   "host_export_outbox",
   "host_mcp_bindings",
-  "external_identity_links",
-  "external_link_turn_authorities",
-  "external_link_task_authorities",
   "host_mcp_delegations",
   "host_mcp_task_authorities",
   "host_mcp_turn_authorities",
@@ -969,6 +970,7 @@ export const FORCE_RLS_TABLES = [
   "video_generation_operations",
   "video_generation_references",
   "workspace_artifact_events",
+  "workspace_artifact_uploads",
   "workspace_artifact_versions",
   "workspace_artifacts",
   "workspace_captures",
@@ -1182,6 +1184,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_artifact_uploads",
   "workspace_artifacts",
   "workspace_captures",
   "workspace_codex_subscription_preferences",
@@ -1234,8 +1237,6 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
-  "external_link_turn_authorities",
-  "external_link_task_authorities",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -1250,6 +1251,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "external_link_task_authorities",
+  "external_link_turn_authorities",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
   "host_mcp_task_authorities",
@@ -1288,7 +1291,6 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
-  "external_identity_links",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
@@ -1307,6 +1309,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "computer_sessions",
   "editable_artifact_session_links",
   "editable_artifacts",
+  "external_identity_links",
   "integration_facet_definitions",
   "integration_spec_revisions",
   "integration_tools",
@@ -2236,14 +2239,22 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if (["ensure_external_identity(uuid, text, text)", "get_external_identity_link_reference(uuid, uuid, text)", "get_external_identity_link_inventory_references(uuid, uuid[])"].includes(routine.name)) {
-      const names = routine.name !== "ensure_external_identity(uuid, text, text)"
-        ? ["external_identity_links", "external_identities", "organization_memberships"] : [
-        "external_identities",
-        "organization_memberships",
-        "workspaces",
-        "workspace_inference_controls",
-      ];
+    } else if (
+      [
+        "ensure_external_identity(uuid, text, text)",
+        "get_external_identity_link_reference(uuid, uuid, text)",
+        "get_external_identity_link_inventory_references(uuid, uuid[])",
+      ].includes(routine.name)
+    ) {
+      const names =
+        routine.name !== "ensure_external_identity(uuid, text, text)"
+          ? ["external_identity_links", "external_identities", "organization_memberships"]
+          : [
+              "external_identities",
+              "organization_memberships",
+              "workspaces",
+              "workspace_inference_controls",
+            ];
       const missing = names.filter((name) => !tableByName.has(name));
       if (missing.length > 0) {
         violations.push(

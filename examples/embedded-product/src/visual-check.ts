@@ -13,6 +13,20 @@ const context = await browser.newContext({ viewport: { width: 1280, height: 1000
 const page = await context.newPage();
 let disconnected = false;
 let denied = false;
+const site = {
+  id: "fixture-site",
+  workspaceId: "fixture-workspace",
+  accountId: "fixture-org",
+  title: "Team overview",
+  description: "Shared team information",
+  status: "active",
+  currentVersion: {
+    id: "fixture-version",
+    revision: 1,
+    requestedTools: [],
+    createdAt: "2026-09-08T00:00:00Z",
+  },
+};
 let schedule: {
   id: string;
   name: string;
@@ -123,13 +137,39 @@ await page.route("**/api/**", async (route) => {
     }
     json = attempt;
   } else if (path === "/api/connect/attempts/fixture-attempt") json = attempt;
-  else if (path === "/api/sites") json = { artifacts: [], nextCursor: null, truncated: false };
-  else return route.fulfill({ status: 404, json: {} });
+  else if (path === "/api/sites") json = { artifacts: [site], nextCursor: null, truncated: false };
+  else if (path === "/api/sites/fixture-site")
+    json = {
+      artifact: site,
+      versions: [site.currentVersion],
+      events: [],
+      versionsTruncated: false,
+      eventsTruncated: false,
+    };
+  else if (path === "/api/sites/fixture-site/html") {
+    if (new URL(route.request().url()).searchParams.get("versionId") !== "fixture-version")
+      throw new Error("Site HTML request lost its observed version");
+    json =
+      "<!doctype html><html lang='en'><title>Team overview</title><body><main><h1>Team overview</h1><p>Shared information, rendered without downloading source.</p></main></body></html>";
+  } else return route.fulfill({ status: 404, json: {} });
   return route.fulfill({ json });
 });
 try {
   await page.goto("http://127.0.0.1:3102");
   await page.getByRole("button", { name: "Disconnect Taylor’s calendar" }).waitFor();
+  await page.getByRole("button", { name: "Team overview" }).click();
+  await page.getByRole("button", { name: "Edit with agent" }).waitFor();
+  await page
+    .frameLocator('iframe[title="Team overview"]')
+    .getByRole("heading", { name: "Team overview" })
+    .waitFor();
+  await page.screenshot({ path: `${output}/07-site-desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: `${output}/08-site-mobile.png`, fullPage: true });
+  if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth))
+    throw new Error("Site mobile overflow");
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.getByRole("button", { name: "Back to Sites" }).click();
   await page.screenshot({ path: `${output}/01-desktop.png`, fullPage: true });
   await page.getByRole("button", { name: "fixture-calendar — connected but incomplete" }).click();
   await page.getByRole("button", { name: "Review integration operations" }).click();
@@ -138,7 +178,7 @@ try {
   await page.getByRole("button", { name: "Install selected operations" }).click();
   await page
     .getByRole("status")
-    .filter({ hasText: /^complete$/ })
+    .filter({ hasText: /^Connection ready$/ })
     .waitFor();
   await page.getByRole("button", { name: "Disconnect Taylor’s calendar" }).click();
   await page.screenshot({ path: `${output}/03-confirmation.png`, fullPage: true });
@@ -178,7 +218,7 @@ try {
   await page.getByText("Account state could not be confirmed.", { exact: false }).waitFor();
   await page.screenshot({ path: `${output}/05-access-loss.png`, fullPage: true });
   console.log(
-    "PASS: explicit operation selection, versioned disconnect confirmation, paused schedule creation and confirmed trigger/delete, mobile overflow, WCAG scan, access-loss state; 6 screenshots",
+    "PASS: version-pinned HTML-only Sites and product-owned edit UI, explicit operation selection, versioned disconnect confirmation, paused schedule creation and confirmed trigger/delete, mobile overflow, WCAG scan, access-loss state; 8 screenshots",
   );
 } finally {
   await browser.close();

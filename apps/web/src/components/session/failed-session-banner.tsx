@@ -19,11 +19,15 @@ export function FailedSessionBanner({
   failure,
   creditExhausted,
   workspaceId,
+  canBuyCredits = false,
+  canConnectModel = false,
   actions,
 }: {
   failure: SessionFailureSummary;
   creditExhausted?: boolean;
   workspaceId?: string;
+  canBuyCredits?: boolean;
+  canConnectModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
 }) {
   if (creditExhausted) {
@@ -41,12 +45,35 @@ export function FailedSessionBanner({
                 {failure.failedAt ? ` (since ${formatTimestamp(failure.failedAt)})` : ""}.
               </span>
               <div className="mt-1 text-xs text-fg-muted">
-                The conversation history is preserved. Add organization credits or choose another
-                available model, then keep working here.
+                The conversation history is preserved. Buy organization credits or connect a model,
+                then keep working here.
               </div>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
+            {workspaceId && canBuyCredits ? (
+              <Button asChild type="button" size="sm" className="shrink-0">
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "billing" }}
+                >
+                  <CreditCardIcon className="size-3.5" />
+                  Buy credits
+                </Link>
+              </Button>
+            ) : null}
+            {workspaceId && canConnectModel ? (
+              <Button asChild type="button" size="sm" variant="secondary" className="shrink-0">
+                <Link
+                  to="/workspaces/$workspaceId/settings"
+                  params={{ workspaceId }}
+                  search={{ section: "models" }}
+                >
+                  Connect a model
+                </Link>
+              </Button>
+            ) : null}
             {actions ? (
               <Button
                 type="button"
@@ -58,13 +85,10 @@ export function FailedSessionBanner({
                 Choose another model
               </Button>
             ) : null}
-            {workspaceId ? (
-              <Button asChild type="button" size="sm" variant="secondary" className="shrink-0">
-                <Link to="/workspaces/$workspaceId/organization" params={{ workspaceId }}>
-                  <CreditCardIcon className="size-3.5" />
-                  Add credits
-                </Link>
-              </Button>
+            {!canBuyCredits && !canConnectModel ? (
+              <span className="self-center text-xs text-fg-muted">
+                Ask an organization owner or workspace admin for help.
+              </span>
             ) : null}
           </div>
         </div>

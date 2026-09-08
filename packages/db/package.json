@@ -59,6 +59,14 @@
       "types": "./src/session-tenancy.ts",
       "default": "./src/session-tenancy.ts"
     },
+    "./session-event-slices": {
+      "types": "./src/session-event-slices.ts",
+      "default": "./src/session-event-slices.ts"
+    },
+    "./session-command-output": {
+      "types": "./src/session-command-output.ts",
+      "default": "./src/session-command-output.ts"
+    },
     "./session-background-commands": {
       "types": "./src/session-background-commands.ts",
       "default": "./src/session-background-commands.ts"

@@ -11,26 +11,30 @@ test("native and embedded Site loader pins the selected version and rejects mism
   const calls: unknown[] = [];
   const readClient = {
     getWorkspaceArtifact: async () => structuredClone(detail),
-    getWorkspaceArtifactContent: async (_workspace: string, _site: string, options?: unknown) => {
+    getWorkspaceArtifactHtml: async (_workspace: string, _site: string, options?: unknown) => {
       calls.push(options);
-      return structuredClone(content);
+      return content.html;
     },
   };
   const snapshot = await loadSiteSnapshot(readClient, "space", "site");
   expect(snapshot.detail.artifact.id).toBe("site");
   expect(calls).toEqual([{ versionId: "current" }]);
-  await expect(loadSiteSnapshot(readClient, "other-space", "site")).rejects.toThrow("scope mismatch");
+  await expect(loadSiteSnapshot(readClient, "other-space", "site")).rejects.toThrow(
+    "scope mismatch",
+  );
   expect(calls).toHaveLength(1);
   await expect(
     loadSiteSnapshot(
       {
         ...readClient,
-        getWorkspaceArtifactContent: async () => ({ ...content, versionId: "other-version" }),
+        getWorkspaceArtifactHtml: async () => {
+          throw new Error("HTML unavailable");
+        },
       },
       "space",
       "site",
     ),
-  ).rejects.toThrow("content mismatch");
+  ).rejects.toThrow("HTML unavailable");
   const archived = {
     ...readClient,
     getWorkspaceArtifact: async () => ({
@@ -99,7 +103,7 @@ function client(overrides: Partial<SiteClient> = {}): SiteClient {
       truncated: false,
     }),
     getWorkspaceArtifact: async () => structuredClone(detail),
-    getWorkspaceArtifactContent: async () => structuredClone(content),
+    getWorkspaceArtifactHtml: async () => content.html,
     rollbackWorkspaceArtifact: async () => {
       throw new Error("unexpected rollback");
     },
@@ -166,9 +170,9 @@ test("Site changes require confirmation and preserve observed version without un
   }
 });
 test("Site actor replacement ignores late content even when a transport ignores cancellation", async () => {
-  let finish!: (value: WorkspaceArtifactContentResponse) => void;
+  let finish!: (value: string) => void;
   const previous = client({
-    getWorkspaceArtifactContent: () =>
+    getWorkspaceArtifactHtml: () =>
       new Promise((resolve) => {
         finish = resolve;
       }),
@@ -183,7 +187,7 @@ test("Site actor replacement ignores late content even when a transport ignores 
   );
   try {
     await view.rerender(<SiteDetail client={next} workspaceId="space" siteId="site" />);
-    await actRun(() => finish(content));
+    await actRun(() => finish(content.html));
     expect(view.container.querySelector("iframe")).toBeNull();
     expect(view.container.textContent).not.toContain("My Site");
   } finally {

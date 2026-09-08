@@ -1,4 +1,4 @@
-/** Shared native/embedded Site authoring intent. These selections do not grant
+/** Example-owned Site authoring prompts, not an SDK API. These selections do not grant
  * permissions: normal session and tool admission remain authoritative. */
 export const ARTIFACT_CREATE_PERMISSIONS = ["artifacts:publish"] as const;
 export const ARTIFACT_EDIT_PERMISSIONS = ["artifacts:read", "artifacts:publish"] as const;

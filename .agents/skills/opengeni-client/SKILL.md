@@ -146,8 +146,12 @@ per chat when even the same user's chats require a hard boundary. Shared
 upstream data does not weaken the chat boundary. Turning `memoryEnabled` off
 does not isolate sessions.
 
-Organization-key-created top-level sessions are workspace-visible. Managed
-human Only-me sessions are not a backend impersonation mechanism. A live agent
+Unscoped organization-key-created top-level sessions are workspace-visible.
+For product-user ownership, use the server-side `asUser(externalId)` client and
+explicit workspace membership described in `references/external-users-and-connect.md`;
+verified external owners can create private sessions when the organization enables
+that feature. Private sessions do not make workspace Files or Sites private.
+Managed-human Only-me sessions are not a backend impersonation mechanism. A live agent
 with cross-session tools can reach unrelated sessions in the same workspace;
 removing those tools is defense in depth, not a hard boundary.
 

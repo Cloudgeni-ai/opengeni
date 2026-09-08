@@ -85,7 +85,7 @@ describe("organization administration surface", () => {
     expect(organizationCodexSource).toContain('role="alert"');
     expect(organizationCodexSource).toContain("Retry");
     expect(workspaceCodexSource).toContain("Where this workspace gets Codex");
-    expect(workspaceCodexSource).toContain("Automatic: prefer organization");
+    expect(workspaceCodexSource).toContain("Automatic: prefer this workspace");
     expect(workspaceCodexSource).toContain("Connect an organization subscription");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(routeSource).toContain('accountGrant?.role === "owner"');

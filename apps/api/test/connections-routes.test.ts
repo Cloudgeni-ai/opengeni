@@ -18,6 +18,7 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import {
+  createApiKey,
   createConnection,
   createOrganizationApiKey,
   ensureExternalIdentity,
@@ -2302,7 +2303,7 @@ describe("connections routes", () => {
       name: "External MCP fixture",
       prefix: "test",
       keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: ["connections:read", "connections:write"],
+      permissions: ["workspace:read", "connections:read", "connections:write"],
     });
     const identity = await ensureExternalIdentity(client.db, {
       accountId: workspace.accountId,
@@ -2311,7 +2312,7 @@ describe("connections routes", () => {
     await grantWorkspaceAccess(client.db, {
       ...workspace,
       subjectId: identity.subjectId,
-      permissions: ["connections:read", "connections:write"],
+      permissions: ["workspace:read", "connections:read", "connections:write"],
     });
     let revokeDuringExchange = false;
     const as = startFakeAuthorizationServer({
@@ -3177,6 +3178,73 @@ describe("connections routes", () => {
       });
       expect(loaded?.metadata.mcpToolsVerification).toMatchObject({
         status: "ok",
+      });
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth callback still writes a workspace connection for an API key that can start OAuth", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = `ogk_${randomUUID().replaceAll("-", "")}`;
+    const apiKey = await createApiKey(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      name: "runtime",
+      prefix: token.slice(0, 14),
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["connections:read", "connections:write", "workspace:read"],
+    });
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "linear.app",
+            mcpUrl: mcp.url,
+            ownership: "workspace",
+            returnPath: "/integrations?connect_item=linear",
+          }),
+        },
+      );
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as { state: string };
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(state.subjectId).toBe(`api_key:${apiKey.id}`);
+      expect(state.ownership).toBe("workspace");
+
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(callback.headers.get("location")).not.toContain("integration_oauth=error");
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+        subjectId: `api_key:${apiKey.id}`,
+        allowSubjectOwned: false,
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "mcp-access-token",
+        mcp_url: mcp.url,
       });
     } finally {
       mcp.close();

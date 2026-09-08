@@ -26,6 +26,7 @@ const testFiles =
         "./test/e2e/restored-attachment-preview.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
+        "./test/e2e/workspace-pause-timers.browser.e2e.ts",
         "./test/e2e/session-rail-row-metadata.browser.e2e.ts",
         "./test/e2e/setup-account-token.browser.e2e.ts",
         "./test/e2e/timeline-scroll.browser.e2e.ts",

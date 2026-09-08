@@ -107,23 +107,29 @@ function Product({ context }: { context: HostContext }) {
         {siteId ? (
           <>
             <button onClick={() => setSiteId(null)}>Back to Sites</button>
-            <SiteDetail
-              client={sites}
-              workspaceId={context.workspaceId}
-              siteId={siteId}
-              onEditWithGeni={async (site) => {
-                if (!site.currentVersion) throw new Error("No current Site version");
-                const created = await hostRequest<{ id: string }>(
-                  `sites/${encodeURIComponent(site.id)}/edit-session`,
-                  "POST",
-                  {
-                    expectedCurrentVersionId: site.currentVersion.id,
-                    idempotencyKey: crypto.randomUUID(),
-                  },
-                );
-                setSessionId(created.id);
+            <SiteDetail client={sites} workspaceId={context.workspaceId} siteId={siteId} />
+            <button
+              onClick={() => {
+                void (async () => {
+                  const { artifact: site } = await sites.getWorkspaceArtifact(
+                    context.workspaceId,
+                    siteId,
+                  );
+                  if (!site.currentVersion) throw new Error("No current Site version");
+                  const created = await hostRequest<{ id: string }>(
+                    `sites/${encodeURIComponent(site.id)}/edit-session`,
+                    "POST",
+                    {
+                      expectedCurrentVersionId: site.currentVersion.id,
+                      idempotencyKey: crypto.randomUUID(),
+                    },
+                  );
+                  setSessionId(created.id);
+                })().catch(() => setError(true));
               }}
-            />
+            >
+              Edit with agent
+            </button>
           </>
         ) : (
           <>

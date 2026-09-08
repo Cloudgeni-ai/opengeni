@@ -316,6 +316,7 @@ function catalogModel(
   overrides: Partial<WorkspaceModelCatalogModel> & Pick<WorkspaceModelCatalogModel, "id" | "label">,
 ): WorkspaceModelCatalogModel {
   return {
+    cost: "credits",
     provider: "openai",
     providerLabel: "OpenAI",
     api: "responses",
@@ -371,6 +372,50 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows([
     id: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     shortLabel: "5.6 Luna",
+  }),
+  catalogModel({
+    id: "codex/gpt-6-astra",
+    label: "GPT-6 Astra",
+    shortLabel: "Astra",
+    provider: "codex",
+    providerLabel: "Codex",
+    source: "codex",
+    cost: "subscription",
+    billing: { upstreamPayer: "connected_subscription", metering: "external" },
+  }),
+  catalogModel({
+    id: "codex/gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    provider: "codex",
+    providerLabel: "Codex",
+    source: "codex",
+    cost: "subscription",
+    billing: { upstreamPayer: "connected_subscription", metering: "external" },
+  }),
+  catalogModel({
+    id: "supergrok/grok-4.6",
+    label: "Grok 4.6",
+    provider: "supergrok",
+    providerLabel: "SuperGrok",
+    source: "supergrok",
+    cost: "subscription",
+    billing: { upstreamPayer: "connected_subscription", metering: "external" },
+  }),
+  catalogModel({
+    id: "workspace-gateway/moonshotai/kimi-k3",
+    label: "Kimi K3",
+    provider: "workspace-gateway",
+    providerLabel: "Vercel AI Gateway",
+    cost: "workspace",
+    billing: { upstreamPayer: "workspace", metering: "external" },
+  }),
+  catalogModel({
+    id: "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+    label: "Nemotron 3 Super",
+    provider: "openrouter",
+    providerLabel: "OpenRouter",
+    cost: "free",
+    billing: { upstreamPayer: "deployment", metering: "external" },
   }),
 ]);
 
@@ -724,7 +769,8 @@ export function chromeScenarios(): ChromeScenario[] {
     {
       id: "queued-only",
       title: "Queued messages only",
-      description: "Human prompts waiting ahead of send; no machine inputs or goal.",
+      description:
+        "Human prompts waiting ahead of send; no machine inputs or goal. Idle chrome opens the queue itself.",
       session,
       queue: galleryQueue({
         queue: [
@@ -738,12 +784,13 @@ export function chromeScenarios(): ChromeScenario[] {
       }),
       goal: galleryGoal(null),
       agentNodes: [],
-      defaultActive: "queue",
+      defaultActive: null,
     },
     {
       id: "incoming-and-queued",
       title: "Incoming + queued",
-      description: "Collapsed chips show both counts; open either segment.",
+      description:
+        "Idle chrome opens the queue. Closing it leaves both chips collapsed until you open one.",
       session,
       queue: galleryQueue({
         queue: [galleryTurn(0, "Follow up once the child session is inspected.")],

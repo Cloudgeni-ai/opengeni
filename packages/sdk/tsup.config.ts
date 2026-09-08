@@ -39,5 +39,5 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//],
-  noExternal: ["@opengeni/contracts/session-titles"],
+  noExternal: ["@opengeni/contracts/session-titles", "@opengeni/contracts/site-session-http"],
 });

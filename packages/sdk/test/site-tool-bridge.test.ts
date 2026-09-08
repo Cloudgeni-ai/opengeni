@@ -4,6 +4,46 @@ import { OpenGeniClient } from "../src/client";
 import type { ToolGatewayCatalog, ToolGatewayCallResponse } from "../src/types";
 
 const identity = { serverId: "product", toolName: "lookup" };
+test("shared Site HTTP forwarding preserves main's bounded session API and host authentication", async () => {
+  const requests: Array<{ path: string; init: RequestInit }> = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    artifactId: "site",
+    siteVersionId: "version",
+    requestedTools: [],
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async () => {
+      throw new Error("unexpected tool call");
+    },
+    fetchResponse: async (path, init) => {
+      requests.push({ path, init });
+      return new Response("ok");
+    },
+  });
+  const message = {
+    type: "opengeni.site.http" as const,
+    requestId: "request",
+    method: "GET",
+    path: "/v1/workspaces/site-host/sessions",
+    headers: [
+      ["authorization", "forged"],
+      ["x-opengeni-external-actor", "other"],
+      ["accept", "text/event-stream"],
+    ] as [string, string][],
+  };
+  await bridge.fetch!(message, new AbortController().signal);
+  expect(requests[0]!.path).toBe("/v1/workspaces/workspace/sessions");
+  expect(new Headers(requests[0]!.init.headers).get("authorization")).toBeNull();
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-external-actor")).toBeNull();
+  expect(new Headers(requests[0]!.init.headers).get("accept")).toBe("text/event-stream");
+  await expect(
+    bridge.fetch!(
+      { ...message, path: "/v1/workspaces/other/sessions" },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow("Unsupported");
+  expect(requests).toHaveLength(1);
+});
 const catalog: ToolGatewayCatalog = {
   version: 1,
   accountId: "org",

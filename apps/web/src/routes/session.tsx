@@ -1,3 +1,5 @@
+import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { findConnectRecoveryAccount } from "@opengeni/connect";
 import {
@@ -9,7 +11,7 @@ import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-b
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
-import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -55,7 +57,6 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
 import { LoadingPanel } from "@/components/common";
 import {
   FollowUpRepositoryMenuBody,
@@ -94,7 +95,7 @@ import {
   oauthConnectionRef,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -1213,7 +1214,7 @@ function SessionChatPane(props: {
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
-  const fleet = useMachines({
+  const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
@@ -1603,7 +1604,18 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
-    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    // Steer and recovered sends do not pass through onSubmitted. Keep the
+    // host-owned upload/repository queue in sync once those inputs are
+    // accepted too; the immutable input snapshot preserves later additions.
+    onSent: (_text, input) => {
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      );
+      repositories.commitSent(input.resources ?? []);
+      personalAttachment.onAccepted(input);
+    },
     onDeliveryError: personalAttachment.onDeliveryError,
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
@@ -1834,6 +1846,9 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -1899,6 +1914,20 @@ function SessionChatPane(props: {
                   failure={props.failure}
                   creditExhausted={props.creditExhausted}
                   workspaceId={props.session.workspaceId}
+                  canBuyCredits={
+                    context.clientConfig.billingMode === "stripe" &&
+                    Boolean(workspaceAccountId) &&
+                    hasAccountPermission(
+                      context.accessContext,
+                      workspaceAccountId ?? "",
+                      "billing:manage",
+                    )
+                  }
+                  canConnectModel={hasWorkspacePermission(
+                    context.accessContext,
+                    props.session.workspaceId,
+                    "connections:write",
+                  )}
                   actions={{
                     failureId: props.failure.failureEventId,
                     composerBlocker: composerSendBlocker(),
@@ -2070,7 +2099,9 @@ function SessionChatPane(props: {
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
+            sessionStatus={props.session.status}
             compact
+            onOpenSession={props.onOpenSession}
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}
@@ -2095,7 +2126,7 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          <PersonalResourceAttachmentControl
+          <PersonalResourceAttachmentSurface
             controller={personalAttachment}
             disabled={terminal || composer.sending}
             compact
@@ -2197,7 +2228,7 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
+              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5 max-sm:flex-nowrap">
                 <ModelPicker
                   open={modelPickerSession === props.session.id}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}

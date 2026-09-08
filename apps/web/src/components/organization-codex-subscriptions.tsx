@@ -153,8 +153,8 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
             <ChatGptMark className="size-4 text-brand" /> Organization Codex subscriptions
           </h2>
           <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-            Connect once for the organization. Current and future shared workspaces inherit this
-            pool by default; personal workspaces keep their own subscriptions.
+            Connect once for the organization. Shared and Personal workspaces can use this pool.
+            Workspaces without their own subscription inherit it automatically.
           </p>
         </div>
         {accounts.length > 0 && !pending ? (

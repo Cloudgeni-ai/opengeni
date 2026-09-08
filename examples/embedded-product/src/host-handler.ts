@@ -1,12 +1,10 @@
+import { OpenGeniClient, OpenGeniApiError, proxySessionEventStream } from "@opengeni/sdk";
 import {
-  OpenGeniClient,
-  OpenGeniApiError,
   artifactEditInstructions,
   artifactEditOpeningMessage,
   ARTIFACT_EDIT_PERMISSIONS,
   ARTIFACT_EDIT_TOOLS,
-  proxySessionEventStream,
-} from "@opengeni/sdk";
+} from "./site-authoring";
 import {
   AdvanceConnectRequest,
   BeginConnectRequest,
@@ -346,12 +344,10 @@ export function createHostHandler(options: HostHandlerOptions) {
           });
         else if (path[1] && path.length === 2 && method === "GET")
           result = await client.getWorkspaceArtifact(workspaceId, path[1], call);
-        else if (path[1] && path.length === 3 && path[2] === "content" && method === "GET")
-          result = await client.getWorkspaceArtifactContent(workspaceId, path[1], {
+        else if (path[1] && path.length === 3 && path[2] === "html" && method === "GET")
+          result = await client.getWorkspaceArtifactHtml(workspaceId, path[1], {
             ...call,
-            ...(url.searchParams.get("versionId")
-              ? { versionId: url.searchParams.get("versionId")! }
-              : {}),
+            versionId: z.string().uuid().parse(url.searchParams.get("versionId")),
           });
         else if (path[1] && path.length === 3 && path[2] === "rollback" && method === "POST")
           result = await client.rollbackWorkspaceArtifact(

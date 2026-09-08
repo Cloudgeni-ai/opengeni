@@ -20,6 +20,33 @@ export function createCodemodeSiteRequestHandler(
     try {
       const active = await provide();
       const pathname = new URL(request.url).pathname;
+      if (pathname.startsWith(`${CODEMODE_SITE_LOCAL_PATH}/sdk/`)) {
+        const path =
+          pathname.slice(`${CODEMODE_SITE_LOCAL_PATH}/sdk`.length) + new URL(request.url).search;
+        const response = await active.sessionRequest(path, {
+          method: request.method,
+          signal: request.signal,
+          headers: {
+            "content-type": request.headers.get("content-type") ?? "application/json",
+            accept: request.headers.get("accept") ?? "application/json",
+            ...(request.headers.has("last-event-id")
+              ? { "last-event-id": request.headers.get("last-event-id")! }
+              : {}),
+          },
+          ...(request.body ? { body: await request.text() } : {}),
+        });
+        // Fetch decodes compressed upstream bodies. Forward decoded bytes with
+        // fresh transport headers, or the preview browser decompresses twice.
+        const headers = new Headers(response.headers);
+        headers.delete("content-encoding");
+        headers.delete("content-length");
+        headers.delete("transfer-encoding");
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      }
       if (request.method === "GET" && pathname === `${CODEMODE_SITE_LOCAL_PATH}/catalog`) {
         const catalog = await active.catalog({ signal: request.signal });
         return Response.json(projectSiteCatalog(catalog));

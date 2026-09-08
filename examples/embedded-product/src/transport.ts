@@ -49,11 +49,9 @@ export const sites: SiteClient = {
     ),
   getWorkspaceArtifact: (_workspace, site, options) =>
     hostRequest(`sites/${id(site)}`, "GET", undefined, options),
-  getWorkspaceArtifactContent: (_workspace, site, versionOrOptions) => {
-    const options =
-      typeof versionOrOptions === "string" ? { versionId: versionOrOptions } : versionOrOptions;
+  getWorkspaceArtifactHtml: (_workspace, site, options) => {
     return hostRequest(
-      `sites/${id(site)}/content${options?.versionId ? `?versionId=${id(options.versionId)}` : ""}`,
+      `sites/${id(site)}/html?versionId=${id(options.versionId)}`,
       "GET",
       undefined,
       options,

@@ -10,6 +10,14 @@ import {
   type OpenGeniToolTransport,
   type OpenGeniWorkspaceTools,
 } from "./tools";
+import { OpenGeniClient } from "./client";
+import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
+export {
+  isSiteHttpRequest,
+  serveSiteHttp,
+  siteSessionPath,
+  type SiteHttpRequest,
+} from "./site-http";
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
@@ -84,6 +92,10 @@ export type OpenGeniSiteBridgeResponseMessage = {
 );
 
 export type OpenGeniSiteClient = {
+  /** Ordinary SDK, including React session/composer methods and SSE streams. */
+  readonly client: OpenGeniClient;
+  /** Host-bound routing alias, not a credential or a caller-selected tenant. */
+  readonly workspaceId: string;
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
   readonly tools: OpenGeniSiteWorkspaceTools;
   close(): void;
@@ -129,6 +141,11 @@ export function createOpenGeniSiteClient(
     ? new OpenGeniSiteLocalCodemodeTransport(options)
     : new OpenGeniSiteBridgeTransport(options);
   return {
+    client: new OpenGeniClient({
+      baseUrl: "https://site.opengeni.invalid",
+      fetch: (input, init) => transport.fetch(input, init),
+    }),
+    workspaceId: SITE_WORKSPACE,
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
     close: () => transport.close(),
   };
@@ -147,6 +164,19 @@ class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
   }
 
   close(): void {}
+
+  async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    const path = `${url.pathname}${url.search}`;
+    siteSessionPath(path, SITE_WORKSPACE, request.method);
+    return this.fetchImpl(`${this.basePath}/sdk${path}`, {
+      method: request.method,
+      headers: request.headers,
+      signal: request.signal,
+      ...(request.body ? { body: await request.text() } : {}),
+    });
+  }
 
   async requestJson<T>(
     method: string,
@@ -254,6 +284,10 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   constructor(options: OpenGeniSiteClientOptions) {
     this.options = options;
     this.bootstrap = createSiteBridgeBootstrap(options);
+  }
+
+  async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    return sitePortFetch(await this.connect(), input, init);
   }
 
   async requestJson<T>(

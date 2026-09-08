@@ -30,6 +30,7 @@ import {
   getScheduledTaskRunAcceptedExecution,
   peekSessionWork,
   settleSessionInputWait,
+  settleSessionIdleWithParentOutbox,
   waitForSessionInputWithEvent,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
@@ -2479,6 +2480,111 @@ describe("session-level wait_for_input", () => {
     });
     expect(settled.action).toBe("settled");
   }
+
+  async function terminalOutboxes(ctx: GoalFixture) {
+    return await shared.admin`select id from session_system_update_outbox
+      where source_session_id = ${ctx.session.id} and kind = 'child_terminal_result'`;
+  }
+
+  test("active child goal suppresses idle completion until goal completion, then replays once", async () => {
+    const ctx = await runningGoalFixture({ withAncestor: true });
+    await settleIdle(ctx);
+    for (let replay = 0; replay < 2; replay += 1) {
+      expect(
+        await settleSessionIdleWithParentOutbox(client.db, ctx.grant.workspaceId!, ctx.session.id),
+      ).toMatchObject({ action: "settled", notifyParent: false });
+    }
+    expect(await terminalOutboxes(ctx)).toHaveLength(0);
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "completed",
+      evidence: "done",
+      event: { type: "goal.completed", evidence: "done" },
+    });
+    for (let replay = 0; replay < 2; replay += 1) {
+      expect(
+        await settleSessionIdleWithParentOutbox(client.db, ctx.grant.workspaceId!, ctx.session.id),
+      ).toMatchObject({ action: "settled", notifyParent: true });
+    }
+    expect(await terminalOutboxes(ctx)).toHaveLength(1);
+  });
+
+  test("goalless child wait and due timeout preserve obligations without terminal callbacks", async () => {
+    const ctx = await runningGoalFixture({ withAncestor: true });
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const waiting = await wait(ctx, { timeoutSeconds: 600 });
+    await settleIdle(ctx);
+    expect(
+      await settleSessionIdleWithParentOutbox(client.db, ctx.grant.workspaceId!, ctx.session.id),
+    ).toMatchObject({ action: "settled", notifyParent: false });
+    expect(
+      await settleSessionInputWait(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        waitTurnId: ctx.turn.id,
+        disposition: "held",
+      }),
+    ).toMatchObject({ action: "held" });
+    expect((await outboxRow(ctx))!.next_attempt_at.getTime()).toBeLessThanOrEqual(
+      Date.parse(waiting.deadlineAt),
+    );
+    await shared.admin`update sessions set input_wait_until = now() - interval '1 second'
+      where id = ${ctx.session.id}`;
+    expect(
+      await settleSessionIdleWithParentOutbox(client.db, ctx.grant.workspaceId!, ctx.session.id),
+    ).toMatchObject({ action: "settled", notifyParent: false });
+    expect(await terminalOutboxes(ctx)).toHaveLength(0);
+    expect(
+      await settleSessionInputWait(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        waitTurnId: ctx.turn.id,
+        disposition: "timeout",
+      }),
+    ).toMatchObject({ action: "timeout" });
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(client.db, ctx.grant.workspaceId!, ctx.session.id)
+      ).some((update) => update.kind === "session_wait_timeout"),
+    ).toBe(true);
+  });
+
+  test("new input supersedes a goalless wait and actual finished work still notifies once", async () => {
+    const ctx = await runningGoalFixture({ withAncestor: true });
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    await wait(ctx, { timeoutSeconds: 600 });
+    await settleIdle(ctx);
+    await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: "test-source",
+      dedupeKey: crypto.randomUUID(),
+      summary: "fresh input",
+      payload: { type: "agent_message", text: "fresh input", operationId: crypto.randomUUID() },
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("fresh input was not claimed");
+    await settleClaimedIdle(ctx, claimed, attemptId);
+    for (let replay = 0; replay < 2; replay += 1) {
+      expect(
+        await settleSessionIdleWithParentOutbox(client.db, ctx.grant.workspaceId!, ctx.session.id),
+      ).toMatchObject({ action: "settled", notifyParent: true });
+    }
+    expect(await terminalOutboxes(ctx)).toHaveLength(1);
+  });
 
   test("persists a self-only wait without a goal and re-arms its durable deadline", async () => {
     const ctx = await runningGoalFixture();

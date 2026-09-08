@@ -6,9 +6,9 @@ description: Build, inspect, edit, validate, and publish OpenGeni Sites as ordin
 # OpenGeni Sites
 
 An OpenGeni Site is an ordinary Bun web application with retained editable
-source and one published runtime file. Build the app normally, validate it in
-the sandbox, compile it to a self-contained HTML document, and publish both the
-source bundle and compiled HTML through the workspace artifact tools.
+source (when supplied) and one published runtime file. React is the default,
+not a requirement: a plain HTML-only Site is valid. Build and test in the
+sandbox, then upload the self-contained HTML and optional source.
 
 Do not invent a Site framework, deployment service, App Host, wildcard domain,
 provider-specific API wrapper, or OpenGeni-only build CLI.
@@ -19,7 +19,10 @@ provider-specific API wrapper, or OpenGeni-only build CLI.
   `index.html`, TypeScript/React source, styles, tests, and any ordinary build
   configuration the app needs.
 - For an edit, call `opengeni__artifacts_get_source` first and restore the
-  returned source bundle exactly. The returned current version id is the
+  download URL in `downloads.source.url` using curl or Bun, then restore the
+  source bundle (`{entrypoint, files: [{path, content}]}`). If source is null,
+  download `downloads.html.url` and edit that HTML instead. URLs expire; call
+  the tool again to refresh them. The returned current version id is the
   optimistic-concurrency fence for the next publish.
 - Treat retained source as the editable truth and the compiled HTML as the
   runtime projection. Never edit only the generated HTML when source exists.
@@ -38,10 +41,28 @@ bun test
 bun build --compile --target=browser ./index.html --outdir=dist
 ```
 
-Stock sandboxes provide deployment-matched `@opengeni/sdk/site` and
-`@opengeni/codemode` packages through the image-owned Bun module path. During
-an unreleased local-development cycle, use those exact packages instead of
-installing an older registry release.
+Install OpenGeni packages from the npm registry using the exact versions in
+`package-versions.json` beside this skill. Do not use `latest`, `canary`, or
+version ranges. First check for the local-development exception below.
+Otherwise, from the project directory:
+
+```bash
+bun add --exact $(bun -e 'const pins=await Bun.file("/workspace/.agents/opengeni-sites/package-versions.json").json(); console.log(Object.entries(pins).map(([name,version])=>name+"@"+version).join(" "))')
+```
+
+Use the skill's actual location if different. Keep these exact dependencies
+in saved source. Missing expected exports indicate a package mismatch, not a
+reason to replace the standard conversation component with custom wiring.
+The pins include `@opengeni/ogtool`. Run `bun run ogtool ...` from this
+project for discovery and calls; a sandbox-global CLI can predate the deployment.
+
+Local development only: if `/opt/opengeni/site-packages/sdk.tgz` exists, these
+are unreleased checkout packages. Skip the registry command above for OpenGeni.
+After ordinary dependencies, install these packages with
+`bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz`.
+Remove stale OpenGeni overrides; repeat this step after `bun install`. Do not
+save sandbox archive paths in published source. In this local-development
+exception, use the image's `ogtool` directly: it is built from the same checkout.
 
 For a tool-using local preview, add a small Bun host which serves the HTML and
 mounts `createCodemodeSiteRequestHandler()` at
@@ -69,6 +90,24 @@ standalone browser build must produce one self-contained HTML document; inspect
 the output directory and fail if runtime JS, CSS, or local asset files are still
 required beside it.
 
+For the final browser test, serve that compiled HTML through the same host
+instead of rebundling the source with a different development configuration:
+
+```ts
+const siteTools = createCodemodeSiteRequestHandler();
+Bun.serve({
+  fetch(request) {
+    if (new URL(request.url).pathname.startsWith("/__opengeni/site-tools/"))
+      return siteTools(request);
+    return new Response(Bun.file("./dist/index.html"));
+  },
+});
+```
+
+This exercises the exact bytes you will upload, with live tools and SDK calls.
+On Docker/local, the server handle is turn-scoped: test it before finishing the
+turn; start it again after a recovery or a new turn.
+
 During development, open the sandbox-local URL with the available Browser tools.
 Exercise the real interactions at desktop and mobile widths, inspect console
 errors, and take a screenshot when visual quality matters. Do not declare the
@@ -83,6 +122,11 @@ Site complete from compilation alone.
   with `@opengeni/sdk/site`. The parent host owns credentials and workspace
   identity; Site code receives neither.
 
+Published Sites have no browser localStorage/sessionStorage. Do not rely on
+them for startup or session selection; use React state and the SDK's durable
+session/draft APIs. A sandbox-local page having storage does not prove the
+published iframe does.
+
 ```ts
 import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
 
@@ -90,14 +134,64 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
+For embedded conversations, `site.client` is the ordinary OpenGeni SDK client;
+`site.workspaceId` is a host-resolved routing alias. Use the normal React
+complete conversation surface—do not implement session REST or SSE yourself:
+
+```tsx
+import { SessionConversation } from "@opengeni/react/session-ui";
+import "@opengeni/react/compiled.css";
+
+const site = createOpenGeniSiteClient();
+<SessionConversation
+  client={site.client}
+  workspaceId={site.workspaceId}
+  sessionId={sessionId}
+/>
+```
+
+`sessionId` is the existing session or the id returned by `site.client.createSession`.
+`SessionConversation` connects timeline/history, durable composer drafts,
+queue display/edit/delete/steer, pause/resume, and human-input forms. Prefer it
+for a normal embedded chat. `ChatComposer` alone is only the input surface;
+pairing it with a timeline does not create the queue UI.
+Use the lower-level hooks/components only for intentionally custom behavior.
+
+The host owns the chat's available space; `SessionConversation` fills it.
+For a full-height page, use a `height: 100dvh` flex-column layout with the
+chat panel `flex: 1; min-height: 0` below its header. Keep intervening
+flex/grid children shrinkable (`min-height: 0; min-width: 0`). The SDK owns
+timeline scrolling and the bottom composer—do not add fixed/sticky positioning
+or another timeline scroller. Expand steps, stream messages, and resize the
+preview: history should scroll without pushing the composer down the page.
+
+Use the narrow `@opengeni/react/session-ui` entry for chat, not the broad root
+entry that pulls unrelated editor/terminal peers. Import compiled CSS once.
+Session creation, history, live events,
+composer drafts, Send/Steer and queue/control use this client. The same local
+Bun handler above forwards them using the agent's current Codemode token;
+published Sites use the viewing user's host auth. Agent authority remains
+agent authority: testing cannot approve on a human's behalf. Test a real Send
+and streamed reply, not just a successful page load. Also pause, queue two
+messages, edit/delete a queued message, and resume; verify pending messages
+remain visible and are not duplicated in the timeline.
+
+The optional `@pierre/diffs` peer brings a large syntax-language bundle. For
+a small self-contained Site that does not need highlighted diffs, exclude
+`@pierre/diffs` and `@pierre/diffs/react` with Bun's `--external` build flags;
+the React renderer already provides a plain-diff fallback. Do not externalize
+the OpenGeni SDK, React, or other required runtime imports.
+
 The generated tool declarations make exact tool paths typed during authoring.
 The runtime proxy resolves those paths to opaque `{serverId, toolName}`
 identities. Friendly names are never authority.
 
 ## Request the smallest tool set
 
-1. Inspect the current attempt catalog with `ogtool list` and generate local
-   declarations with `ogtool declarations <path>` when the Site needs tools.
+1. Find relevant tools with `bun run ogtool list --query <keyword> --limit 10`, then
+   inspect selected tools with `bun run ogtool show <path>`. Do not dump the full
+   catalog into model context. Generate local types with
+   `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
    identity in the Site's `requestedTools` publish field.
 3. Do not request tools the Site does not call. A Site with no direct workspace
@@ -112,26 +206,22 @@ identities. Friendly names are never authority.
 
 ## Publish one immutable version
 
-Read the compiled HTML as text and include every retained project file using a
-relative, traversal-free path. Exclude dependency directories, build caches,
-coverage, screenshots, credentials, `.env` files, and other generated or secret
-material.
+1. Call `opengeni__artifacts_prepare_upload` (no hashes or sizes required).
+2. Upload `dist/index.html` to `html.putUrl` with HTTP PUT using curl or Bun.
+   Send the returned `requiredHeaders` exactly.
+3. If editable source exists, save JSON `{entrypoint, files: [{path, content}]}`
+   locally and PUT it to `source.putUrl`. Paths must be relative and
+   traversal-free. Exclude node_modules, caches, build output, and credentials.
+   Source is optional: skip this upload for an HTML-only Site.
+4. Call `opengeni__artifacts_create` with `uploadId`, title, description,
+   idempotency key, and exact `requestedTools`. For an edit, call
+   `opengeni__artifacts_publish` with the artifact id and
+   `expectedCurrentVersionId` from `artifacts_get_source`.
 
-For a new Site, call `opengeni__artifacts_create` with:
-
-- a clear title, description, and idempotency key;
-- the complete self-contained HTML;
-- `source.entrypoint` and the retained source files; and
-- the exact `requestedTools` identities.
-
-For an existing Site, call `opengeni__artifacts_publish` with the same complete
-payload plus the current version id returned by `artifacts_get_source`. Never
-force a stale publish; re-read and reconcile concurrent changes.
-
-Prefer a persistent Bun publish script which reads `dist/index.html` and the
-retained source files with `Bun.file()`, then calls the corresponding artifact
-tool through `@opengeni/codemode`. Large generated bytes should travel from the
-sandbox process to Codemode, not through model context.
+Do not put generated HTML or source into model tool arguments. Upload file
+bytes directly from the sandbox. No special SDK upload helper is required.
+Finish both intended uploads before publishing. For changed content, prepare
+a new upload; published versions do not change if an old PUT URL is reused.
 
 If an idempotent create or publish reports an uncertain outcome, inspect the
 artifact list/source and rerun that same persistent script with the exact same
@@ -168,7 +258,7 @@ immutable versions and retained source. There is no hard-delete workflow.
 - No credential or hidden runtime authority exists in source or HTML.
 - The requested tool list is exact and minimal, and unavailable/access-loss
   states are understandable.
-- The durable Site contains both the final HTML and the source needed for the
-  next `Edit with Geni` iteration.
+- The durable Site contains final HTML and any editable source used to build it.
+  Plain HTML-only Sites are valid; their HTML is the editable source.
 - The completion reply contains the working Markdown link returned from the
   durable artifact identity.

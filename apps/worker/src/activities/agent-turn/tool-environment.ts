@@ -775,6 +775,18 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         } : {}),
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
+        refreshOwnedCommand: async (commandId) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          // Read only the existing attempt-owned object. A retained read must
+          // not provision a sandbox or follow an active-pointer change.
+          const owned = (sandboxState.lazyOwnedSandbox?.session ??
+            sandboxState.resolvedSandbox?.established.session ??
+            media.sdkOwnedSandboxSession) as {
+            refreshOwnedCommand?: (id: string) => Promise<boolean>;
+          } | null;
+          return (await owned?.refreshOwnedCommand?.(commandId)) ?? false;
+        },
         spillOversizedModelToolResult: async ({ operationId, result }) =>
           await toolResultSpill.spill({ operationId, result }),
         localMcpServers,

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
@@ -5,6 +6,12 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
   bootstrapWorkspace,
+  settleRetainedProcess,
+  adoptConnectedMachineSessionBackgroundCommand,
+  adoptManagedSessionBackgroundCommand,
+  settleConnectedMachineSessionBackgroundCommand,
+  waitForSessionInputWithEvent,
+  settleSessionInputWait,
   claimPendingSessionSystemUpdateOutbox,
   claimSessionWorkForAttempt,
   configureChildLifecycleNotices,
@@ -131,7 +138,13 @@ async function member(grant: Grant, control = false): Promise<string> {
 
 async function startSession(
   grant: Grant,
-  input: { parent?: Started; goal?: boolean; message: string; personalVariableSetId?: string },
+  input: {
+    parent?: Started;
+    goal?: boolean;
+    message: string;
+    personalVariableSetId?: string;
+    personalMode?: "once" | "session" | "always";
+  },
 ) {
   const session = await createSession(client.db, {
     accountId: grant.accountId,
@@ -163,7 +176,7 @@ async function startSession(
           variableSetIds: [input.personalVariableSetId],
           variableSetId: input.personalVariableSetId,
           initialPersonalResourceAttachmentIntent: {
-            mode: "session" as const,
+            mode: input.personalMode ?? ("session" as const),
             workspaceSharedAcknowledged: true,
             sharedOutputWarningVersion: 1 as const,
           },
@@ -459,12 +472,19 @@ describe("child read acknowledgment on parent consumption", () => {
       workflowId: `session-${parent.session.id}`,
       trigger: { kind: "next" },
       error: "Agent turn admission failed before attempt claim.",
+      admissionFailure: { disposition: "permanent", code: "claim_invariant" },
     });
     expect(failed.action).toBe("failed");
     const failedSequence = await lastSequence(parent.session.id);
     const [failureEvent] = await shared.admin<
       Array<{
-        payload: { status: string; code: string; failedSystemUpdateIds?: string[] };
+        payload: {
+          status: string;
+          code: string;
+          error: string;
+          admissionFailure?: { disposition: string; code: string };
+          failedSystemUpdateIds?: string[];
+        };
         turnId: string | null;
       }>
     >`
@@ -476,6 +496,8 @@ describe("child read acknowledgment on parent consumption", () => {
       payload: {
         status: "failed",
         code: "pre_claim_failure",
+        error: "Agent turn admission failed before attempt claim.",
+        admissionFailure: { disposition: "permanent", code: "claim_invariant" },
         failedSystemUpdateIds: [pendingUpdate.id],
       },
       turnId: null,
@@ -981,5 +1003,444 @@ describe("child read acknowledgment on parent consumption", () => {
 
     expect(await pinRowCount(stranger.session.id)).toBe(0);
     expect(await pinRowCount(child.session.id)).toBe(0);
+  });
+});
+
+test.each(["legacy", "current", "legacy-replay"] as const)(
+  "a %s retained command result preserves exact causal human for personal resources",
+  async (version) => {
+    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const parent = await startSession(grant, {
+      message: "run background work",
+      personalVariableSetId: variableSetId,
+    });
+    const { accountId, workspaceId } = grant;
+    const sessionId = parent.session.id,
+      sandboxGroupId = parent.session.sandboxGroupId;
+    const commandId = crypto.randomUUID(),
+      leaseId = crypto.randomUUID(),
+      admissionId = crypto.randomUUID();
+    const actorId = parent.attemptId;
+    await shared.admin`insert into sandbox_leases ${shared.admin({ id: leaseId, account_id: accountId, workspace_id: workspaceId, sandbox_group_id: sandboxGroupId, backend: "local", instance_id: "test-instance", expires_at: new Date(Date.now() + 60_000) })}`;
+    await shared.admin`insert into sandbox_lease_holders ${shared.admin({ account_id: accountId, workspace_id: workspaceId, lease_id: leaseId, kind: "process", holder_id: `process:${commandId}`, subject_id: sessionId })}`;
+    await shared.admin`insert into sandbox_workspace_mutation_admissions ${shared.admin({ id: admissionId, account_id: accountId, workspace_id: workspaceId, lease_id: leaseId, sandbox_group_id: sandboxGroupId, session_id: sessionId, actor_kind: "turn", actor_id: actorId, turn_id: parent.turn.id, attempt_id: parent.attemptId, execution_generation: parent.turn.executionGeneration, holder_kind: "turn", holder_id: `turn:${parent.turn.id}`, lease_epoch: 0, provider_backend: "local", provider_instance_id: "test-instance", route_kind: "active", route_epoch: 0, workspace_generation: 1, operation: "terminalExec", provider_outcome: "retained" })}`;
+    await shared.admin`insert into sandbox_retained_processes ${shared.admin({ id: commandId, account_id: accountId, workspace_id: workspaceId, session_id: sessionId, lease_id: leaseId, sandbox_group_id: sandboxGroupId, parent_admission_id: admissionId, holder_id: `process:${commandId}`, owner_actor_kind: "turn", owner_actor_id: actorId, owner_turn_id: parent.turn.id, owner_attempt_id: parent.attemptId, owner_execution_generation: parent.turn.executionGeneration, lease_epoch: 0, provider_backend: "local", provider_instance_id: "test-instance", route_kind: "active", route_epoch: 0, provider_session_id: 1 })}`;
+    await shared.admin`insert into session_background_commands ${shared.admin({ id: commandId, account_id: accountId, workspace_id: workspaceId, session_id: sessionId, provider: "managed", state: "running", retained_process_id: commandId })}`;
+    if (version !== "legacy") {
+      if (version === "current") {
+        await shared.admin`delete from session_background_commands where id=${commandId}`;
+      }
+      await adoptManagedSessionBackgroundCommand(client.db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        processId: commandId,
+        turnId: parent.turn.id,
+        attemptId: parent.attemptId,
+        executionGeneration: parent.turn.executionGeneration,
+        command: "printf done",
+        expected: {
+          leaseId,
+          sandboxGroupId,
+          parentAdmissionId: admissionId,
+          holderId: `process:${commandId}`,
+          leaseEpoch: 0,
+          providerBackend: "local",
+          providerInstanceId: "test-instance",
+          routeKind: "active",
+          routeTargetId: null,
+          routeEpoch: 0,
+          providerSessionId: 1,
+        },
+      });
+    }
+    if (version === "current") {
+      await shared.admin`insert into session_background_commands ${shared.admin({
+        id: commandId,
+        account_id: accountId,
+        workspace_id: workspaceId,
+        session_id: sessionId,
+        provider: "managed",
+        state: "running",
+        retained_process_id: commandId,
+      })} on conflict (retained_process_id) where retained_process_id is not null
+        do update set updated_at=now()`;
+    }
+    const [launch] =
+      await shared.admin`select launch_turn_id from session_background_commands where id=${commandId}`;
+    expect(launch?.launch_turn_id).toBe(version === "current" ? parent.turn.id : null);
+    await settleIdle(grant, parent);
+    await settleRetainedProcess(client.db, {
+      accountId,
+      workspaceId,
+      sessionId,
+      processId: commandId,
+      expected: {
+        leaseId,
+        sandboxGroupId,
+        parentAdmissionId: admissionId,
+        holderId: `process:${commandId}`,
+        leaseEpoch: 0,
+        providerBackend: "local",
+        providerInstanceId: "test-instance",
+        routeKind: "active",
+        routeTargetId: null,
+        routeEpoch: 0,
+        providerSessionId: 1,
+      },
+      outcome: "exited",
+      exitCode: 0,
+      reason: "process exited",
+      idleGraceMs: 0,
+    });
+    const [pending] =
+      await shared.admin`select kind, lineage, state from session_system_updates where source_id=${commandId}`;
+    expect(pending).toMatchObject({ state: "pending", lineage: { causalTurnId: parent.turn.id } });
+    await recoverLegacyCausalUpdate(grant, parent, commandId);
+    const claimed = await claim(grant, sessionId);
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action === "claimed")
+      expect(claimed.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+  },
+);
+
+test("an input wait timeout preserves exact waiting human for personal resources", async () => {
+  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const parent = await startSession(grant, {
+    message: "wait for work",
+    personalVariableSetId: variableSetId,
+  });
+  await waitForSessionInputWithEvent(client.db, grant.workspaceId, parent.session.id, {
+    reason: "waiting for CI",
+    timeoutSeconds: 30,
+    command: {
+      accountId: grant.accountId,
+      operationKey: crypto.randomUUID(),
+      actor: {
+        type: "agent_attempt",
+        sessionId: parent.session.id,
+        turnId: parent.turn.id,
+        attemptId: parent.attemptId,
+        executionGeneration: parent.turn.executionGeneration,
+      },
+    },
+  });
+  await settleIdle(grant, parent);
+  await shared.admin`update sessions set input_wait_until=now()-interval '1 second' where id=${parent.session.id}`;
+  const result = await settleSessionInputWait(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: parent.session.id,
+    waitTurnId: parent.turn.id,
+    disposition: "timeout",
+  });
+  expect(result.action).toBe("timeout");
+  await recoverLegacyCausalUpdate(grant, parent, parent.turn.id);
+  const claimed = await claim(grant, parent.session.id);
+  expect(claimed.action).toBe("claimed");
+});
+
+async function connectedCommand(grant: Grant, parent: Started) {
+  const identity = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: parent.session.id,
+    commandId: crypto.randomUUID(),
+    controlWorkspaceId: grant.workspaceId,
+    enrollmentId: crypto.randomUUID(),
+    connectionInstanceId: crypto.randomUUID(),
+    opId: crypto.randomUUID(),
+  };
+  const input = {
+    ...identity,
+    turnId: parent.turn.id,
+    attemptId: parent.attemptId,
+    executionGeneration: parent.turn.executionGeneration,
+    command: "printf done",
+  };
+  await adoptConnectedMachineSessionBackgroundCommand(client.db, input);
+  return {
+    identity,
+    input,
+    finish: () =>
+      settleConnectedMachineSessionBackgroundCommand(client.db, {
+        ...identity,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "process exited",
+      }),
+  };
+}
+
+test.each(["session", "always"] as const)(
+  "a Connected Machine result inherits only its %s personal grant",
+  async (mode) => {
+    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const parent = await startSession(grant, {
+      message: "start command",
+      personalVariableSetId: variableSetId,
+      personalMode: mode,
+    });
+    const command = await connectedCommand(grant, parent);
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, command.input);
+    // Exact old-writer upsert omits the new columns; conflict replay must
+    // preserve the new writer's immutable receipt.
+    await shared.admin`insert into session_background_commands ${shared.admin({
+      id: command.identity.commandId,
+      account_id: grant.accountId,
+      workspace_id: grant.workspaceId,
+      session_id: parent.session.id,
+      provider: "connected_machine",
+      state: "running",
+      control_workspace_id: command.identity.controlWorkspaceId,
+      enrollment_id: command.identity.enrollmentId,
+      connection_instance_id: command.identity.connectionInstanceId,
+      op_id: command.identity.opId,
+    })} on conflict (control_workspace_id,enrollment_id,connection_instance_id,op_id)
+      where provider='connected_machine' do update set updated_at=now()`;
+    const [launch] =
+      await shared.admin`select launch_turn_id,launch_attempt_id from session_background_commands where id=${command.identity.commandId}`;
+    expect(launch).toEqual({ launch_turn_id: parent.turn.id, launch_attempt_id: parent.attemptId });
+    await settleIdle(grant, parent);
+    await command.finish();
+    await command.finish();
+    const result = await claim(grant, parent.session.id);
+    expect(result.action).toBe("claimed");
+    if (result.action !== "claimed") throw new Error("command result was not claimed");
+    expect(result.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+    const [receipt] =
+      await shared.admin`select resource_count from session_attempt_personal_resource_admissions where attempt_id=${result.attemptId}`;
+    expect(receipt?.resource_count).toBe(1);
+    const [count] =
+      await shared.admin`select count(*)::int as count from session_system_updates where source_id=${command.identity.commandId}`;
+    expect(count?.count).toBe(1);
+  },
+);
+
+test("a command successor cannot extend a once personal grant", async () => {
+  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const parent = await startSession(grant, {
+    message: "start command",
+    personalVariableSetId: variableSetId,
+    personalMode: "once",
+  });
+  const command = await connectedCommand(grant, parent);
+  await settleIdle(grant, parent);
+  await command.finish();
+  await expect(claim(grant, parent.session.id)).rejects.toThrow();
+});
+
+test("commands launched by different humans never coalesce or borrow the latest human", async () => {
+  const owner = await workspace();
+  const other = { ...owner, subjectId: await member(owner) };
+  const first = await startSession(owner, { message: "first command" });
+  const firstCommand = await connectedCommand(owner, first);
+  await settleIdle(owner, first);
+  await enqueueHumanTurn(other, first.session.id);
+  const secondClaim = await claim(other, first.session.id);
+  if (secondClaim.action !== "claimed") throw new Error("second human was not claimed");
+  const second = {
+    session: first.session,
+    turn: secondClaim.turn,
+    attemptId: secondClaim.attemptId,
+  };
+  const secondCommand = await connectedCommand(other, second);
+  await settleIdle(other, second);
+  await firstCommand.finish();
+  await secondCommand.finish();
+  const firstResult = await claim(owner, first.session.id);
+  if (firstResult.action !== "claimed") throw new Error("first result was not claimed");
+  expect(firstResult.turn.initiatingHumanSubjectId).toBe(owner.subjectId);
+  const [pending] =
+    await shared.admin`select count(*)::int as count from session_system_updates where session_id=${first.session.id} and state='pending'`;
+  expect(pending?.count).toBe(1);
+  await settleIdle(owner, { ...first, turn: firstResult.turn, attemptId: firstResult.attemptId });
+  const secondResult = await claim(other, first.session.id);
+  if (secondResult.action !== "claimed") throw new Error("second result was not claimed");
+  expect(secondResult.turn.initiatingHumanSubjectId).toBe(other.subjectId);
+});
+
+test("command launch identity rejects another session, attempt and later rewrites", async () => {
+  const grant = await workspace();
+  const first = await startSession(grant, { message: "command" });
+  const other = await startSession(grant, { message: "other" });
+  const command = await connectedCommand(grant, first);
+  await expect(
+    adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      ...command.input,
+      attemptId: other.attemptId,
+    }),
+  ).rejects.toThrow();
+  await expect(
+    adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      ...command.input,
+      sessionId: other.session.id,
+    }),
+  ).rejects.toThrow();
+  await expect(
+    Promise.resolve(
+      shared.admin`update session_background_commands set launch_turn_id=${other.turn.id} where id=${command.identity.commandId}`,
+    ),
+  ).rejects.toThrow("immutable");
+});
+
+async function recoverLegacyCausalUpdate(grant: Grant, parent: Started, sourceId: string) {
+  // Simulate pre-fix producer authority fields while retaining exact payload,
+  // source receipt, pending event and lifecycle history.
+  await shared.admin`update session_system_updates set lineage = lineage - 'causalTurnId' - 'causalAttemptId' - 'causalExecutionGeneration' where session_id=${parent.session.id} and source_id=${sourceId}`;
+  const [update] =
+    await shared.admin`select id from session_system_updates where session_id=${parent.session.id} and source_id=${sourceId} and state='pending'`;
+  expect(update).toBeDefined();
+  await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId, {
+    accountId: grant.accountId,
+    sessionId: parent.session.id,
+    workflowId: `session-${parent.session.id}`,
+    trigger: { kind: "next" },
+    error: "Agent turn admission failed before attempt claim.",
+  });
+  const failureSequence = await lastSequence(parent.session.id);
+  const input = {
+    accountId: grant.accountId,
+    sessionId: parent.session.id,
+    workflowId: `session-${parent.session.id}`,
+    operationId: crypto.randomUUID(),
+    expectedFailureEventSequence: failureSequence,
+    expectedLastSequence: failureSequence,
+    failedUpdateIds: [String(update!.id)],
+  };
+  expect(
+    await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
+      ...input,
+      failedUpdateIds: [crypto.randomUUID()],
+    }),
+  ).toEqual({ action: "stale", event: null });
+  expect(
+    await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, input),
+  ).toMatchObject({ action: "recovered", restoredUpdateIds: input.failedUpdateIds });
+  expect(
+    await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, input),
+  ).toMatchObject({ action: "already_recovered" });
+}
+
+test("a command successor cannot revive a revoked personal grant", async () => {
+  const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+  const parent = await startSession(grant, {
+    message: "start command",
+    personalVariableSetId: variableSetId,
+  });
+  const command = await connectedCommand(grant, parent);
+  await settleIdle(grant, parent);
+  await shared.admin`update organization_user_resource_grants set status='revoked', revoked_at=clock_timestamp(), generation=generation+1 where id in (select grant_id from session_attempt_personal_resource_snapshots where attempt_id=${parent.attemptId})`;
+  await command.finish();
+  await expect(claim(grant, parent.session.id)).rejects.toThrow();
+});
+
+test("legacy unattributed commands cannot borrow a coalesced command human", async () => {
+  const grant = await workspace();
+  const parent = await startSession(grant, { message: "start command" });
+  const good = await connectedCommand(grant, parent);
+  const legacy = { ...good.identity, commandId: crypto.randomUUID(), opId: crypto.randomUUID() };
+  await shared.admin`insert into session_background_commands ${shared.admin({
+    id: legacy.commandId,
+    account_id: grant.accountId,
+    workspace_id: grant.workspaceId,
+    session_id: parent.session.id,
+    provider: "connected_machine",
+    state: "running",
+    control_workspace_id: grant.workspaceId,
+    enrollment_id: legacy.enrollmentId,
+    connection_instance_id: legacy.connectionInstanceId,
+    op_id: legacy.opId,
+  })}`;
+  await expect(
+    adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      ...good.input,
+      ...legacy,
+    }),
+  ).rejects.toThrow("another identity");
+  const [legacyReceipt] =
+    await shared.admin`select launch_turn_id from session_background_commands where id=${legacy.commandId}`;
+  expect(legacyReceipt?.launch_turn_id).toBeNull();
+  await settleIdle(grant, parent);
+  await good.finish();
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...legacy,
+    outcome: "exited",
+    exitCode: 0,
+    reason: "done",
+  });
+  const goodResult = await claim(grant, parent.session.id);
+  if (goodResult.action !== "claimed") throw new Error("good command not claimed");
+  expect(goodResult.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+  await settleIdle(grant, { ...parent, turn: goodResult.turn, attemptId: goodResult.attemptId });
+  const legacyResult = await claim(grant, parent.session.id);
+  if (legacyResult.action !== "claimed") throw new Error("legacy command not claimed");
+  expect(legacyResult.turn.initiatingHumanSubjectId).toBeNull();
+});
+
+test("migration rejects a mismatched launch receipt and a partial identity", async () => {
+  const grant = await workspace();
+  const parent = await startSession(grant, { message: "parent" });
+  const other = await startSession(grant, { message: "other" });
+  const row = {
+    id: crypto.randomUUID(),
+    account_id: grant.accountId,
+    workspace_id: grant.workspaceId,
+    session_id: parent.session.id,
+    provider: "connected_machine",
+    state: "running",
+    control_workspace_id: grant.workspaceId,
+    enrollment_id: crypto.randomUUID(),
+    connection_instance_id: crypto.randomUUID(),
+    op_id: crypto.randomUUID(),
+    launch_turn_id: other.turn.id,
+    launch_attempt_id: other.attemptId,
+    launch_execution_generation: other.turn.executionGeneration,
+  };
+  await expect(
+    Promise.resolve(shared.admin`insert into session_background_commands ${shared.admin(row)}`),
+  ).rejects.toThrow("launch attempt does not match session");
+  await expect(
+    Promise.resolve(
+      shared.admin`insert into session_background_commands ${shared.admin({
+        ...row,
+        launch_turn_id: parent.turn.id,
+        launch_attempt_id: parent.attemptId,
+        launch_execution_generation: null,
+      })}`,
+    ),
+  ).rejects.toThrow("launch_identity_check");
+});
+
+test("0419 launch validation resolves its dedicated data schema", async () => {
+  const schemaName = `command_launch_${crypto.randomUUID().replaceAll("-", "")}`;
+  const migration = await readFile(
+    new URL("../drizzle/0419_background_command_launch_authority.sql", import.meta.url),
+    "utf8",
+  );
+  await shared.admin.begin(async (tx) => {
+    await tx.unsafe(`create schema "${schemaName}"`);
+    await tx`select set_config('search_path', ${schemaName}, true)`;
+    await tx.unsafe(`
+      create table session_turns (id uuid, workspace_id uuid, session_id uuid, account_id uuid);
+      create table session_turn_attempts (id uuid, turn_id uuid, workspace_id uuid, session_id uuid, account_id uuid, execution_generation int);
+      create table session_background_commands (
+        id uuid, account_id uuid, workspace_id uuid, session_id uuid, provider text,
+        retained_process_id uuid, control_workspace_id uuid, enrollment_id uuid,
+        connection_instance_id text, op_id text
+      );`);
+    await tx.unsafe(migration);
+    const account = crypto.randomUUID(),
+      dataWorkspaceId = crypto.randomUUID(),
+      session = crypto.randomUUID(),
+      turn = crypto.randomUUID(),
+      attempt = crypto.randomUUID();
+    await tx`insert into session_turns values (${turn},${dataWorkspaceId},${session},${account})`;
+    await tx`insert into session_turn_attempts values (${attempt},${turn},${dataWorkspaceId},${session},${account},1)`;
+    await tx`insert into session_background_commands (id,account_id,workspace_id,session_id,provider,launch_turn_id,launch_attempt_id,launch_execution_generation)
+      values (${crypto.randomUUID()},${account},${dataWorkspaceId},${session},'connected_machine',${turn},${attempt},1)`;
+    const [count] = await tx`select count(*)::int as count from session_background_commands`;
+    expect(count?.count).toBe(1);
+    await tx.unsafe(`drop schema "${schemaName}" cascade`);
   });
 });

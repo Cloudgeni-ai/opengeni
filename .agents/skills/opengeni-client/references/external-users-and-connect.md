@@ -218,6 +218,12 @@ transport and `callTool` backed by the host's `callWorkspaceSiteTool` SDK method
 The native console uses this same bridge. Recreate it when the actor or version
 changes. It strips iframe-supplied authority, pins the Site context, and retries
 only an explicit pre-execution stale-catalog response, never an uncertain effect.
+For the Site's ordinary session SDK, optionally supply `fetchResponse` with your
+authenticated host transport. The shared bridge applies the same bounded
+`siteSessionPath` routing as the native console and forwards only content negotiation
+and event replay headers; host authentication and tenant selection remain outside
+the iframe. Omit this transport for tools-only Sites. Display uses
+`getWorkspaceArtifactHtml` at the observed version, not a retained-source download.
 It checks Site read authority every 15 seconds while loaded and clears the frame
 on denial, scope replacement or version/status change. This is bounded UI
 revalidation, not instantaneous revocation of downloaded HTML; bridge calls must
@@ -226,10 +232,10 @@ independently enforce current backend authority.
 `canPublish` controls presentation only. The backend still requires
 `artifacts:publish`; rollback/archive/restore preserve the observed current
 version and require explicit confirmation. Failed mutations clear the loaded
-state and require refresh rather than an unsafe retry. `onEditWithGeni` receives
-cloned Site/content data; the host creates an ordinary authorized session and
-navigates to its existing session UI. This callback does not implicitly grant
-tools, publish a Site or alter scheduling/approval rules. Native Site UI reuse
+state and require refresh rather than an unsafe retry. Authoring buttons and
+prompts belong to the host: create an ordinary authorized session and navigate
+to your existing session UI. There is no dedicated SDK authoring helper or
+branded Site component button. Native Site UI reuse
 and complete visual acceptance remain separate integration work.
 
 ## Credentials and focused acceptance
@@ -428,9 +434,9 @@ session hooks/timeline/approval/structured-input, versioned session control, and
 shared durable composer/queue controls, explicit schedule management, and bounded
 workspace-file uploads. Schedule operations retain native permission and approval
 semantics, not a new execution delegation guarantee. Its fixed-user demo auth
-is opt-in and must never be exposed publicly. The native and embedded authoring
-helpers share tool selections and instructions from SDK `site-authoring.ts`;
-an optional trusted `completionHref` keeps completion links in the host product.
+is opt-in and must never be exposed publicly. Native and embedded authoring
+prompts live in their respective products, not the SDK. The example's optional
+trusted `completionHref` keeps completion links in the host product.
 No helper grants tool permissions or changes model billing/approval/scheduling.
 
 Test concurrent users without actor-header bleed, cross-workspace denial,

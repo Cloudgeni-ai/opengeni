@@ -243,6 +243,7 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_membership_operation_receipts",
     "organization_memberships",
     "external_identities",
+    "external_identity_links",
     "workspace_inference_controls",
     "organization_profile_events",
     "organization_shared_workspace_administration_capabilities",
@@ -582,27 +583,29 @@ describe("runtime database posture evaluator", () => {
             [RUNTIME_DML_TABLES, 188],
           ] as const);
       for (const [tables, length] of contracts) {
-        const hostBindingMetadataCount =
-          tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_FULL_DML_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 2
-            : 0;
-        const acceptedHostAuthorityCount =
-          tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_READ_INSERT_TABLES ||
-          tables === RUNTIME_DML_TABLES
-            ? 1
-            : 0;
+        // Nine additive embedding tables: three full-DML, four append-only,
+        // one link lifecycle journal and one protected identity table.
+        const embeddingTableCount =
+          tables === FORCE_RLS_TABLES
+            ? 9
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 3
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 4
+                : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+                  ? 1
+                  : tables === PROTECTED_NO_DIRECT_DML_TABLES
+                    ? 1
+                    : tables === RUNTIME_DML_TABLES
+                      ? 8
+                      : 0;
         const expectedLength =
-          hostBindingMetadataCount +
-          acceptedHostAuthorityCount +
+          embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
-              organizationRecoveryProtectedTableCount +
-              1
+              organizationRecoveryProtectedTableCount
             : length);
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -610,7 +613,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 338 : 219) + 3;
+      const tableCount = (hasCurrentMainActivityLedger ? 337 : 218) + 9;
       expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
       for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {

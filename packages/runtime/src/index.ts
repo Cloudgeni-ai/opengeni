@@ -1,4 +1,5 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
+import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
@@ -3486,6 +3487,8 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Live exact-owner control refresh; API remains read/observation authority. */
+  refreshOwnedCommand?: (commandId: string) => Promise<boolean>;
   accountId?: string;
   workspaceId?: string;
   // Worker-asserted session scope for first-party MCP calls; enables
@@ -4007,6 +4010,9 @@ export async function prepareAgentTools(
           undefined,
           firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
             ? inputWaitYield
+            : undefined,
+          firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
+            ? options.refreshOwnedCommand
             : undefined,
         );
         return {
@@ -6322,6 +6328,7 @@ export class PrefixedMcpServer implements MCPServer {
     >,
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
+    private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6624,9 +6631,23 @@ export class PrefixedMcpServer implements MCPServer {
     const completeWait =
       unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
     try {
-      const projectedOutput = this.inner.callToolResult
-        ? await this.inner.callToolResult(unprefixed, args, meta, options)
-        : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
+      const physicalCall = async (callArgs: Record<string, unknown>) => {
+        const projected = this.inner.callToolResult
+          ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
+          : mcpContentAsResult(await this.inner.callTool(unprefixed, callArgs, meta, options));
+        return projected;
+      };
+      const projectedOutput =
+        this.refreshOwnedCommand && (unprefixed === "command_read" || unprefixed === "command_wait")
+          ? await executeCommandReadWithRefresh({
+              toolName: unprefixed,
+              args: args ?? {},
+              ...(options?.signal ? { signal: options.signal } : {}),
+              refresh: this.refreshOwnedCommand,
+              call: async (callArgs) =>
+                AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
+            })
+          : await physicalCall(args ?? {});
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -6899,6 +6920,9 @@ export async function prepareRunInput(
     });
   }
   const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
+  // Pre-fix serialized states have no ownership field. Establish application
+  // ownership before reading history and choosing the durable append boundary.
+  state._historyOwnership = "external";
   const interruptions = state.getInterruptions();
   const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
   const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);
@@ -10017,6 +10041,7 @@ export function repositoryCloneCommand(
     '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
+    '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
     "    exit 1",
     "  fi",
     // origin/HEAD is best-effort: workspace capture diffs the branch against it

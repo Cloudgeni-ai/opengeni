@@ -148,6 +148,23 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("workspace artifact listing is available to humans without an agent session", () => {
+    const human: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "reader",
+      principalKind: "human_session",
+      permissions: ["artifacts:read"],
+    };
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), human))).toContain("artifacts_list");
+    expect(
+      registeredToolNames(buildOpenGeniMcpServer(deps(), { ...human, permissions: [] })),
+    ).not.toContain("artifacts_list");
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), human))).not.toContain(
+      "artifacts_create",
+    );
+  });
+
   test("session_wait needs caller-session context as well as sessions:read", () => {
     const scoped = grant(["sessions:read"], ["session_wait"]);
     const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;

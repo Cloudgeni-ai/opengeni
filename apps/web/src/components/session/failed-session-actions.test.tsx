@@ -1,15 +1,24 @@
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
-import { FailedSessionBanner } from "./failed-session-banner";
 import { FailureRecoveryBoundary } from "./failure-recovery-boundary";
-import { afterEach, beforeAll, expect, test } from "bun:test";
+import { afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { FailedSessionActions } from "./failed-session-actions";
 
+mock.module("@tanstack/react-router", () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#models">{children}</a>,
+}));
+
+const { FailedSessionBanner } = await import("./failed-session-banner");
+
 beforeAll(() => {
-  GlobalRegistrator.register();
-  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    GlobalRegistrator.register();
+  } catch {
+    // Another web test in this process already installed Happy DOM.
+  }
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 let root: Root | undefined;
 afterEach(async () => {
@@ -142,6 +151,9 @@ test("credit exhaustion retains model selection without offering automatic Conti
     root!.render(
       <FailedSessionBanner
         creditExhausted
+        workspaceId="workspace-a"
+        canBuyCredits
+        canConnectModel
         failure={{
           reason: "No credits available",
           failedAt: null,
@@ -159,12 +171,45 @@ test("credit exhaustion retains model selection without offering automatic Conti
       />,
     ),
   );
-  expect(container.textContent).toContain("choose another");
+  expect(container.textContent).toContain("Buy organization credits or connect a model");
+  expect([...container.querySelectorAll("a")].map((link) => link.textContent)).toEqual([
+    "Buy credits",
+    "Connect a model",
+  ]);
   expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
     "Choose another model",
   ]);
   await act(async () => container.querySelector("button")!.click());
   expect(opened).toBe(1);
+});
+
+test("credit exhaustion hides administrative recovery links from ordinary members", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        creditExhausted
+        workspaceId="workspace-a"
+        failure={{
+          reason: "No credits available",
+          failedAt: null,
+          recoveryCount: 0,
+          failedTurnCount: 1,
+        }}
+        actions={{
+          onContinue: async () => true,
+          continuationBlocker: null,
+          modelDisabled: false,
+          onChooseModel: () => undefined,
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelectorAll("a")).toHaveLength(0);
+  expect(container.textContent).toContain("Ask an organization owner or workspace admin");
+  expect(container.textContent).toContain("Choose another model");
 });
 
 test("shared composer blockers disable Continue and explain the actual unresolved choice", async () => {

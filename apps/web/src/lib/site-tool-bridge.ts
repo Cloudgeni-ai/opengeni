@@ -4,17 +4,18 @@ import {
   type CreateSiteToolBridgeOptions,
 } from "@opengeni/sdk/site";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
-import { ApiError, request } from "@/api";
+import { ApiError, request, requestResponse } from "@/api";
 
-/** Native transport only; projection, version pinning and retry behavior are SDK-owned. */
+/** Native authentication only; Site routing, filtering and version pinning are shared. */
 export function createSiteToolBridge(
-  input: Omit<CreateSiteToolBridgeOptions, "callTool" | "isCatalogStale"> & {
+  input: Omit<CreateSiteToolBridgeOptions, "callTool" | "isCatalogStale" | "fetchResponse"> & {
     callTool?: CreateSiteToolBridgeOptions["callTool"];
   },
 ): PublishedHtmlArtifactToolBridge {
   return createSharedSiteToolBridge({
     ...input,
     isCatalogStale: isCatalogStaleApiError,
+    fetchResponse: (path, init) => requestResponse(path, init),
     callTool:
       input.callTool ??
       (async ({ workspaceId, request: body, signal }) =>

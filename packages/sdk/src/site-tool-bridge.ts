@@ -1,4 +1,5 @@
 import { OpenGeniApiError } from "./errors";
+import { siteSessionPath, type SiteHttpRequest } from "./site-http";
 import type { OpenGeniSiteToolCatalog } from "./site";
 import type { OpenGeniWorkspaceTools } from "./tools";
 import type { ToolGatewayCallRequest, ToolGatewayCallResponse, ToolGatewayIdentity } from "./types";
@@ -13,6 +14,7 @@ export type SiteToolCaller = (input: {
   signal: AbortSignal;
 }) => Promise<ToolGatewayCallResponse>;
 export type SiteToolBridge = {
+  fetch?: (request: SiteHttpRequest, signal: AbortSignal) => Promise<Response>;
   catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
@@ -27,6 +29,9 @@ export type CreateSiteToolBridgeOptions = {
   requestedTools: readonly ToolGatewayIdentity[];
   callTool: SiteToolCaller;
   isCatalogStale?: (error: unknown) => boolean;
+  /** Optional authenticated host transport for main's bounded Site session API.
+   * Omit to expose tools only. Site-provided authorization headers are never forwarded. */
+  fetchResponse?: (path: string, init: RequestInit) => Promise<Response>;
 };
 
 /** Host-side bridge for the opaque Site frame. Supply an authenticated transport;
@@ -61,6 +66,24 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     return projectedCatalog;
   };
   return {
+    ...(input.fetchResponse
+      ? {
+          fetch: async (message: SiteHttpRequest, signal: AbortSignal) => {
+            const path = siteSessionPath(message.path, input.workspaceId, message.method);
+            const headers = new Headers();
+            for (const [name, value] of message.headers) {
+              if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
+                headers.set(name, value);
+            }
+            return input.fetchResponse!(path, {
+              method: message.method,
+              signal,
+              headers: Object.fromEntries(headers),
+              ...(message.body === undefined ? {} : { body: message.body }),
+            });
+          },
+        }
+      : {}),
     catalog: loadCatalog,
     call: async (request, { signal }) => {
       if (!allowed.has(identityKey(request.identity)))

@@ -422,12 +422,21 @@ describe("failSessionAttempt child-terminal identity", () => {
       attemptId: "attempt-never-created",
       workflowId: "session-child-1",
       preClaimFailureDisposition: "permanent",
+      preClaimFailure: { disposition: "permanent", code: "claim_invariant" },
       trigger: { kind: "next" },
       error: "Agent turn admission failed before attempt claim.",
     });
 
     expect(result).toEqual({ action: "failed" });
     expect(terminalSettlement).toHaveBeenCalledTimes(1);
+    expect(terminalSettlement).toHaveBeenCalledWith(
+      expect.anything(),
+      "workspace-1",
+      expect.objectContaining({
+        error: "Agent turn admission failed before attempt claim.",
+        admissionFailure: { disposition: "permanent", code: "claim_invariant" },
+      }),
+    );
     expect(enqueue).not.toHaveBeenCalled();
     expect(publishCalls).toHaveLength(1);
     expect(parentWakeCalls).toHaveLength(1);

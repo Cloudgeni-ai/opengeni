@@ -1,3 +1,4 @@
+import { AppearanceMenu } from "@/components/appearance-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import {
@@ -222,6 +223,7 @@ export function BrowserAccountMenu() {
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
+          tabIndex={0}
           align="start"
           side={rail.collapsed ? "right" : "top"}
           className="w-[min(22rem,calc(100vw-1rem))] forced-colors:border-[CanvasText] forced-colors:text-[CanvasText]! motion-reduce:[&_*]:animate-none"
@@ -302,6 +304,7 @@ export function BrowserAccountMenu() {
             className="min-h-11 forced-colors:text-[CanvasText]!"
             disabled={busy}
           />
+          <AppearanceMenu />
           {showAnalyticsPreferences ? (
             <DropdownMenuItem className="min-h-11" onSelect={() => openAnalyticsPreferences()}>
               <ChartColumnIcon className="size-4" />

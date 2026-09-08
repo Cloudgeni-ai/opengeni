@@ -9,6 +9,12 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
+Externally owned SDK history preserves retained messages across opaque compaction
+checkpoints in both provider input and returned history. The turn history sink
+checks the identities and order of its durable prefix before advancing its append
+cursor; database position conflicts succeed only for the same turn and exact
+canonical item. Provider dispatch and successful settlement require this check.
+
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
 internal-update batch is processed until the agent reaches a natural stopping
@@ -425,6 +431,12 @@ claimed inference into a terminal failure or a new prompt.
 The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
+
+A permanent admission failure with no claimed turn records the supplied failure
+message and, when available, its classified admission cause on the durable
+`session.status.changed` event. The absence of a `turn.failed` event must not
+discard those diagnostics. Older events remain unchanged; missing historical
+details cannot be reconstructed from the failure code alone.
 
 SuperGrok/xAI connected-subscription work separately freezes an identifier-free
 `workspace | user` provider-account authority snapshot. Workspace is the
@@ -1035,6 +1047,11 @@ prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
+A workflow run closing during a current input wait or an active goal is parked,
+not completed work. Idle settlement preserves that projection and durable wake
+without creating a child terminal result. Goal completion, explicit goal pause,
+failed settlement, and finished goalless work retain their existing callbacks.
+
 Every child terminal result remains a durable pending machine input even when it
 arrives late. It may autonomously wake an idle parent only while the parent has
 an active goal, which is the durable obligation to keep working. A goal paused
@@ -1361,8 +1378,14 @@ Only providers whose process locator is controllable from another worker may
 end that wait with a second, exact-attempt-fenced adoption transaction that
 inserts its session-owned command row immediately before the model receives the
 live locator. The SDK Local and Docker locators index an in-memory table on one
-worker session object, so those providers remain turn-owned until terminal or
-turn cancellation instead of publishing a false background locator. A yielded
+worker session object. After the bounded foreground wait, those providers return
+an explicitly turn-scoped handle so the agent can test a running server. The
+shell remains registered with the exact turn cancellation fence: ordinary
+completion, Pause, Steer, and cancellation stop it and settle its process holder
+before workspace capture. It is not registered as a session background command,
+does not create terminal background notifications, and cannot be reused by a
+successor attempt. Never wait for an indefinitely running server to exit before
+returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
@@ -1423,11 +1446,21 @@ zero, and checkpoints the typed terminal provider observation before changing
 the lifecycle row. Running, offline, timed-out, malformed, and successor-only
 states remain active/deferred; connection retirement or elapsed time is not
 physical proof and cannot license replay or rebinding.
-The exact terminal transition is also the agent-input boundary: changing the
+The exact terminal transition is also the fallback agent-input boundary: changing the
 command to `exited|lost` and appending `session.command.finished` commit
 together. For a nonterminal session, one dedupe-keyed
 `background_command_result`, `system.update.pending`, and any idle workflow
-wake join that transaction. A failed or cancelled session remains terminal and
+wake join that transaction unless command completion was already observed.
+A successful agent-facing command read that reports `exited|lost` records
+completion observation and suppresses a still-pending completion notification.
+A running read does not observe future completion. Observation concerns terminal
+status, not whether every output byte was read. Reads of arbitrary audit events
+or redirected files do not acknowledge commands. Already-claimed notifications
+may still arrive once; delivered history and earlier running tool receipts remain
+unchanged. Observation happens while serving the read, without a separate
+worker-history delivery handshake; a crash between observation and receipt
+preservation is an accepted tradeoff.
+A failed or cancelled session remains terminal and
 keeps event-only command audit rather than reopening pending model input. A
 failed transaction leaves the command unsettled so the same already-checkpointed
 proof can retry; a duplicate proof cannot create a second result.
@@ -1436,9 +1469,80 @@ holder, lease counts, linked command transition, event, model input, and wake
 are one transaction. A notification failure therefore rolls the process back
 to active with its provider proof intact; the reaper defers that exact proof and
 never repeats provider execution.
-`command_wait` uses the terminal event only as a short live hint and re-reads
-the durable command row. A longer wait uses session-level `wait_for_input`,
+`command_read` returns command-specific bounded retained output and current
+status with a continuation cursor; reads work while running and after settlement,
+subject to explicit retention limits. `command_wait` uses the same read path,
+with output/terminal events as live hints rather than command-state authority.
+Waits also recheck durable state once a second if a hint is missed. Sending
+stdin is a separate capability, explicitly unsupported when the provider has no
+interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
+
+Migration 0419 records the exact launch turn, attempt, and execution generation
+when either provider adopts a background command under the existing attempt
+fence. Terminal results resolve that immutable receipt, copy only eligible
+same-session successor delegations, and retain the causal human for normal
+personal-resource admission. Legacy managed commands can prove the same tuple
+through their retained process; legacy Connected Machine commands with no receipt
+remain unattributed. A timeout similarly inherits its exact waiting turn.
+Different causal turns claim separately. No path substitutes the newest human,
+extends a once grant, or bypasses live revocation.
+
+The existing exact-set pre-claim recovery can restore unconsumed root command
+results and wait timeouts only after verifying their retained launch or timeout
+receipt, completed causal human turn, failure frontier, and unchanged failed
+update set. It repairs typed authority, preserves message/event content, and is
+idempotent; it does not replay a previously accepted turn or recover a nested
+session with parent-facing terminal truth.
+
+Both command readers accept `commandId`, an optional opaque `cursor`,
+`waitSeconds` (0–50; defaults 0 for read and 45 for wait), and `maxOutputBytes`
+(4–65,536; default 16,384 UTF-8 output bytes). They return ordered stdout/stderr
+chunks with `nextCursor` and `hasMore`, plus durable state and exit code. Keep the
+cursor even on an empty running page. Retention metadata describes the stored
+source and any detected gaps; unknown completeness and an empty page do not
+prove that a command produced no output. Older output that was never persisted,
+removed output, and oversized legacy events cannot be reconstructed by a read.
+The API reads persisted output. In the live owning runtime, the trusted
+first-party tool path authorizes through that API before refreshing the exact
+owned command, then reads the newly retained output through the same API. Model
+calls and Codemode use this path; third-party lookalike tools do not. Outside
+that owning context, native reads and background reconciliation refresh the
+stored snapshot. An empty running snapshot can therefore precede capture of
+bytes already produced by the process.
+If a live refresh encounters a recognized temporary transport failure, the
+runtime reauthorizes and rereads the API instead of discarding retained output.
+A still-running result reports `freshness.status: "refresh_unavailable"` and
+`retryable: true`; this is a freshness warning, not proof of command failure or
+completion. No provider operation is retried by this fallback. Authorization,
+consent, fencing, integrity, and unclassified errors still fail closed.
+
+Typed runner failures are distinct from the process exit code: a runner may
+report an output/spool failure alongside exit code zero. Migration 0417 adds
+bounded `runner_failure` metadata to the command row so later reads and
+completion notifications preserve that distinction after the live reader is
+gone. Apply this rolling migration before starting readers that select the new
+field; do not infer successful completion from exit code alone.
+
+Repeated reads by the same live command client retain only an in-memory replay
+frontier, incremental integrity state, and UTF-8 decoder state after successful
+capture. They do not retain the full output prefix. Failed capture discards that
+optimization and permits replay of retained truth; it grants no runner garbage
+collection authority. A fresh client, including a new reconciliation claim,
+still replays the retained prefix and performs idempotent capture. Its work is
+proportional to retained command output, not bounded by the API output-page size.
+
+Connected Machine capture preserves stream identity. SDK native readers can
+return merged output; those retained chunks explicitly report merged stream
+fidelity rather than reconstructing stdout/stderr. Local, Docker, and
+OpenSandbox numeric process handles remain owning-context only: their process
+maps are not durable recovery locators. Recoverable managed handles and
+Connected Machine operations support background capture; missing or
+provider-truncated bytes remain unrecoverable. Connected Machine has no stdin
+transport, and OpenSandbox does not support arbitrary stdin.
+The native `command_input` tool accepts the owning context's numeric
+`session_id` and nonempty `chars`; it uses the existing fenced stdin mutation
+path. It does not accept a durable command UUID or use history as input authority.
 
 A successful first-party `wait_for_input` is an enforced production-runtime
 boundary, not a request for the model to volunteer a final answer. The trusted

@@ -26,6 +26,7 @@ import {
   findActiveApiKeyByHash,
   getWorkspaceGrant,
   requireWorkspace,
+  resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
@@ -440,6 +441,35 @@ export async function requireAccessGrantAuthorization(
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
   return await accessGrantAuthorization(context, deps, workspaceId, permission);
+}
+
+/**
+ * Settings administration is narrower than workspace administration. The
+ * canonical managed-cookie owner may configure their Personal workspace, but
+ * never acquires the admin wildcard (and its membership/delegation powers).
+ * Only use this boundary for workspace configuration, not access management.
+ */
+export async function requireWorkspaceSettingsGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<AccessGrant> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = requireResolvedAccessGrantAuthorization(authorization, workspaceId);
+  if (hasPermission(grant.permissions, "workspace:admin")) return grant;
+  if (
+    authorization.canonicalManagedHumanSession &&
+    (await resolveNamedManagedPersonalWorkspaceGrant(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: authorization.authenticatedSubjectId,
+    }))
+  ) {
+    return grant;
+  }
+  throw new HTTPException(403, {
+    message: "workspace settings require a workspace administrator or Personal workspace owner",
+  });
 }
 
 async function accessGrantAuthorization(

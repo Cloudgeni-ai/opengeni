@@ -30,6 +30,10 @@
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
     },
+    "./site-session-http": {
+      "types": "./src/site-session-http.ts",
+      "default": "./src/site-session-http.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

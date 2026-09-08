@@ -15,16 +15,6 @@ export type {
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
 export {
-  ARTIFACT_CREATE_PERMISSIONS,
-  ARTIFACT_EDIT_PERMISSIONS,
-  ARTIFACT_CREATE_TOOLS,
-  ARTIFACT_EDIT_TOOLS,
-  artifactCreateOpeningMessage,
-  artifactCreateInstructions,
-  artifactEditOpeningMessage,
-  artifactEditInstructions,
-} from "./site-authoring";
-export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,
   OpenGeniToolsClient,
@@ -46,6 +36,7 @@ export type {
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
+  SessionListPageOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
@@ -935,6 +926,8 @@ export type {
   SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  WorkspacePauseTimer,
+  WorkspacePauseTimerRequest,
   SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,

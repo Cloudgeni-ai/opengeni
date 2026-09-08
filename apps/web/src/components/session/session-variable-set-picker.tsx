@@ -290,7 +290,7 @@ export function SessionVariableSetPicker(props: {
 
         {props.session.tenancy?.visibility === "workspace" && selectedPersonal.length > 0 ? (
           <p className="text-2xs leading-4 text-fg-subtle">
-            Only-me Variable Sets are used only for messages you send. Other members may see the
+            Only-me Variable Sets are authorized for your own work. Other members may see the
             result, but cannot use your credentials.
           </p>
         ) : null}

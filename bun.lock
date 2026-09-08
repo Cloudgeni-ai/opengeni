@@ -245,6 +245,16 @@
         "typescript": "7.0.2",
       },
     },
+    "examples/site-session-embed": {
+      "name": "@opengeni/example-site-session-embed",
+      "dependencies": {
+        "@opengeni/codemode": "workspace:*",
+        "@opengeni/react": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
+        "react": "^19.2.5",
+        "react-dom": "^19.2.5",
+      },
+    },
     "packages/agent-proto": {
       "name": "@opengeni/agent-proto",
       "version": "0.5.1",
@@ -1393,6 +1403,8 @@
     "@opengeni/example-embedded-product": ["@opengeni/example-embedded-product@workspace:examples/embedded-product"],
 
     "@opengeni/example-northstar-support": ["@opengeni/example-northstar-support@workspace:examples/northstar-support"],
+
+    "@opengeni/example-site-session-embed": ["@opengeni/example-site-session-embed@workspace:examples/site-session-embed"],
 
     "@opengeni/github": ["@opengeni/github@workspace:packages/github"],
 

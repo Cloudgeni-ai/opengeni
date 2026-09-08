@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 test("external service removal retains the deployed teardown and records service attribution", async () => {
   const source = await readFile(
-    new URL("../drizzle/0416_external_workspace_member_removal.sql", import.meta.url),
+    new URL("../drizzle/0426_external_workspace_member_removal.sql", import.meta.url),
     "utf8",
   );
   expect(source).toStartWith("-- deployment-mode: rolling\n");

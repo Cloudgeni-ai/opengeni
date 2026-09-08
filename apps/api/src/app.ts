@@ -1,4 +1,5 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
+import { codemodeSessionRequest } from "./codemode";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -901,6 +902,7 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
+        billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
@@ -1131,6 +1133,20 @@ export function createAppComposition(deps: AppDependencies): {
     } finally {
       await prepared.close();
     }
+  });
+
+  app.all("/v1/workspaces/:workspaceId/codemode/sdk/*", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    const url = new URL(c.req.url);
+    const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
+    const forwarded = await codemodeSessionRequest(
+      routeDeps,
+      grant,
+      c.req.raw,
+      url.pathname.slice(prefix.length) + url.search,
+    );
+    return app.fetch(forwarded);
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -1564,7 +1580,8 @@ function retryableHttpStatus(status: number): boolean {
 }
 
 function publicErrorMessage(error: unknown, status: number): string {
-  if (error instanceof ConnectAttemptConflictError) return "Connection setup changed or is still in progress. Reload its current status before retrying.";
+  if (error instanceof ConnectAttemptConflictError)
+    return "Connection setup changed or is still in progress. Reload its current status before retrying.";
   if (error instanceof ConnectAttemptNotFoundError) return "Connection setup not found.";
   if (status === 502 || status === 503 || status === 504) {
     return "OpenGeni is temporarily unavailable — retry.";
@@ -1971,6 +1988,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
     label: "/v1/workspaces/:workspaceId/inference-control",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pause-timer$/,
+    label: "/v1/workspaces/:workspaceId/pause-timer",
   },
   {
     pattern:

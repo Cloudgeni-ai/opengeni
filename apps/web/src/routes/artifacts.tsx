@@ -205,7 +205,10 @@ export function ArtifactDetailRoute({
   );
   const navigate = useNavigate();
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
-  const [content, setContent] = useState<WorkspaceArtifactContentResponse | null>(null);
+  const [content, setContent] = useState<Pick<
+    WorkspaceArtifactContentResponse,
+    "html" | "versionId" | "requestedTools"
+  > | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
@@ -240,7 +243,7 @@ export function ArtifactDetailRoute({
   const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
   const siteVersionId = content?.versionId;
   const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
-    if (requestedTools.length === 0 || !siteVersionId) return undefined;
+    if (!siteVersionId) return undefined;
     return createSiteToolBridge({
       workspaceTools: context.client.tools.forWorkspace(workspaceId),
       workspaceId,
@@ -435,7 +438,6 @@ export function ArtifactDetailRoute({
             onEdit={() => void editWithGeni()}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
-            sourceFileCount={content.source.files.length}
           />
           <section className="overflow-hidden rounded-2xl border border-border/80 bg-surface/60 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 px-4 py-3.5 sm:px-5">
@@ -448,8 +450,7 @@ export function ArtifactDetailRoute({
               <div className="flex items-center gap-3 text-2xs text-fg-subtle">
                 <span className="inline-flex items-center gap-1">
                   <FilesIcon className="size-3" />
-                  {content.source.files.length} source{" "}
-                  {content.source.files.length === 1 ? "file" : "files"}
+                  {detail.artifact.currentVersion?.sourceSizeBytes ? "Source saved" : "HTML-only"}
                 </span>
                 <span className="inline-flex items-center gap-1">
                   <PlugZapIcon className="size-3" />

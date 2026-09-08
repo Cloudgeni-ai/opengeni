@@ -261,11 +261,15 @@ describe("durable image generation operation rebinding", () => {
       });
       await waitForImageOperationLockWait(shared!.admin, 1);
 
+      // Observe rejection immediately: B may settle before A's result arrives.
       const raceRebindB = prepareImageGenerationOperation(rebindClient.db, {
         ...raceCommon,
         providerBindingHash: bindingB,
         expectedArtifactId: raceArtifactB,
-      });
+      }).then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason: unknown) => ({ status: "rejected" as const, reason }),
+      );
       await waitForImageOperationLockWait(shared!.admin, 2);
       await expect(
         getImageGenerationOperation(client.db, grant.workspaceId, raceOperationId),
@@ -283,7 +287,12 @@ describe("durable image generation operation rebinding", () => {
       const begunRaceA = await raceBeginA;
       expect(begunRaceA.started).toBe(true);
       expect(begunRaceA.operation.status).toBe("provider_started");
-      await expect(raceRebindB).rejects.toThrow("reserved operation");
+      const rebindOutcome = await raceRebindB;
+      expect(rebindOutcome.status).toBe("rejected");
+      if (rebindOutcome.status === "rejected") {
+        expect(rebindOutcome.reason).toBeInstanceOf(Error);
+        expect((rebindOutcome.reason as Error).message).toContain("reserved operation");
+      }
       await expect(
         getImageGenerationOperation(client.db, grant.workspaceId, raceOperationId),
       ).resolves.toMatchObject({

@@ -17,21 +17,25 @@ export type SiteClient = Pick<
   OpenGeniClient,
   | "listWorkspaceArtifacts"
   | "getWorkspaceArtifact"
-  | "getWorkspaceArtifactContent"
+  | "getWorkspaceArtifactHtml"
   | "rollbackWorkspaceArtifact"
   | "setWorkspaceArtifactStatus"
+>;
+type SiteDisplayContent = Pick<
+  WorkspaceArtifactContentResponse,
+  "artifactId" | "versionId" | "html" | "requestedTools"
 >;
 type SiteScope = { client: SiteClient; workspaceId: string; className?: string };
 /** Shared native/embedded read boundary: pin content to the observed version,
  * and never accept a response belonging to another workspace or Site. */
 export async function loadSiteSnapshot(
-  client: Pick<SiteClient, "getWorkspaceArtifact" | "getWorkspaceArtifactContent">,
+  client: Pick<SiteClient, "getWorkspaceArtifact" | "getWorkspaceArtifactHtml">,
   workspaceId: string,
   siteId: string,
   options: { signal?: AbortSignal; includeArchivedContent?: boolean } = {},
 ): Promise<{
   detail: WorkspaceArtifactDetailResponse;
-  content: WorkspaceArtifactContentResponse | null;
+  content: SiteDisplayContent | null;
 }> {
   const requestOptions = options.signal ? { signal: options.signal } : {};
   const detail = await client.getWorkspaceArtifact(workspaceId, siteId, requestOptions);
@@ -41,10 +45,15 @@ export async function loadSiteSnapshot(
   const versionId = detail.artifact.currentVersion?.id;
   const content =
     versionId && (detail.artifact.status === "active" || options.includeArchivedContent)
-      ? await client.getWorkspaceArtifactContent(workspaceId, siteId, {
-          ...requestOptions,
+      ? {
+          artifactId: siteId,
           versionId,
-        })
+          requestedTools: detail.artifact.currentVersion!.requestedTools,
+          html: await client.getWorkspaceArtifactHtml(workspaceId, siteId, {
+            ...requestOptions,
+            versionId,
+          }),
+        }
       : null;
   options.signal?.throwIfAborted();
   if (content && (content.artifactId !== siteId || content.versionId !== versionId))
@@ -60,11 +69,6 @@ export type SiteDetailProps = SiteScope & {
   /** Presentation hint only: the backend still enforces artifacts:publish. */
   canPublish?: boolean;
   toolBridge?: PublishedHtmlArtifactToolBridge;
-  /** Host creates/navigates its ordinary authorized session. No second engine. */
-  onEditWithGeni?: (
-    site: WorkspaceArtifact,
-    content: WorkspaceArtifactContentResponse,
-  ) => void | Promise<unknown>;
 };
 
 function useScopeKey(values: readonly unknown[]) {
@@ -163,12 +167,11 @@ function ScopedSiteDetail({
   siteId,
   canPublish = false,
   toolBridge,
-  onEditWithGeni,
   className,
 }: SiteDetailProps) {
   const [loaded, setLoaded] = useState<{
     detail: WorkspaceArtifactDetailResponse;
-    content: WorkspaceArtifactContentResponse | null;
+    content: SiteDisplayContent | null;
   } | null>(null);
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
@@ -308,21 +311,6 @@ function ScopedSiteDetail({
               title={site.title}
               {...(toolBridge ? { toolBridge } : {})}
             />
-          )}
-          {onEditWithGeni && loaded.content && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                void Promise.resolve()
-                  .then(() =>
-                    onEditWithGeni(structuredClone(site), structuredClone(loaded.content!)),
-                  )
-                  .catch(() => setError(true));
-              }}
-            >
-              Edit with Geni
-            </button>
           )}
           <h3>Versions</h3>
           <ul>

@@ -1763,8 +1763,9 @@ export async function postUserMessageTurn(
  * `session_create` tool: payload validation, resource/tool/variableSet
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty execution-context fields keep
- * their meaning: a child inherits omitted resources/tools/mcpServers from its
- * trusted immediate parent, while explicit arrays (including []) win. A
+ * their meaning: a child inherits repositories (never files), tools, and MCP
+ * servers from its trusted immediate parent when omitted; explicit arrays
+ * (including []) win. A
  * top-level create with omitted tools applies workspace-default capability MCPs.
  */
 export function resolveChildGoalFromAcceptedSnapshot(
@@ -2171,7 +2172,8 @@ export async function createSessionForRequestWithOutcome(
   const resources = normalizeResources(
     hasOwnProperty(rawPayload, "resources")
       ? payload.resources
-      : (parentSession?.resources ?? payload.resources),
+      : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
+          payload.resources),
   );
   const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills

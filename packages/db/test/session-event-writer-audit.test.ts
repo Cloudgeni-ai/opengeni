@@ -284,6 +284,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-command-output.ts#appendSessionCommandOutput": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-control.ts#mutateSessionControlInTransaction": {
     inserts: 1,
     contract: "canonical",

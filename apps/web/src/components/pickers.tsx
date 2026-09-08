@@ -259,7 +259,7 @@ export function SessionToolPicker(props: {
           className={cn(pillClass(selected > 0, props.triggerClassName), "session-tools-trigger")}
         >
           <PlugIcon className="size-3.5" />
-          <span className="session-tools-label truncate">
+          <span className="session-tools-label truncate @max-[14rem]/model-controls:hidden">
             {props.saving
               ? "Saving tools"
               : selected === total

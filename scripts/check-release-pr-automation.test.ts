@@ -3660,6 +3660,96 @@ describe("workflow contracts", () => {
   const seal = Bun.YAML.parse(sealText) as any;
   const retainController = Bun.YAML.parse(retainControllerText) as any;
 
+  test("substantive CI work remains selectable through skipped dependencies but stops on cancellation", () => {
+    const reports = new Set(["test", "images", "automation-report"]);
+    const needs = {
+      plan: {
+        result: "success",
+        outputs: {
+          mode: "full",
+          unit_count: "1",
+          integration_count: "1",
+          e2e_count: "1",
+          browser_lane_count: "1",
+          build_count: "1",
+          artifact_runtime_required: "true",
+          bake_images: "true",
+        },
+      },
+      "automation-admission": { result: "skipped" },
+      "artifact-runtime": { result: "success" },
+    };
+    for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
+      if (reports.has(name) || name === "automation-admission") continue;
+      // Execute the checked-in boolean predicate with GitHub's documented
+      // status-function values, including an unrelated skipped dependency.
+      const expression = job.if
+        .slice(3, -2)
+        .replace(/needs\.([a-z-]+)/g, (_match, key: string) => `needs[${JSON.stringify(key)}]`);
+      const select = new Function(
+        "github",
+        "needs",
+        "always",
+        "cancelled",
+        `return (${expression});`,
+      ) as (
+        github: { event_name: string },
+        needs: object,
+        always: () => boolean,
+        cancelled: () => boolean,
+      ) => boolean;
+      for (const event of ["pull_request", "push", "schedule", "workflow_dispatch"]) {
+        needs["automation-admission"].result =
+          event === "workflow_dispatch" ? "success" : "skipped";
+        expect(
+          select(
+            { event_name: event },
+            needs,
+            () => true,
+            () => false,
+          ),
+          `${name}/${event}`,
+        ).toBe(true);
+        expect(
+          select(
+            { event_name: event },
+            needs,
+            () => true,
+            () => true,
+          ),
+          `${name}/${event}/cancelled`,
+        ).toBe(false);
+      }
+      needs["automation-admission"].result = "failure";
+      expect(
+        select(
+          { event_name: "workflow_dispatch" },
+          needs,
+          () => true,
+          () => false,
+        ),
+        `${name}/admission`,
+      ).toBe(false);
+    }
+  });
+
+  test("cancellation preserves bounded final reports and diagnostic cleanup", () => {
+    for (const name of ["test", "images", "automation-report"]) {
+      expect(ci.jobs[name].if).toContain("always()");
+      expect(ci.jobs[name]["timeout-minutes"]).toBe(10);
+    }
+    expect(
+      ci.jobs.test.steps.find((step: any) => step.name === "Require every split CI lane").run,
+    ).toContain("scripts/ci/required-results.jq");
+    expect(ci.jobs["automation-report"].steps.at(-1).env.AUTOMATION_CHECK_CONCLUSION).toContain(
+      "&& 'success' || 'failure'",
+    );
+    expect(
+      ci.jobs["browser-acceptance"].steps.filter((step: any) => step.if?.includes("always()"))
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
   test("uses only the scoped token for Changesets and grants narrow dispatch rights", () => {
     expect(releaseText).not.toContain("RELEASE_PAT");
     const versionChangesets = release.jobs.version.steps.find(
@@ -3700,7 +3790,7 @@ describe("workflow contracts", () => {
     );
     expect(release.on.schedule).toBeUndefined();
     expect(ci.jobs.deployment.if).toBe(
-      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
@@ -3720,7 +3810,7 @@ describe("workflow contracts", () => {
       "artifact-outbox-dispatcher-image",
       "relay-image",
     ]) {
-      expect(ci.jobs[jobName].if).toBe(ci.jobs.images.if);
+      expect(ci.jobs[jobName].if).toBe(ci.jobs.images.if.replace("always()", "!cancelled()"));
     }
     for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
       expect(ci.jobs[jobName].if).toContain("needs.plan.outputs.bake_images == 'true'");
@@ -3834,7 +3924,7 @@ describe("workflow contracts", () => {
     expect(plan.name).toBe("Explain change impact");
     expect(plan.needs).toBe("automation-admission");
     expect(plan.if).toBe(
-      "${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(plan.outputs).toEqual(
       expect.objectContaining({

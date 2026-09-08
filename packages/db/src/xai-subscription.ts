@@ -1845,6 +1845,8 @@ export async function updateXaiQuotaMetadata(
     quotaResetAt: Date | null;
     quotaCheckedAt: Date;
     exhaustedUntil: Date | null;
+    expectedExhaustedUntil?: Date | null;
+    expectedQuotaCheckedAt?: Date | null;
   },
 ): Promise<boolean> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
@@ -1861,6 +1863,12 @@ export async function updateXaiQuotaMetadata(
         and(
           eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
           eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
+          ...(input.expectedExhaustedUntil === undefined
+            ? []
+            : [
+                sql`${schema.xaiSubscriptionCredentials.exhaustedUntil} IS NOT DISTINCT FROM ${input.expectedExhaustedUntil?.toISOString() ?? null}::timestamptz`,
+                sql`${schema.xaiSubscriptionCredentials.quotaCheckedAt} IS NOT DISTINCT FROM ${input.expectedQuotaCheckedAt?.toISOString() ?? null}::timestamptz`,
+              ]),
         ),
       )
       .returning({ id: schema.xaiSubscriptionCredentials.id });

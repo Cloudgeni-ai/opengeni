@@ -1,3 +1,5 @@
+import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
+import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -88,6 +90,7 @@ import {
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
@@ -97,6 +100,7 @@ import {
   assertWorkspaceMemberRemovable,
   assertWorkspaceMemberUpdateAllowed,
   controlHumanWorkspace,
+  controlHumanWorkspaceTimer,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
@@ -383,7 +387,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   // deep-merges (top-level) a settings patch, preserving unknown/future keys.
   app.patch("/v1/workspaces/:workspaceId/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -492,7 +496,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
@@ -568,7 +572,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/gateway-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -629,7 +633,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = CreateWorkspaceOpenRouterCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
@@ -707,7 +711,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -820,12 +824,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // Full replace (PUT, not merge): null/omitted = unrestricted for that
-  // dimension; an empty array is a valid explicit total block. Admin access —
-  // this decides whether turns can reach paid providers, so it is the same
-  // trust level as billing-affecting workspace settings.
+  // dimension; an empty array is a valid explicit total block. Settings access
+  // admits workspace administrators and the verified Personal owner, without
+  // widening membership or API-key delegation authority.
   app.put("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = UpdateWorkspaceModelPolicyRequest.parse(await c.req.json());
     const catalog = await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: grant.accountId,
@@ -840,9 +844,42 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(policy);
   });
 
+  app.post("/v1/workspaces/:workspaceId/pause-timer", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
+    const parsed = WorkspacePauseTimerRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid pause timer" });
+    try {
+      await controlHumanWorkspaceTimer(
+        {
+          db: deps.db,
+          bus: deps.bus,
+          workflowClient: deps.workflowClient,
+          ...(deps.schedulePromptPostCommit
+            ? { schedulePromptPostCommit: deps.schedulePromptPostCommit }
+            : {}),
+        },
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        parsed.data,
+      );
+    } catch (error) {
+      if (error instanceof SessionControlConflictError)
+        throw new HTTPException(409, {
+          message: "Workspace changed. Reopen the timer and try again.",
+        });
+      if (error instanceof WorkspacePauseTimerInputError)
+        throw new HTTPException(400, { message: error.message });
+      throw error;
+    }
+    return c.json({ ok: true });
+  });
+
   app.post("/v1/workspaces/:workspaceId/inference-control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
       throw new HTTPException(400, {
         message: "workspace-control actor is too large",

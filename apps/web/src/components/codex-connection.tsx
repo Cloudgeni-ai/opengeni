@@ -1180,7 +1180,7 @@ export function CodexSubscriptionsCard({
         ) : null}
       </div>
 
-      {canManage && source?.workspaceKind === "shared" ? (
+      {canManage && source ? (
         <div className="grid gap-2 rounded-md border border-border/70 px-3 py-2">
           <label className="grid gap-1">
             <span className="text-xs font-medium">Where this workspace gets Codex</span>
@@ -1192,7 +1192,7 @@ export function CodexSubscriptionsCard({
                 void setSourceMode(event.target.value as WorkspaceCodexSubscriptionMode)
               }
             >
-              <option value="automatic">Automatic: prefer organization</option>
+              <option value="automatic">Automatic: prefer this workspace</option>
               <option value="organization">
                 Organization subscription only
                 {source.organizationAvailable ? "" : " (not connected)"}
@@ -1203,7 +1203,7 @@ export function CodexSubscriptionsCard({
           </label>
           <p className="text-2xs leading-4 text-fg-subtle">
             {source.mode === "automatic"
-              ? "Automatic uses the organization subscription when one is connected, otherwise this workspace's subscription."
+              ? "Automatic uses this workspace's subscription when one is connected, otherwise the organization's subscription."
               : source.mode === "organization"
                 ? "Sessions use the subscription managed once for the whole organization."
                 : source.mode === "workspace"

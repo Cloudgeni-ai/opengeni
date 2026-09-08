@@ -1,6 +1,26 @@
 import { expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
 
+test("Site display fetches version-pinned HTML without downloading retained source", async () => {
+  let called: URL | undefined;
+  let actor: string | null = null;
+  const client = new OpenGeniClient({
+    baseUrl: "https://fixture.invalid",
+    apiKey: "synthetic",
+    fetch: async (url, init) => {
+      called = new URL(String(url));
+      actor = new Headers(init?.headers).get("x-opengeni-external-actor");
+      return new Response("<p>Site</p>");
+    },
+  }).asUser("viewer");
+  expect(
+    await client.getWorkspaceArtifactHtml("space/one", "site/one", { versionId: "version/one" }),
+  ).toBe("<p>Site</p>");
+  expect(called!.pathname).toBe("/v1/workspaces/space%2Fone/published-artifacts/site%2Fone/html");
+  expect(called!.searchParams.get("versionId")).toBe("version/one");
+  expect(actor).not.toBeNull();
+});
+
 test("Site lifecycle uses published artifact routes and preserves actor, version, and idempotency", async () => {
   const calls: { url: URL; method: string | undefined; body: unknown; actor: string | null }[] = [];
   const client = new OpenGeniClient({
