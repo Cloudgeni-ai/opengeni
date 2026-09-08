@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 
 export function SubscriptionConnectAction(props: {
   provider: string;
+  analyticsAction?: "connect_codex" | "connect_supergrok";
   count: number;
   busy: boolean;
   onConnect: () => void;
@@ -18,7 +19,13 @@ export function SubscriptionConnectAction(props: {
       </p>
       <div className="flex flex-wrap items-center gap-2">
         {props.scopeControl}
-        <Button type="button" size="sm" disabled={props.busy} onClick={props.onConnect}>
+        <Button
+          type="button"
+          size="sm"
+          disabled={props.busy}
+          data-analytics-action={props.analyticsAction}
+          onClick={props.onConnect}
+        >
           {props.busy ? (
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : (

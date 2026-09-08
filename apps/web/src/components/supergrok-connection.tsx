@@ -1,6 +1,8 @@
 import { ConnectionAccessSettings } from "@/components/connection-access-settings";
 import { SubscriptionConnectAction } from "@/components/subscription-connect-action";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { trackModelConnection } from "@/lib/analytics-observer";
+
 import type {
   SuperGrokAccount,
   SuperGrokAccountsResponse,
@@ -137,6 +139,7 @@ export function SuperGrokSubscriptionsCardWithClient({
   }, [refresh]);
 
   const connect = useCallback(async () => {
+    const recordOutcome = workspaceId ? trackModelConnection("supergrok", workspaceId) : () => {};
     setBusy(true);
     try {
       const start = organizationId
@@ -175,6 +178,7 @@ export function SuperGrokSubscriptionsCardWithClient({
           if (!result || controller.signal.aborted || cancelled.current) return;
           setPending(null);
           if (result.status === "connected") {
+            recordOutcome("connected");
             toast.success(
               result.scope === "organization"
                 ? "SuperGrok connected for the organization"
@@ -185,9 +189,11 @@ export function SuperGrokSubscriptionsCardWithClient({
             await refresh();
             return;
           }
+          recordOutcome(result.status === "expired" ? "expired" : "denied");
           toast.error(result.status === "expired" ? "The xAI code expired" : "xAI login denied");
         })
         .catch((error) => {
+          recordOutcome("outcome_unknown");
           if (!controller.signal.aborted && !cancelled.current) {
             setPending(null);
             toast.error(error instanceof Error ? error.message : "Failed to verify xAI login");
@@ -197,6 +203,7 @@ export function SuperGrokSubscriptionsCardWithClient({
           if (pollAbort.current === controller) pollAbort.current = null;
         });
     } catch (error) {
+      recordOutcome("outcome_unknown");
       setPending(null);
       toast.error(error instanceof Error ? error.message : "Failed to start xAI login");
     } finally {
@@ -458,6 +465,7 @@ export function SuperGrokSubscriptionsCardWithClient({
 
       {canManage && !pending && !loading && !loadError ? (
         <SubscriptionConnectAction
+          analyticsAction="connect_supergrok"
           provider="SuperGrok"
           count={accounts.length}
           busy={busy}

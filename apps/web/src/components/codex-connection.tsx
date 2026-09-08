@@ -1,5 +1,7 @@
 import { ConnectionAccessSettings } from "@/components/connection-access-settings";
 import { SubscriptionConnectAction } from "@/components/subscription-connect-action";
+import { trackModelConnection } from "@/lib/analytics-observer";
+
 // Codex (ChatGPT) subscriptions card for workspace settings: connect MULTIPLE
 // ChatGPT accounts via device code, list them with an ACTIVE radio (the account
 // unpinned sessions use), inline rename, per-account refresh/disconnect, and
@@ -919,6 +921,7 @@ export function CodexSubscriptionsCardWithClient({
   }, [loading, data, refreshUsage]);
 
   const connect = useCallback(async () => {
+    const recordOutcome = trackModelConnection("codex", workspaceId);
     setBusy(true);
     try {
       const start = await client.codexConnectStart(workspaceId);
@@ -942,6 +945,7 @@ export function CodexSubscriptionsCardWithClient({
         try {
           result = await client.codexConnectPoll(workspaceId, start.state);
         } catch (error) {
+          recordOutcome("outcome_unknown");
           if (!cancelled.current) {
             setPending(null);
             toast.error(
@@ -953,6 +957,7 @@ export function CodexSubscriptionsCardWithClient({
           return;
         }
         if (result.status === "connected") {
+          recordOutcome("connected");
           if (!cancelled.current) {
             setPending(null);
             toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
@@ -961,6 +966,7 @@ export function CodexSubscriptionsCardWithClient({
           return;
         }
         if (result.status === "expired") {
+          recordOutcome("expired");
           if (!cancelled.current) {
             setPending(null);
             toast.error("The code expired before it was authorized. Try again.");
@@ -971,6 +977,7 @@ export function CodexSubscriptionsCardWithClient({
       };
       setTimeout(() => void poll(), interval);
     } catch (error) {
+      recordOutcome("outcome_unknown");
       setPending(null);
       toast.error(error instanceof Error ? error.message : "Failed to start Codex login");
     } finally {
@@ -1263,6 +1270,7 @@ export function CodexSubscriptionsCardWithClient({
       <p className="text-xs leading-5 text-fg-subtle">
         Use Codex models with a ChatGPT subscription. Usage is included in the connected plan.
       </p>
+
       {canManage && source ? (
         <CodexSourceSettings
           source={source}
@@ -1538,6 +1546,7 @@ export function CodexSubscriptionsCardWithClient({
       )}
       {canManage && workspaceManaged && !sourceDisabled && !pending && !loading && !loadError ? (
         <SubscriptionConnectAction
+          analyticsAction="connect_codex"
           provider="Codex"
           count={accounts.length}
           busy={busy}
