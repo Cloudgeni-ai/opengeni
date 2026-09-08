@@ -136,7 +136,13 @@ describe("Pack installation ownership", () => {
       capabilityId: skill.capabilityId,
       expectedInstallationVersion: installed.installationVersion,
     });
-    const files = [{ path: "SKILL.md", content: "Customized Pack behavior" }];
+    const files = [
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: customized-pack\ndescription: Customized Pack behavior\n---\nCustomized Pack behavior",
+      },
+    ];
     const customized = await applySkillLifecycle(
       client.db,
       {

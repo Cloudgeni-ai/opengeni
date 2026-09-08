@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
+import { readSkillMetadata } from "@opengeni/contracts";
 import type {
   SkillFile,
   SkillRecord,
@@ -28,12 +29,57 @@ export async function applySkillLifecycle(
       await tx.execute(
         sql`SELECT set_config('opengeni.principal_kind', ${context.actor.principalKind}, true)`,
       );
+    } else await assertSkillReadAttempt(tx, { ...context, actor: context.actor });
+    let content: string | undefined;
+    if (request.operation === "save") {
+      content = (request.files as SkillFile[] | undefined)?.find(
+        (file) => file.path === "SKILL.md",
+      )?.content;
+    } else if (request.operation === "install") {
+      const [main] = await rawRows<{ content: string }>(
+        tx,
+        sql`SELECT content FROM capability_skill_files
+        WHERE skill_facet_id=${request.skillFacetId as string}::uuid AND path='SKILL.md'`,
+      );
+      content = main?.content;
+    } else if (request.operation === "approve" || request.operation === "restore") {
+      const [revision] = await rawRows<{
+        content: string;
+        title: string;
+        description: string;
+        skill_files: SkillFile[] | null;
+      }>(
+        tx,
+        sql`
+        SELECT content,title,description,skill_files FROM preference_registry_revisions
+        WHERE account_id=${context.accountId}::uuid AND preference_id=${request.skillId as string}::uuid
+          AND id=${request.revisionId as string}::uuid`,
+      );
+      content = revision?.content;
+      if (request.operation === "approve" && revision) {
+        const metadata = readSkillMetadata(revision.content);
+        if (
+          !revision.skill_files ||
+          revision.title !== metadata.name ||
+          revision.description !== metadata.description
+        )
+          throw new Error(
+            "Historical Skill approval requires a canonical files-bearing revision; use restore or save",
+          );
+      }
     }
+    if (content === undefined) throw new Error("Skill lifecycle requires a readable SKILL.md");
+    const metadata = readSkillMetadata(content);
+    const canonicalRequest = {
+      ...request,
+      title: metadata.name,
+      description: metadata.description,
+    };
     const rows = await rawRows<{ receipt: SkillWriteReceipt }>(
       tx,
       sql`
       SELECT skill_apply_lifecycle(${context.accountId}::uuid, ${context.workspaceId}::uuid,
-        ${JSON.stringify(context.actor)}::jsonb, ${JSON.stringify(request)}::jsonb) AS receipt
+        ${JSON.stringify(context.actor)}::jsonb, ${JSON.stringify(canonicalRequest)}::jsonb) AS receipt
     `,
     );
     if (!rows[0]) throw new Error("Skill lifecycle returned no durable receipt");
