@@ -66,6 +66,14 @@ a separate client and does not mutate the service client. It requires an
 organization key; a workspace key or deployment access key is not a substitute.
 Never retry a denied user request using the unscoped service client.
 
+An organization key is trusted to assert and lazily provision product users;
+there is no separate provisioning permission or registration ceremony. The first
+authenticated request may create the identity anchor even if its later workspace
+operation is denied. Workload permissions still restrict that operation. Derive
+IDs from authenticated host records and bound onboarding in the host; never
+forward arbitrary browser-supplied identities. Personal identity anchors are not
+shared product-tenant workspaces or a way to obtain workspace membership.
+
 Identity is scoped by organization, source and opaque external ID. Source
 defaults to `default`; use a stable source namespace when multiple identity
 systems share an organization. IDs are case-sensitive, not emails to normalize:

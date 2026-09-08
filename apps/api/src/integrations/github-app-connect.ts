@@ -178,6 +178,15 @@ export async function completeGitHubAppConnect(
     if (stored.attempt.providerId !== state.providerId || stored.attempt.ownership !== "workspace")
       throw new Error("GitHub attempt mismatch");
     destination = stored.returnUrl;
+    // Reject obsolete browser stages before committing an operation claim.
+    // Otherwise a valid older callback could strand the current stage in-flight.
+    // Completed callbacks still navigate home without repeating provider work.
+    if (
+      stored.attempt.nextAction.type !== "authorize" ||
+      new URL(stored.attempt.nextAction.url).searchParams.get("state") !== input.state
+    )
+      throw new Error("Stale GitHub setup stage");
+    if (state.providerId === "github-lens") await requireGitHubLensConnect(deps, state.workspaceId);
     const authorize = callbackAuthority(state);
     const operation = {
       attemptId: state.connectAttemptId,
@@ -190,19 +199,12 @@ export async function completeGitHubAppConnect(
       expectedRevision: stored.attempt.revision,
     });
     if (claim.status !== "replayed") {
-      if (state.providerId === "github-lens")
-        await requireGitHubLensConnect(deps, state.workspaceId);
       const provider =
         state.providerId === "github-lens" ? deps.prReviewGithubAppApi : deps.githubAppApi;
       const settings =
         state.providerId === "github-lens"
           ? settingsForPrReviewGitHubApp(deps.settings)
           : deps.settings;
-      if (
-        stored.attempt.nextAction.type !== "authorize" ||
-        new URL(stored.attempt.nextAction.url).searchParams.get("state") !== input.state
-      )
-        throw new Error("Stale GitHub setup stage");
       let prepared: PreparedConnectOperation;
       if (input.error || (state.phase !== "install" && !input.code)) {
         prepared = {

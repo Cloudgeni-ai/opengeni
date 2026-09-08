@@ -15,7 +15,7 @@ import {
 import { getCapabilityPack } from "@opengeni/core";
 import { grantWorkspaceAccess, withWorkspaceSubjectRls } from "@opengeni/db";
 import { stableJson } from "@opengeni/contracts";
-import { createSignedState } from "@opengeni/github";
+import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -203,6 +203,20 @@ for (const providerId of ["github-app", "github-lens"] as const)
     });
     expect(selection.status).toBe(200);
     const binding = await selection.json();
+    // Two signed browser stages may coexist. An obsolete unconsumed stage must
+    // not acquire a durable claim and strand the current authorization stage.
+    const supersededState = createSignedState("embedded-app-state", {
+      ...readSignedState(
+        new URL(binding.nextAction.url).searchParams.get("state")!,
+        "embedded-app-state",
+      ),
+      nonce: randomUUID(),
+    });
+    const supersededUrl = new URL(binding.nextAction.url);
+    supersededUrl.searchParams.set("state", supersededState);
+    expect((await callback(supersededUrl.toString())).headers.get("location")).toBe(returnUrl);
+    expect(await (await app.request(`${base}/${attempt.id}`, { headers })).json()).toEqual(binding);
+    expect(proofs).toBe(0);
     expect((await callback(binding.nextAction.url)).headers.get("location")).toBe(returnUrl);
     expect(await (await app.request(`${base}/${attempt.id}`, { headers })).json()).toMatchObject({
       state: "complete",
