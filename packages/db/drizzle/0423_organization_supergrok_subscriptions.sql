@@ -224,3 +224,9 @@ END
 $body$;
 CREATE TRIGGER xai_organization_live_disconnect_guard BEFORE DELETE ON xai_subscription_credentials
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.prevent_organization_xai_live_disconnect();
+
+-- Trigger execution stays attached to table writes; unrelated roles receive no
+-- direct function capability through PostgreSQL's default PUBLIC grant.
+REVOKE ALL ON FUNCTION opengeni_private.enforce_xai_organization_runtime_update() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.enforce_xai_credential_pool_reference() FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.prevent_organization_xai_live_disconnect() FROM PUBLIC;
