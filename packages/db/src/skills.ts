@@ -25,7 +25,7 @@ export async function applySkillLifecycle(
   request: Record<string, unknown>,
 ): Promise<SkillWriteReceipt> {
   const run = async (tx: Database) => {
-    if (context.actor.kind === "human") {
+    if (context.actor.kind !== "agent") {
       await tx.execute(
         sql`SELECT set_config('opengeni.principal_kind', ${context.actor.principalKind}, true)`,
       );
@@ -85,7 +85,7 @@ export async function applySkillLifecycle(
     if (!rows[0]) throw new Error("Skill lifecycle returned no durable receipt");
     return rows[0].receipt;
   };
-  return context.actor.kind === "human"
+  return context.actor.kind !== "agent"
     ? withWorkspaceSubjectRls(db, context.workspaceId, context.actor.subjectId, run)
     : withWorkspaceRls(db, context.workspaceId, run);
 }

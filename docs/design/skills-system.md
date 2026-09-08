@@ -379,6 +379,16 @@ Worker install retries consult their original-request receipt before remote
 source resolution. Startup contribution accounting now uses the actual bounded
 index text rather than loading every installed Skill folder.
 
+Composite-install audit still open: registry publication must not expose a
+source-managed Skill before its owning Pack/Plugin becomes effective. The old
+portable runtime filters effective owners, but the shared registry descriptor
+and snapshot paths need equivalent protection. Do not fix historical snapshots
+by filtering their canonical as-of content against mutable current owner state.
+Verify admission/publication ordering, incomplete operation recovery, and
+customization preservation with real PostgreSQL before rollout. Composite
+responses now retain per-Skill publication receipts and the existing UI notice
+distinguishes pending changes from installed distribution components.
+
 ## 6. Current implementation: verified baseline
 
 Paths below refer to the main commit recorded at the top, not necessarily this

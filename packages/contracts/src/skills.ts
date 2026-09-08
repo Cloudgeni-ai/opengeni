@@ -7,6 +7,11 @@ export const SkillFile = z.object({ path: z.string().min(1).max(512), content: z
 export type SkillFile = z.infer<typeof SkillFile>;
 export const SkillActor = z.discriminatedUnion("kind", [
   z.object({
+    kind: z.literal("service"),
+    subjectId: z.string().min(1),
+    principalKind: z.enum(["service", "api_key", "configured_key"]),
+  }),
+  z.object({
     kind: z.literal("human"),
     subjectId: z.string().min(1),
     principalKind: z.literal("human_session"),

@@ -40,6 +40,13 @@ constructing a human actor. `principalKind: human_session` is a trusted boundary
 fact, not a model argument. Humans bypass Learning, not authorization. Existing
 organization and personal preference scope visibility remains intact.
 
+Authenticated service/API-key callers install sources as a distinct `service`
+actor, never as a human. This authority is limited to workspace installation:
+Learning Off refuses it, Suggest retains a pending revision, and Automatic makes
+the revision live. Machine callers cannot approve revisions, write authored
+folders, restore history, or remove a final Skill source through this actor.
+Those operations are not silently attributed to an initiating human.
+
 Agent claims must come from the live host attempt, never the tool arguments.
 The database binds account, workspace, session, active turn, active attempt,
 execution generation, state, and interruptions. Agent writes are workspace-only

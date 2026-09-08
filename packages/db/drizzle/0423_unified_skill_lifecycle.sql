@@ -99,7 +99,8 @@ BEGIN
 END $rls$;
 
 -- This is a separate truthful agent lifecycle, not a human-session impersonation.
--- The caller supplies trusted HTTP human identity or host-bound exact attempt claims.
+-- The caller supplies trusted HTTP identity or host-bound exact attempt claims.
+-- Machine credentials may install sources only, under workspace Learning mode.
 CREATE FUNCTION skill_apply_lifecycle(p_account_id uuid, p_workspace_id uuid, p_actor jsonb, p_request jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
 <<lifecycle>>
@@ -143,6 +144,11 @@ BEGIN
     AND p_actor->>'subjectId' = nullif(current_setting('opengeni.subject_id',true),'')
     AND current_setting('opengeni.principal_kind',true) = 'human_session' THEN
     actor_subject := p_actor->>'subjectId';
+  ELSIF p_actor->>'kind' = 'service' AND operation = 'install' AND scope = 'workspace'
+    AND p_actor->>'principalKind' IN ('service','api_key','configured_key')
+    AND p_actor->>'subjectId' = nullif(current_setting('opengeni.subject_id',true),'')
+    AND p_actor->>'principalKind' = current_setting('opengeni.principal_kind',true) THEN
+    actor_subject := p_actor->>'subjectId';
   ELSE RAISE EXCEPTION 'Skill lifecycle actor is not authorized' USING ERRCODE='42501'; END IF;
 
   fingerprint := encode(sha256(convert_to(jsonb_build_array(p_actor,p_request)::text,'UTF8')),'hex');
@@ -153,7 +159,7 @@ BEGIN
       RAISE EXCEPTION 'Skill operation key reused with different input' USING ERRCODE='23505'; END IF;
     RETURN (prior.receipt - 'portableInstall') || jsonb_build_object('replayed',true);
   END IF;
-  IF p_actor->>'kind' = 'agent' THEN
+  IF p_actor->>'kind' IN ('agent','service') THEN
     SELECT r.workspace_mode INTO mode FROM workspace_learning_policy_heads h
       JOIN workspace_learning_policy_revisions r ON r.id=h.revision_id AND r.account_id=h.account_id
       WHERE h.account_id=p_account_id AND h.workspace_id=p_workspace_id FOR SHARE OF h;
@@ -189,7 +195,7 @@ BEGIN
         FROM preference_registry_revisions r WHERE r.preference_id=head.id
         ORDER BY (r.id=head.active_revision_id) DESC NULLS LAST,r.revision DESC LIMIT 1;
     END IF;
-    IF (p_actor->>'kind' = 'agent' AND (head.scope <> 'workspace' OR head.scope_workspace_id <> p_workspace_id))
+    IF (p_actor->>'kind' IN ('agent','service') AND (head.scope <> 'workspace' OR head.scope_workspace_id <> p_workspace_id))
       OR (p_actor->>'kind' = 'human' AND NOT opengeni_private.preference_registry_scope_visible(
         head.account_id,head.scope,head.scope_workspace_id,head.scope_subject_id)) THEN
       RAISE EXCEPTION 'Skill is outside authorized scope' USING ERRCODE='42501'; END IF;
@@ -230,7 +236,7 @@ BEGIN
       VALUES(p_account_id,skill_id,title,description,main_content,encode(sha256(convert_to(main_content,'UTF8')),'hex'),
         'override',CASE WHEN operation='install' THEN 'portable_skill' WHEN p_actor->>'kind'='agent' THEN 'agent' ELSE 'human' END,
         CASE WHEN operation='install' THEN source_id WHEN p_actor->>'kind'='agent' THEN p_actor->>'attemptId' END,
-        CASE WHEN p_actor->>'kind'='agent' THEN 'untrusted_proposal' WHEN scope='user' THEN 'personal'
+        CASE WHEN p_actor->>'kind' IN ('agent','service') THEN 'untrusted_proposal' WHEN scope='user' THEN 'personal'
           WHEN scope='organization' THEN 'organization_managed' ELSE 'workspace_managed' END,
         actor_subject,head.active_revision_id,files,activation_mode) RETURNING id INTO revision_id;
     END IF;

@@ -55,7 +55,12 @@ test("Skill installer carries exact signed attempt identity instead of attributi
 
 test("service and key principals cannot acquire human Skill authority", () => {
   for (const principalKind of ["service", "api_key", "configured_key"] as const) {
-    expect(() => skillInstallerActor(authorization({ principalKind }))).toThrow();
+    expect(skillInstallerActor(authorization({ principalKind }))).toEqual({
+      kind: "service",
+      principalKind,
+      subjectId: "user:installer",
+    });
+    expect(skillRemovalActor(authorization({ principalKind }))).toBeUndefined();
   }
   expect(() => skillInstallerActor(authorization({ subjectId: "api_key:example" }))).toThrow();
   expect(() =>

@@ -34,9 +34,16 @@ export function skillInstallerActor(access: AccessGrantAuthorization): SkillActo
   ) {
     return { kind: "human", principalKind: "human_session", subjectId: grant.subjectId };
   }
+  if (
+    grant.principalKind === "service" ||
+    grant.principalKind === "api_key" ||
+    grant.principalKind === "configured_key"
+  ) {
+    return { kind: "service", principalKind: grant.principalKind, subjectId: grant.subjectId };
+  }
   throw new HTTPException(403, {
     message:
-      "Skill installation requires a human session or a live agent attempt; service principals cannot be attributed as humans.",
+      "Skill installation requires authenticated human, service, or complete live-attempt authority.",
   });
 }
 
