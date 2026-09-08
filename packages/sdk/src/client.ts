@@ -272,6 +272,7 @@ import type {
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
@@ -297,6 +298,7 @@ import type {
   OrganizationRecoveryMutationResponse,
   OrganizationRecoveryOperationCommandRequest,
   OrganizationRecoveryOverview,
+  OrganizationSessionListResponse,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
@@ -371,6 +373,7 @@ import type {
   UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
+  SessionEndUser,
   SessionEvent,
   SessionEventCompactResult,
   SessionEventCompactResultOptions,
@@ -583,12 +586,14 @@ function sessionListQuery(options: {
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
+  endUser?: SessionEndUser;
 }): Record<string, string> {
-  const { limit, parentSessionId } = options;
+  const { limit, parentSessionId, endUser } = options;
   return {
     ...(options.originSiteId ? { originSiteId: options.originSiteId } : {}),
     ...(limit === undefined ? {} : { limit: String(limit) }),
     ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
+    ...(endUser === undefined ? {} : { endUserSource: endUser.source, endUserId: endUser.id }),
   };
 }
 
@@ -597,6 +602,8 @@ export type SessionListPageOptions = {
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
+  /** Only sessions carrying this exact opaque end-user label. */
+  endUser?: SessionEndUser;
   cursor?: string;
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
@@ -1289,6 +1296,8 @@ export class OpenGeniClient {
       limit?: number;
       parentSessionId?: string | null;
       search?: string;
+      /** Only sessions carrying this exact opaque end-user label. */
+      endUser?: SessionEndUser;
     } = {},
   ): Promise<Session[]> {
     // Search and Site filtering use the pin-aware page endpoint. An older API silently
@@ -7381,6 +7390,58 @@ export class OpenGeniClient {
       "DELETE",
       `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
     );
+  }
+
+  // --- Organization-wide sessions ----------------------------------------------------------------
+
+  /**
+   * One page of sessions across every shared workspace of the organization the
+   * caller may read (an organization API key, `full` or `read`, or an
+   * organization owner). Each row carries its `workspaceId`; read events,
+   * history, and files through the ordinary workspace methods. Personal
+   * workspaces are never included and private sessions stay invisible.
+   */
+  async listOrganizationSessions(
+    organizationId: string,
+    options: ListOrganizationSessionsOptions = {},
+  ): Promise<OrganizationSessionListResponse> {
+    return await this.requestJson<OrganizationSessionListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/sessions`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+        ...(options.endUser
+          ? { endUserSource: options.endUser.source, endUserId: options.endUser.id }
+          : {}),
+        ...(options.status === undefined ? {} : { status: options.status }),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Every session `listOrganizationSessions` would return, following
+   * `nextCursor` page by page until the organization is exhausted. A page may
+   * be shorter than `limit` while more pages remain, so callers must not treat
+   * a short page as the end.
+   */
+  async *iterateOrganizationSessions(
+    organizationId: string,
+    options: Omit<ListOrganizationSessionsOptions, "cursor"> = {},
+  ): AsyncGenerator<Session, void, undefined> {
+    let cursor: string | undefined;
+    do {
+      const page: OrganizationSessionListResponse = await this.listOrganizationSessions(
+        organizationId,
+        { ...options, ...(cursor === undefined ? {} : { cursor }) },
+      );
+      for (const session of page.sessions) {
+        yield session;
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
   }
 
   // --- Billing (account-scoped) --------------------------------------------------------------------

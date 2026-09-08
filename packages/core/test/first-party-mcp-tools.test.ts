@@ -27,8 +27,29 @@ describe("first-party MCP tool selection at session creation", () => {
     ]);
   });
 
-  test("an explicit child selection replaces inherited visibility", () => {
-    expect(resolveFirstPartyMcpToolsForCreate(["session_create"], ["set_session_title"])).toEqual([
+  test("an explicit child selection replaces inherited visibility but may only narrow it", () => {
+    expect(
+      resolveFirstPartyMcpToolsForCreate(
+        ["set_session_title"],
+        ["set_session_title", "session_create"],
+      ),
+    ).toEqual(["set_session_title"]);
+    // The hole: a wider explicit child list used to be returned verbatim.
+    expect(() =>
+      resolveFirstPartyMcpToolsForCreate(["session_create"], ["set_session_title"]),
+    ).toThrow(
+      "child first-party MCP tools may only narrow the parent session selection: session_create",
+    );
+    // A legacy null parent selection means the deployment default catalog.
+    expect(resolveFirstPartyMcpToolsForCreate(["set_session_title"], null)).toEqual([
+      "set_session_title",
+    ]);
+    // Pause authority carries its resume counterpart, as the runtime grants it.
+    expect(resolveFirstPartyMcpToolsForCreate(["goal_resume"], ["goal_pause"])).toEqual([
+      "goal_resume",
+    ]);
+    // A top-level explicit request has no creator selection to narrow.
+    expect(resolveFirstPartyMcpToolsForCreate(["session_create"], undefined)).toEqual([
       "session_create",
     ]);
   });

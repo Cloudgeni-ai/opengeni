@@ -203,6 +203,23 @@
         "typescript": "7.0.2",
       },
     },
+    "examples/chat-quickstart": {
+      "name": "@opengeni/example-chat-quickstart",
+      "version": "0.0.1",
+      "dependencies": {
+        "@opengeni/react": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
+        "@vitejs/plugin-react": "^6.0.1",
+        "react": "^19.2.5",
+        "react-dom": "^19.2.5",
+        "vite": "^8.0.9",
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.14",
+        "@types/react-dom": "^19.2.3",
+        "typescript": "7.0.2",
+      },
+    },
     "examples/northstar-support": {
       "name": "@opengeni/example-northstar-support",
       "version": "0.0.137",
@@ -645,6 +662,7 @@
         "@opengeni/codex": "workspace:*",
         "@opengeni/deployment": "workspace:*",
         "fake-indexeddb": "^6.2.5",
+        "openai": "6.47.0",
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
         "zod": "^4.2.1",
@@ -1368,6 +1386,8 @@
     "@opengeni/documents": ["@opengeni/documents@workspace:packages/documents"],
 
     "@opengeni/events": ["@opengeni/events@workspace:packages/events"],
+
+    "@opengeni/example-chat-quickstart": ["@opengeni/example-chat-quickstart@workspace:examples/chat-quickstart"],
 
     "@opengeni/example-northstar-support": ["@opengeni/example-northstar-support@workspace:examples/northstar-support"],
 

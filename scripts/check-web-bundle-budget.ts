@@ -452,7 +452,17 @@ const effectiveBudgets = {
   // entry points merged with 380bba5e6 measure 2,326,478 raw / 649,427 gzip
   // bytes on macOS/arm64.
   // Keep the established whole-KiB headroom and gzip platform-skew allowance.
-  directSessionRaw: Math.max(budgets.directSessionRaw, wholeKibEnvelope(2_326_478)),
+  // Chat integration against main 8e0bf0d28 on Bun 1.3.14 macOS/arm64:
+  // base 2,329,705 raw / 650,067 gzip; integrated 2,333,912 / 651,444.
+  // Organization-session SDK methods and the explicit Site route allowlist
+  // stay in the shared graph; the chat UI remains outside it. Both trees have
+  // 31 direct-session files and identical CSS. Bound only this measured delta
+  // with the existing raw headroom and gzip platform-skew policy.
+  directSessionRaw: Math.max(
+    budgets.directSessionRaw,
+    wholeKibEnvelope(2_326_478),
+    wholeKibEnvelope(2_333_912),
+  ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -472,6 +482,7 @@ const effectiveBudgets = {
     wholeKibEnvelope(647_413, 1.5 * kib),
     // Merged 380bba5e6 model/context UI: 649,427 gzip bytes locally.
     wholeKibEnvelope(649_427, 1.5 * kib),
+    wholeKibEnvelope(651_444, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

@@ -35,3 +35,5 @@ If you send an ordinary message while the session is waiting on an approval or a
 ## Where the wait shows up
 
 Both waits appear on the session timeline in the web app, on embedded timelines built with `@opengeni/react`, and in the session's events through the API. A structured question from a child session can also be answered by an authorized agent in another session; tool approvals never can.
+
+The `@opengeni/react/chat` component restores unresolved approvals and questions when you reload a conversation through `createChatHandler`. Its question form supports multiple selections, selection limits, and Other answers. Completed or expired requests are not shown as actionable after reload.
