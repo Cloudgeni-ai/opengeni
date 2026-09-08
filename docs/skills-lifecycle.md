@@ -162,6 +162,13 @@ instruction-policy, and historical proposal/receipt reads are unchanged. New
 Skills must use the shared file lifecycle and simple Learning mode, not the
 Knowledge confidence/evidence evaluator.
 
+The exported `createRememberRouter().remember()` domain entry point also rejects
+new `lane=preference` requests with `RememberError.code = "preference_retired"`
+before creating a Task note, policy snapshot, proposal, or confirmation question,
+regardless of Learning mode. MCP already redirects that lane to `skill_save`.
+The historical confirmation and receipt schemas remain readable; Knowledge and
+instruction-policy remember/confirm workflows retain their existing behavior.
+
 The exact 0426 runner stage executes inside an explicit migration transaction:
 setup and owner window, TypeScript parsing into a temporary staging table, then
 SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
