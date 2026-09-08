@@ -5,7 +5,7 @@ import {
   resolveSkillImport,
   type GitHubSkillSourceClient,
   type GitHubSkillTreeEntry,
-} from "../src";
+} from "../src/domain/skill-imports";
 
 const commit = "a".repeat(40);
 const skillMarkdown = `---
@@ -82,7 +82,11 @@ describe("remote Skill source resolution", () => {
             size: skillMarkdown.length,
           },
         ],
-        { skill: skillMarkdown, checklist: "Verify.\n", other: skillMarkdown },
+        {
+          skill: skillMarkdown,
+          checklist: "Verify.\n",
+          other: skillMarkdown.replace("release-operator", "other"),
+        },
       ),
     );
     expect(resolved.preview).toMatchObject({
@@ -139,5 +143,167 @@ describe("remote Skill source resolution", () => {
     await expect(
       resolveSkillImport("https://github.com/acme/skills/tree/main/release", unsafe),
     ).rejects.toThrow("symbolic links or submodules");
+  });
+
+  test("matches frontmatter identity rather than directory and reuses pinned metadata blobs", async () => {
+    const reads: string[] = [];
+    const resolved = await resolveSkillImport(
+      "https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices",
+      {
+        resolveCommit: async (_owner, _repo, ref) => {
+          expect(ref).toBe("HEAD");
+          return commit;
+        },
+        listTree: async (_owner, _repo, revision) => {
+          expect(revision).toBe(commit);
+          return [
+            {
+              path: "skills/react-best-practices/SKILL.md",
+              type: "blob",
+              mode: "100644",
+              sha: "metadata",
+              size: null,
+            },
+          ];
+        },
+        readBlob: async (_owner, _repo, sha) => {
+          reads.push(sha);
+          return new TextEncoder().encode(
+            skillMarkdown.replace("release-operator", "vercel-react-best-practices"),
+          );
+        },
+      },
+    );
+    expect(resolved.preview.sourcePath).toBe("skills/react-best-practices");
+    expect(resolved.preview.sourceCommit).toBe(commit);
+    expect(reads).toEqual(["metadata"]);
+  });
+
+  test("duplicate frontmatter identities require an exact folder override", async () => {
+    const client = sourceClient(
+      ["one", "release-operator"].map((path) => ({
+        path: `${path}/SKILL.md`,
+        type: "blob",
+        mode: "100644",
+        sha: path,
+        size: null,
+      })),
+      { one: skillMarkdown, "release-operator": skillMarkdown },
+    );
+    await expect(
+      resolveSkillImport("https://skills.sh/acme/skills/release-operator", client),
+    ).rejects.toThrow("multiple Skills");
+    const resolved = await resolveSkillImport(
+      `https://github.com/acme/skills/tree/${commit}/one`,
+      client,
+    );
+    expect(resolved.preview.sourcePath).toBe("one");
+  });
+
+  test("retains the legacy folder alias when no frontmatter identity matches", async () => {
+    const client = sourceClient(
+      [{ path: "alias/SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null }],
+      { skill: skillMarkdown },
+    );
+    expect(
+      (await resolveSkillImport("https://skills.sh/acme/skills/alias", client)).preview.name,
+    ).toBe("release-operator");
+  });
+
+  test("root Skill source URLs round trip through preview and exact commit URLs", async () => {
+    const client = sourceClient(
+      [{ path: "SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null }],
+      { skill: skillMarkdown },
+    );
+    const resolved = await resolveSkillImport("https://github.com/acme/skills", client);
+    expect(resolved.preview.sourcePath).toBe(".");
+    expect(
+      (await resolveSkillImport(resolved.preview.sourceUrl, client)).preview.contentSha256,
+    ).toBe(resolved.preview.contentSha256);
+    expect(
+      (await resolveSkillImport(`https://github.com/acme/skills/blob/${commit}/SKILL.md`, client))
+        .preview.sourcePath,
+    ).toBe(".");
+  });
+
+  test("bounds candidate scanning before reading blobs", async () => {
+    let reads = 0;
+    const client = sourceClient(
+      Array.from({ length: 129 }, (_, index) => ({
+        path: `skill-${index}/SKILL.md`,
+        type: "blob",
+        mode: "100644",
+        sha: String(index),
+        size: null,
+      })),
+      {},
+    );
+    await expect(
+      resolveSkillImport("https://skills.sh/acme/skills/release-operator", {
+        ...client,
+        readBlob: async () => {
+          reads++;
+          return new Uint8Array();
+        },
+      }),
+    ).rejects.toThrow("Too many Skill candidates");
+    expect(reads).toBe(0);
+  });
+
+  test("bounds actual metadata bytes when provider size is unknown", async () => {
+    const client = sourceClient(
+      [{ path: "one/SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null }],
+      {},
+    );
+    await expect(
+      resolveSkillImport("https://skills.sh/acme/skills/release-operator", {
+        ...client,
+        readBlob: async () => new Uint8Array(256 * 1024 + 1),
+      }),
+    ).rejects.toThrow("metadata is too large");
+  });
+
+  test("preserves network failures instead of mislabelling them invalid UTF-8", async () => {
+    const client = sourceClient(
+      [{ path: "one/SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null }],
+      {},
+    );
+    await expect(
+      resolveSkillImport("https://github.com/acme/skills/tree/main/one", {
+        ...client,
+        readBlob: async () => {
+          throw new Error("GitHub limited the request");
+        },
+      }),
+    ).rejects.toThrow("GitHub limited the request");
+    expect(() => parseSkillSource("https://github.com/acme/skills/tree/main/%zz")).toThrow(
+      "invalid encoding",
+    );
+  });
+
+  test("stops scheduling candidate reads once aggregate metadata exceeds its budget", async () => {
+    let reads = 0;
+    const client = sourceClient(
+      Array.from({ length: 24 }, (_, index) => ({
+        path: `skill-${index}/SKILL.md`,
+        type: "blob",
+        mode: "100644",
+        sha: String(index),
+        size: null,
+      })),
+      {},
+    );
+    const metadata = new TextEncoder().encode(`${skillMarkdown}${" ".repeat(200 * 1024)}`);
+    await expect(
+      resolveSkillImport("https://skills.sh/acme/skills/release-operator", {
+        ...client,
+        readBlob: async () => {
+          reads++;
+          return metadata;
+        },
+      }),
+    ).rejects.toThrow("metadata is too large");
+    // Eight reads can already be in flight when one detects the limit.
+    expect(reads).toBeLessThanOrEqual(13);
   });
 });

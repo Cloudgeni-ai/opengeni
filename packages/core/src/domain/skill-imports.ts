@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { SkillImportPreview, SkillImportSource } from "@opengeni/contracts";
 import {
   buildPortableSkillArtifact,
+  parsePortableSkillFrontmatter,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
   PORTABLE_SKILL_MAX_FILES,
   PORTABLE_SKILL_MAX_TOTAL_BYTES,
   type SkillLibraryFile,
@@ -55,7 +57,18 @@ export async function resolveSkillImport(
     throw new HTTPException(422, { message: "GitHub returned an invalid source commit" });
   }
   const tree = await client.listTree(parsed.owner, parsed.repository, sourceCommit);
-  const sourcePath = selectSkillRoot(parsed, tree);
+  // Metadata discovery and the selected artifact share immutable blobs. This
+  // avoids reading SKILL.md twice without caching mutable refs or remote URLs.
+  const blobs = new Map<string, Promise<Uint8Array>>();
+  const readBlob = (sha: string) => {
+    let pending = blobs.get(sha);
+    if (!pending) {
+      pending = client.readBlob(parsed.owner, parsed.repository, sha);
+      blobs.set(sha, pending);
+    }
+    return pending;
+  };
+  const sourcePath = await selectSkillRoot(parsed, tree, readBlob);
   const entries = skillFilesUnderRoot(tree, sourcePath);
   const declaredBytes = entries.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
   if (entries.length > PORTABLE_SKILL_MAX_FILES) {
@@ -69,11 +82,11 @@ export async function resolveSkillImport(
     });
   }
   const files = await mapConcurrent(entries, maxConcurrentBlobReads, async (entry) => {
+    // Keep provider/network failures distinct from UTF-8 validation failures.
+    const bytes = await readBlob(entry.sha);
     let content: string;
     try {
-      content = new TextDecoder("utf-8", { fatal: true }).decode(
-        await client.readBlob(parsed.owner, parsed.repository, entry.sha),
-      );
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       throw new HTTPException(422, {
         message: `Skill file is not valid UTF-8 text: ${relativeSkillPath(entry.path, sourcePath)}`,
@@ -159,7 +172,12 @@ export function parseSkillSource(rawUrl: string): ParsedSkillSource {
       message: "Skill imports require a credential-free HTTPS URL without a fragment",
     });
   }
-  const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  let segments: string[];
+  try {
+    segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    throw new HTTPException(422, { message: "The Skill URL contains invalid encoding" });
+  }
   if (url.hostname === "skills.sh" || url.hostname === "www.skills.sh") {
     if (segments.length !== 3) {
       throw new HTTPException(422, {
@@ -212,14 +230,14 @@ export function parseSkillSource(rawUrl: string): ParsedSkillSource {
   const ref = segments[3];
   if (!ref) throw new HTTPException(422, { message: "The GitHub URL is missing a revision" });
   const pathSegments = segments.slice(4);
-  if (pathSegments.length === 0) {
+  if (pathSegments.length === 0 && mode === "blob") {
     throw new HTTPException(422, { message: "The GitHub URL is missing a Skill folder" });
   }
-  const requestedPath = normalizeGitHubPath(
+  const folderSegments =
     mode === "blob" && pathSegments.at(-1)?.toLowerCase() === "skill.md"
       ? pathSegments.slice(0, -1)
-      : pathSegments,
-  );
+      : pathSegments;
+  const requestedPath = folderSegments.length === 0 ? "." : normalizeGitHubPath(folderSegments);
   return {
     source: "github",
     owner,
@@ -231,7 +249,11 @@ export function parseSkillSource(rawUrl: string): ParsedSkillSource {
   };
 }
 
-function selectSkillRoot(source: ParsedSkillSource, tree: readonly GitHubSkillTreeEntry[]): string {
+async function selectSkillRoot(
+  source: ParsedSkillSource,
+  tree: readonly GitHubSkillTreeEntry[],
+  readBlob: (sha: string) => Promise<Uint8Array>,
+): Promise<string> {
   const skillFiles = tree
     .filter(
       (entry) =>
@@ -239,7 +261,7 @@ function selectSkillRoot(source: ParsedSkillSource, tree: readonly GitHubSkillTr
         entry.mode !== "120000" &&
         (entry.path === "SKILL.md" || entry.path.endsWith("/SKILL.md")),
     )
-    .map((entry) => entry.path.slice(0, -"/SKILL.md".length) || ".")
+    .map((entry) => (entry.path === "SKILL.md" ? "." : entry.path.slice(0, -"/SKILL.md".length)))
     .sort();
   if (source.requestedPath) {
     const root = source.requestedPath;
@@ -250,9 +272,56 @@ function selectSkillRoot(source: ParsedSkillSource, tree: readonly GitHubSkillTr
     }
     return root;
   }
-  const candidates = source.skillSlug
-    ? skillFiles.filter((path) => path.split("/").at(-1) === source.skillSlug)
-    : skillFiles;
+  let candidates = skillFiles;
+  if (source.skillSlug) {
+    // skills.sh identifies frontmatter names, not necessarily folder basenames
+    // (e.g. vercel-react-best-practices lives in skills/react-best-practices).
+    // Bound discovery as well as the eventual artifact; exact folder URLs avoid
+    // this scan for very large repositories or duplicate names.
+    if (skillFiles.length > PORTABLE_SKILL_MAX_FILES) {
+      throw new HTTPException(422, {
+        message: "Too many Skill candidates; paste the exact GitHub folder URL",
+      });
+    }
+    let metadataBytes = 0;
+    const entriesByPath = new Map(tree.map((entry) => [entry.path, entry]));
+    const matches = await mapConcurrent(skillFiles, maxConcurrentBlobReads, async (root) => {
+      const entry = entriesByPath.get(root === "." ? "SKILL.md" : `${root}/SKILL.md`)!;
+      if ((entry.size ?? 0) > PORTABLE_SKILL_MAX_FILE_BYTES) {
+        throw new HTTPException(422, {
+          message: "Skill metadata is too large; paste the exact GitHub folder URL",
+        });
+      }
+      const bytes = await readBlob(entry.sha);
+      metadataBytes += bytes.byteLength;
+      if (
+        bytes.byteLength > PORTABLE_SKILL_MAX_FILE_BYTES ||
+        metadataBytes > PORTABLE_SKILL_MAX_TOTAL_BYTES
+      ) {
+        throw new HTTPException(422, {
+          message: "Skill metadata is too large; paste the exact GitHub folder URL",
+        });
+      }
+      let markdown: string;
+      try {
+        markdown = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new HTTPException(422, {
+          message: "Skill metadata is not valid UTF-8; paste the exact GitHub folder URL",
+        });
+      }
+      return (
+        parsePortableSkillFrontmatter(markdown).name?.toLowerCase() ===
+        source.skillSlug!.toLowerCase()
+      );
+    });
+    candidates = skillFiles.filter((_, index) => matches[index]);
+    // Retain the existing directory-name form for old skills.sh links, but an
+    // actual frontmatter identity always takes precedence over this fallback.
+    if (candidates.length === 0) {
+      candidates = skillFiles.filter((path) => path.split("/").at(-1) === source.skillSlug);
+    }
+  }
   if (candidates.length === 0) {
     throw new HTTPException(422, { message: "No Skill folder with SKILL.md was found" });
   }
@@ -332,13 +401,22 @@ async function mapConcurrent<Input, Output>(
 ): Promise<Output[]> {
   const output = new Array<Output>(values.length);
   let next = 0;
+  let failed = false;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, values.length) }, async () => {
       for (;;) {
+        if (failed) return;
         const index = next;
         next += 1;
         if (index >= values.length) return;
-        output[index] = await map(values[index]!);
+        try {
+          output[index] = await map(values[index]!);
+        } catch (error) {
+          // Let existing reads settle, but do not launch further provider calls
+          // after any peer detects a failed request or an exceeded byte budget.
+          failed = true;
+          throw error;
+        }
       }
     }),
   );
