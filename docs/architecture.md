@@ -54,9 +54,7 @@ The product has several deliberately separate surfaces:
   ComputerSession interaction, terminals, and published outputs.
 - **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
   stock web console, and advanced in-process host seams.
-- **Feedback** retains authenticated general comments and session/turn ratings separately
-  from conversation and agent context. See [`feedback.md`](feedback.md),
-  `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts`.
+- **[Feedback](feedback.md)** collects comments and ratings.
 - **Operations** include usage metering, entitlement admission, billing,
   deployment contracts, observability, and release evidence.
 
