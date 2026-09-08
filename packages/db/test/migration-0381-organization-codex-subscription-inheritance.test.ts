@@ -13,6 +13,7 @@ import {
   setWorkspaceCodexSubscriptionMode,
   setWorkspaceCodexSubscriptionModeInTransaction,
   upsertCodexSubscriptionCredential,
+  upsertOrganizationCodexSubscriptionCredential,
   withSessionCodexCapacityMutation,
   type DbClient,
 } from "../src";
@@ -125,7 +126,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /mutateCodexCapacityInTransaction[\s\S]*?sourceBefore[\s\S]*?sourceAfter[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
     );
     expect(dbIndexSource).toMatch(
-      /lockOrganizationCodexSubscriptionSources[\s\S]*?list_organization_workspace_ids[\s\S]*?lockWorkspaceCodexSubscriptionSource/u,
+      /lockOrganizationCodexSubscriptionSources[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?lockWorkspaceCodexSubscriptionSource/u,
     );
     expect(dbIndexSource).toMatch(
       /withOrganizationCodexAdministrator[\s\S]*?lockOrganizationMembershipLifecycle[\s\S]*?get_organization_administration_overview/u,
@@ -137,7 +138,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /input\.source === "organization"[\s\S]*?codex_organization_live_lease_count/u,
     );
     expect(dbIndexSource).toMatch(
-      /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_workspace_ids[\s\S]*?session-tenancy:/u,
+      /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?session-tenancy:/u,
     );
     expect(apiCodexRouteSource).toMatch(
       /withSessionCodexCapacityMutation[\s\S]*?sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction[\s\S]*?effectiveSourceBeforeMutation: sourceBeforeConnect\.effectiveSource/u,
@@ -154,7 +155,34 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     }
   });
 
-  test("inherits into shared workspaces, excludes personal workspaces, and honors overrides", async () => {
+  test("Personal activation requires drained runtimes before installing the Codex inventory", async () => {
+    const activation = await Bun.file(
+      new URL(
+        "../drizzle/0422_personal_workspace_organization_codex_inheritance.sql",
+        import.meta.url,
+      ),
+    ).text();
+    expect(activation).toStartWith("-- deployment-mode: maintenance");
+    expect(activation).toContain("$personal_codex_runtime_drain_before$");
+    expect(activation).toContain("$personal_codex_runtime_drain_after$");
+    expect(activation).toContain(
+      "REVOKE ALL ON FUNCTION list_organization_codex_workspace_ids(uuid) FROM PUBLIC",
+    );
+    if (!shared || !app) return;
+    const [runtime] = await app<{ name: string }[]>`select current_user as name`;
+    await expectSqlState(
+      () =>
+        shared!.admin.begin(async (transaction) => {
+          await transaction`select set_config(
+        'opengeni.migration_application_roles', ${JSON.stringify([runtime!.name])}, true
+      )`;
+          await transaction.unsafe(activation);
+        }),
+      "55000",
+    );
+  });
+
+  test("inherits into shared and Personal workspaces and honors overrides", async () => {
     if (!shared || !app || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('organization-codex-inheritance') returning id`;
@@ -182,6 +210,24 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       workspaceId: null,
       subjectId: ownerSubjectId,
     });
+    const codexInventory = await app<{ workspace_id: string }[]>`
+      select workspace_id from list_organization_codex_workspace_ids(${account!.id})`;
+    expect(new Set(codexInventory.map((row) => row.workspace_id))).toEqual(
+      new Set([personalWorkspace!.id, sharedWorkspace!.id]),
+    );
+    const ordinaryInventory = await app<{ workspace_id: string }[]>`
+      select workspace_id from list_organization_workspace_ids(${account!.id})`;
+    expect(ordinaryInventory.map((row) => row.workspace_id)).toEqual([sharedWorkspace!.id]);
+    await expectSqlState(
+      () => app!`select * from list_organization_codex_workspace_ids(${crypto.randomUUID()})`,
+      "42501",
+    );
+    await setAppContext({ accountId: account!.id, workspaceId: personalWorkspace!.id });
+    await expectSqlState(
+      () => app!`select * from list_organization_codex_workspace_ids(${account!.id})`,
+      "42501",
+    );
+    await setAppContext({ accountId: account!.id, workspaceId: null, subjectId: ownerSubjectId });
     const [organizationCredential] = await app<{ id: string }[]>`
       insert into codex_subscription_credentials (
         account_id, workspace_id, organization_id, authority_scope,
@@ -249,7 +295,50 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       select resolve_workspace_codex_subscription_source(
         ${account!.id}, ${personalWorkspace!.id}
       ) as source`;
-    expect(personalSource?.source).toBe("workspace");
+    expect(personalSource?.source).toBe("organization");
+    const personalPool = await app<{ id: string }[]>`
+      select id from codex_subscription_credentials`;
+    expect(personalPool.map((row) => row.id)).toEqual([organizationCredential!.id]);
+    await expectSqlState(
+      () => app!`update codex_subscription_credentials set label = 'personal takeover'
+        where id = ${organizationCredential!.id}`,
+      "42501",
+    );
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "disabled",
+    });
+    const [personalDisabled] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${personalWorkspace!.id}) as source`;
+    expect(personalDisabled?.source).toBe("disabled");
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "automatic",
+    });
+    await app`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, authority_scope, credential_encrypted, status
+      ) values (${account!.id}, ${personalWorkspace!.id}, 'workspace', 'local-ciphertext', 'active')`;
+    const [localPreferred] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${personalWorkspace!.id}) as source`;
+    expect(localPreferred?.source).toBe("workspace");
+    const organizationPreferred = await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "organization",
+    });
+    expect(organizationPreferred.effectiveSource).toBe("organization");
+    const [otherAccount] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('other organization') returning id`;
+    await setAppContext({ accountId: otherAccount!.id, workspaceId: personalWorkspace!.id });
+    expect(await app`select id from codex_subscription_credentials`).toHaveLength(0);
 
     await setAppContext({ accountId: account!.id, workspaceId: sharedWorkspace!.id });
     await app`
@@ -536,7 +625,89 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(turn.id).toBeString();
   });
 
-  test("allows an organization credential lease only in an inheriting shared workspace", async () => {
+  test("fences organization pool connect and disconnect against active Personal turns", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('personal organization source fences') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${account!.id}, 'Personal') returning id`;
+    const actorSubjectId = `user:${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (${account!.id}, ${actorSubjectId}, 'owner', 'active', ${workspace!.id})`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+    const session = await createSession(client.db, {
+      workspaceId: workspace!.id,
+      accountId: account!.id,
+      initialMessage: "retain the accepted source",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "codex/gpt-5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const turn = await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      const [row] = await transaction<{ id: string }[]>`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, position, prompt, model, reasoning_effort, sandbox_backend
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`personal-source-fence-${crypto.randomUUID()}`}, 'running', 0,
+          'retain the accepted source', 'codex/gpt-5', 'medium', 'none'
+        ) returning id`;
+      return row!;
+    });
+    const connect = () =>
+      upsertOrganizationCodexSubscriptionCredential(client!.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialEncrypted: "organization-ciphertext",
+        chatgptAccountId: crypto.randomUUID(),
+        scopes: null,
+        planType: null,
+        isFedramp: false,
+        expiresAt: null,
+        lastRefreshAt: null,
+      });
+    await expect(connect()).rejects.toThrow(
+      "Codex subscription source cannot change while active turns are using it",
+    );
+    const [rolledBack] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from codex_subscription_credentials
+      where account_id = ${account!.id}`;
+    expect(rolledBack?.count).toBe(0);
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`update session_turns set status = 'completed' where id = ${turn.id}`;
+    });
+    const credential = await connect();
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`update session_turns set status = 'waiting_capacity' where id = ${turn.id}`;
+    });
+    await expect(
+      disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: credential.id,
+      }),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    expect(await getWorkspaceCodexSubscriptionSource(client.db, workspace!.id)).toMatchObject({
+      effectiveSource: "organization",
+    });
+    const [retained] = await shared.admin<{ id: string }[]>`
+      select id from codex_subscription_credentials where id = ${credential.id}`;
+    expect(retained?.id).toBe(credential.id);
+  });
+
+  test("allows organization credential leases in inheriting shared and Personal workspaces", async () => {
     if (!shared || !app || !client) return;
     const dbClient = client;
     const [account] = await shared.admin<{ id: string }[]>`
@@ -687,16 +858,13 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       return turn!;
     });
     await setAppContext({ accountId: account!.id, workspaceId: personalWorkspace!.id });
-    await expectSqlState(
-      () =>
-        app!`
-          insert into codex_credential_leases (
-            account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
-          ) values (
-            ${account!.id}, ${personalWorkspace!.id}, ${credential!.id},
-            ${personalTurn.id}, 'personal-holder', now() + interval '5 minutes'
-          )`,
-      "23514",
-    );
+    const [personalLease] = await app<{ credential_id: string }[]>`
+      insert into codex_credential_leases (
+        account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
+      ) values (
+        ${account!.id}, ${personalWorkspace!.id}, ${credential!.id},
+        ${personalTurn.id}, 'personal-holder', now() + interval '5 minutes'
+      ) returning credential_id`;
+    expect(personalLease?.credential_id).toBe(credential!.id);
   });
 });

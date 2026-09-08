@@ -1214,7 +1214,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
-        mode: sourceBeforeConnect.workspaceKind === "personal" ? "automatic" : "workspace",
+        mode: "workspace",
         effectiveSourceBeforeMutation: sourceBeforeConnect.effectiveSource,
       });
       const rotation = await getCodexRotationSettings(tx, workspaceId);

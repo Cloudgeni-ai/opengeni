@@ -922,11 +922,10 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
-Managed billing is an API concern over the shared usage and entitlement
-boundaries. Provider subscription pools such as Codex or SuperGrok add their
-own credential and capacity authority without changing the logical-turn model.
-Codex may resolve to a workspace pool or an organization pool inherited by a
-shared workspace; the resolved pool remains one complete allocator boundary.
+Managed billing uses shared usage and entitlement boundaries. Codex and SuperGrok
+pools own credentials and capacity without changing logical turns. Shared and
+Personal workspaces can inherit their organization's Codex pool. Each pool has
+one allocator boundary and grants no workspace access.
 Vercel AI Gateway and OpenRouter expose separate workspace- and
 organization-owned BYOK products. Organization products use dedicated encrypted
 FORCE-RLS storage, inherit only into same-organization shared workspaces, and
