@@ -11116,14 +11116,11 @@ describe("runtime Skill activation", () => {
     });
     const index = enabled.lazySource.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("opengeni-sites");
-    const packagePins = JSON.parse(
-      readFileSync(
-        join(process.cwd(), ".opengeni/bundled_site_skills/opengeni-sites/package-versions.json"),
-        "utf8",
-      ),
-    );
+    const siteSource = (enabled.lazySource.source as any).children["opengeni-sites"];
+    const packagePins = JSON.parse(siteSource.children["package-versions.json"].content);
     expect(Object.keys(packagePins).sort()).toEqual([
       "@opengeni/codemode",
+      "@opengeni/ogtool",
       "@opengeni/react",
       "@opengeni/sdk",
     ]);

@@ -1,3 +1,4 @@
+import { AppearanceMenu } from "@/components/appearance-menu";
 // Pinned rail footer: the collapse-toggle chevron and the signed-in user menu
 // (account/sign-out, depending on auth mode). Collapsed → just the avatar +
 // a collapse chevron, both with tooltips.
@@ -91,7 +92,7 @@ export function RailFooter() {
               <button
                 type="button"
                 aria-label="Account menu"
-                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none pointer-coarse:py-2"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-h-11"
               >
                 <Avatar size="sm">
                   {image ? <AvatarImage src={image} alt="" /> : null}
@@ -114,7 +115,7 @@ export function RailFooter() {
             <DropdownMenuContent
               align="start"
               side={rail.collapsed ? "right" : "top"}
-              className="min-w-56"
+              className="w-[min(18rem,calc(100vw-1rem))]"
             >
               <DropdownMenuLabel className="grid gap-0.5">
                 <span className="truncate text-sm">{displayName}</span>
@@ -126,6 +127,7 @@ export function RailFooter() {
               {managed ? (
                 <OrganizationInvitationsMenuItem controller={organizationInvitations} />
               ) : null}
+              <AppearanceMenu />
               {showAnalyticsPreferences ? (
                 <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
                   <ChartColumnIcon className="size-4" />

@@ -38395,6 +38395,9 @@ export async function adoptManagedSessionBackgroundCommand(
           commandId: input.processId,
           retainedProcessId: input.processId,
           command: input.command,
+          turnId: input.turnId,
+          attemptId: input.attemptId,
+          executionGeneration: input.executionGeneration,
         });
       }),
   );
@@ -61784,7 +61787,9 @@ function systemUpdateCausalHumanTurnId(
       : null;
   const value = isChildLifecycleSystemUpdateKind(update.kind)
     ? lineage?.parentTurnId
-    : update.kind === "goal_continuation"
+    : update.kind === "goal_continuation" ||
+        update.kind === "background_command_result" ||
+        update.kind === "session_wait_timeout"
       ? lineage?.causalTurnId
       : null;
   if (typeof value !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value)) {
@@ -61829,7 +61834,12 @@ function systemUpdateCausalExecutionKey(
 ): string | null {
   const targetTurnId = systemUpdateCausalHumanTurnId(update);
   if (targetTurnId) return `target-turn:${targetTurnId}`;
-  if (isChildLifecycleSystemUpdateKind(update.kind) || update.kind === "goal_continuation") {
+  if (
+    isChildLifecycleSystemUpdateKind(update.kind) ||
+    update.kind === "goal_continuation" ||
+    update.kind === "background_command_result" ||
+    update.kind === "session_wait_timeout"
+  ) {
     // Malformed historical authority-bearing rows still own distinct claims.
     // They may carry ordinary authority-neutral context, but they must never
     // borrow another child, goal, or Steer's causal principal.
@@ -66376,6 +66386,10 @@ async function settleSessionInputWaitInActivity(
     }
     const deadlineAt = expected.inputWaitUntil.toISOString();
     const reason = expected.inputWaitReason;
+    const causalAuthority = await sameSessionCausalAuthorityTx(db as unknown as Database, {
+      ...input,
+      turnId: input.waitTurnId,
+    });
     try {
       const result = await addSessionSystemUpdateWithSourceMutation(
         db,
@@ -66384,6 +66398,11 @@ async function settleSessionInputWaitInActivity(
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           kind: "session_wait_timeout",
+          personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
+          xaiProviderAccountAuthoritySnapshot:
+            causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
+            WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+          lineage: causalAuthority?.lineage ?? {},
           classification: "info",
           sourceId: input.waitTurnId,
           dedupeKey: `session-input-wait-timeout:${input.waitTurnId}`,
@@ -66572,6 +66591,11 @@ export type FailSessionWorkBeforeAttemptClaimInput = {
   workflowId: string;
   trigger: SessionWorkTrigger;
   error: string;
+  /** Already-classified admission facts from the failed worker activity. */
+  admissionFailure?: {
+    disposition: "retryable" | "permanent";
+    code: "db_deadlock" | "db_serialization_failure" | "db_failure" | "claim_invariant";
+  };
 };
 
 export type FailSessionWorkBeforeAttemptClaimResult =
@@ -66955,6 +66979,8 @@ export async function failSessionWorkBeforeAttemptClaim(
             payload: {
               status: "failed",
               code: "pre_claim_failure",
+              error: input.error,
+              ...(input.admissionFailure ? { admissionFailure: input.admissionFailure } : {}),
               ...(!turn ? { failedSystemUpdateIds } : {}),
             },
             turnId: turn?.id ?? null,
@@ -67284,6 +67310,8 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
           .select({
             id: schema.sessionSystemUpdates.id,
             kind: schema.sessionSystemUpdates.kind,
+            sourceId: schema.sessionSystemUpdates.sourceId,
+            dedupeKey: schema.sessionSystemUpdates.dedupeKey,
             lineage: schema.sessionSystemUpdates.lineage,
             deliveredTurnId: schema.sessionSystemUpdates.deliveredTurnId,
             deliveredHistoryItemId: schema.sessionSystemUpdates.deliveredHistoryItemId,
@@ -67388,22 +67416,71 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
         }
 
         const causalTurnIds = new Set<string>();
+        const repairedAuthorities = new Map<
+          string,
+          NonNullable<Awaited<ReturnType<typeof sameSessionCausalAuthorityTx>>>
+        >();
         for (const update of failedUpdates) {
-          const causalTurnId = systemUpdateCausalHumanTurnId(update);
+          let causalTurnId = systemUpdateCausalHumanTurnId(update);
           const lineage =
             update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
               ? (update.lineage as Record<string, unknown>)
               : null;
           if (
-            !isChildLifecycleSystemUpdateKind(update.kind) ||
-            !causalTurnId ||
-            lineage?.parentSessionId !== input.sessionId ||
             update.deliveredTurnId !== null ||
             update.deliveredHistoryItemId !== null ||
             update.deliveredAt !== null
-          ) {
+          )
             return { action: "stale", event: null } as const;
-          }
+          if (isChildLifecycleSystemUpdateKind(update.kind)) {
+            if (!causalTurnId || lineage?.parentSessionId !== input.sessionId) {
+              return { action: "stale", event: null } as const;
+            }
+          } else if (update.kind === "background_command_result") {
+            if (
+              !update.sourceId ||
+              !UUID_PATTERN.test(update.sourceId) ||
+              update.dedupeKey !== `background-command-result:${update.sourceId}`
+            ) {
+              return { action: "stale", event: null } as const;
+            }
+            const authority = await backgroundCommandCausalAuthorityTx(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              commandId: update.sourceId,
+            });
+            if (!authority) return { action: "stale", event: null } as const;
+            repairedAuthorities.set(update.id, authority);
+            causalTurnId = authority.lineage.causalTurnId;
+          } else if (update.kind === "session_wait_timeout") {
+            if (
+              !update.sourceId ||
+              !UUID_PATTERN.test(update.sourceId) ||
+              update.dedupeKey !== `session-input-wait-timeout:${update.sourceId}`
+            ) {
+              return { action: "stale", event: null } as const;
+            }
+            const [timeoutProof] = await tx.execute(sql`
+              select id from session_events
+              where workspace_id = ${workspaceId} and session_id = ${input.sessionId}
+                and type = 'session.wait.finished'
+                and payload ->> 'waitTurnId' = ${update.sourceId}
+                and payload ->> 'outcome' = 'timeout'
+                and sequence < ${input.expectedFailureEventSequence}
+              limit 1`);
+            if (!timeoutProof) return { action: "stale", event: null } as const;
+            const authority = await sameSessionCausalAuthorityTx(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: update.sourceId,
+            });
+            if (!authority) return { action: "stale", event: null } as const;
+            repairedAuthorities.set(update.id, authority);
+            causalTurnId = authority.lineage.causalTurnId;
+          } else return { action: "stale", event: null } as const;
+          if (!causalTurnId) return { action: "stale", event: null } as const;
           causalTurnIds.add(causalTurnId);
         }
         const causalTurns = await tx
@@ -67432,6 +67509,27 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
           return { action: "stale", event: null } as const;
         }
 
+        // Only after every exact failed member and causal receipt passes do
+        // we repair typed authority; message/event content is never rewritten.
+        for (const update of failedUpdates) {
+          const authority = repairedAuthorities.get(update.id);
+          if (!authority) continue;
+          await tx
+            .update(schema.sessionSystemUpdates)
+            .set({
+              personalConnectionDelegations: authority.personalConnectionDelegations,
+              xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
+              lineage: { ...update.lineage, ...authority.lineage },
+            })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.id, update.id),
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.state, "failed"),
+              ),
+            );
+        }
         const restored = await tx
           .update(schema.sessionSystemUpdates)
           .set({ state: "pending" })
@@ -72820,6 +72918,129 @@ export async function addSessionSystemUpdateWithSourceMutation<
   )) as AddSessionSystemUpdateResult<RequireIdleSession>;
 }
 
+async function sameSessionCausalAuthorityTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+) {
+  const [turn] = await tx
+    .select()
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.accountId, input.accountId),
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, input.turnId),
+      ),
+    )
+    .limit(1);
+  if (!turn) return null;
+  const personalConnectionDelegations = personalConnectionDelegationsForSameSessionSuccessor(
+    parsedPersonalConnectionDelegations(
+      turn.personalConnectionDelegations,
+      `session_turns:${turn.id}`,
+    ),
+    input.sessionId,
+  );
+  const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
+    turn.xaiProviderAccountAuthoritySnapshot,
+  );
+  const human =
+    turn.initiatingHumanSubjectId ??
+    (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+  if (
+    !human &&
+    (personalConnectionDelegations.some((d) => d.userDelegation) ||
+      xaiProviderAccountAuthoritySnapshot.scope === "user")
+  ) {
+    throw new SessionControlInvariantError("Causal turn lost its personal execution authority");
+  }
+  return {
+    personalConnectionDelegations,
+    xaiProviderAccountAuthoritySnapshot,
+    lineage: {
+      causalTurnId: turn.id,
+      ...(human && personalConnectionDelegations.some((d) => d.userDelegation)
+        ? { connectionAuthoritySubjectId: human }
+        : {}),
+      ...(human && xaiProviderAccountAuthoritySnapshot.scope === "user"
+        ? { xaiAuthoritySubjectId: human }
+        : {}),
+    },
+  };
+}
+
+/** Resolve only the immutable launch receipt, including pre-0419 managed rows.
+ * Legacy Connected Machine rows have no durable launch identity and stay
+ * unattributed. Neither a current session owner nor its latest turn is a substitute. */
+async function backgroundCommandCausalAuthorityTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; commandId: string },
+) {
+  const [command] = await tx
+    .select()
+    .from(schema.sessionBackgroundCommands)
+    .where(
+      and(
+        eq(schema.sessionBackgroundCommands.accountId, input.accountId),
+        eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+        eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+        eq(schema.sessionBackgroundCommands.id, input.commandId),
+      ),
+    )
+    .limit(1);
+  if (!command || !["exited", "lost"].includes(command.state) || !command.settledAt) return null;
+  let turnId = command.launchTurnId;
+  let attemptId = command.launchAttemptId;
+  let generation = command.launchExecutionGeneration;
+  if (!turnId && command.provider === "managed" && command.retainedProcessId) {
+    const [process] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(
+        and(
+          eq(schema.sandboxRetainedProcesses.id, command.retainedProcessId),
+          eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+          eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+          eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (process?.ownerActorKind === "turn" && process.ownerActorId === process.ownerAttemptId) {
+      turnId = process.ownerTurnId;
+      attemptId = process.ownerAttemptId;
+      generation = process.ownerExecutionGeneration;
+    }
+  }
+  if (!turnId || !attemptId || !generation) return null;
+  const [attempt] = await tx
+    .select({ id: schema.sessionTurnAttempts.id })
+    .from(schema.sessionTurnAttempts)
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.id, attemptId),
+        eq(schema.sessionTurnAttempts.accountId, input.accountId),
+        eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+        eq(schema.sessionTurnAttempts.turnId, turnId),
+        eq(schema.sessionTurnAttempts.executionGeneration, generation),
+      ),
+    )
+    .limit(1);
+  if (!attempt) return null;
+  const authority = await sameSessionCausalAuthorityTx(tx, { ...input, turnId });
+  return authority
+    ? {
+        ...authority,
+        lineage: {
+          ...authority.lineage,
+          causalAttemptId: attemptId,
+          causalExecutionGeneration: generation,
+        },
+      }
+    : null;
+}
+
 function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
@@ -72955,6 +73176,10 @@ function backgroundCommandTerminalMutation(input: {
         ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
       };
+      const causalAuthority = await backgroundCommandCausalAuthorityTx(tx as unknown as Database, {
+        ...input,
+        commandId: command.id,
+      });
       const [insertedUpdate] = await tx
         .insert(schema.sessionSystemUpdates)
         .values(
@@ -72970,7 +73195,15 @@ function backgroundCommandTerminalMutation(input: {
                 dedupeKey: `background-command-result:${command.id}`,
                 summary,
                 payload,
-                lineage: { commandId: command.id, provider: command.provider },
+                personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
+                xaiProviderAccountAuthoritySnapshot:
+                  causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
+                  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+                lineage: {
+                  commandId: command.id,
+                  provider: command.provider,
+                  ...causalAuthority?.lineage,
+                },
                 state: "pending",
               },
               "summary",
@@ -75508,6 +75741,15 @@ async function workspaceControlProjection(
       .limit(1);
     if (!control) throw new Error(`Workspace ${workspaceId} has no inference control`);
     return {
+      timer: control.timerId
+        ? {
+            id: control.timerId,
+            action: control.timerAction as "pause" | "resume",
+            dueAt: control.timerDueAt!.toISOString(),
+            pauseForSeconds: control.timerPauseForSeconds,
+          }
+        : null,
+      serverTime: new Date().toISOString(),
       state: control.workspaceState as "active" | "paused",
       revision: Number(control.revision),
       reason: control.reason,
@@ -76237,3 +76479,15 @@ export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
+
+export {
+  setWorkspacePauseTimerInTransaction,
+  fireWorkspacePauseTimerInTransaction,
+} from "./session-control";
+
+export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
+  return await rawRows<{ workspace_id: string; timer_id: string }>(
+    db,
+    sql`select * from opengeni_private.list_due_workspace_pause_timers(${limit})`,
+  );
+}

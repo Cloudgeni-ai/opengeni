@@ -281,7 +281,7 @@ function measureComposerContentHeight(textarea: HTMLTextAreaElement): number {
     mirror.tabIndex = -1;
     mirror.rows = 1;
     mirror.style.cssText =
-      "position:absolute;top:0;left:0;visibility:hidden;pointer-events:none;height:auto;min-height:0;max-height:none;overflow:hidden;z-index:-1;";
+      "position:fixed;top:0;left:-100000px;visibility:hidden;pointer-events:none;height:auto;min-height:0;max-height:none;overflow:hidden;z-index:-1;";
     composerHeightMirror = mirror;
   }
 

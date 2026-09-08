@@ -896,6 +896,7 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
+        billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
@@ -1972,6 +1973,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
     label: "/v1/workspaces/:workspaceId/inference-control",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pause-timer$/,
+    label: "/v1/workspaces/:workspaceId/pause-timer",
   },
   {
     pattern:

@@ -90,7 +90,7 @@ import {
   oauthConnectionRef,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -1559,7 +1559,18 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
-    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    // Steer and recovered sends do not pass through onSubmitted. Keep the
+    // host-owned upload/repository queue in sync once those inputs are
+    // accepted too; the immutable input snapshot preserves later additions.
+    onSent: (_text, input) => {
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      );
+      repositories.commitSent(input.resources ?? []);
+      personalAttachment.onAccepted(input);
+    },
     onDeliveryError: personalAttachment.onDeliveryError,
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
@@ -1790,6 +1801,9 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -1855,6 +1869,20 @@ function SessionChatPane(props: {
                   failure={props.failure}
                   creditExhausted={props.creditExhausted}
                   workspaceId={props.session.workspaceId}
+                  canBuyCredits={
+                    context.clientConfig.billingMode === "stripe" &&
+                    Boolean(workspaceAccountId) &&
+                    hasAccountPermission(
+                      context.accessContext,
+                      workspaceAccountId ?? "",
+                      "billing:manage",
+                    )
+                  }
+                  canConnectModel={hasWorkspacePermission(
+                    context.accessContext,
+                    props.session.workspaceId,
+                    "connections:write",
+                  )}
                   actions={{
                     failureId: props.failure.failureEventId,
                     composerBlocker: composerSendBlocker(),
@@ -2026,6 +2054,7 @@ function SessionChatPane(props: {
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
+            sessionStatus={props.session.status}
             compact
             onOpenSession={props.onOpenSession}
             queue={props.queue}

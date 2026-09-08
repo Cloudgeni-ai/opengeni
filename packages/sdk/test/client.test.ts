@@ -2327,3 +2327,18 @@ test("filters schedules by session on the server", async () => {
   expect(url.searchParams.get("limit")).toBe("10");
   expect(url.searchParams.get("offset")).toBe("20");
 });
+
+test("sets a workspace duration timer through the public endpoint", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ ok: true }));
+  const request = {
+    action: "set" as const,
+    pauseInSeconds: 1800,
+    pauseForSeconds: 7200,
+    clientEventId: "timer-save",
+    expectedRevision: 7,
+  };
+  expect(await client.setWorkspacePauseTimer(WORKSPACE_ID, request)).toEqual({ ok: true });
+  expect(requests[0]!.url).toEndWith(`/v1/workspaces/${WORKSPACE_ID}/pause-timer`);
+  expect(requests[0]!.method).toBe("POST");
+  expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+});

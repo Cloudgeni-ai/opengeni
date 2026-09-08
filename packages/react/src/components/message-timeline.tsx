@@ -3677,7 +3677,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono">
               {JSON.stringify(item.details.value, null, 2)}
             </pre>
           </details>

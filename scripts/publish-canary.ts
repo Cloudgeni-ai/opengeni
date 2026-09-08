@@ -64,7 +64,9 @@ export function main(): void {
       Object.fromEntries(
         packages
           .filter((pkg) =>
-            ["@opengeni/sdk", "@opengeni/react", "@opengeni/codemode"].includes(pkg.name),
+            ["@opengeni/sdk", "@opengeni/react", "@opengeni/codemode", "@opengeni/ogtool"].includes(
+              pkg.name,
+            ),
           )
           .map((pkg) => [pkg.name, JSON.parse(readFileSync(pkg.packagePath, "utf8")).version]),
       ),
