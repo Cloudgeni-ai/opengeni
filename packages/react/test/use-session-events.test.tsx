@@ -13,6 +13,10 @@ import {
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
+import {
+  invokeOlderHistoryLoaderWithReceiptCapture,
+  type OlderHistoryLoadReceipt,
+} from "../src/older-history";
 
 registerDom();
 
@@ -1266,6 +1270,28 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events[0]?.sequence).toBe(52);
     expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
     expect(hook.result.current.lastSequence).toBe(10_051);
+
+    let automatic!: OlderHistoryLoadReceipt;
+    await actRun(async () => {
+      invokeOlderHistoryLoaderWithReceiptCapture(
+        () => {
+          void hook.result.current.loadOlder();
+        },
+        (receipt) => {
+          automatic = receipt;
+        },
+        true,
+      );
+      await automatic;
+    });
+    await flush();
+    expect(automatic.committed).toBe(false);
+    expect(automatic.tailPreserved).toBe(true);
+    expect(hook.result.current.events[0]?.sequence).toBe(52);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
+    expect(hook.result.current.hasNewer).toBe(false);
+    expect(streamCalls).toEqual([0]);
+    listCalls.length = 0;
 
     const more = await actRun(() => hook.result.current.loadOlder());
     await flush(100);

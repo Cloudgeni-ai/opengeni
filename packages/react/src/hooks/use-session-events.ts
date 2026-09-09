@@ -556,7 +556,7 @@ export function useSessionEvents(
 
   const loadOlder = useCallback(
     (): OlderHistoryLoadReceipt =>
-      createOlderHistoryLoadReceipt(async (markCommitted) => {
+      createOlderHistoryLoadReceipt(async (markCommitted, preserveTail, markTailPreserved) => {
         if (!sessionId || navigationBusy() || !hasOlderRef.current) {
           return false;
         }
@@ -592,11 +592,17 @@ export function useSessionEvents(
           // Freeze the live iterator before replacing its in-memory window. Rows
           // pending in the aborted iterator were never cursor-committed and will
           // be replayed from the retained high-water mark below.
-          streamAbortRef.current?.abort();
-          const status = observeSessionStatus(window.events, sessionStatusRef);
           const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
             direction: "oldest",
           });
+          if (preserveTail && maxResumeSequence(next.events) < maxResumeSequence(current.events)) {
+            // Automatic viewport filling must not navigate away from the
+            // reader's retained tail. Explicit history navigation may do so.
+            markTailPreserved();
+            return false;
+          }
+          streamAbortRef.current?.abort();
+          const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = {
             ...next,
             truncated: current.truncated || next.truncated,
