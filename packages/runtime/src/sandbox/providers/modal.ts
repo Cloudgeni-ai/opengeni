@@ -13,7 +13,9 @@ import {
 } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
-import { SandboxConfigError } from "../errors";
+import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
+export { ModalProcessObservationUnavailableError } from "../errors";
+import { markTypedExecHandleLoss } from "../exec-banner";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -93,6 +95,8 @@ type ModalWorkspaceCaptureOptions = {
 };
 
 type MutableModalSandboxSession = {
+  // Pinned Agents Extensions 0.14.3 uses this synchronous adapter-local map.
+  activeProcesses?: unknown;
   modal?: {
     version?: () => string;
     sandboxes?: {
@@ -399,9 +403,28 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
 function installModalExecCompletionRecovery(session: MutableModalSandboxSession): void {
   const writeStdin = session.writeStdin;
   if (typeof writeStdin !== "function") return;
+  const observe = async (args: Parameters<typeof writeStdin>[0]) => {
+    // The pinned SDK looks up this map before its first await. Check the same
+    // handle synchronously, with no await before calling it: a missing entry
+    // is observer-state loss, while a real command may print the exact missing
+    // handle banner at ANY exit code. Never classify its output as authority.
+    // An SDK shape change must fail closed rather than reintroduce that guess.
+    if (!(session.activeProcesses instanceof Map)) {
+      throw new ModalProcessObservationUnavailableError(args.sessionId, {
+        reason: "unsupported_handle_map",
+      });
+    }
+    if (!session.activeProcesses.has(args.sessionId)) {
+      throw new ModalProcessObservationUnavailableError(args.sessionId, {
+        reason: "missing_handle",
+      });
+    }
+    return await writeStdin.call(session, args);
+  };
+  markTypedExecHandleLoss(session);
   session.writeStdin = async (args) => {
     try {
-      return await writeStdin.call(session, args);
+      return await observe(args);
     } catch (error) {
       if (
         !isModalExecAlreadyCompletedError(error) ||
@@ -410,19 +433,13 @@ function installModalExecCompletionRecovery(session: MutableModalSandboxSession)
       ) {
         throw error;
       }
-      // Agents Extensions checks its local active-process map before writing,
-      // but the process can finish before Modal receives TaskExecStdinWrite.
-      // An empty retry performs no side effect: it lets the adapter observe the
-      // already-terminal process, delete its stale map entry, and return the
-      // ordinary exact exit banner consumed by OpenGeni's durable settlement.
-      // If that cleanup poll itself loses transport, the original typed
-      // completion is still authoritative and the canonical lost-session
-      // result lets OpenGeni close the exact retained process without failing
-      // the turn or replaying stdin.
+      // The process can finish between the SDK lookup and the provider stdin
+      // write. An empty poll may recover its exact terminal result; never replay
+      // stdin, and never turn failure to observe that result into loss proof.
       try {
-        return await writeStdin.call(session, { ...args, chars: "" });
-      } catch {
-        return `write_stdin failed: session not found: ${args.sessionId}`;
+        return await observe({ ...args, chars: "" });
+      } catch (cause) {
+        throw new ModalProcessObservationUnavailableError(args.sessionId, { cause });
       }
     }
   };
