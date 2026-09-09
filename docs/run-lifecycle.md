@@ -1509,6 +1509,10 @@ then acknowledge cursors. Both streams must drain through provider terminal
 status before settlement. Sandbox files and printed status text are never
 execution authority. Failed initial observation still retains a successful
 start's locator; an ambiguous start is never automatically replayed.
+The dedicated command client preserves abort signals through a version-guarded
+non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
+and retry-disabled calls. Cancelling observation is not process-exit proof;
+the existing token/PGID cleanup fence still owns physical cancellation.
 
 For historical commands without that locator, the reaper reports
 `process_observation_unavailable`, retaining the exact process/admission/holder.

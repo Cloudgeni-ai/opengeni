@@ -102,6 +102,8 @@ type MutableModalSandboxSession = {
   activeProcesses?: unknown;
   modal?: {
     cpClient?: ModalClient["cpClient"];
+    profile?: ModalClient["profile"];
+    logger?: ModalClient["logger"];
     version?: () => string;
     sandboxes?: {
       fromId?: (sandboxId: string) => Promise<MutableModalSnapshotSandbox>;
@@ -542,24 +544,30 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
+  installModalPendingExecCancellation(mutable);
   if (
     mutable.modal?.cpClient &&
     mutable.modal.version &&
     mutable.state?.sandboxId &&
     mutable.state.manifest?.root
   ) {
+    if (!mutable.modal.profile)
+      throw new Error("Modal command control requires its original authenticated SDK profile");
     installModalCommandSession(
       mutable,
       ModalCommandControl.forSandbox(
-        { cpClient: mutable.modal.cpClient, version: mutable.modal.version.bind(mutable.modal) },
+        {
+          cpClient: mutable.modal.cpClient,
+          version: mutable.modal.version.bind(mutable.modal),
+          profile: mutable.modal.profile,
+          ...(mutable.modal.logger ? { logger: mutable.modal.logger } : {}),
+        },
         mutable.state.sandboxId,
         mutable.state.manifest.root,
         () => mutable.state?.environment ?? {},
       ),
     );
   }
-  installModalPendingExecCancellation(mutable);
-
   const persistWorkspace = mutable.persistWorkspace.bind(session);
   mutable.persistWorkspace = async (options?: ModalWorkspaceCaptureOptions) => {
     assertPinnedModalSdk(mutable);

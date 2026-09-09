@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   ModalCommandControl,
+  modalCommandAbortMiddleware,
   type ModalProviderCommand,
 } from "../src/sandbox/providers/modal-command-control";
 
@@ -31,6 +32,51 @@ test("unsupported SDK contracts fail before provider execution", () => {
       "/workspace",
     ),
   ).toThrow("verified 0.9.0");
+});
+
+test("dedicated non-retrying middleware preserves unary and streaming abort authority", async () => {
+  const cancellation = new AbortController();
+  const observed: unknown[] = [];
+  const control = controller({
+    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
+    containerExec: async (request: unknown, options: { signal: AbortSignal; retries: number }) => {
+      expect(options.signal).toBe(cancellation.signal);
+      // The dedicated client replaces the signal-stripping retry branch.
+      const pipeline = modalCommandAbortMiddleware(
+        {
+          request,
+          next: async function* (
+            _request: unknown,
+            downstream: { signal?: AbortSignal; retries?: number },
+          ) {
+            observed.push(downstream.signal);
+            yield { execId: "tp-test" };
+          },
+        } as never,
+        options,
+      );
+      let result: unknown;
+      for await (const value of pipeline) result = value;
+      return result;
+    },
+    containerExecGetOutput: async function* (request: unknown, options: { signal: AbortSignal }) {
+      expect(options.signal).toBe(cancellation.signal);
+      yield* modalCommandAbortMiddleware(
+        {
+          request,
+          next: async function* (_request: unknown, downstream: { signal?: AbortSignal }) {
+            observed.push(downstream.signal);
+            yield { batchIndex: 1, items: [], exitCode: 7 };
+          },
+        } as never,
+        options,
+      );
+    },
+  });
+  const command = await control.start({ cmd: "work" }, cancellation.signal);
+  const page = await control.read(command, 1, cancellation.signal);
+  expect(page.exitCode).toBe(7);
+  expect(observed).toEqual([cancellation.signal, cancellation.signal, cancellation.signal]);
 });
 
 test("fresh controllers replay stable provider pages until protected cursors advance", async () => {

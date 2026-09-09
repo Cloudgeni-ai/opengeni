@@ -37,6 +37,8 @@ export function installModalCommandSession(
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
+  const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
+  const pendingStarts = new Set<AbortController>();
   const entries = new Map<number, Entry>();
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
 
@@ -65,6 +67,7 @@ export function installModalCommandSession(
     entry: Entry,
     yieldTimeMs: number,
     maxOutputTokens?: number,
+    signal?: AbortSignal,
   ): Promise<string> => {
     if (entry.persistence) {
       const retained = await entry.persistence.load();
@@ -72,7 +75,7 @@ export function installModalCommandSession(
         throw new Error("Original Modal command identity is unavailable");
       entry.command = retained;
     }
-    const page = await control.read(entry.command, yieldTimeMs);
+    const page = await control.read(entry.command, yieldTimeMs, signal);
     // The receipt is generated here, not parsed from command output. Its only
     // purpose is correlating this return value with a trusted in-memory page.
     return formatPage(handle, page, maxOutputTokens);
@@ -87,15 +90,37 @@ export function installModalCommandSession(
       return originalExec(args);
     }
     if (entries.has(handle)) throw new Error("Modal command handle is already bound");
-    const entry = { command: await control.start(args) };
-    entries.set(handle, entry);
+    const cancellation = new AbortController();
+    pendingStarts.add(cancellation);
     try {
-      return await read(handle, entry, args.yieldTimeMs ?? 10000, args.maxOutputTokens);
-    } catch {
-      // Start succeeded. A failed first observation must still publish the
-      // known locator for retention, never lose it or replay the command.
-      return formatPage(handle, { command: entry.command, chunks: [], exitCode: null });
+      const entry = { command: await control.start(args, cancellation.signal) };
+      entries.set(handle, entry);
+      try {
+        return await read(
+          handle,
+          entry,
+          args.yieldTimeMs ?? 10000,
+          args.maxOutputTokens,
+          cancellation.signal,
+        );
+      } catch {
+        // Start succeeded. A failed/cancelled first observation must still
+        // publish the known locator for durable retention and exact cleanup.
+        return formatPage(handle, { command: entry.command, chunks: [], exitCode: null });
+      }
+    } finally {
+      pendingStarts.delete(cancellation);
     }
+  };
+
+  session.cancelPendingExecCommand = async () => {
+    for (const start of pendingStarts)
+      start.abort(
+        new Error("Modal command start observation cancelled; provider outcome is unknown"),
+      );
+    // SDK-internal foreground commands retain their separate legacy transport
+    // cancellation. Neither path closes an already-yielded command's locator.
+    await cancelLegacyStart?.();
   };
 
   session.getProviderCommand = (handle) => {

@@ -17,6 +17,8 @@ export type ProviderCommandPersistence = {
 };
 
 export type ProviderCommandSession = {
+  /** Abort only starts/initial observations still owned by this session call. */
+  cancelPendingExecCommand?(): Promise<void>;
   getProviderCommand?(handle: number): SandboxProviderCommand | null;
   bindProviderCommand?(
     handle: number,

@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { ModalClient } from "modal";
+import { ModalClient } from "modal";
 import { SandboxProviderCommand } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
 import { shellQuote } from "@openai/agents-core/sandbox/internal";
@@ -8,6 +8,60 @@ type ControlPlane = Pick<
   ModalClient["cpClient"],
   "sandboxGetTaskId" | "containerExec" | "containerExecGetOutput" | "containerExecPutInput"
 >;
+
+type CommandClient = Pick<ModalClient, "cpClient" | "version"> &
+  Partial<Pick<ModalClient, "profile" | "logger">>;
+type GrpcMiddleware = NonNullable<
+  NonNullable<ConstructorParameters<typeof ModalClient>[0]>["grpcMiddleware"]
+>[number];
+/** This dedicated command client never retries a request behind the caller's
+ * back and preserves the exact cancellation signal, including streaming RPCs. */
+export const modalCommandAbortMiddleware: GrpcMiddleware = async function* (call, options) {
+  options.signal?.throwIfAborted();
+  return yield* call.next(call.request, options);
+};
+
+// Version-pinned compatibility boundary: 0.9.0's retryMiddleware drops signal
+// for streaming and retries=0. Its public custom middleware runs OUTSIDE that
+// branch, so cannot repair it. Override only this dedicated instance's factory
+// hook before construction; never mutate the SDK's global prototype or use
+// negative/fractional retry counts to manipulate its branch conditions.
+type PublicModalClient = Pick<ModalClient, keyof ModalClient>;
+const ModalClientBase: new (
+  options?: ConstructorParameters<typeof ModalClient>[0],
+) => PublicModalClient = ModalClient;
+class ModalCommandClient extends ModalClientBase {
+  retryMiddleware(): GrpcMiddleware {
+    return modalCommandAbortMiddleware;
+  }
+}
+const controlClients = new WeakMap<object, PublicModalClient>();
+
+function commandControlPlane(client: CommandClient): ControlPlane {
+  // Minimal injected control planes are used by deterministic unit tests.
+  // Production installation requires the authenticated SDK profile below.
+  if (!client.profile) return client.cpClient;
+  if (typeof Reflect.get(ModalClient.prototype, "retryMiddleware") !== "function")
+    throw new Error("Verified Modal command cancellation contract is unavailable");
+  let controlled = controlClients.get(client);
+  if (!controlled) {
+    const profile = client.profile;
+    if (!profile.tokenId || !profile.tokenSecret)
+      throw new Error("Modal command control requires its original authenticated profile");
+    controlled = new ModalCommandClient({
+      tokenId: profile.tokenId,
+      tokenSecret: profile.tokenSecret,
+      endpoint: profile.serverUrl,
+      environment: profile.environment ?? "",
+      ...(profile.maxThrottleWaitSecs !== undefined
+        ? { maxThrottleWaitSecs: profile.maxThrottleWaitSecs }
+        : {}),
+      ...(client.logger ? { logger: client.logger } : {}),
+    });
+    controlClients.set(client, controlled);
+  }
+  return controlled.cpClient;
+}
 export type ModalCommandStream = "stdout" | "stderr";
 export type ModalProviderCommand = SandboxProviderCommand;
 export type ModalProviderOutputPage = {
@@ -69,21 +123,25 @@ export class ModalCommandControl {
   ) {}
 
   static forSandbox(
-    client: Pick<ModalClient, "cpClient" | "version">,
+    client: CommandClient,
     sandboxId: string,
     root: string,
     environment: Record<string, string> | (() => Record<string, string>) = {},
   ): ModalCommandControl {
     if (client.version() !== "0.9.0")
       throw new Error("Modal command control requires the verified 0.9.0 SDK contract");
-    return new ModalCommandControl(client.cpClient, sandboxId, root, environment);
+    return new ModalCommandControl(commandControlPlane(client), sandboxId, root, environment);
   }
 
-  async start(args: ChannelAExecArgs): Promise<ModalProviderCommand> {
+  async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalProviderCommand> {
+    signal?.throwIfAborted();
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
       throw new Error("Command workdir is outside the sandbox workspace");
-    const task = await this.client.sandboxGetTaskId({ sandboxId: this.sandboxId });
+    const task = await this.client.sandboxGetTaskId(
+      { sandboxId: this.sandboxId },
+      signal ? { signal } : undefined,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     // Match the pinned SDK's default non-login /bin/sh and runAs behavior,
     // including an already-matching non-root user and sudo-based transitions.
@@ -133,7 +191,7 @@ export class ModalCommandControl {
             }
           : {}),
       },
-      { retries: 0 },
+      { retries: 0, ...(signal ? { signal } : {}) },
     );
     if (!result.execId) throw new Error("Modal command start returned no execution identity");
     return {
@@ -149,7 +207,12 @@ export class ModalCommandControl {
     };
   }
 
-  async read(command: ModalProviderCommand, yieldTimeMs: number): Promise<ModalProviderOutputPage> {
+  async read(
+    command: ModalProviderCommand,
+    yieldTimeMs: number,
+    signal?: AbortSignal,
+  ): Promise<ModalProviderOutputPage> {
+    signal?.throwIfAborted();
     this.assertIdentity(command);
     const next = structuredClone(command);
     const pages = await Promise.all(
@@ -157,13 +220,16 @@ export class ModalCommandControl {
         const cursor = command.streams[stream];
         if (cursor.exitCode !== null) return null;
         const descriptor = stream === "stdout" ? 1 : 2;
-        for await (const batch of this.client.containerExecGetOutput({
-          execId: command.execId,
-          timeout: Math.max(0, yieldTimeMs) / 1000,
-          lastBatchIndex: cursor.batchIndex,
-          fileDescriptor: descriptor,
-          getRawBytes: true,
-        })) {
+        for await (const batch of this.client.containerExecGetOutput(
+          {
+            execId: command.execId,
+            timeout: Math.max(0, yieldTimeMs) / 1000,
+            lastBatchIndex: cursor.batchIndex,
+            fileDescriptor: descriptor,
+            getRawBytes: true,
+          },
+          signal ? { signal } : undefined,
+        )) {
           if (batch.batchIndex <= cursor.batchIndex) continue;
           if (!Number.isSafeInteger(batch.batchIndex))
             throw new Error("Invalid Modal output cursor");

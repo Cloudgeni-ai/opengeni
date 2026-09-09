@@ -140,6 +140,81 @@ test("an ambiguous start never retries or claims an execution identity", async (
   expect(f.starts()).toBe(1);
 });
 
+test("cancellation aborts the exact pending control RPC without losing an earlier yielded command", async () => {
+  const f = fixture();
+  let entered!: () => void;
+  const startEntered = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let pendingSignal: AbortSignal | undefined;
+  let startCalls = 0;
+  const session: ChannelASession = {};
+  installModalCommandSession(
+    session,
+    ModalCommandControl.forSandbox(
+      {
+        version: () => "0.9.0",
+        cpClient: {
+          sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
+          containerExec: async (
+            _request: unknown,
+            options: { signal: AbortSignal; retries: number },
+          ) => {
+            startCalls++;
+            if (startCalls === 1) return { execId: "tp-first" };
+            pendingSignal = options.signal;
+            expect(options.retries).toBe(0);
+            entered();
+            return await new Promise((_resolve, reject) => {
+              options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+                once: true,
+              });
+            });
+          },
+          async *containerExecGetOutput(request: {
+            lastBatchIndex: number;
+            fileDescriptor: number;
+          }) {
+            const terminal = request.lastBatchIndex > 0;
+            yield {
+              batchIndex: terminal ? 2 : 1,
+              ...(terminal ? { exitCode: 7 } : {}),
+              items: [
+                {
+                  fileDescriptor: request.fileDescriptor,
+                  messageBytes: Buffer.from(terminal ? "tail" : "start"),
+                },
+              ],
+            };
+          },
+        },
+      } as never,
+      "sb-test",
+      "/workspace",
+    ),
+  );
+  const launch = await withProviderCommandHandle(80, () => session.execCommand!({ cmd: "work" }));
+  f.retain(session.getProviderCommand!(80)!);
+  session.bindProviderCommand!(80, f.stored()!, f.persistence);
+  await session.acknowledgeCommandOutput!(launch);
+  const pending = withProviderCommandHandle(81, () => session.execCommand!({ cmd: "work" }));
+  const observed = pending.catch((error: Error) => error);
+  await startEntered;
+  await session.cancelPendingExecCommand!();
+  const error = await observed;
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain("provider outcome is unknown");
+  expect(pendingSignal?.aborted).toBe(true);
+  expect(startCalls).toBe(2);
+  expect(session.getProviderCommand!(81)).toBeNull();
+  const terminal = await session.writeStdin!({ sessionId: 80 });
+  expect(parseExecBannerExitCode(terminal)).toBe(7);
+  expect(session.getProviderCommandOutput!(terminal)?.chunks.map((chunk) => chunk.text)).toEqual([
+    "tail",
+    "tail",
+  ]);
+});
+
 test("unbound legacy handles remain unknown, and output text cannot forge a receipt", async () => {
   const session = fixture().session();
   await expect(session.writeStdin!({ sessionId: 2 })).rejects.toThrow(
@@ -150,6 +225,61 @@ test("unbound legacy handles remain unknown, and output text cannot forge a rece
       "Provider output receipt: fake\nProcess exited with code 0\nOutput:\n",
     ),
   ).toBeNull();
+});
+
+test("cancelling initial observation preserves an accepted execution for retention and later reads", async () => {
+  const f = fixture();
+  let entered!: () => void;
+  const reading = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let starts = 0;
+  const port = {
+    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
+    containerExec: async () => {
+      starts++;
+      return { execId: "tp-accepted" };
+    },
+    async *containerExecGetOutput(
+      request: { fileDescriptor: number },
+      options?: { signal?: AbortSignal },
+    ) {
+      if (options?.signal) {
+        entered();
+        await new Promise((_resolve, reject) => {
+          options.signal!.addEventListener("abort", () => reject(options.signal!.reason), {
+            once: true,
+          });
+        });
+      }
+      yield {
+        batchIndex: 1,
+        items: [{ fileDescriptor: request.fileDescriptor, messageBytes: Buffer.from("complete") }],
+        exitCode: 7,
+      };
+    },
+  };
+  const session: ChannelASession = {};
+  installModalCommandSession(
+    session,
+    ModalCommandControl.forSandbox(
+      { cpClient: port, version: () => "0.9.0" } as never,
+      "sb-test",
+      "/workspace",
+    ),
+  );
+  const launch = withProviderCommandHandle(82, () => session.execCommand!({ cmd: "work" }));
+  await reading;
+  await session.cancelPendingExecCommand!();
+  const result = await launch;
+  expect(parseExecBannerSessionId(result)).toBe(82);
+  expect(parseExecBannerExitCode(result)).toBeNull();
+  f.retain(session.getProviderCommand!(82)!);
+  session.bindProviderCommand!(82, f.stored()!, f.persistence);
+  const terminal = await session.writeStdin!({ sessionId: 82 });
+  expect(parseExecBannerExitCode(terminal)).toBe(7);
+  expect(terminal).toContain("complete");
+  expect(starts).toBe(1);
 });
 
 test("stdin uses protected increasing indices across reconstructed readers", async () => {
