@@ -1209,6 +1209,84 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test.each([
+    "streamed",
+    "completed",
+    "completed-before-commentary",
+    "whitespace-tail",
+    "opaque-tail",
+  ])("a %s answer stays visible once when a trailing wait ends with empty output", async (mode) => {
+    resetTimelineEvents();
+    const answer = "Not yet. The browser test still times out; I have resumed the repair.";
+    const events = [
+      timelineEvent("user.message", { text: "Is it mergeable?" }),
+      timelineEvent("agent.message.delta", { text: "Checking CI now." }),
+      timelineEvent("agent.toolCall.created", {
+        id: "check",
+        name: "exec_command",
+        arguments: { cmd: "gh pr checks" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "check", output: "one failure" }),
+      timelineEvent("agent.message.delta", { text: answer.slice(0, 12) }),
+      timelineEvent("agent.message.delta", { text: answer.slice(12) }),
+      ...(mode === "streamed" || mode === "whitespace-tail" || mode === "opaque-tail"
+        ? []
+        : [timelineEvent("agent.message.completed", { text: answer, phase: "final_answer" })]),
+      ...(mode === "whitespace-tail" || mode === "opaque-tail"
+        ? [
+            timelineEvent("agent.toolCall.created", {
+              id: "tail",
+              name: "exec_command",
+              arguments: {},
+            }),
+            timelineEvent("agent.toolCall.output", { id: "tail", output: "ok" }),
+            timelineEvent("agent.message.delta", {
+              text: mode === "opaque-tail" ? "citeopaque-handle" : "  ",
+            }),
+          ]
+        : []),
+      ...(mode === "completed-before-commentary"
+        ? [
+            timelineEvent("agent.toolCall.created", {
+              id: "follow",
+              name: "exec_command",
+              arguments: {},
+            }),
+            timelineEvent("agent.toolCall.output", { id: "follow", output: "ok" }),
+            timelineEvent("agent.message.completed", {
+              text: "Waiting for the worker now.",
+              phase: "commentary",
+            }),
+          ]
+        : []),
+      timelineEvent("agent.toolCall.created", {
+        id: "wait",
+        name: "wait_for_input",
+        arguments: { reason: "Repair running", timeoutSeconds: 300 },
+      }),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "Repair running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "wait",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent?.split(answer)).toHaveLength(2);
+    expect(r.container.textContent).not.toContain("Checking CI now.");
+    if (mode !== "completed") expect(r.container.textContent).toContain("Waiting: Repair running");
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent?.split(answer)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Checking CI now.");
+    await r.unmount();
+  });
+
   test("empty wait turns keep their durable reason outside the collapsed steps", async () => {
     resetTimelineEvents();
     const reason = "Two delegated reviews are still running.";

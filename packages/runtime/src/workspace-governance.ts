@@ -97,18 +97,22 @@ export function renderWorkspaceGovernanceContext(
     ),
   ].filter((section): section is string => Boolean(section));
 
+  // Receipt UUIDs identify an accepted attempt, not policy content. Keep them in
+  // durable snapshots / contribution receipts: putting them before the history
+  // invalidates the provider's prompt prefix on every turn. Content hashes and
+  // revision identities below still change when the effective authority changes.
   const preferenceEvidence = context.preferences
-    ? `Skill snapshot evidence (structured preference authority): id=${context.preferences.id}; sha256=${context.preferences.descriptorHash}; descriptors=${context.preferences.descriptors.length}/${PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT}; descriptorUtf8Limit=${PREFERENCE_REGISTRY_DESCRIPTOR_MAX_UTF8_BYTES}; truncated=${context.preferences.truncated}.`
+    ? `Skill snapshot evidence (structured preference authority): sha256=${context.preferences.descriptorHash}; descriptors=${context.preferences.descriptors.length}/${PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT}; descriptorUtf8Limit=${PREFERENCE_REGISTRY_DESCRIPTOR_MAX_UTF8_BYTES}; truncated=${context.preferences.truncated}.`
     : "Skill snapshot evidence: unavailable for this service-initiated attempt.";
   const companyProfileEvidence = companyProfile
-    ? `Company-profile snapshot evidence: id=${companyProfile.id}; sha256=${companyProfile.snapshotHash}; revision=${companyProfile.profile!.revision}; activationVersion=${companyProfile.profile!.activationVersion}.`
+    ? `Company-profile snapshot evidence: sha256=${companyProfile.snapshotHash}; revision=${companyProfile.profile!.revision}; activationVersion=${companyProfile.profile!.activationVersion}.`
     : null;
   const rendered = [
     companyProfile
       ? "Active organization and workspace governance for this exact accepted attempt follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply only to a new attempt."
       : "Active workspace governance for this exact accepted attempt follows. Apply it after the non-bypassable CORE and in the section order shown. Later activations apply only to a new attempt.",
     companyProfileEvidence,
-    `Instruction-policy snapshot evidence: id=${context.instructionPolicy.id}; sha256=${context.instructionPolicy.entryHash}; role=${context.instructionPolicy.policyRole ?? "none"}; roleSource=${context.instructionPolicy.roleSource}; entries=${context.instructionPolicy.entries.length}/3.`,
+    `Instruction-policy snapshot evidence: sha256=${context.instructionPolicy.entryHash}; role=${context.instructionPolicy.policyRole ?? "none"}; roleSource=${context.instructionPolicy.roleSource}; entries=${context.instructionPolicy.entries.length}/3.`,
     options.sharedSkillReader ? null : preferenceEvidence,
     ...sections,
     options.sharedSkillReader

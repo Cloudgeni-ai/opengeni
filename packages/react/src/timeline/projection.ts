@@ -1039,11 +1039,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           }
         }
         finalizeOpen(turnId, "complete", event.occurredAt);
-        items.push(turnEndItem(event, "complete", null));
+        const completedTurn = turnEndItem(event, "complete", null);
+        items.push(completedTurn);
         const hasCompletedFinalResponse =
           latestAgentResponse?.completed === true &&
           latestAgentResponse.item.phase !== "commentary" &&
           Boolean(visibleTrackedResponse);
+        if (!hasAuthoritativeFinalOutput && pendingWaitOutcome) {
+          // Preserve existing prose, including delta-only streams, when a
+          // trailing wait yields without a terminal output receipt.
+          completedTurn.preserveWaitResponse = true;
+        }
         if (!hasAuthoritativeFinalOutput && !hasCompletedFinalResponse && pendingWaitOutcome) {
           items.push({
             kind: "notice",
@@ -1808,7 +1814,31 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     return;
   }
 
-  const finalMessage = extractFinalAgentMessage(collected, turnEnd);
+  // Resolve only inside this turn's collected suffix. A user/machine-input
+  // boundary or an interleaved foreign turn must never donate its answer.
+  const waitMessages = turnEnd.preserveWaitResponse
+    ? collected.filter(
+        (group): group is Extract<TimelineGroup, { kind: "item" }> =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          !group.item.streaming &&
+          group.item.text.trim().length > 0 &&
+          belongsToTurn(group.item, turnEnd.turnId),
+      )
+    : [];
+  // A completed answer outranks later commentary. Otherwise use the latest
+  // visible existing prose, ignoring whitespace and opaque-only stream tails.
+  const waitResponse =
+    waitMessages
+      .slice()
+      .reverse()
+      .find(
+        (group) =>
+          group.item.kind === "agent-message" &&
+          group.item.phase !== "commentary" &&
+          group.item.annotationSource?.eventType === "agent.message.completed",
+      ) ?? waitMessages.at(-1);
+  const finalMessage = waitResponse ?? extractFinalAgentMessage(collected, turnEnd);
   const fallbackMessage =
     finalMessage || hasOrdinaryFinalAgentMessage(collected, turnEnd)
       ? null

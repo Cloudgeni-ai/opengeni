@@ -2757,6 +2757,46 @@ describe("groupTimeline", () => {
     ).toHaveLength(0);
   });
 
+  test.each(["authoritative", "ordinary", "foreign", "user-boundary"])(
+    "wait answer promotion preserves %s precedence and boundaries",
+    (scenario) => {
+      reset();
+      const answer = "Exact streamed answer.\nSecond line.";
+      const events = [
+        event("agent.message.delta", { text: answer }),
+        ...(scenario === "foreign"
+          ? [event("agent.message.delta", { text: "Another turn's answer." }, { turnId: "other" })]
+          : scenario === "user-boundary"
+            ? [event("user.message", { text: "New direction" }, { turnId: "other" })]
+            : []),
+        event("agent.toolCall.created", { id: "wait", name: "wait_for_input", arguments: {} }),
+        ...(scenario === "ordinary"
+          ? []
+          : [event("session.wait.started", { actor: "agent", reason: "Awaiting result" })]),
+        event("agent.toolCall.output", { id: "wait", output: { status: "waiting_for_input" } }),
+        event("turn.completed", {
+          output: scenario === "authoritative" ? "Authoritative final." : "",
+        }),
+      ];
+      const items = buildTimeline(events);
+      const groups = groupTimeline(items);
+      const foldIndex = groups.findIndex(
+        (group) => group.kind === "turn" && group.id === "turn-turn-1",
+      );
+      const lifted = groups
+        .slice(foldIndex + 1)
+        .filter((group) => group.kind === "item" && group.item.kind === "agent-message");
+      expect(
+        lifted.map((group) =>
+          group.kind === "item" && group.item.kind === "agent-message" ? group.item.text : null,
+        ),
+      ).toEqual(scenario === "authoritative" ? ["Authoritative final."] : []);
+      expect(
+        items.filter((item) => item.kind === "agent-message" && item.text === answer),
+      ).toHaveLength(1);
+    },
+  );
+
   test("promotes the latest completed commentary when a tool turn settles without a final", () => {
     reset();
     const events = [

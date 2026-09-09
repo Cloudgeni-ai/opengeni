@@ -1186,10 +1186,10 @@ injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
 Multiple SDK clients in the same document retain independent ports; connecting
-one must not cancel another. The same Site client exposes the ordinary session
-SDK for React providers, timelines, and composers. Published requests use the
-viewer-authenticated parent; sandbox previews use the existing attempt-bound
-Codemode HTTP handler, including incremental, cancellable event streams.
+one must not cancel another. Workspace SDK requests have no endpoint allowlist:
+the host binds routing; API handlers authorize. Published calls use viewer auth;
+previews retain the Codemode permission ceiling and cancellable streaming.
+Build/edit shortcuts send user prompts without authority overrides.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
