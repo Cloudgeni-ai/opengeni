@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import postgres from "postgres";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
-  retainWorkspaceProviderCommand,
+  createProviderCommandRetainer,
   getRetainedProviderCommand,
   acknowledgeRetainedProviderOutput,
   reserveRetainedProviderInput,
@@ -66,6 +66,11 @@ import {
 } from "../src/observability-metrics";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import type { ActivityServices } from "../src/activities/types";
+
+const retainWorkspaceProviderCommand = createProviderCommandRetainer(
+  retainWorkspaceMutationProcess,
+  (error) => (error instanceof SandboxRetainedProcessPromotionFencedError ? error.process : null),
+);
 
 const SETTINGS = testSettings({
   sandboxBackend: "local",

@@ -14,7 +14,7 @@
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import {
-  retainWorkspaceProviderCommand,
+  createProviderCommandRetainer,
   retainedProviderCommandPersistence,
 } from "@opengeni/db/retained-provider-commands";
 import {
@@ -25,6 +25,8 @@ import {
   getSandbox,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
+  retainWorkspaceMutationProcess,
+  SandboxRetainedProcessPromotionFencedError,
   retainedProcessSettlementIdentity,
   settleRetainedProcess,
   verifyDirectWorkspaceMutationSettlement,
@@ -61,6 +63,11 @@ type PersistableMutationAdmission = {
     ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
   > | null;
 };
+
+const retainWorkspaceProviderCommand = createProviderCommandRetainer(
+  retainWorkspaceMutationProcess,
+  (error) => (error instanceof SandboxRetainedProcessPromotionFencedError ? error.process : null),
+);
 
 type DirectRetainedProcessRoute = {
   providerSessionId: number;

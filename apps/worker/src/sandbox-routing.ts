@@ -16,7 +16,7 @@
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
-  retainWorkspaceProviderCommand,
+  createProviderCommandRetainer,
   retainedProviderCommandPersistence,
 } from "@opengeni/db/retained-provider-commands";
 import {
@@ -25,6 +25,7 @@ import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
   getRetainedProcess,
+  retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
   settleConnectedMachineSessionBackgroundCommand,
   settleRetainedProcess,
@@ -81,6 +82,11 @@ import {
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
+
+const retainWorkspaceProviderCommand = createProviderCommandRetainer(
+  retainWorkspaceMutationProcess,
+  (error) => (error instanceof SandboxRetainedProcessPromotionFencedError ? error.process : null),
+);
 
 type PersistableMutationAdmission = {
   admission: SandboxWorkspaceMutationAdmission;
