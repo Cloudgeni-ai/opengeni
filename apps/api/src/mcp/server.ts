@@ -5343,7 +5343,8 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_pause",
       {
-        description: "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
+        description:
+          "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           idempotencyKey: z4.string().uuid(),
