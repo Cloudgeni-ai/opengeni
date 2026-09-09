@@ -111,8 +111,8 @@ conversation:
 
 `agentAccess` is enforced for agents in the single session-authorization seam:
 a session's own tree (its children and their children) is always reachable,
-peers are reachable only when both sides allow it, and the most restrictive side
-wins. `memory` selects which Memory rows the agent reads and where it saves:
+peers are reachable when the caller's task scope and ordinary target authorization
+allow it. Target task scope adds no incoming restriction. `memory` selects which Memory rows the agent reads and where it saves:
 user-scoped memories use the verified user of the active turn, not an arbitrary
 product label or the person who first created a shared conversation. Use task
 notes for temporary conversation-tree coordination. There is no active session
@@ -192,8 +192,8 @@ setting, so the default is one workspace per customer:
 
 This is an agent-authority decision, not only a UI visibility decision. A live
 agent attempt may read, message, and control another session in the same
-workspace only when both sessions' `agentAccess` scopes allow it; the seam in
-`packages/core/src/session-authorization.ts` applies the most restrictive side,
+workspace only when the caller's `agentAccess` and target resource authorization allow it; the seam in
+`packages/core/src/session-authorization.ts` enforces outbound-only task scope,
 always allows a session's own tree, and filters `sessions_list` and the session
 list routes the same way. Turning `memoryEnabled` off only disables workspace
 Memory retrieval/saving; use `memoryScope` for per-session memory behavior.

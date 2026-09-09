@@ -106,14 +106,15 @@ on the first message; afterwards OpenGeni owns the history.
 | Scenario | `agentAccess` | `memory` |
 | --- | --- | --- |
 | Support desk: agent confined to its chat tree | `"session"` (default) | `false` (default) |
-| One customer, several users, private from each other | `"user"` with a `user` label | `"user"` |
+| Agents restricted to their canonical user's chats | `"user"` with `asUser()` | `"user"` |
 | A team collaborating across chats | `"workspace"` | `"workspace"` |
 | Any of the above without Memory tools | any | `false` |
 
 `agentAccess` is enforced in the server-side session-authorization seam for
-agents (own tree always allowed, most restrictive side wins); `user` is an opaque
-label for memory scope and list filtering, never a login. Humans and the
-organization key still see every session. Graduate to `og.client`
+agents as outbound task scope: own tree, same canonical user, or workspace.
+A narrow target remains reachable by an authorized broad coordinator; target
+private visibility and normal permissions still apply. `asUser()` establishes
+canonical authority, not a second end-user label. Graduate to `og.client`
 (`OpenGeniClient`) on the same `chat.sessionId` when the product needs files,
 tools, approval policies, forks, or realtime voice. The
 `examples/chat-quickstart` directory provides a backend-only server example.

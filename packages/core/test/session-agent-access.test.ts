@@ -9,76 +9,25 @@ import { resolveSessionCreateScope } from "../src/domain/sessions";
 const acme = "user:acme";
 const other = "user:other";
 
-describe("agent access pairwise rule", () => {
-  test("workspace callers reach workspace targets regardless of label", () => {
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "workspace", scopeSubjectId: null },
-        { agentAccess: "workspace", scopeSubjectId: acme },
-      ),
-    ).toBe(true);
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "workspace", scopeSubjectId: acme },
-        { agentAccess: "workspace", scopeSubjectId: other },
-      ),
-    ).toBe(true);
-  });
-
-  test("a session-scoped side denies every cross-tree pair", () => {
-    for (const peer of ["session", "user", "workspace"] as const) {
-      expect(
-        agentAccessPermitsCrossTreeAccess(
-          { agentAccess: "session", scopeSubjectId: acme },
-          { agentAccess: peer, scopeSubjectId: acme },
-        ),
-      ).toBe(false);
-      expect(
-        agentAccessPermitsCrossTreeAccess(
-          { agentAccess: peer, scopeSubjectId: acme },
-          { agentAccess: "session", scopeSubjectId: acme },
-        ),
-      ).toBe(false);
+describe("outbound agent task scope", () => {
+  test("target task scope never restricts an otherwise authorized coordinator", () => {
+    for (const callerMode of ["session", "user", "workspace"] as const) {
+      for (const targetMode of ["session", "user", "workspace"] as const) {
+        for (const callerUser of [null, acme, other]) {
+          for (const targetUser of [null, acme, other]) {
+            const expected =
+              callerMode === "workspace" ||
+              (callerMode === "user" && callerUser !== null && callerUser === targetUser);
+            expect(
+              agentAccessPermitsCrossTreeAccess(
+                { agentAccess: callerMode, scopeSubjectId: callerUser },
+                { agentAccess: targetMode, scopeSubjectId: targetUser },
+              ),
+            ).toBe(expected);
+          }
+        }
+      }
     }
-  });
-
-  test("a user-scoped side requires the exact same non-null label", () => {
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "user", scopeSubjectId: acme },
-        { agentAccess: "workspace", scopeSubjectId: acme },
-      ),
-    ).toBe(true);
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "workspace", scopeSubjectId: acme },
-        { agentAccess: "user", scopeSubjectId: acme },
-      ),
-    ).toBe(true);
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "user", scopeSubjectId: acme },
-        { agentAccess: "user", scopeSubjectId: other },
-      ),
-    ).toBe(false);
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "user", scopeSubjectId: null },
-        { agentAccess: "user", scopeSubjectId: null },
-      ),
-    ).toBe(false);
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "workspace", scopeSubjectId: null },
-        { agentAccess: "user", scopeSubjectId: acme },
-      ),
-    ).toBe(false);
-    expect(
-      agentAccessPermitsCrossTreeAccess(
-        { agentAccess: "user", scopeSubjectId: "external_user:other" },
-        { agentAccess: "user", scopeSubjectId: acme },
-      ),
-    ).toBe(false);
   });
 });
 

@@ -34204,29 +34204,22 @@ function sessionFilters(
 
 /**
  * The agent-access predicate for one calling attempt (migration 0427). It
- * mirrors the pairwise rule in the core seam exactly: a caller always keeps
- * its own root tree; a `session` caller sees nothing else; a `user` caller
- * additionally sees non-`session` sessions carrying its own end-user label; a
- * `workspace` caller additionally sees every `workspace` session and the
- * `user` sessions carrying its own label. A caller without a label can never
- * match a labelled `user` session.
+ * mirrors outgoing reach in the core seam: own tree, same canonical user, or
+ * workspace. Target task scope never hides the conversation. This predicate
+ * remains intersected with host scope and ordinary private-session visibility.
  */
 export function sessionAgentAccessViewerFilter(viewer: SessionAgentAccessViewer): SQL {
   const ownTree = eq(schema.sessions.rootSessionId, viewer.callerRootSessionId);
-  const sameEndUser = viewer.scopeSubjectId
+  const sameUser = viewer.scopeSubjectId
     ? and(eq(schema.sessions.scopeSubjectId, viewer.scopeSubjectId))!
     : sql`false`;
   switch (viewer.agentAccess) {
     case "session":
       return ownTree;
     case "user":
-      return or(ownTree, and(ne(schema.sessions.agentAccess, "session"), sameEndUser)!)!;
+      return or(ownTree, sameUser)!;
     case "workspace":
-      return or(
-        ownTree,
-        eq(schema.sessions.agentAccess, "workspace"),
-        and(eq(schema.sessions.agentAccess, "user"), sameEndUser)!,
-      )!;
+      return sql`true`;
   }
 }
 

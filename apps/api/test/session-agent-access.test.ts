@@ -417,12 +417,12 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     expect((await httpGet(f, aBearer, `/sessions/${b.id}/queue`)).status).toBe(404);
     expect((await httpGet(f, aBearer, `/sessions/${c.id}/events`)).status).toBe(404);
 
-    // A workspace-scoped peer cannot read into a session-scoped tree either.
-    await expectDenied(callTool(cServer, "session_get", { sessionId: a.id }));
-    await expectDenied(callTool(cServer, "session_events", { sessionId: a.id }));
+    // An authorized workspace coordinator can inspect a narrowly scoped task.
+    await expectAllowed(callTool(cServer, "session_get", { sessionId: a.id }));
+    await expectAllowed(callTool(cServer, "session_events", { sessionId: a.id }));
     await expectAllowed(callTool(cServer, "session_get", { sessionId: c.id }));
     const cBearer = await agentBearer(f, cAttempt);
-    expect((await httpGet(f, cBearer, `/sessions/${a.id}/events`)).status).toBe(404);
+    expect((await httpGet(f, cBearer, `/sessions/${a.id}/events`)).status).toBe(200);
     expect((await httpGet(f, cBearer, `/sessions/${c.id}/events`)).status).toBe(200);
 
     // A's child inherits the scope, and the tree stays reachable both ways.
@@ -444,13 +444,13 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     const childServer = await agentServer(f, await liveAttempt(f, childId));
     await expectAllowed(callTool(childServer, "session_get", { sessionId: a.id }));
     await expectDenied(callTool(childServer, "session_get", { sessionId: b.id }));
-    await expectDenied(callTool(cServer, "session_get", { sessionId: childId }));
+    await expectAllowed(callTool(cServer, "session_get", { sessionId: childId }));
 
     // Discovery is fenced by the same rule, in MCP and HTTP alike.
     expect(await listedIds(aServer)).toEqual(new Set([a.id, childId]));
-    expect(await listedIds(cServer)).toEqual(new Set([c.id]));
+    expect(await listedIds(cServer)).toEqual(new Set([a.id, b.id, c.id, childId]));
     expect(await httpListedIds(f, aBearer)).toEqual(new Set([a.id, childId]));
-    expect(await httpListedIds(f, cBearer)).toEqual(new Set([c.id]));
+    expect(await httpListedIds(f, cBearer)).toEqual(new Set([a.id, b.id, c.id, childId]));
     // Humans keep the complete workspace list.
     expect(await httpListedIds(f, f.humanBearer)).toEqual(new Set([a.id, b.id, c.id, childId]));
     void bAttempt;
@@ -472,14 +472,14 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     await expectDenied(callTool(user1Server, "session_get", { sessionId: user2.id }));
     await expectDenied(callTool(user1Server, "session_get", { sessionId: shared0.id }));
     await expectAllowed(callTool(shared1Server, "session_get", { sessionId: user1.id }));
-    await expectDenied(callTool(shared1Server, "session_get", { sessionId: user2.id }));
+    await expectAllowed(callTool(shared1Server, "session_get", { sessionId: user2.id }));
     await expectAllowed(callTool(shared1Server, "session_get", { sessionId: shared0.id }));
-    await expectDenied(callTool(shared0Server, "session_get", { sessionId: user1.id }));
+    await expectAllowed(callTool(shared0Server, "session_get", { sessionId: user1.id }));
     await expectAllowed(callTool(shared0Server, "session_get", { sessionId: shared1.id }));
 
     expect(await listedIds(user1Server)).toEqual(new Set([user1.id, shared1.id]));
-    expect(await listedIds(shared1Server)).toEqual(new Set([user1.id, shared1.id, shared0.id]));
-    expect(await listedIds(shared0Server)).toEqual(new Set([shared1.id, shared0.id]));
+    expect(await listedIds(shared1Server)).toEqual(new Set([user1.id, user2.id, shared1.id, shared0.id]));
+    expect(await listedIds(shared0Server)).toEqual(new Set([user1.id, user2.id, shared1.id, shared0.id]));
 
     // The human end-user filter is an exact pair.
     expect(

@@ -6849,10 +6849,10 @@ export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
 
 /**
  * How far a live agent attempt on a session may reach across the workspace,
- * and how far peer attempts may reach into it. `workspace` is the platform
- * default. `user` limits both directions to sessions carrying the same
- * {@link SessionScopeSubjectId} canonical identity; `session` limits both to the own root tree.
- * The most restrictive side of a caller/target pair wins. Humans and API keys
+ * under ordinary resource authorization. `workspace` is the platform default.
+ * `user` limits outgoing reach to the same canonical {@link SessionScopeSubjectId};
+ * `session` limits it to the own root tree. Target task scope does not restrict
+ * incoming access; private ownership remains enforced. Humans and API keys
  * are unaffected: this is an agent-to-agent fence enforced only in the core
  * session-authorization seam.
  */

@@ -74,17 +74,16 @@ function sameScopeSubject(
 /**
  * The agent-to-agent reach rule (migration 0427) for one caller/target pair
  * that live in DIFFERENT root trees. A caller always keeps its own tree, so
- * this is never consulted for same-root access. The most restrictive side
- * wins: a `session` side denies everything; a `user` side requires both
- * sessions to carry the same non-null canonical user; two `workspace` sides
- * are today's behaviour. Humans and API keys never pass through here.
+ * this is never consulted for same-root access. Only the caller's task scope
+ * restricts outgoing reach. The target's visibility and ownership remain
+ * independently enforced; its agent scope does not block incoming access.
  */
 export function agentAccessPermitsCrossTreeAccess(
   caller: SessionAgentAccessFacts,
   target: SessionAgentAccessFacts,
 ): boolean {
-  if (caller.agentAccess === "session" || target.agentAccess === "session") return false;
-  if (caller.agentAccess === "user" || target.agentAccess === "user") {
+  if (caller.agentAccess === "session") return false;
+  if (caller.agentAccess === "user") {
     return sameScopeSubject(caller.scopeSubjectId, target.scopeSubjectId);
   }
   return true;
@@ -265,9 +264,9 @@ export async function requireSessionAuthorization(
     if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
   }
   // Agent-access scope (migration 0427): an attempt always keeps its own root
-  // tree; across trees the most restrictive of the caller's and the target's
-  // declared reach wins. Both sides are read from durable session rows, never
-  // from the request, and an embedding-host port cannot widen this.
+  // tree; across trees only its own outgoing task scope restricts reach.
+  // User matching reads canonical target identity, not target task scope.
+  // Private ownership above and the host authorization below still apply.
   if (actor.kind === "agent_attempt" && target.rootSessionId !== actor.callerRootSessionId) {
     const callerAccess = resolvedActor.callerAccess;
     if (

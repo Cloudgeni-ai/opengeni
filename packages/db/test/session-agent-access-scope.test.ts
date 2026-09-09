@@ -252,13 +252,19 @@ describe("session agent access scope (real PostgreSQL)", () => {
       listIds(f, { authorizationScope: { kind: "all", agentAccessViewer } });
     // A session-scoped caller sees only its own tree.
     expect(await scoped(viewer(a.id, "session", u1))).toEqual(new Set([a.id, a1.id]));
-    // A user-scoped caller sees its tree plus non-session peers with its label.
-    expect(await scoped(viewer(e.id, "user", u1))).toEqual(new Set([e.id, c.id]));
+    // A user-scoped caller sees its tree plus every same-user peer, regardless of target scope.
+    expect(await scoped(viewer(e.id, "user", u1))).toEqual(
+      new Set([a.id, a1.id, b.id, c.id, e.id]),
+    );
     expect(await scoped(viewer(h.id, "user", u2))).toEqual(new Set([h.id, g.id]));
-    // A workspace caller without a label sees every workspace peer and no user peer.
-    expect(await scoped(viewer(d.id, "workspace", null))).toEqual(new Set([c.id, d.id, g.id]));
-    // A workspace caller with a label additionally sees the user peers carrying it.
-    expect(await scoped(viewer(c.id, "workspace", u1))).toEqual(new Set([c.id, d.id, g.id, e.id]));
+    // A workspace caller without a label sees every authorized peer regardless of target task scope.
+    expect(await scoped(viewer(d.id, "workspace", null))).toEqual(
+      new Set([a.id, a1.id, b.id, c.id, d.id, e.id, g.id, h.id]),
+    );
+    // A workspace caller with a label has the same reach regardless of its own user label.
+    expect(await scoped(viewer(c.id, "workspace", u1))).toEqual(
+      new Set([a.id, a1.id, b.id, c.id, d.id, e.id, g.id, h.id]),
+    );
     // The viewer intersects a host root scope rather than replacing it.
     expect(
       await listIds(f, {
@@ -279,7 +285,7 @@ describe("session agent access scope (real PostgreSQL)", () => {
           agentAccessViewer: viewer(d.id, "workspace", null),
         },
       }),
-    ).toEqual(new Set([c.id]));
+    ).toEqual(new Set([a.id, a1.id, c.id]));
     // Human/API callers without a viewer keep the complete list.
     expect(await listIds(f, { authorizationScope: { kind: "all" } })).toEqual(
       new Set([a.id, a1.id, b.id, c.id, d.id, e.id, g.id, h.id]),
