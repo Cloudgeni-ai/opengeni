@@ -1613,7 +1613,7 @@ export function buildRemoteV2ReplacementHistory(
       remaining -= chargeTokens;
       continue;
     }
-    retainedReversed.push(compactRetainedMessage(item, remaining));
+    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
     remaining = 0;
     break;
   }

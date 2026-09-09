@@ -1660,3 +1660,21 @@ test("compaction charges projected attachment images before selecting retained m
   );
   expect(remote).not.toContainEqual(image);
 });
+
+test("remote compaction reserves image tokens while truncating retained text", () => {
+  const text = "long context ".repeat(50000);
+  const image = { type: "input_image", image_url: "data:image/png;base64,cGl4ZWxz" };
+  const item = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }, image],
+  };
+  const retained = buildRemoteV2ReplacementHistory(
+    [item],
+    { type: "compaction", encrypted_content: "blob" },
+    () => estimateTextTokens(text) + 10000,
+  );
+  const content = retained[0]!.content as Array<Record<string, unknown>>;
+  expect(content).toContainEqual(image);
+  expect(estimateTextTokens(content[0]!.text as string) + 10000).toBeLessThanOrEqual(64000);
+});
