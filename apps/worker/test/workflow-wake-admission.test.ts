@@ -118,8 +118,9 @@ test("accepted Send stays pending in supervision until the actual durable claim"
   const service = {
     db: client.db,
     observability: { info: () => {}, error: () => {} },
-    wakeSessionWorkflow: async () => {
+    wakeSessionWorkflow: async ({ onSignalAccepted }: { onSignalAccepted?: () => void }) => {
       signals++;
+      onSignalAccepted?.();
       return await markSessionWorkflowWakeDelivered(client.db, wake);
     },
   } as unknown as NotifyServices;
@@ -154,4 +155,51 @@ test("accepted Send stays pending in supervision until the actual durable claim"
     deliveredRevision: queued.wakeRevision,
   });
   expect(signals).toBe(2);
+});
+
+test("transport acceptance survives a failed acknowledgment without consuming the wake", async () => {
+  const ctx = await fixture();
+  const queued = await send(ctx, "continue after the database recovers");
+  const wake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+    (row) => row.sessionId === ctx.session.id,
+  )!;
+  const service = {
+    db: client.db,
+    observability: { info: () => {}, error: () => {} },
+    wakeSessionWorkflow: async ({ onSignalAccepted }: { onSignalAccepted?: () => void }) => {
+      // Fault at the acknowledgment boundary after transport accepted the signal.
+      onSignalAccepted?.();
+      throw new Error("acknowledgment database unavailable");
+    },
+  } as unknown as NotifyServices;
+  const result = await reconcilePendingSessionWorkflowWakes(service, 1, {
+    claimPendingSessionWorkflowWakes: async () => [wake],
+  });
+  expect(result).toMatchObject({ signaled: 1, delivered: 0, failed: 1 });
+  expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+    wakeRevision: queued.wakeRevision,
+    deliveredRevision: 0,
+    lastError: "acknowledgment database unavailable",
+  });
+  const transportFailure = await reconcilePendingSessionWorkflowWakes(
+    {
+      ...service,
+      wakeSessionWorkflow: async () => {
+        throw new Error("transport unavailable");
+      },
+    },
+    1,
+    { claimPendingSessionWorkflowWakes: async () => [wake] },
+  );
+  expect(transportFailure).toMatchObject({ signaled: 0, delivered: 0, failed: 1 });
+  // An immediate caller still sees the original failure instead of a false ACK.
+  await expect(
+    service.wakeSessionWorkflow!({
+      accountId: wake.accountId,
+      workspaceId: wake.workspaceId,
+      sessionId: wake.sessionId,
+      workflowId: wake.temporalWorkflowId,
+      wakeRevision: wake.wakeRevision,
+    }),
+  ).rejects.toThrow("acknowledgment database unavailable");
 });

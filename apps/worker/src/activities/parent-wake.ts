@@ -382,6 +382,12 @@ export async function reconcilePendingSessionWorkflowWakes(
     for (;;) {
       const repair = queue.shift();
       if (!repair) return;
+      let signalAccepted = false;
+      const onSignalAccepted = () => {
+        if (signalAccepted) return;
+        signalAccepted = true;
+        signaled += 1;
+      };
       try {
         const receipt = await svc.wakeSessionWorkflow!({
           accountId: repair.accountId,
@@ -390,8 +396,11 @@ export async function reconcilePendingSessionWorkflowWakes(
           workflowId: repair.temporalWorkflowId,
           wakeRevision: repair.wakeRevision,
           ...(repair.interruptionRequested ? { interruptionRequested: true } : {}),
+          onSignalAccepted,
         });
-        signaled += 1;
+        // Older embeddings do not invoke the optional transport observer.
+        // Their successful return still proves a signal call, never an ACK.
+        onSignalAccepted();
         if (receipt?.action === "acknowledged") {
           delivered += 1;
         } else if (receipt?.action === "pending_admission") {

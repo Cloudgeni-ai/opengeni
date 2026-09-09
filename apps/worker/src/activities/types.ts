@@ -28,6 +28,8 @@ export type WakeSessionWorkflowSignal = (input: {
   workflowId: string;
   wakeRevision: number;
   interruptionRequested?: boolean;
+  /** Called after transport acceptance, before the fallible durable ACK. */
+  onSignalAccepted?: () => void;
 }) => Promise<SessionWorkflowWakeDeliveryResult | void>;
 
 export type SignalCodexCapacityWorkflow = (input: {

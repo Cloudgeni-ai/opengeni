@@ -380,3 +380,9 @@ dispatcher's result and structured reconciliation log separate `signaled`,
 verify the durable attempt claim and `turn.started` before reporting execution.
 Pending revisions keep the existing outbox backoff and admission rules; these
 counters neither resume paused work nor authorize a new attempt.
+
+Transport acceptance is reported before attempting the database acknowledgment.
+If that acknowledgment fails, a batch can report both `signaled` and `failed`
+for the same revision; `delivered` remains zero and the original error propagates
+to immediate callers. Older embedding clients may omit the optional transport
+observer; successful void responses remain `unconfirmed`, not acknowledged.

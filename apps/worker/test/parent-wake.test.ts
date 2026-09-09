@@ -109,6 +109,7 @@ for (const scenario of [
       sessionId: "33333333-3333-4333-8333-333333333333",
       workflowId: "session-33333333-3333-4333-8333-333333333333",
       wakeRevision: 7,
+      onSignalAccepted: expect.any(Function),
     });
   });
 }
