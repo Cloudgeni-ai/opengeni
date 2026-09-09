@@ -1418,12 +1418,8 @@ process, admission, PTY, and holder remain capture blockers. Quarantine never
 becomes exit/loss proof and never authorizes capture, rotation, provider
 termination, or replay.
 
-Resumed Modal adapters restore the sandbox, not their local numeric command
-handles. Retained-command reconciliation defers unavailable process observation
-and applies the same explicit quarantine schedule after five probes. It never
-uses an SDK map miss as physical loss proof. Owner exit receipts and exact bound
-provider-instance loss remain authoritative; cross-worker process reattachment
-is not provided by this containment. See `docs/run-lifecycle.md`.
+Modal handle-map misses cannot prove command loss; resumed observers defer reconciliation.
+See `docs/run-lifecycle.md` for containment and remaining reattachment limitations.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
