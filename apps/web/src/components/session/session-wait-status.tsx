@@ -49,7 +49,9 @@ export function SessionWaitStatus({
           {!compact && (
             <details className="mt-1 text-xs">
               <summary className="cursor-pointer">Wait details</summary>
-              <p className="mt-1 whitespace-pre-wrap break-words">{reason}</p>
+              <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
+                {reason}
+              </p>
             </details>
           )}
         </div>
