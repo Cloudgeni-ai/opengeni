@@ -184,6 +184,7 @@ import {
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
+import { getToolSearchExecution, getToolSearchProviderCallId } from "@openai/agents-core/utils";
 import {
   Capabilities,
   Manifest,
@@ -316,6 +317,7 @@ import {
   composeCallModelInputFilters,
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
+  stripProviderItemId,
 } from "./model-input";
 import {
   recordModelPreparationManifestInventory,
@@ -1014,9 +1016,12 @@ export async function summarizeForCompaction(
   // items without flattening tool history into a fake user transcript.
   const request: ModelRequest = {
     systemInstructions: options.systemInstructions ?? "",
-    input: input as AgentInputItem[],
+    input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
     modelSettings: {
       maxTokens,
+      // Azure can select a historical tool despite empty schemas. Keep this
+      // verified policy off subscription/gateway transports with other contracts.
+      ...(provider.wireProfile === "azure-openai" ? { toolChoice: "none" as const } : {}),
       // Azure rejects store:false; the Codex subscription transport enforces
       // it independently. The OpenAI platform path remains explicitly storeless.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
@@ -1048,6 +1053,47 @@ export async function summarizeForCompaction(
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
   return summary;
+}
+
+/**
+ * Portable checkpoints carry inline history, not references to stored Responses
+ * items. An assistant/tool item's provider id can require its original reasoning
+ * item even when the full message is supplied. The portable preparation removes
+ * opaque reasoning, so retaining those dependent ids makes Azure reject the
+ * checkpoint. Remove only provider item identity from this request-local copy;
+ * callId/call_id, tool payloads, order, and canonical history stay unchanged.
+ */
+const DETACHABLE_COMPACTION_ITEM_TYPES = new Set([
+  "message",
+  "reasoning",
+  "function_call",
+  "function_call_result",
+  "shell_call",
+  "shell_call_output",
+  "computer_call",
+  "computer_call_result",
+  "apply_patch_call",
+  "apply_patch_call_output",
+]);
+
+function detachCompactionResponseItemIdentity(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  const clientToolSearch =
+    (item.type === "tool_search_call" || item.type === "tool_search_output") &&
+    getToolSearchExecution(item) !== "server" &&
+    Boolean(getToolSearchProviderCallId(item));
+  const providerData = item.providerData as Record<string, unknown> | undefined;
+  const webSearch =
+    item.type === "hosted_tool_call" &&
+    (providerData?.type === "web_search_call" || providerData?.type === "web_search");
+  // Unlike web search, hosted file search requires its id on Azure input.
+  // Approval/program references also remain intact. A universal strip is unsafe.
+  if (!DETACHABLE_COMPACTION_ITEM_TYPES.has(String(item.type)) && !clientToolSearch && !webSearch)
+    return item;
+  // The SDK reserves providerData.id for these types; only the top-level id is
+  // emitted. Share the normal inference primitive without changing its policy.
+  return stripProviderItemId(item as AgentInputItem) as Record<string, unknown>;
 }
 
 /**
@@ -1287,11 +1333,13 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let type: string | null = null;
   let requestId: string | null = null;
   let eventType: string | null = null;
+  let rejectionReason: "missing_required_reasoning_item" | null = null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as Record<string, unknown>;
+    rejectionReason ??= compactionRejectionReason(record);
     if (!errorName && current instanceof Error) {
       errorName = boundCompactionDiagnosticField(current.name);
     }
@@ -1342,6 +1390,7 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     const nestedError = record.error;
     if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
       const nested = nestedError as Record<string, unknown>;
+      rejectionReason ??= compactionRejectionReason(nested);
       if (code === null && typeof nested.code === "string") {
         code = boundCompactionDiagnosticField(nested.code);
       }
@@ -1372,7 +1421,22 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     type,
     requestId,
     ...(eventType ? { eventType } : {}),
+    ...(rejectionReason ? { rejectionReason } : {}),
   };
+}
+
+function compactionRejectionReason(
+  record: Record<string, unknown>,
+): "missing_required_reasoning_item" | null {
+  // Classify the known provider protocol rejection without persisting the
+  // message, referenced item ids, or arbitrary provider-owned fields.
+  return typeof record.message === "string" &&
+    record.message.length <= 1024 &&
+    /^Item '[A-Za-z0-9_-]+' of type '[a-z_]+' was provided without its required 'reasoning' item: '[A-Za-z0-9_-]+'\.$/.test(
+      record.message,
+    )
+    ? "missing_required_reasoning_item"
+    : null;
 }
 
 const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
