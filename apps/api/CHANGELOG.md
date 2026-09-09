@@ -1,5 +1,32 @@
 # @opengeni/api-router
 
+## 2.11.3
+
+### Patch Changes
+
+- 87fbd92: Preserve full session messages and tool output through database paging, compact
+  event delivery, SSE, browser rendering, and copying. Remove browser per-event
+  preview truncation while retaining history pagination and backpressure. Events
+  larger than a page or loaded-window byte target are delivered intact on their own.
+- Updated dependencies [1b0f4f2]
+- Updated dependencies [87fbd92]
+- Updated dependencies [8a55774]
+- Updated dependencies [5835c27]
+- Updated dependencies [eb21b93]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/db@4.2.2
+  - @opengeni/events@0.4.21
+  - @opengeni/runtime@2.4.3
+  - @opengeni/artifact-tool@0.3.23
+  - @opengeni/codemode@0.5.3
+  - @opengeni/config@1.0.4
+  - @opengeni/core@2.8.3
+  - @opengeni/documents@0.8.23
+  - @opengeni/github@0.7.7
+  - @opengeni/observability@0.8.23
+  - @opengeni/storage@0.2.124
+  - @opengeni/tool-gateway@0.1.4
+
 ## 2.11.2
 
 ### Patch Changes

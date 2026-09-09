@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 2.15.2
+
+### Patch Changes
+
+- 1b0f4f2: Expose unavailable background command observations separately from command lifecycle state, and render that uncertainty in command and session status.
+
 ## 2.15.1
 
 ### Patch Changes
