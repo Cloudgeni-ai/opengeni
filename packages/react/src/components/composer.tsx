@@ -74,7 +74,16 @@ function ComposerTip({
 
 export type ComposerDelivery = Pick<
   ComposerState,
-  "value" | "setValue" | "send" | "steer" | "sending" | "canSend" | "error" | "clearError"
+  | "value"
+  | "setValue"
+  | "send"
+  | "steer"
+  | "sending"
+  | "canSend"
+  | "error"
+  | "clearError"
+  | "annotations"
+  | "requestAnnotationReview"
 >;
 
 export type ComposerDraftState = Pick<
@@ -112,6 +121,7 @@ export type ChatComposerMessages = {
   sendAndResumeAriaLabel: string;
   sendTitle: string;
   sendAndResumeTitle: string;
+  annotationNotesRequired: string;
   workspacePaused: string;
   pausedHere: string;
   parentBlocker: string;
@@ -179,6 +189,7 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   sendAndResumeAriaLabel: "Add message to queue",
   sendTitle: "Queue message (Enter); steer with Cmd/Ctrl+Enter",
   sendAndResumeTitle: "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
+  annotationNotesRequired: "Add a note to each quote before sending.",
   workspacePaused: "Workspace paused",
   pausedHere: "Paused here",
   parentBlocker: "parent",
@@ -237,6 +248,7 @@ export type ComposerSubmitBlocker =
   | "attachment"
   | "sending"
   | "command"
+  | "annotations"
   | "empty"
   | null;
 
@@ -547,6 +559,9 @@ export function useChatComposerController({
   });
   const paletteEnabled = commandContext !== undefined;
   const commandDraftBlocked = paletteEnabled && palette.isCommandDraft;
+  const annotationsIncomplete = (delivery.annotations ?? []).some(
+    (annotation) => annotation.note.trim().length === 0,
+  );
 
   const submitBlocker: ComposerSubmitBlocker = disabled
     ? "disabled"
@@ -556,9 +571,11 @@ export function useChatComposerController({
         ? "sending"
         : commandDraftBlocked
           ? "command"
-          : delivery.canSend || hasReadyAttachment
-            ? null
-            : "empty";
+          : annotationsIncomplete
+            ? "annotations"
+            : delivery.canSend || hasReadyAttachment
+              ? null
+              : "empty";
   const canSubmit = submitBlocker === null;
 
   const submit = useCallback(
@@ -570,6 +587,12 @@ export function useChatComposerController({
       }
       if (disabled || blockedByAttachment || delivery.sending || submittingRef.current)
         return false;
+      if (annotationsIncomplete) {
+        setNotice({ tone: "error", message: messages.annotationNotesRequired });
+        delivery.clearError();
+        delivery.requestAnnotationReview?.();
+        return false;
+      }
       if (!delivery.canSend && !hasReadyAttachment) return false;
       submittingRef.current = true;
       setSubmitting(true);
@@ -581,11 +604,13 @@ export function useChatComposerController({
       }
     },
     [
+      annotationsIncomplete,
       blockedByAttachment,
       commandDraftBlocked,
       delivery,
       disabled,
       hasReadyAttachment,
+      messages.annotationNotesRequired,
       messages.slashCommandBlocked,
     ],
   );
@@ -645,6 +670,12 @@ export function useChatComposerController({
     );
     return () => window.clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    if (annotationsIncomplete) return;
+    setNotice((current) =>
+      current?.message === messages.annotationNotesRequired ? null : current,
+    );
+  }, [annotationsIncomplete, messages.annotationNotesRequired]);
 
   const runControlOperation = useCallback(async (operation: () => Promise<void>) => {
     if (controlOperationRef.current) return false;
@@ -1260,7 +1291,11 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
     const controller = useComposerController();
     const tip =
       title ??
-      (controller.paused ? controller.messages.sendAndResumeTitle : controller.messages.sendTitle);
+      (controller.submitBlocker === "annotations"
+        ? controller.messages.annotationNotesRequired
+        : controller.paused
+          ? controller.messages.sendAndResumeTitle
+          : controller.messages.sendTitle);
     return (
       <ComposerTip tip={tip}>
         <button

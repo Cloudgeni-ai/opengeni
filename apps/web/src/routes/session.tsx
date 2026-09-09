@@ -2000,6 +2000,8 @@ function SessionChatPane(props: {
               renderMessageText={renderMessageText}
               renderMessageActions={renderMessageActions}
               onAnnotate={composer.addAnnotation}
+              draftAnnotations={composer.annotations}
+              onDraftAnnotationSelect={composer.requestAnnotationReview}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}

@@ -14,6 +14,8 @@ Memory is retrieval context, never conversation history: the model sees relevant
 
 Integrations can choose a per-session `memoryScope`: `workspace`, `user`, `session`, or `off`. User and session scopes can read shared workspace facts, but their saves, corrections, and deletions stay within their own memory layer. Reading a shared fact does not allow a private chat to change it for everyone.
 
+The [chat integration](/guides/integrate-your-product#choose-agent-access-and-memory) exposes this as `memory: "workspace" | "user" | "session" | false`. If omitted, memory follows the chat's `agentAccess` scope, which defaults to `"session"`. User memory follows the product's opaque user label within the tenant and requires that label. `false` disables Memory tools, not the conversation's durable history, and it does not change which other sessions the agent may reach. Memory retrieval and saving also require Memory to be enabled for the workspace.
+
 ## Documents and Knowledge
 
 Upload documents or sync them from connected sources such as Google Drive. OpenGeni indexes them for hybrid vector and keyword search, and agents retrieve permission-filtered passages with citations. A separate curated Knowledge lane holds human-reviewed claims for facts that should not change without review.

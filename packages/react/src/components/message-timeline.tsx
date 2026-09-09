@@ -106,6 +106,7 @@ import {
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
+import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
@@ -118,10 +119,11 @@ import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
-import { TimelineAnnotationsChip } from "./timeline-annotations";
+import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
+const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -192,6 +194,10 @@ export type MessageTimelineProps = {
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /** Composer draft quotes currently attached to the next send. */
+  draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
+  /** Open the composer review list for one numbered draft badge. */
+  onDraftAnnotationSelect?: ((id: string) => void) | undefined;
   /** Older durable history exists above the current window (see useSessionEvents). */
   hasOlder?: boolean | undefined;
   /** An older window is being fetched; shows the quiet top shimmer. */
@@ -406,6 +412,8 @@ export function MessageTimeline({
   turnSummary,
   autoFollow = true,
   onAnnotate,
+  draftAnnotations,
+  onDraftAnnotationSelect,
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
@@ -1790,303 +1798,316 @@ export function MessageTimeline({
           <TimelineComputeLabelProvider value={computeLabel ?? null}>
             <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
-                <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-                  {onAnnotate ? (
-                    <Suspense fallback={null}>
-                      <TimelineAnnotationSelection
-                        rootRef={scrollRef}
-                        sources={annotationSources}
-                        onAnnotate={onAnnotate}
-                      />
-                    </Suspense>
-                  ) : null}
-                  {/* Pinned: anchoring off so the tip-follow camera owns the motion.
+                <TimelineAnnotationSourceRootContext.Provider value={scrollRef}>
+                  <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                    {onAnnotate ? (
+                      <Suspense fallback={null}>
+                        <TimelineAnnotationSelection
+                          rootRef={scrollRef}
+                          sources={annotationSources}
+                          onAnnotate={onAnnotate}
+                        />
+                      </Suspense>
+                    ) : null}
+                    {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
-                  <div
-                    ref={scrollRef}
-                    data-og-timeline-scroller=""
-                    data-og-bottom-follow={autoFollow && pinned && !hasNewer ? "true" : "false"}
-                    tabIndex={-1}
-                    onScroll={onScroll}
-                    onScrollEnd={onScrollEnd}
-                    onWheel={onWheel}
-                    onTouchStart={(event) => {
-                      const touch = event.touches.length === 1 ? event.touches[0] : undefined;
-                      touchPositionRef.current = touch
-                        ? { x: touch.clientX, y: touch.clientY }
-                        : null;
-                    }}
-                    onTouchMove={(event) => {
-                      const touch = event.touches[0];
-                      const previous = touchPositionRef.current;
-                      if (!touch || !previous || event.touches.length !== 1) {
-                        touchPositionRef.current = null;
-                        return;
-                      }
-                      const deltaX = previous.x - touch.clientX;
-                      const deltaY = previous.y - touch.clientY;
-                      if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 4) return;
-                      touchPositionRef.current = { x: touch.clientX, y: touch.clientY };
-                      onWheel({
-                        deltaX,
-                        deltaY,
-                        target: event.target,
-                        currentTarget: event.currentTarget,
-                      });
-                    }}
-                    onTouchEnd={() => {
-                      touchPositionRef.current = null;
-                    }}
-                    onTouchCancel={() => {
-                      touchPositionRef.current = null;
-                    }}
-                    onClickCapture={(event) => {
-                      const target =
-                        event.target instanceof Element
-                          ? event.target.closest("button[aria-expanded]")
+                    <div
+                      ref={scrollRef}
+                      data-og-timeline-scroller=""
+                      data-og-bottom-follow={autoFollow && pinned && !hasNewer ? "true" : "false"}
+                      tabIndex={-1}
+                      onScroll={onScroll}
+                      onScrollEnd={onScrollEnd}
+                      onWheel={onWheel}
+                      onTouchStart={(event) => {
+                        const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+                        touchPositionRef.current = touch
+                          ? { x: touch.clientX, y: touch.clientY }
                           : null;
-                      if (target) {
-                        releasePinFromReader();
-                        disclosureKeepsUnpinnedRef.current = true;
-                      }
-                    }}
-                    onPointerDown={onPointerDown}
-                    onKeyDown={onKeyDown}
-                    style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
-                    className={cn(
-                      // tabIndex=-1 is programmatic only — never paint a focus ring on
-                      // the whole scroller (click + Shift used to flash a blue outline).
-                      "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-16 pb-6 sm:px-6 outline-hidden",
-                      autoFollow && pinned && !hasNewer
-                        ? "[overflow-anchor:none]"
-                        : "[overflow-anchor:auto]",
-                    )}
-                  >
-                    <TimelineBeforeLayout
-                      capture={() => {
-                        readingAnchorRef.current =
-                          !pinnedRef.current && scrollRef.current
-                            ? captureTimelineAnchor(scrollRef.current)
-                            : null;
                       }}
+                      onTouchMove={(event) => {
+                        const touch = event.touches[0];
+                        const previous = touchPositionRef.current;
+                        if (!touch || !previous || event.touches.length !== 1) {
+                          touchPositionRef.current = null;
+                          return;
+                        }
+                        const deltaX = previous.x - touch.clientX;
+                        const deltaY = previous.y - touch.clientY;
+                        if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 4) return;
+                        touchPositionRef.current = { x: touch.clientX, y: touch.clientY };
+                        onWheel({
+                          deltaX,
+                          deltaY,
+                          target: event.target,
+                          currentTarget: event.currentTarget,
+                        });
+                      }}
+                      onTouchEnd={() => {
+                        touchPositionRef.current = null;
+                      }}
+                      onTouchCancel={() => {
+                        touchPositionRef.current = null;
+                      }}
+                      onClickCapture={(event) => {
+                        const target =
+                          event.target instanceof Element
+                            ? event.target.closest("button[aria-expanded]")
+                            : null;
+                        if (target) {
+                          releasePinFromReader();
+                          disclosureKeepsUnpinnedRef.current = true;
+                        }
+                      }}
+                      onPointerDown={onPointerDown}
+                      onKeyDown={onKeyDown}
+                      style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+                      className={cn(
+                        // tabIndex=-1 is programmatic only — never paint a focus ring on
+                        // the whole scroller (click + Shift used to flash a blue outline).
+                        "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-16 pb-6 sm:px-6 outline-hidden",
+                        autoFollow && pinned && !hasNewer
+                          ? "[overflow-anchor:none]"
+                          : "[overflow-anchor:auto]",
+                      )}
                     >
-                      <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
-                        <AnimatePresence>
-                          {loadingOlder ||
-                          loadingOldest ||
-                          (hasOlder && onJumpToStart && olderPrefetchArmed) ||
-                          underfillRetryReady ? (
-                            // Reserved top gutter: controls scroll with history and cannot
-                            // cover a disclosure. Visibility never changes content height.
-                            <motion.div
-                              initial={{ opacity: 0, y: -6 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              exit={{ opacity: 0, y: -6 }}
-                              transition={{ duration: 0.15, ease: "easeOut" }}
-                              data-og-loading-older=""
-                              aria-live="polite"
-                              className="pointer-events-none absolute inset-x-0 -top-11 z-10 flex justify-center"
-                            >
-                              {loadingOlder || loadingOldest ? (
-                                <span className={LOADING_CHIP_CLASS}>
-                                  <span className="og-shimmer-text">
-                                    {loadingOldest
-                                      ? "Jumping to start…"
-                                      : "Loading earlier activity…"}
+                      <TimelineBeforeLayout
+                        capture={() => {
+                          readingAnchorRef.current =
+                            !pinnedRef.current && scrollRef.current
+                              ? captureTimelineAnchor(scrollRef.current)
+                              : null;
+                        }}
+                      >
+                        <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
+                          <AnimatePresence>
+                            {loadingOlder ||
+                            loadingOldest ||
+                            (hasOlder && onJumpToStart && olderPrefetchArmed) ||
+                            underfillRetryReady ? (
+                              // Reserved top gutter: controls scroll with history and cannot
+                              // cover a disclosure. Visibility never changes content height.
+                              <motion.div
+                                initial={{ opacity: 0, y: -6 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -6 }}
+                                transition={{ duration: 0.15, ease: "easeOut" }}
+                                data-og-loading-older=""
+                                aria-live="polite"
+                                className="pointer-events-none absolute inset-x-0 -top-11 z-10 flex justify-center"
+                              >
+                                {loadingOlder || loadingOldest ? (
+                                  <span className={LOADING_CHIP_CLASS}>
+                                    <span className="og-shimmer-text">
+                                      {loadingOldest
+                                        ? "Jumping to start…"
+                                        : "Loading earlier activity…"}
+                                    </span>
                                   </span>
-                                </span>
-                              ) : null}
-                              {hasOlder &&
-                              !loadingOlder &&
-                              !loadingOldest &&
-                              (underfillRetryReady || onJumpToStart) ? (
-                                <button
-                                  type="button"
-                                  data-og-retry={underfillRetryReady || undefined}
-                                  data-og-jump-to-start={!underfillRetryReady || undefined}
-                                  onClick={() => {
-                                    const node = scrollRef.current;
-                                    if (underfillRetryReady) {
-                                      if (node && underfillRetryReadyRef.current) {
-                                        // AnimatePresence retains this handler during
-                                        // exit. Current authorization plus the exact
-                                        // attempt check prevent stale dispatch.
-                                        requestOlderIfUnderfilled(node, underfillSettledAttempt!);
-                                      }
-                                      return;
-                                    }
-                                    applyPinned(false);
-                                    pendingJumpToStartRef.current = true;
-                                    const seq = ++jumpToStartSeqRef.current;
-                                    void Promise.resolve(onJumpToStart!()).then(
-                                      () => {
-                                        // The commit that swaps in the oldest window consumes
-                                        // the flag against the new DOM; this write covers the
-                                        // already-committed order and the no-window-change
-                                        // case (jumping within the current window).
-                                        const scroller = scrollRef.current ?? node;
-                                        if (scroller) {
-                                          scroller.scrollTop = 0;
+                                ) : null}
+                                {hasOlder &&
+                                !loadingOlder &&
+                                !loadingOldest &&
+                                (underfillRetryReady || onJumpToStart) ? (
+                                  <button
+                                    type="button"
+                                    data-og-retry={underfillRetryReady || undefined}
+                                    data-og-jump-to-start={!underfillRetryReady || undefined}
+                                    onClick={() => {
+                                      const node = scrollRef.current;
+                                      if (underfillRetryReady) {
+                                        if (node && underfillRetryReadyRef.current) {
+                                          // AnimatePresence retains this handler during
+                                          // exit. Current authorization plus the exact
+                                          // attempt check prevent stale dispatch.
+                                          requestOlderIfUnderfilled(node, underfillSettledAttempt!);
                                         }
-                                        // A host may resolve without ever changing the
-                                        // window (already on the oldest page). Any swap
-                                        // commit runs its layout effect before the next
-                                        // frame, so a flag still armed by then is the
-                                        // no-change case — clear it, or a LATER prepend
-                                        // would spuriously jump the reader to the top.
-                                        requestFrame(() => {
+                                        return;
+                                      }
+                                      applyPinned(false);
+                                      pendingJumpToStartRef.current = true;
+                                      const seq = ++jumpToStartSeqRef.current;
+                                      void Promise.resolve(onJumpToStart!()).then(
+                                        () => {
+                                          // The commit that swaps in the oldest window consumes
+                                          // the flag against the new DOM; this write covers the
+                                          // already-committed order and the no-window-change
+                                          // case (jumping within the current window).
+                                          const scroller = scrollRef.current ?? node;
+                                          if (scroller) {
+                                            scroller.scrollTop = 0;
+                                          }
+                                          // A host may resolve without ever changing the
+                                          // window (already on the oldest page). Any swap
+                                          // commit runs its layout effect before the next
+                                          // frame, so a flag still armed by then is the
+                                          // no-change case — clear it, or a LATER prepend
+                                          // would spuriously jump the reader to the top.
+                                          requestFrame(() => {
+                                            if (jumpToStartSeqRef.current === seq) {
+                                              pendingJumpToStartRef.current = false;
+                                            }
+                                          });
+                                        },
+                                        () => {
                                           if (jumpToStartSeqRef.current === seq) {
                                             pendingJumpToStartRef.current = false;
                                           }
-                                        });
-                                      },
-                                      () => {
-                                        if (jumpToStartSeqRef.current === seq) {
-                                          pendingJumpToStartRef.current = false;
-                                        }
-                                      },
-                                    );
-                                  }}
-                                  className="pointer-events-auto rounded-full border border-og-border px-3 py-1.5 text-og-control"
-                                >
-                                  {underfillRetryReady ? "Retry earlier activity" : "Jump to start"}
-                                </button>
-                              ) : null}
-                            </motion.div>
-                          ) : null}
-                        </AnimatePresence>
-                        {!groups.length
-                          ? (emptyState ?? (
-                              <p className="py-10 text-center text-og-menu text-og-fg-subtle">
-                                No activity yet.
-                              </p>
-                            ))
-                          : null}
-                        {hasOlder && olderPrefetchArmed ? (
-                          // Overlaid, not a layout row: mounting/unmounting the sentinel
-                          // must never shift content (that shift was itself a wobble).
-                          // End at the scroll origin above the pt-16 gutter so the
-                          // observer and scrollTop cooldown share the same 400px band.
-                          <div
-                            ref={topSentinelRef}
-                            data-og-top-sentinel=""
-                            data-og-timeline-chrome=""
-                            aria-hidden="true"
-                            className="pointer-events-none absolute inset-x-0 -top-16 h-px -translate-y-full"
-                          />
-                        ) : null}
-                        {groups.map(({ group, key, entranceEnabled }, index) => {
-                          return (
-                            <TimelineGroupEntry
-                              key={key}
-                              groupKey={key}
-                              group={group}
-                              nextGroup={groups[index + 1]?.group}
-                              entranceEnabled={entranceEnabled}
-                              liveEntranceEnabled={
-                                group.kind === "activity" ? !bulkRender : undefined
-                              }
-                              context={timelineGroupEntryContext}
+                                        },
+                                      );
+                                    }}
+                                    className="pointer-events-auto rounded-full border border-og-border px-3 py-1.5 text-og-control"
+                                  >
+                                    {underfillRetryReady
+                                      ? "Retry earlier activity"
+                                      : "Jump to start"}
+                                  </button>
+                                ) : null}
+                              </motion.div>
+                            ) : null}
+                          </AnimatePresence>
+                          {!groups.length
+                            ? (emptyState ?? (
+                                <p className="py-10 text-center text-og-menu text-og-fg-subtle">
+                                  No activity yet.
+                                </p>
+                              ))
+                            : null}
+                          {hasOlder && olderPrefetchArmed ? (
+                            // Overlaid, not a layout row: mounting/unmounting the sentinel
+                            // must never shift content (that shift was itself a wobble).
+                            // End at the scroll origin above the pt-16 gutter so the
+                            // observer and scrollTop cooldown share the same 400px band.
+                            <div
+                              ref={topSentinelRef}
+                              data-og-top-sentinel=""
+                              data-og-timeline-chrome=""
+                              aria-hidden="true"
+                              className="pointer-events-none absolute inset-x-0 -top-16 h-px -translate-y-full"
                             />
-                          );
-                        })}
-                        {groups.length > 0 && trailingState ? (
-                          <div data-og-timeline-trailing-state="">{trailingState}</div>
-                        ) : null}
-                        {hasNewer ? (
-                          <div
-                            ref={bottomSentinelRef}
-                            data-og-bottom-sentinel=""
-                            data-og-timeline-chrome=""
-                            aria-hidden="true"
-                            className="h-px w-full"
-                          />
-                        ) : null}
-                      </div>
-                    </TimelineBeforeLayout>
-                  </div>
-
-                  <AnimatePresence>
-                    {loadingNewer ? (
-                      <motion.div
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 6 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        data-og-loading-newer=""
-                        aria-live="polite"
-                        className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
-                      >
-                        <span className={LOADING_CHIP_CLASS}>
-                          <span className="og-shimmer-text">Loading later activity…</span>
-                        </span>
-                      </motion.div>
+                          ) : null}
+                          {groups.map(({ group, key, entranceEnabled }, index) => {
+                            return (
+                              <TimelineGroupEntry
+                                key={key}
+                                groupKey={key}
+                                group={group}
+                                nextGroup={groups[index + 1]?.group}
+                                entranceEnabled={entranceEnabled}
+                                liveEntranceEnabled={
+                                  group.kind === "activity" ? !bulkRender : undefined
+                                }
+                                context={timelineGroupEntryContext}
+                              />
+                            );
+                          })}
+                          {groups.length > 0 && trailingState ? (
+                            <div data-og-timeline-trailing-state="">{trailingState}</div>
+                          ) : null}
+                          {hasNewer ? (
+                            <div
+                              ref={bottomSentinelRef}
+                              data-og-bottom-sentinel=""
+                              data-og-timeline-chrome=""
+                              aria-hidden="true"
+                              className="h-px w-full"
+                            />
+                          ) : null}
+                        </div>
+                      </TimelineBeforeLayout>
+                    </div>
+                    {draftAnnotations && draftAnnotations.length > 0 ? (
+                      <Suspense fallback={null}>
+                        <TimelineAnnotationMarkers
+                          rootRef={scrollRef}
+                          annotations={draftAnnotations}
+                          onSelect={onDraftAnnotationSelect}
+                        />
+                      </Suspense>
                     ) : null}
-                  </AnimatePresence>
-                  <AnimatePresence>
-                    {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
-                      <motion.button
-                        type="button"
-                        data-og-jump-to-latest=""
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 8 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        onClick={() => {
-                          disclosureKeepsUnpinnedRef.current = false;
-                          if (hasNewer) {
-                            // Do not pin against the current history page — its bottom
-                            // is not the tip. The pin + snap run when the tip window
-                            // actually lands (`hasNewer` flips false).
-                            wantPinRef.current = true;
-                            const node = scrollRef.current;
-                            if (onJumpToLatest) {
-                              void Promise.resolve(onJumpToLatest()).then(
-                                () => {
-                                  // Covers a host that flipped hasNewer before
-                                  // resolving; otherwise the tip-window commit
-                                  // consumes the flag.
-                                  const current = scrollRef.current;
-                                  if (current && wantPinRef.current && !hasNewerRef.current) {
+
+                    <AnimatePresence>
+                      {loadingNewer ? (
+                        <motion.div
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 6 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          data-og-loading-newer=""
+                          aria-live="polite"
+                          className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
+                        >
+                          <span className={LOADING_CHIP_CLASS}>
+                            <span className="og-shimmer-text">Loading later activity…</span>
+                          </span>
+                        </motion.div>
+                      ) : null}
+                    </AnimatePresence>
+                    <AnimatePresence>
+                      {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
+                        <motion.button
+                          type="button"
+                          data-og-jump-to-latest=""
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 8 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          onClick={() => {
+                            disclosureKeepsUnpinnedRef.current = false;
+                            if (hasNewer) {
+                              // Do not pin against the current history page — its bottom
+                              // is not the tip. The pin + snap run when the tip window
+                              // actually lands (`hasNewer` flips false).
+                              wantPinRef.current = true;
+                              const node = scrollRef.current;
+                              if (onJumpToLatest) {
+                                void Promise.resolve(onJumpToLatest()).then(
+                                  () => {
+                                    // Covers a host that flipped hasNewer before
+                                    // resolving; otherwise the tip-window commit
+                                    // consumes the flag.
+                                    const current = scrollRef.current;
+                                    if (current && wantPinRef.current && !hasNewerRef.current) {
+                                      wantPinRef.current = false;
+                                      applyPinned(true);
+                                      snapToBottom(current);
+                                    }
+                                  },
+                                  () => {
+                                    // The tip reload failed (ordinary network error):
+                                    // an armed latch would fire a surprise snap when
+                                    // the reader later pages to the tip themselves.
                                     wantPinRef.current = false;
-                                    applyPinned(true);
-                                    snapToBottom(current);
-                                  }
-                                },
-                                () => {
-                                  // The tip reload failed (ordinary network error):
-                                  // an armed latch would fire a surprise snap when
-                                  // the reader later pages to the tip themselves.
-                                  wantPinRef.current = false;
-                                },
-                              );
-                            } else if (node) {
-                              // No tip reload available: jump within the in-memory
-                              // window so the newer sentinel can page forward; the
-                              // latch pins if the tip window eventually lands.
+                                  },
+                                );
+                              } else if (node) {
+                                // No tip reload available: jump within the in-memory
+                                // window so the newer sentinel can page forward; the
+                                // latch pins if the tip window eventually lands.
+                                snapToBottom(node);
+                              }
+                              return;
+                            }
+                            const node = scrollRef.current;
+                            if (node) {
+                              applyPinned(true);
                               snapToBottom(node);
                             }
-                            return;
-                          }
-                          const node = scrollRef.current;
-                          if (node) {
-                            applyPinned(true);
-                            snapToBottom(node);
-                          }
-                        }}
-                        className={cn(
-                          "absolute inset-x-0 bottom-4 mx-auto w-fit",
-                          "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                          "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
-                          "hover:border-og-border-strong",
-                        )}
-                      >
-                        <ArrowDownIcon className="size-3.5" />
-                        Jump to latest
-                      </motion.button>
-                    ) : null}
-                  </AnimatePresence>
-                </div>
+                          }}
+                          className={cn(
+                            "absolute inset-x-0 bottom-4 mx-auto w-fit",
+                            "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                            "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
+                            "hover:border-og-border-strong",
+                          )}
+                        >
+                          <ArrowDownIcon className="size-3.5" />
+                          Jump to latest
+                        </motion.button>
+                      ) : null}
+                    </AnimatePresence>
+                  </div>
+                </TimelineAnnotationSourceRootContext.Provider>
               </TooltipProvider>
             </EntranceAnimationProvider>
           </TimelineComputeLabelProvider>
@@ -3033,7 +3054,7 @@ function UserMessageRow({
               </div>
             ) : null}
             {(item.annotations?.length ?? 0) > 0 ? (
-              <TimelineAnnotationsChip
+              <TimelineAnnotationCards
                 annotations={item.annotations ?? []}
                 className={item.text ? "mt-2" : undefined}
               />
@@ -3229,24 +3250,22 @@ function AgentMessageRow({
   // While streaming, copy is still useful (current text) but keep chrome calm —
   // stamp only after the message finishes (occurredAt tracks completion).
   return (
-    <div data-og-annotation-source-key={item.annotationSource?.eventId}>
-      <CopyHoverFrame
-        copyText={item.text}
-        label="Copy message"
-        align="start"
-        className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
-        trailing={
-          item.streaming ? null : (
-            <>
-              {renderMessageActions?.(item)}
-              <MessageFooterTime occurredAt={item.occurredAt} />
-            </>
-          )
-        }
-      >
-        {body}
-      </CopyHoverFrame>
-    </div>
+    <CopyHoverFrame
+      copyText={item.text}
+      label="Copy message"
+      align="start"
+      className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
+      trailing={
+        item.streaming ? null : (
+          <>
+            {renderMessageActions?.(item)}
+            <MessageFooterTime occurredAt={item.occurredAt} />
+          </>
+        )
+      }
+    >
+      <div data-og-annotation-source-key={item.annotationSource?.eventId}>{body}</div>
+    </CopyHoverFrame>
   );
 }
 
