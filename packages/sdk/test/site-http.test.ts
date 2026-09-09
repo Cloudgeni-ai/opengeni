@@ -1,6 +1,44 @@
 import { expect, test } from "bun:test";
-import { sitePortFetch, serveSiteHttp, siteSessionPath } from "../src/site-http";
+import { sitePortFetch, serveSiteHttp, siteSessionPath, isSiteHttpRequest } from "../src/site-http";
 import { createOpenGeniSiteClient } from "../src/site";
+
+test("HEAD and OPTIONS pass the published message validator and round-trip", async () => {
+  for (const method of ["HEAD", "OPTIONS"]) {
+    const channel = new MessageChannel();
+    channel.port2.onmessage = (event) => {
+      expect(isSiteHttpRequest(event.data)).toBe(true);
+      expect(event.data.method).toBe(method);
+      void serveSiteHttp(
+        event.data,
+        event.ports[0]!,
+        async () => new Response(null, { status: 204 }),
+        new AbortController().signal,
+      );
+    };
+    const response = await sitePortFetch(
+      channel.port1,
+      "https://site.test/v1/workspaces/site-host/projects",
+      { method },
+    );
+    expect(response.status).toBe(204);
+    channel.port1.close();
+    channel.port2.close();
+  }
+});
+
+test("malformed HTTP methods are rejected", () => {
+  for (const method of ["", "GET\r\nX: bad", "G ET", null, 12]) {
+    expect(
+      isSiteHttpRequest({
+        type: "opengeni.site.http",
+        requestId: "one",
+        path: "/v1/config/client",
+        headers: [],
+        method,
+      }),
+    ).toBe(false);
+  }
+});
 
 test("Site SDK routing cannot change workspace or escape the host API", () => {
   expect(siteSessionPath("/v1/workspaces/site-host/sessions/one/events?after=4", "ws")).toBe(
