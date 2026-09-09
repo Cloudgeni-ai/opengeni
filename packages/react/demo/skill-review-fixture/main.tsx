@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import type { SkillRecord, SubmitHumanInputResponseRequest } from "@opengeni/sdk";
-import { HumanInputForm } from "../../src/components/human-input-form";
+import { HumanInputForm } from "@opengeni/react";
 import "../styles.css";
 
 const content =
