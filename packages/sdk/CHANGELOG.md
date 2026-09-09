@@ -1,5 +1,13 @@
 # @opengeni/sdk
 
+## 4.0.2
+
+### Patch Changes
+
+- 1b0f4f2: Expose unavailable background command observations separately from command lifecycle state, and render that uncertainty in command and session status.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+
 ## 4.0.1
 
 ### Patch Changes
