@@ -29368,6 +29368,144 @@ export async function setSessionCodexPinInTransaction(
   return updated.length > 0;
 }
 
+/** Explicit session control, unlike background pin/pool bookkeeping. The allocator
+ * lock serializes this override with both waiter reconciliation and lease claim.
+ * Only a closed capacity attempt may change its accepted selection. */
+export async function switchSessionCodexAccount(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; credentialId: string | null; subjectId: string },
+) {
+  return await withSessionCodexCapacityMutation<{
+    changed: boolean;
+    appliedTo: "waiting_turn" | "next_turn";
+    events: SessionEvent[];
+  }>(
+    db,
+    { workspaceId: input.workspaceId, reason: "codex_manual_session_pin_changed" },
+    async (tx) => {
+      const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
+      const changed = await setSessionCodexPinInTransaction(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+        input.credentialId,
+      );
+      const events: SessionEvent[] = [];
+      let appliedTo: "waiting_turn" | "next_turn" = "next_turn";
+      if (!changed) return { result: { changed, appliedTo, events }, changed };
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "none",
+        sessionIds: [input.sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!session) throw new Error("Codex account switch lost its locked session");
+      if (session.status === "waiting_capacity" && session.activeTurnId) {
+        const [turn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.id, session.activeTurnId),
+            ),
+          )
+          .for("update");
+        const [waiter] = await tx
+          .select()
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+              eq(schema.codexCapacityWaiters.status, "waiting"),
+            ),
+          )
+          .for("update");
+        if (
+          turn?.status === "waiting_capacity" &&
+          turn.activeAttemptId === null &&
+          waiter &&
+          waiter.blockedTurnId === turn.id &&
+          waiter.blockedTurnGeneration === turn.executionGeneration
+        ) {
+          const accepted = readCodexCredentialPolicySnapshotV1(turn.metadata);
+          if (accepted.kind === "valid") {
+            // Never use an explicit pin override to cross the accepted authority/pool boundary.
+            if (
+              !rotation ||
+              (accepted.policy.source && accepted.policy.source !== rotation.source)
+            ) {
+              throw new Error("Cannot switch a waiting Codex turn across credential sources");
+            }
+            const policy = {
+              ...accepted.policy,
+              pinnedCredentialId: input.credentialId,
+              pinSource: input.credentialId === null ? null : ("manual" as const),
+              // Auto explicitly requests the current defaults within the SAME accepted pool.
+              ...(input.credentialId === null
+                ? {
+                    activeCredentialId: rotation.activeCredentialId,
+                    rotationEnabled: rotation.rotationEnabled,
+                    rotationStrategy: rotation.rotationStrategy,
+                    lastCredentialId: null,
+                  }
+                : {}),
+            };
+            await tx
+              .update(schema.sessionTurns)
+              .set({
+                metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, policy),
+                version: turn.version + 1,
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.sessionTurns.id, turn.id));
+          }
+          appliedTo = "waiting_turn";
+        }
+      }
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "codex.account.selection.changed",
+                payload: {
+                  credentialId: input.credentialId,
+                  appliedTo,
+                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+                  subjectId: input.subjectId,
+                },
+                // This is a user control receipt, not output from a running attempt.
+                occurredAt: new Date(),
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1 })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        );
+      events.push(...inserted.map(mapEvent));
+      return { result: { changed, appliedTo, events }, changed };
+    },
+  );
+}
+
 export async function setSessionCodexPin(
   db: Database,
   workspaceId: string,
@@ -33211,6 +33349,8 @@ export type SessionListSnapshotCursor = {
 
 export type SessionListKeysetCursor = {
   kind: "keyset";
+  /** Absent on v2 cursors, which always used session updatedAt. */
+  sortBy?: "updatedAt" | "archivedAt";
   /** Decimal committed workspace activity revision frozen on page one. */
   snapshotRevision: string;
   /** Exact PostgreSQL timestamp text, including microseconds. */
@@ -34302,7 +34442,7 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
     JSON.stringify(
       cursor.kind === "keyset"
         ? {
-            version: 2,
+            version: cursor.sortBy === "archivedAt" ? 3 : 2,
             // Preserve the old cursor envelope until every pre-v2 replica has
             // rolled away. It resolves only to the typed expiry/rebase path.
             snapshotId: SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID,
@@ -34356,8 +34496,9 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       filter.length <= 2_048;
     if (!filtersAreValid) return null;
 
-    if (parsed.version === 2) {
+    if (parsed.version === 2 || parsed.version === 3) {
       if (
+        (parsed.version === 3 && archiveMode !== "archived") ||
         typeof parsed.snapshotRevision !== "string" ||
         typeof parsed.sortAt !== "string" ||
         !isSessionListCursorTimestamp(parsed.sortAt) ||
@@ -34368,6 +34509,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       }
       return {
         kind: "keyset",
+        ...(parsed.version === 3 ? { sortBy: "archivedAt" as const } : {}),
         snapshotRevision: normalizeSessionActivityRevision(
           parsed.snapshotRevision,
           "cursor snapshot revision",
@@ -34504,6 +34646,17 @@ export async function listSessionsForSubject(
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
         const archiveMode = options.archivedOnly ? "archived" : "active";
+        // Descendants inherit their root's subject-specific archive ordering,
+        // just as they inherit its archive visibility in sessionFilters.
+        const ordinarySortAt = options.archivedOnly
+          ? sql`(select archive_order.archived_at
+              from ${schema.sessionPins} archive_order
+              where archive_order.workspace_id = ${schema.sessions.workspaceId}
+                and archive_order.subject_id = ${options.subjectId}
+                and archive_order.session_id = ${schema.sessions.rootSessionId}
+                and archive_order.archived = true)`
+          : schema.sessions.updatedAt;
+        const exactOrdinarySortAt = sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
         const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
@@ -34514,6 +34667,16 @@ export async function listSessionsForSubject(
         }
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
+        }
+        // Never reinterpret an updatedAt boundary as an archivedAt boundary.
+        // v3 envelopes retain the reserved snapshot id so older replicas also
+        // take the typed expiry/rebase path instead of mixing sort domains.
+        if (
+          options.cursor &&
+          options.cursor.archiveMode === "archived" &&
+          (options.cursor.kind === "snapshot" || options.cursor.sortBy !== "archivedAt")
+        ) {
+          throw new SessionListCursorExpiredError();
         }
 
         let pageIds: string[];
@@ -34527,6 +34690,9 @@ export async function listSessionsForSubject(
             }>
           | undefined;
         let nextCursor: string | null = null;
+        // Keep archive ordering precision in the public root projection as well
+        // as the cursor. Drizzle's Date hydration otherwise loses microseconds.
+        const exactArchiveTimestamps = new Map<string, string>();
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
           // its root page. Do not turn that cheap projection into an O(N)
@@ -34624,7 +34790,12 @@ export async function listSessionsForSubject(
           }
         } else if (options.materializeSnapshot === false) {
           const ordinaryIdRows = await tx
-            .select({ id: schema.sessions.id, session: schema.sessions, pin: schema.sessionPins })
+            .select({
+              id: schema.sessions.id,
+              session: schema.sessions,
+              pin: schema.sessionPins,
+              sortAt: exactOrdinarySortAt,
+            })
             .from(schema.sessions)
             .leftJoin(
               schema.sessionPins,
@@ -34635,10 +34806,13 @@ export async function listSessionsForSubject(
               ),
             )
             .where(and(...filters, ordinaryPinFilter))
-            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
           selectedOrdinaryRows = ordinaryIdRows;
+          if (options.archivedOnly) {
+            for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.sortAt);
+          }
         } else {
           const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
           if (
@@ -34655,9 +34829,9 @@ export async function listSessionsForSubject(
             : await readWorkspaceSessionActivityRevision(tx, workspaceId);
           const cursorPredicate = cursor
             ? or(
-                sql`${schema.sessions.updatedAt} < ${cursor.sortAt}::text::timestamptz`,
+                sql`${ordinarySortAt} < ${cursor.sortAt}::text::timestamptz`,
                 and(
-                  sql`${schema.sessions.updatedAt} = ${cursor.sortAt}::text::timestamptz`,
+                  sql`${ordinarySortAt} = ${cursor.sortAt}::text::timestamptz`,
                   lt(schema.sessions.id, cursor.id),
                 ),
               )
@@ -34667,7 +34841,7 @@ export async function listSessionsForSubject(
               id: schema.sessions.id,
               session: schema.sessions,
               pin: schema.sessionPins,
-              sortAt: sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+              sortAt: exactOrdinarySortAt,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -34686,16 +34860,20 @@ export async function listSessionsForSubject(
                 cursorPredicate,
               ),
             )
-            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
             .limit(limit + 1);
           const hasMore = ordinaryIdRows.length > limit;
           const page = ordinaryIdRows.slice(0, limit);
           pageIds = page.map((row) => row.id);
           selectedOrdinaryRows = page;
+          if (options.archivedOnly) {
+            for (const row of page) exactArchiveTimestamps.set(row.id, row.sortAt);
+          }
           const last = page.at(-1);
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
               kind: "keyset",
+              ...(options.archivedOnly ? { sortBy: "archivedAt" as const } : {}),
               snapshotRevision,
               sortAt: last.sortAt,
               id: last.id,
@@ -34804,7 +34982,12 @@ export async function listSessionsForSubject(
                   mcpServers.get(session.id) ?? [],
                   mapSessionPin(row.pin),
                   mapSessionAttention(session, row.pin),
-                  mapSessionArchive(row.pin),
+                  {
+                    ...mapSessionArchive(row.pin),
+                    ...(row.pin?.archived && exactArchiveTimestamps.has(session.id)
+                      ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
+                      : {}),
+                  },
                   { subjectId: options.subjectId, activated: tenancyActivated },
                 ),
                 treeStats: treeStats.get(session.id) ?? EMPTY_SESSION_TREE_STATS,
@@ -76117,7 +76300,63 @@ async function mapSessionWithControl(
     row.workspaceId,
     await withCurrentSessionInputWait(db, row.workspaceId, [row]),
   );
-  return mapSession(effective!, control, mcpServers, pin, attention, archive, tenancyViewer);
+  const mapped = mapSession(
+    effective!,
+    control,
+    mcpServers,
+    pin,
+    attention,
+    archive,
+    tenancyViewer,
+  );
+  mapped.codexCurrentSelection = null;
+  if (row.activeTurnId) {
+    const [turn] = await db
+      .select({
+        metadata: schema.sessionTurns.metadata,
+        status: schema.sessionTurns.status,
+        credentialId: schema.codexCredentialLeases.credentialId,
+      })
+      .from(schema.sessionTurns)
+      .leftJoin(
+        schema.codexCredentialLeases,
+        and(
+          eq(schema.codexCredentialLeases.workspaceId, schema.sessionTurns.workspaceId),
+          eq(schema.codexCredentialLeases.turnId, schema.sessionTurns.id),
+          sql`${schema.codexCredentialLeases.leasedUntil} > clock_timestamp()`,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, row.workspaceId),
+          eq(schema.sessionTurns.sessionId, row.id),
+          eq(schema.sessionTurns.id, row.activeTurnId),
+          sql`${schema.sessionTurns.model} like 'codex/%'`,
+        ),
+      )
+      .limit(1);
+    if (
+      turn &&
+      ["running", "recovering", "waiting_capacity", "requires_action"].includes(turn.status)
+    ) {
+      const accepted = readCodexCredentialPolicySnapshotV1(turn.metadata);
+      const policy = accepted.kind === "valid" ? accepted.policy : null;
+      mapped.codexCurrentSelection = {
+        waiting: turn.status === "waiting_capacity",
+        credentialId:
+          turn.status === "waiting_capacity"
+            ? !policy && row.codexPinSource !== "policy"
+              ? row.codexPinnedCredentialId
+              : policy?.pinSource === "manual"
+                ? policy.pinnedCredentialId
+                : policy?.rotationEnabled === false
+                  ? policy.activeCredentialId
+                  : null
+            : turn.credentialId,
+      };
+    }
+  }
+  return mapped;
 }
 
 function mapSessionTenancy(

@@ -1,5 +1,6 @@
 import { runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
 import {
+  hasTypedExecHandleLoss,
   isExecSessionLostBanner,
   parseExecBannerExitCode,
   parseExecBannerSessionId,
@@ -69,6 +70,9 @@ type ActiveShellSession = {
   execInvoke: FunctionToolInvoke;
   writeInvoke: FunctionToolInvoke | null;
   processSession: CommandCancellationSession | null;
+  // Capture before a terminal read removes the retained route; this describes
+  // the adapter's error contract, never current process liveness.
+  typedHandleLoss: boolean;
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
@@ -85,6 +89,7 @@ type CommandCancellationSession = {
   supportsPty?(): boolean;
   supportsCommandInput?(providerSessionId: number): boolean;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   /** Whether the provider locator remains controllable from another worker
    * process after this turn returns. */
   canAdoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): boolean;
@@ -886,6 +891,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             execInvoke: invokeExec,
             writeInvoke: invokeWrite,
             processSession,
+            typedHandleLoss: hasTypedExecHandleLoss(session, retainedProcess.providerSessionId),
             identity: null,
             identityValidated: false,
             cancellation: null,
@@ -945,6 +951,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         execInvoke: invokeExec,
         writeInvoke: invokeWrite,
         processSession: retainedProcessSession(session, sessionId),
+        typedHandleLoss: hasTypedExecHandleLoss(session, sessionId),
         identity: null,
         identityValidated: false,
         cancellation: null,
@@ -1191,6 +1198,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   execInvoke: tool.invoke,
                   writeInvoke: this.rawWriteInvoke,
                   processSession,
+                  typedHandleLoss: hasTypedExecHandleLoss(
+                    cancellationSession,
+                    retainedProcess.providerSessionId,
+                  ),
                   identity: null,
                   identityValidated: false,
                   cancellation: null,
@@ -1216,6 +1227,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 execInvoke: tool.invoke,
                 writeInvoke: this.rawWriteInvoke,
                 processSession: retainedProcessSession(cancellationSession, sessionId),
+                typedHandleLoss: hasTypedExecHandleLoss(cancellationSession, sessionId),
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
@@ -1262,6 +1274,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : input;
             const directProcessSession =
               sessionId === null ? null : retainedProcessSession(cancellationSession, sessionId);
+            const typedHandleLoss =
+              sessionId !== null &&
+              (hasTypedExecHandleLoss(cancellationSession, sessionId) ||
+                this.shellSessions.get(sessionId)?.typedHandleLoss === true);
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
             if (sessionId !== null && directProcessSession?.writeStdinForProcessMutation) {
               // This bypasses the SDK-built tool, whose default errorFunction
@@ -1287,11 +1303,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               output = await tool.invoke(runContext, cappedInput, details);
             }
             if (sessionId !== null && typeof output === "string") {
-              if (isExecSessionLostBanner(output, sessionId)) {
-                // Modal reports a vanished exec session as a non-throwing
-                // string. The matching provider banner is positive evidence
-                // that this exact tracked PTY no longer exists; a different id
-                // or an ambiguous error must leave the registration fenced.
+              if (!typedHandleLoss && isExecSessionLostBanner(output, sessionId)) {
+                // Legacy adapters may report a missing handle as a banner.
+                // Guarded adapters throw instead; their command output must
+                // never be reinterpreted as process-loss proof.
                 this.shellSessions.delete(sessionId);
               } else if (parseExecBannerSessionId(output) === sessionId) {
                 if (
@@ -1307,6 +1322,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     execInvoke: this.rawExecInvoke ?? tool.invoke,
                     writeInvoke: tool.invoke,
                     processSession: directProcessSession,
+                    typedHandleLoss,
                     identity: null,
                     identityValidated: false,
                     cancellation: null,
@@ -1333,6 +1349,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                         execInvoke: this.rawExecInvoke ?? tool.invoke,
                         writeInvoke: tool.invoke,
                         processSession: directProcessSession,
+                        typedHandleLoss,
                         identity: null,
                         identityValidated: false,
                         cancellation: null,
@@ -1371,7 +1388,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     const { state, startedAt, waitMs, maxOutputTokens } = input;
     const canAdoptInBackground =
       state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
-    if (isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
+    if (!state.typedHandleLoss && isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
     }
@@ -1426,7 +1443,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       if (this.cancelled) throw cancellationError(this.reason);
       if (typeof next !== "string")
         throw new Error("Retained command read returned no provider status");
-      if (isExecSessionLostBanner(next, state.sessionId)) {
+      if (!state.typedHandleLoss && isExecSessionLostBanner(next, state.sessionId)) {
         this.shellSessions.delete(state.sessionId);
         return next;
       }
@@ -1879,10 +1896,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             undefined,
           );
       if (typeof output !== "string") return false;
-      // Marker files can already be gone when a process exited outside the
-      // model-facing write path. Modal's exact matching lost-session banner is
-      // then the only positive provider proof that this tracked PTY is absent.
-      if (isExecSessionLostBanner(output, state.sessionId)) return true;
+      // Preserve legacy missing-handle classification only where the adapter
+      // has no typed loss contract. Otherwise only metadata can prove exit.
+      if (!state.typedHandleLoss && isExecSessionLostBanner(output, state.sessionId)) return true;
       if (parseExecBannerSessionId(output) === state.sessionId) return false;
       if (parseExecBannerExitCode(output) !== null) return true;
     } catch {

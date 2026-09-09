@@ -7,19 +7,26 @@ icon: "house"
 
 OpenGeni is the platform layer that makes long-running AI agents safe to trust with real work: durable, replayable sessions; human approvals; governed credentials and memory; and a choice of where every session runs, either a managed sandbox or your own hardware.
 
-OpenGeni is the runtime, not the agent. It exposes a session-based API for creating, steering, observing, interrupting, and replaying agent runs, agnostic to what the agent does. The included web app is one client for that API. Your own products call the same API and let OpenGeni own durable session state, event history, approvals, and outputs.
+The included web app lets you use OpenGeni directly as an agent harness. Your own products can use the same session-based API to create, steer, observe, interrupt, and replay agent runs, with OpenGeni owning durable session state, event history, approvals, and outputs.
 
 ## Two ways to use it
 
 <CardGroup cols={2}>
-  <Card title="Managed" icon="cloud" href="/quickstart">
-    Sign in at app.opengeni.ai, connect a model, and start a session in minutes.
+  <Card title="Agent harness" icon="robot" href="/quickstart">
+    Use the OpenGeni app to give agents work, follow their progress, steer sessions, approve tool
+    use, and answer questions. Start with your own tasks or work with your team.
   </Card>
-  <Card title="Self-hosted" icon="server" href="/guides/self-host">
-    Run the whole control plane yourself. Apache-2.0, a Helm chart, and reference Terraform for
-    Azure, AWS, and GCP.
+  <Card title="Integrate into your product" icon="plug" href="/guides/integrate-your-product">
+    Add agent capabilities to your product with the API, SDK, and React components. Your product
+    owns its users and interface; OpenGeni handles agent execution and durable sessions.
   </Card>
 </CardGroup>
+
+## Choose a deployment
+
+For either usage mode, choose where OpenGeni runs. Use the managed service at [app.opengeni.ai](https://app.opengeni.ai), or [self-host OpenGeni](/guides/self-host) in your own infrastructure.
+
+For product integrations, check which features your chosen deployment supports. The [new chat setup](/guides/integrate-your-product#connect-your-backend) currently requires a compatible API deployment and source workspace packages; the hosted API does not yet support that setup.
 
 ## What you get
 
@@ -35,8 +42,8 @@ OpenGeni is the runtime, not the agent. It exposes a session-based API for creat
   <Card title="Concepts" icon="book" href="/concepts/sessions">
     Sessions, turns, goals, approvals, compute targets, and memory.
   </Card>
-  <Card title="Integrate your product" icon="plug" href="/guides/integrate-your-product">
-    Put agent sessions behind your own backend with the TypeScript SDK and React components.
+  <Card title="SDK reference" icon="code" href="/reference/sdk">
+    Explore the chat integration, full session API, and React components for your product.
   </Card>
   <Card title="Connect a machine" icon="laptop" href="/guides/connect-a-machine">
     Enroll a laptop, build server, or GPU box and run sessions on it directly.

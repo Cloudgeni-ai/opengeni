@@ -34,6 +34,51 @@ operation id cannot be approved again after execution may have started.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
+### Recovery from tool-search misses
+
+Progressive discovery uses the same authorized deferred pool on Codex-native,
+OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
+exhaustive. `tool_list` is a query-independent fallback: it returns compact
+names and description previews, with a default page of 20, a maximum of 40,
+and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
+optional literal `namePrefix` filter. An invalid cursor requires restarting
+the listing against the current pool. Names and prefixes are display/routing
+keys, never authorization identities.
+
+Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
+listed tool's full schema without keyword ranking. Exact lookup cannot admit
+a tool outside the current pool. Search backfills smaller candidates after
+schema-size exclusions while retaining existing count and byte limits.
+Native disclosure returns the original SDK tool objects; generic dispatch,
+approvals, and invocation continue through the existing runtime. Listing
+joins deferred preparation but adds no preparation barrier to the first model
+request, no shell dependency, and no change to eager/search policy defaults.
+
+The native Connected Machine Codemode client sends its compiled API contract
+acknowledgement for compatibility with older deployments whose Codemode routes
+were protected by the product mutation fence. Current deployments scope
+Codemode through the attempt protocol independently, and the TypeScript client
+does not send this header. A server contract mismatch must fail explicitly;
+clients must not blindly echo a newly advertised version. The native mirror is
+pinned to the shared contracts by `packages/codemode/test/native-api-contract.test.ts`.
+
+Native Codemode failures emit a JSON receipt on stderr with the operation ID,
+observed state, error code, and message once an operation ID has been allocated.
+Its existence may remain unconfirmed if submission and subsequent observation fail.
+An unobserved state remains null, never an inferred execution failure.
+`opengeni-agent codemode read <operation-id>` reads the existing journal under
+the current attempt's authority without submitting or repeating the tool.
+Unknown outcomes are not automatically retried. Client compatibility must be
+verified on packaged artifacts; catalog authority does not certify an installed
+JavaScript client, and an optional client failure grants no additional access.
+The `read` command exits successfully when journal observation succeeds, even
+when the returned operation failed; inspect `operation.state` before using its
+result. Reads remain attempt-authorized and can be denied after an attempt ends.
+On a Linux Docker build host, `bun scripts/test-codemode-image.ts <image>
+<absolute-native-binary> receipts` verifies the packaged clients against an
+owned loopback fixture, including credential modes and GET-only recovery. This
+is release verification, not a health probe that executes customer tools.
+
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.

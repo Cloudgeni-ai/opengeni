@@ -294,7 +294,8 @@ export type RetainedProcessProbeResult =
         | "provider_timeout"
         | "provider_error"
         | "provider_binding_missing"
-        | "provider_binding_mismatch";
+        | "provider_binding_mismatch"
+        | "process_observation_unavailable";
     };
 
 export type RetainedProcessProbeFn = (
@@ -1652,14 +1653,18 @@ export function retainedProcessReconciliationDeferral(
 } {
   const bindingQuarantine =
     process.reconcileAttempts >= RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS &&
-    (outcome === "provider_binding_missing" || outcome === "provider_binding_mismatch");
+    (outcome === "provider_binding_missing" ||
+      outcome === "provider_binding_mismatch" ||
+      outcome === "process_observation_unavailable");
   if (bindingQuarantine) {
     return {
       durableOutcome: `quarantined_${outcome}`,
       metricOutcome:
         outcome === "provider_binding_missing"
           ? "quarantined_binding_missing"
-          : "quarantined_binding_mismatch",
+          : outcome === "provider_binding_mismatch"
+            ? "quarantined_binding_mismatch"
+            : "quarantined_process_observation_unavailable",
       retryAfterMs: RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
       quarantined: true,
     };
@@ -1869,6 +1874,11 @@ export async function probeRetainedProcessAtProvider(
     ) {
       return { status: "deferred", reason: "provider_binding_mismatch" };
     }
+    // Modal resume recovers the sandbox, not the SDK's adapter-local numeric
+    // process map. Polling this fresh adapter would falsely report a live
+    // owner's command lost. Keep the holder until the owner supplies terminal
+    // proof or the exact bound provider instance is independently proved gone.
+    return { status: "deferred", reason: "process_observation_unavailable" };
   }
 
   let result: unknown;

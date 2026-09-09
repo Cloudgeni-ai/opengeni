@@ -647,7 +647,7 @@ describe("personal resource attachment authority", () => {
     });
   });
 
-  test("workspace-visible personal resources use message-only authority without a second toggle", () => {
+  test("workspace-visible personal attachments authorize ongoing work without a second toggle", () => {
     expect(
       newSessionPersonalResourceAttachment({
         personalResourceCount: 1,
@@ -655,7 +655,7 @@ describe("personal resource attachment authority", () => {
       }),
     ).toEqual({
       intent: {
-        mode: "once",
+        mode: "session",
         workspaceSharedAcknowledged: true,
         sharedOutputWarningVersion: 1,
       },
@@ -687,17 +687,15 @@ describe("personal resource attachment authority", () => {
   });
 });
 
-test("shared new sessions retain once default and accept explicit ongoing authorization", () => {
+test("shared new sessions authorize only selected personal resources for ongoing work", () => {
   const input = { personalResourceCount: 1, visibility: "workspace" as const };
-  expect(newSessionPersonalResourceAttachment(input).intent?.mode).toBe("once");
-  expect(newSessionPersonalResourceAttachment({ ...input, mode: "session" }).intent).toEqual({
+  expect(newSessionPersonalResourceAttachment(input).intent).toEqual({
     mode: "session",
     workspaceSharedAcknowledged: true,
     sharedOutputWarningVersion: 1,
   });
   expect(
-    newSessionPersonalResourceAttachment({ ...input, personalResourceCount: 0, mode: "session" })
-      .intent,
+    newSessionPersonalResourceAttachment({ ...input, personalResourceCount: 0 }).intent,
   ).toBeUndefined();
 });
 

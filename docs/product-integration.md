@@ -77,17 +77,16 @@ are namespaced per `user`: the handler reads the client's conversation id (the
 `x-opengeni-conversation` header, else the wire format's own field) and scopes
 it to the user `resolve` returned, so one user cannot continue another user's
 chat by guessing its id. Without a `user`, the host must name the
-`conversation` from `resolve`. The browser side is
-`<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
-`@opengeni/react/chat`, which talks only to your handler and restores the
-history and unresolved approvals/questions on reload (`GET` on the same endpoint). If the product already uses the
+`conversation` from `resolve`. A custom browser client can restore
+history and unresolved approvals/questions with `GET` on the same endpoint.
+There is no dedicated React component for this simplified protocol. If the product already uses the
 Vercel AI SDK, pass `format: "vercel"` and keep `useChat` unchanged; for an
 OpenAI-shaped client pass `format: "openai-chat"` or
 `format: "openai-responses"`. These adapters send only the latest user message
 and import the earlier messages in the request once, as context on the first
 message of a conversation; after that OpenGeni owns the history. The runnable
 [chat quickstart example](../examples/chat-quickstart) is this section as one
-server file and one page.
+backend server file with a command-line request example.
 
 ### Pick the privacy and memory of each chat
 
@@ -526,23 +525,13 @@ runtime agent.
 
 ## Browser and React integration
 
-The smallest browser surface is `OpenGeniChat` from `@opengeni/react/chat`. It
-needs no provider and no SDK client: it restores the conversation with
-`GET <handlerUrl>` on mount and whenever `conversation` changes, posts
-`{ message }` to the product's `createChatHandler` endpoint, renders the
-streamed reply, and shows a card with buttons for a pending approval or
-human-input request, which it answers through `POST <handlerUrl>/respond`. The
-`conversation` prop travels as the `x-opengeni-conversation` header; the handler
-scopes it to the user `resolve` returned.
-
-Changing authenticated `headers` values resets messages, pending cards, drafts
-and in-flight requests before restoring the new identity's conversation.
-Header callbacks are evaluated on each host render, so re-render when their
-credentials change. When authentication uses cookies or can change without
-changing those header values, pass a stable `authKey`, for example
-`authKey={JSON.stringify([tenantId, userId])}`, and change it on sign-in,
-sign-out and tenant switches. This key is local to React and is not sent to
-the handler; server-side `resolve` still owns authorization.
+Use `SessionConversation` for a packaged existing-session experience, or
+compose the timeline and composer. These use the normal SDK, not the
+simplified backend chat-handler protocol. Custom clients of that protocol
+must implement history restoration, pending decisions, and streaming themselves.
+On sign-out or user/tenant changes, clear private UI state and abort old
+requests before restoring another conversation. Backend authorization remains
+mandatory regardless of UI state.
 
 Use `@opengeni/react/session` for headless session semantics, or the focused
 styled subpaths when the product wants packaged OpenGeni visuals. The React

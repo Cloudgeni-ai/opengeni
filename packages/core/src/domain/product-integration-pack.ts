@@ -37,6 +37,7 @@ The desired outcome is a native-feeling product experience backed by a standalon
 - When an unknown choice is reversible and low-risk, choose the best-fitting default, state the assumption, and continue. When it changes privacy, tenant authority, write access, cost exposure, or an external mutation, resolve it before crossing that boundary.
 - Possession of a credential or access to a cloud, repository, or deployment is technical capability, not authorization. Match the user's requested delivery autonomy and the repository's stated workflow.
 - Keep alternatives open until evidence eliminates them. Use strict rules only for actual security, privacy, protocol, or authorization invariants.
+- For packaged React chat, use SessionConversation or compose MessageTimeline and ChatComposer with the normal SDK and authenticated session routes. For a custom or compatible frontend, use the optional backend chat handler.
 
 Read the references selectively:
 

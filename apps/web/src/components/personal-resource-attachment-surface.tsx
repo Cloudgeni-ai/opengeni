@@ -15,13 +15,7 @@ export function PersonalResourceAttachmentSurface(props: {
   const { controller } = props;
   if (
     !controller.eligible ||
-    !(
-      controller.selected.personalResourceCount > 0 ||
-      controller.error ||
-      controller.notice ||
-      controller.loading ||
-      controller.truncated
-    )
+    !(controller.error || controller.notice || controller.loading || controller.truncated)
   )
     return null;
   const blocked = controller.error

@@ -28,6 +28,7 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { hasTypedExecHandleLoss } from "../exec-banner";
 import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import {
@@ -539,8 +540,9 @@ function providerSessionIdFromArgs(args: unknown): number | null {
 function retainedProcessTerminalProof(
   result: string,
   providerSessionId: number,
+  source?: object,
 ): RoutingRetainedProcessTerminalProof | null {
-  if (isExecSessionLostBanner(result, providerSessionId)) {
+  if (isExecSessionLostBanner(result, providerSessionId, source)) {
     return {
       outcome: "lost",
       exitCode: null,
@@ -1054,7 +1056,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
     }
     if (pending.outcome === "resolved" && typeof pending.result === "string") {
-      const proof = retainedProcessTerminalProof(pending.result, record.process.providerSessionId);
+      const proof = retainedProcessTerminalProof(
+        pending.result,
+        record.process.providerSessionId,
+        record.backend.session,
+      );
       if (proof) record.pendingTerminal ??= { proof, result: pending.result };
       await this.captureRetainedOutput(record, pending.result);
       if (proof) {
@@ -1155,7 +1161,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         );
       }
     }
-    const proof = retainedProcessTerminalProof(result, providerSessionId);
+    const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
     if (proof) record.pendingTerminal ??= { proof, result };
     await this.captureRetainedOutput(record, result);
     if (proof) {
@@ -1183,7 +1189,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const pending = (async () => {
       if (existing) {
         const result = await existing.catch(() => null);
-        if (result !== null && retainedProcessTerminalProof(result, providerSessionId)) {
+        if (
+          result !== null &&
+          retainedProcessTerminalProof(result, providerSessionId, record?.backend.session)
+        ) {
           if (modelVisible && record) await this.deps.observeProcessTerminal?.(record);
           return result;
         }
@@ -1221,7 +1230,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const result = await this.invokeProviderOperation("writeStdin", record.backend, () =>
       write.call(record.backend.session, args),
     );
-    const proof = retainedProcessTerminalProof(result, providerSessionId);
+    const proof = retainedProcessTerminalProof(result, providerSessionId, record?.backend.session);
     if (proof) record.pendingTerminal ??= { proof, result };
     await this.captureRetainedOutput(record, result);
     if (proof) {
@@ -1256,7 +1265,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
     } else if (result !== undefined) {
       const banner = formatExecResult(result);
-      const chunk = isExecSessionLostBanner(banner, record.process.providerSessionId)
+      const chunk = isExecSessionLostBanner(
+        banner,
+        record.process.providerSessionId,
+        record.backend.session,
+      )
         ? ""
         : stripExecBanner(banner);
       if (chunk)
@@ -1731,6 +1744,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       return s.writeStdin(args);
     });
+  }
+
+  /** Capture the exact pinned adapter's observation contract before a terminal
+   * write removes its route. This is not process completion or liveness proof. */
+  retainedProcessHasTypedHandleLoss(providerSessionId: number): boolean {
+    const record = this.retainedProcesses.get(providerSessionId);
+    return record !== undefined && hasTypedExecHandleLoss(record.backend.session);
   }
 
   /** Whether a positive provider session locator is still pinned to the exact

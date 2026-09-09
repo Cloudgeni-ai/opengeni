@@ -1,6 +1,6 @@
 ---
 title: "SDK"
-description: "The TypeScript SDK and React components for the OpenGeni API."
+description: "Choose the backend chat handler or the full TypeScript session client and React surfaces."
 icon: "code"
 ---
 
@@ -9,7 +9,54 @@ icon: "code"
   repository are the authority for exact method signatures and the current version.
 </Note>
 
-## @opengeni/sdk
+## Choose an entry point
+
+| Import               | Use it for                                                                       |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `@opengeni/sdk/chat` | Server-side chat, tenant mapping, conversation identity, and a host HTTP handler |
+| `@opengeni/sdk`      | The full session, workspace, file, tool, and event API                           |
+
+For a product adding chat, start with [Integrate your product](/guides/integrate-your-product). Keep the organization API key on your backend.
+
+## Chat API
+
+Use the repository workspace packages and a compatible server deployment for these examples. Follow the [source quickstart and deployment setup](/guides/integrate-your-product#connect-your-backend) before using the backend chat handler. It has no dedicated React frontend.
+
+```ts
+import { OpenGeni } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  source: "acme-product",
+});
+
+const chat = await og.chat({
+  tenant: "acme",
+  user: "u_42",
+  conversation: "c_9",
+  agentAccess: "session",
+  memory: "user",
+});
+const reply = await chat.send("What did we decide last time?");
+console.log(reply.text);
+```
+
+In an authenticated product, resolve `tenant` and `user` on your server. The session is created on first send, and the same product, tenant, user, and conversation IDs reopen it. `agentAccess` defaults to `"session"`; `memory` defaults to the same scope and accepts `false` to disable Memory tools. Both settings apply at creation, not when reopening an existing session.
+
+| API                                          | Purpose                                                                    |
+| -------------------------------------------- | -------------------------------------------------------------------------- |
+| `chat.send(message)`                         | Aggregate a reply with `text`, `status`, and any pending decision          |
+| `chat.stream(message)`                       | Iterate text, tool activity, pending decisions, and the final reply        |
+| `chat.snapshot()`                            | Restore messages, unresolved decisions, and session status                 |
+| `chat.respond(input)`                        | Continue after a human approves/rejects a tool or answers/skips a question |
+| `createChatHandler(og, { resolve, format })` | Serve your authenticated chat, history, and decision routes                |
+| `og.client`                                  | Use the full SDK on the same session                                       |
+
+A reply can be `completed`, `pending`, or `cancelled`. Present pending requests to the user before calling `respond`; a text reply alone does not imply that the turn completed. The handler supports native, Vercel UI message stream, OpenAI Chat Completions, and OpenAI Responses text-chat formats. Its history and decision endpoints remain native. See the [handler setup and protocol choices](/guides/integrate-your-product#mount-the-handler) for route registration and history ownership.
+
+## Full TypeScript client
 
 A framework-agnostic TypeScript client with zero runtime dependencies. It needs only WHATWG `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
 
@@ -25,6 +72,7 @@ const client = new OpenGeniClient({
   apiKey: process.env.OPENGENI_API_KEY!,
 });
 
+const workspaceId = process.env.OPENGENI_WORKSPACE_ID!;
 const session = await client.createSession(workspaceId, {
   initialMessage: "Investigate the failing deploy on staging",
   resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
@@ -41,7 +89,8 @@ What it covers:
 
 | Area                         | Highlights                                                                                                                        |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, workspace settings                                                           |
+| Organizations and workspaces | Full/read-only organization API keys, idempotent `ensureWorkspace`, workspace settings                                            |
+| Organization sessions        | Paginated `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                   |
 | Sessions                     | Create with resources, files, Skills, tools, a goal, and a compute target; list, get, archive, cancel                             |
 | Input and control            | Send, Steer, queue management, Pause and Resume, approval decisions, human-input answers                                          |
 | Events                       | Replay by sequence, bounded event pages, and a streaming iterator with reconnect, resume, gap backfill, and duplicate suppression |
@@ -51,6 +100,8 @@ What it covers:
 | Proxy helpers                | Re-emit a session stream from your own server with an identical wire format                                                       |
 
 Full reference: [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
+
+Organization session listings exclude Personal workspaces and Only me sessions. Each row includes its `workspaceId` for subsequent session, event, and file reads. Use `nextCursor` to determine whether another page exists, even when a page is shorter than the requested limit. [Read-only organization keys](/reference/authentication#organization-key-access) support this reporting path but cannot create chats or send messages.
 
 ## @opengeni/react
 
@@ -66,6 +117,8 @@ Subpaths keep the root import lean:
 | `@opengeni/react/realtime` | Voice controls, lazily loadable                      |
 
 Full reference: [packages/react/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/README.md).
+
+Use `SessionConversation` with the normal SDK for an existing session, or compose the timeline and composer. These components do not consume the backend chat-handler protocol. Import `@opengeni/react/compiled.css` for the supplied styles. See the [React integration guide](/guides/integrate-your-product#render-the-chat).
 
 ## Compatibility
 

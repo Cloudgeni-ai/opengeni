@@ -13,6 +13,7 @@ import {
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
+import { cn } from "@/lib/utils";
 import { AppearanceMenu } from "@/components/appearance-menu";
 import {
   accountMenuAriaLabel,
@@ -92,16 +93,22 @@ export function RailFooter() {
               onSubmitted={() => toast.success("Thanks for your feedback")}
             />
           </Suspense>
-          <Button
-            variant="ghost"
-            size="sm"
+          <button
+            type="button"
+            className={cn(
+              "mb-1 flex h-8 items-center rounded-md text-sm font-medium text-fg-muted outline-none transition-colors pointer-coarse:h-10",
+              "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
+              rail.collapsed
+                ? "mx-auto w-8 justify-center pointer-coarse:w-10"
+                : "w-full gap-2.5 px-2.5 text-left",
+            )}
             aria-label="Send feedback"
             title="Send feedback"
             onClick={() => setFeedbackOpen(true)}
           >
-            <FeedbackIcon className="size-4" />
-            {rail.collapsed ? null : "Send feedback"}
-          </Button>
+            <FeedbackIcon className="size-4 shrink-0" />
+            {rail.collapsed ? null : <span className="min-w-0 truncate">Send feedback</span>}
+          </button>
         </>
       ) : null}
       <div
