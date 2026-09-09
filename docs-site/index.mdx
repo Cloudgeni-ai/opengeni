@@ -26,6 +26,8 @@ The included web app lets you use OpenGeni directly as an agent harness. Your ow
 
 For either usage mode, choose where OpenGeni runs. Use the managed service at [app.opengeni.ai](https://app.opengeni.ai), or [self-host OpenGeni](/guides/self-host) in your own infrastructure.
 
+For product integrations, check which features your chosen deployment supports. The [new chat setup](/guides/integrate-your-product#connect-your-backend) currently requires a compatible API deployment and source workspace packages; the hosted API does not yet support that setup.
+
 ## What you get
 
 - **Durable, replayable sessions.** Every event lands in a Postgres event log. Live streams backfill from it, so a browser reload, a new client, or an audit replays the same history.
