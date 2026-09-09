@@ -1666,6 +1666,7 @@ describe("release schema contract", () => {
       "0433_unified_skill_lifecycle.sql",
       "0432_xai_disconnect_session_pins.sql",
       "0434_ordered_model_history.sql",
+      "0435_skill_chat_confirmation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
