@@ -1,5 +1,3 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-
 export function markdownTableWidth({
   columnLeft,
   columnWidth,
@@ -18,83 +16,70 @@ export function markdownTableWidth({
   return Math.max(columnWidth, Math.min(preferredWidth, available));
 }
 
-/** Top-level assistant tables may borrow the timeline's unused side gutters.
- * Keep the prose column (and scroll owner) intact; never escape a bubble, quote,
- * nested list, or clipped disclosure. Standalone Markdown retains its layout.
- */
-export function useMarkdownTableLayout(children: ReactNode) {
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const tableRef = useRef<HTMLTableElement>(null);
-  const [width, setWidth] = useState<number | null>(null);
+/** Loaded only for assistant tables. Keep prose and nested scroll owners intact. */
+export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLTableElement) {
+  const body = wrapper.parentElement;
+  const scroller = body
+    ?.closest("[data-og-wide-table-message]")
+    ?.closest<HTMLElement>("[data-og-timeline-scroller]");
+  if (!body?.classList.contains("og-markdown-body") || !scroller) return;
 
-  useLayoutEffect(() => {
-    const wrapper = wrapperRef.current;
-    const table = tableRef.current;
-    const body = wrapper?.parentElement;
-    const message = body?.closest("[data-og-wide-table-message]");
-    const scroller = message?.closest<HTMLElement>("[data-og-timeline-scroller]");
-    if (!wrapper || table === null || !body?.classList.contains("og-markdown-body") || !scroller) {
-      setWidth(null);
-      return;
-    }
-
-    const measure = () => {
-      // Intermediate clipped/scrollable surfaces own their own content bounds.
-      for (
-        let ancestor: HTMLElement | null = body;
-        ancestor && ancestor !== scroller;
-        ancestor = ancestor.parentElement
-      ) {
-        if (getComputedStyle(ancestor).overflowX !== "visible") {
-          setWidth(null);
-          return;
-        }
+  let width: number | null = null;
+  const reset = () => {
+    width = null;
+    wrapper.style.width = "";
+    wrapper.style.maxWidth = "";
+    wrapper.style.marginInline = "";
+  };
+  const measure = () => {
+    // Intermediate clipped/scrollable surfaces own their own content bounds.
+    for (
+      let ancestor: HTMLElement | null = body;
+      ancestor && ancestor !== scroller;
+      ancestor = ancestor.parentElement
+    ) {
+      if (getComputedStyle(ancestor).overflowX !== "visible") {
+        reset();
+        return;
       }
-      const column = body.getBoundingClientRect();
-      const panel = scroller.getBoundingClientRect();
-      const panelStyle = getComputedStyle(scroller);
-      const left = panel.left + scroller.clientLeft + parseFloat(panelStyle.paddingLeft);
-      const right =
-        panel.left +
-        scroller.clientLeft +
-        scroller.clientWidth -
-        parseFloat(panelStyle.paddingRight);
+    }
+    const column = body.getBoundingClientRect();
+    const panel = scroller.getBoundingClientRect();
+    const panelStyle = getComputedStyle(scroller);
+    const left = panel.left + scroller.clientLeft + parseFloat(panelStyle.paddingLeft);
+    const right =
+      panel.left + scroller.clientLeft + scroller.clientWidth - parseFloat(panelStyle.paddingRight);
 
-      // Measure the same table's preferred width, then restore its normal fluid
-      // layout. This preserves wrapping and TSV copy without a duplicate DOM.
-      const previousWidth = table.style.width;
+    // Measure the original table, preserving its wrapping and TSV copy DOM.
+    const previousWidth = table.style.width;
+    let preferred: number;
+    try {
       table.style.width = "max-content";
-      const preferred = table.getBoundingClientRect().width;
+      preferred = table.getBoundingClientRect().width;
+    } finally {
       table.style.width = previousWidth;
-      const next = markdownTableWidth({
-        columnLeft: column.left,
-        columnWidth: column.width,
-        contentLeft: left,
-        contentRight: right,
-        preferredWidth: preferred,
-      });
-      setWidth((current) => (current !== null && Math.abs(current - next) < 0.5 ? current : next));
-    };
+    }
+    const next = markdownTableWidth({
+      columnLeft: column.left,
+      columnWidth: column.width,
+      contentLeft: left,
+      contentRight: right,
+      preferredWidth: preferred,
+    });
+    if (width !== null && Math.abs(width - next) < 0.5) return;
+    width = next;
+    wrapper.style.width = `${width}px`;
+    wrapper.style.maxWidth = "none";
+    wrapper.style.marginInline = `calc((100% - ${width}px) / 2)`;
+  };
 
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(scroller);
-    observer.observe(body);
-    observer.observe(table);
-    return () => observer.disconnect();
-  }, [children]);
-
-  return {
-    wrapperRef,
-    tableRef,
-    style:
-      width === null
-        ? undefined
-        : {
-            width,
-            maxWidth: "none",
-            marginInline: `calc((100% - ${width}px) / 2)`,
-          },
+  measure();
+  const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+  observer?.observe(scroller);
+  observer?.observe(body);
+  observer?.observe(table);
+  return () => {
+    observer?.disconnect();
+    reset();
   };
 }
