@@ -10,16 +10,14 @@ import type { ControlActivityServices } from "./types";
 import {
   reconcileAutomaticSessionTitleFanout,
   reconcilePendingSessionWorkflowWakes,
+  type WorkflowWakeReconciliationResult,
 } from "./parent-wake";
 
 const BATCH_SIZE = 1_000;
 const MAX_DELIVERIES_PER_ACTIVITY = 10_000;
 const MAX_TITLE_FANOUT_PER_ACTIVITY = 1_000;
 
-export type DispatchSessionWorkflowWakesResult = {
-  claimed: number;
-  delivered: number;
-  failed: number;
+export type DispatchSessionWorkflowWakesResult = WorkflowWakeReconciliationResult & {
   exhaustedBatchLimit: boolean;
 };
 
@@ -61,6 +59,11 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
         }
       }
       let claimed = 0;
+      let signaled = 0;
+      let pendingAdmission = 0;
+      let unconfirmed = 0;
+      const pendingAdmissionBlockers: WorkflowWakeReconciliationResult["pendingAdmissionBlockers"] =
+        {};
       let delivered = 0;
       let failed = 0;
       let exhaustedBatchLimit = false;
@@ -73,7 +76,14 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
         const limit = Math.min(BATCH_SIZE, remaining);
         const batch = await reconcilePendingSessionWorkflowWakes(service, limit);
         claimed += batch.claimed;
+        signaled += batch.signaled;
         delivered += batch.delivered;
+        pendingAdmission += batch.pendingAdmission;
+        unconfirmed += batch.unconfirmed;
+        for (const [blocker, count] of Object.entries(batch.pendingAdmissionBlockers)) {
+          const key = blocker as keyof typeof pendingAdmissionBlockers;
+          pendingAdmissionBlockers[key] = (pendingAdmissionBlockers[key] ?? 0) + count;
+        }
         failed += batch.failed;
         if (batch.claimed < limit) break;
       }
@@ -95,7 +105,23 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
           failed: titleFanout.failed,
         });
       }
-      return { claimed, delivered, failed, exhaustedBatchLimit };
+      const result = {
+        claimed,
+        signaled,
+        delivered,
+        pendingAdmission,
+        unconfirmed,
+        failed,
+        pendingAdmissionBlockers,
+        exhaustedBatchLimit,
+      };
+      if (claimed > 0) {
+        service.observability.info("session workflow wake delivery reconciled", {
+          ...result,
+          pendingAdmissionBlockers: JSON.stringify(pendingAdmissionBlockers),
+        });
+      }
+      return result;
     },
   };
 }

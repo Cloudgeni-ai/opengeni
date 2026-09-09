@@ -9,7 +9,7 @@ import type {
   SessionAuthorizationPort,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -44,7 +44,7 @@ export type SessionWorkflowClient = {
     workflowId: string;
     wakeRevision: number;
     interruptionRequested?: boolean;
-  }) => Promise<void>;
+  }) => Promise<SessionWorkflowWakeDeliveryResult | void>;
   /** Trigger one bounded drain of already-committed workflow-wake revisions. */
   requestSessionWorkflowWakeDispatch: () => Promise<void>;
   // Dedicated, revision-carrying nudge for a durable Codex capacity waiter.

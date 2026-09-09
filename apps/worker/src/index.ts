@@ -395,7 +395,7 @@ export async function createWorkerWorkflowSignaler(
           signal: "queueChanged",
         });
       }
-      await markSessionWorkflowWakeDelivered(db, {
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,

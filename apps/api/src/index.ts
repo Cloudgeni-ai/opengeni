@@ -131,7 +131,7 @@ export async function createTemporalWorkflowClient(
         args: [{ accountId, workspaceId, sessionId }],
         signal: interruptionRequested ? "sessionControl" : "queueChanged",
       });
-      await markSessionWorkflowWakeDelivered(db, {
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,

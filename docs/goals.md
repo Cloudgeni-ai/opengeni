@@ -367,3 +367,16 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 | `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |
 | `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `false` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Enable only after the whole fleet runs an image that understands the new kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
+
+
+### Interpreting wake delivery
+
+A successful Temporal signal only confirms transport acceptance. The durable
+wake acknowledgment guard may still return `pending_admission` with a queued
+prompt, machine input, input wait, Agent Steer, or quiescence blocker. The wake
+dispatcher's result and structured reconciliation log separate `signaled`,
+`delivered` (acknowledged revisions), `pendingAdmission` by blocker, and
+`unconfirmed` legacy signal-only responses. None is proof of a model turn:
+verify the durable attempt claim and `turn.started` before reporting execution.
+Pending revisions keep the existing outbox backoff and admission rules; these
+counters neither resume paused work nor authorize a new attempt.
