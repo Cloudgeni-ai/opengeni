@@ -17,7 +17,12 @@ type Entry = {
 };
 
 function sameExecution(a: ModalProviderCommand, b: ModalProviderCommand): boolean {
-  return a.sandboxId === b.sandboxId && a.taskId === b.taskId && a.execId === b.execId;
+  return (
+    a.sandboxId === b.sandboxId &&
+    a.taskId === b.taskId &&
+    a.execId === b.execId &&
+    Boolean(a.pty) === Boolean(b.pty)
+  );
 }
 
 /** Bridges the SDK's numeric/banner surface to provider-owned execution

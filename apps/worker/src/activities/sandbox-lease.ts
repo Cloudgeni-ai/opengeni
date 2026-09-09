@@ -306,7 +306,12 @@ export type RetainedProcessProbeFn = (
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
   mode?: "observe" | "cancel",
-  captureOutput?: (result: unknown, chunkId: string, stream?: "stdout" | "stderr") => Promise<void>,
+  captureOutput?: (
+    result: unknown,
+    chunkId: string,
+    stream?: "stdout" | "stderr",
+    streamFidelity?: "separate" | "merged",
+  ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
 ) => Promise<RetainedProcessProbeResult>;
 
@@ -1472,7 +1477,7 @@ async function reconcileTerminalRetainedProcesses(
               lease!,
               process,
               claim.ownerState === "background_stopping" ? "cancel" : "observe",
-              async (result, chunkId, stream) => {
+              async (result, chunkId, stream, streamFidelity) => {
                 if (
                   typeof result !== "string" ||
                   (!stream && isExecSessionLostBanner(result, process.providerSessionId))
@@ -1485,7 +1490,7 @@ async function reconcileTerminalRetainedProcesses(
                   commandId: process.id,
                   chunkId,
                   stream: stream ?? "stdout",
-                  streamFidelity: stream ? "separate" : "merged",
+                  streamFidelity: streamFidelity ?? (stream ? "separate" : "merged"),
                   chunk: stream ? result : stripExecBanner(result),
                 });
                 if (events.length && bus)
@@ -1751,7 +1756,12 @@ export async function probeRetainedProcessAtProvider(
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
   mode: "observe" | "cancel" = "observe",
-  captureOutput?: (result: unknown, chunkId: string, stream?: "stdout" | "stderr") => Promise<void>,
+  captureOutput?: (
+    result: unknown,
+    chunkId: string,
+    stream?: "stdout" | "stderr",
+    streamFidelity?: "separate" | "merged",
+  ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
 ): Promise<RetainedProcessProbeResult> {
   if (
@@ -1902,7 +1912,8 @@ export async function probeRetainedProcessAtProvider(
     const page = session.getProviderCommandOutput?.(value);
     if (page) {
       for (const chunk of page.chunks)
-        if (chunk.text) await captureOutput(chunk.text, chunk.chunkId, chunk.stream);
+        if (chunk.text)
+          await captureOutput(chunk.text, chunk.chunkId, chunk.stream, page.streamFidelity);
     } else {
       await captureRetainedProbeOutput(process.id, value, captureOutput);
     }

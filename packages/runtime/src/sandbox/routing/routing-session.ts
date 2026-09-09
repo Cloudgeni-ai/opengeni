@@ -1289,7 +1289,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             chunkId: page.chunkId,
             chunk: page.text,
             stream: page.stream,
-            streamFidelity: "separate",
+            streamFidelity: providerPage.streamFidelity ?? "separate",
           });
       }
     } else if (

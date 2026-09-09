@@ -14,6 +14,7 @@ export type ModalProviderOutputPage = {
   command: ModalProviderCommand;
   chunks: Array<{ stream: ModalCommandStream; chunkId: string; text: string }>;
   exitCode: number | null;
+  streamFidelity: "separate" | "merged";
 };
 
 // A provider batch may end halfway through a UTF-8 character. Keep only that
@@ -140,6 +141,7 @@ export class ModalCommandControl {
       sandboxId: this.sandboxId,
       taskId: task.taskId,
       execId: result.execId,
+      ...(args.tty ? { pty: true } : {}),
       streams: {
         stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
         stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
@@ -195,6 +197,7 @@ export class ModalCommandControl {
       throw new Error("Modal output streams disagree about command exit status");
     return {
       command: next,
+      streamFidelity: command.pty ? "merged" : "separate",
       chunks: pages.filter((page): page is NonNullable<typeof page> => page !== null),
       exitCode: stdoutExit !== null && stderrExit !== null ? stdoutExit : null,
     };

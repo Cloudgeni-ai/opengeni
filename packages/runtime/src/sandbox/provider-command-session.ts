@@ -5,6 +5,7 @@ export type ProviderCommandOutput = {
   command: SandboxProviderCommand;
   chunks: Array<{ stream: "stdout" | "stderr"; chunkId: string; text: string }>;
   exitCode: number | null;
+  streamFidelity?: "separate" | "merged";
 };
 
 /** These callbacks are supplied by the control plane after exact-route

@@ -136,6 +136,7 @@ test("start disables ambiguous mutation retries and PTY idle-stdin termination",
   });
   const command = await control.start({ cmd: "printf test", login: false, tty: true });
   expect(command.execId).toBe("tp-test");
+  expect(command.pty).toBe(true);
   expect(observed).toMatchObject({
     request: {
       command: ["/bin/sh", "-c", "printf test"],
@@ -149,6 +150,16 @@ test("foreign sandbox locators never reach the provider", async () => {
   await expect(controller({}).read({ ...locator(), sandboxId: "sb-other" }, 1)).rejects.toThrow(
     "original sandbox",
   );
+});
+
+test("PTY output keeps merged fidelity despite separate provider read endpoints", async () => {
+  const control = controller({
+    async *containerExecGetOutput() {
+      yield { batchIndex: 1, items: [], exitCode: 0 };
+    },
+  });
+  expect((await control.read({ ...locator(), pty: true }, 1)).streamFidelity).toBe("merged");
+  expect((await control.read(locator(), 1)).streamFidelity).toBe("separate");
 });
 
 test("each start observes renewed environment and preserves explicit shell login behavior", async () => {

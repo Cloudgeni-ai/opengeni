@@ -19,6 +19,7 @@ export const SandboxProviderCommand = z
     sandboxId: z.string().min(1).max(200),
     taskId: z.string().min(1).max(200),
     execId: z.string().min(1).max(200),
+    pty: z.boolean().optional(),
     streams: z.object({ stdout: ModalOutputCursor, stderr: ModalOutputCursor }).strict(),
   })
   .strict();

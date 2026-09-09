@@ -35,7 +35,8 @@ function sameExecution(a: SandboxProviderCommand, b: SandboxProviderCommand): bo
     a.kind === b.kind &&
     a.sandboxId === b.sandboxId &&
     a.taskId === b.taskId &&
-    a.execId === b.execId
+    a.execId === b.execId &&
+    Boolean(a.pty) === Boolean(b.pty)
   );
 }
 
