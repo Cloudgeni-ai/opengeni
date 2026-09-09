@@ -69,6 +69,7 @@ import {
   resolveConnectedMachinePath,
 } from "./selfhosted/workspace-path";
 import {
+  hasTypedExecHandleLoss,
   isExecSessionLostBanner,
   parseExecBannerExitCode,
   parseExecBannerSessionId,
@@ -170,6 +171,7 @@ export type ChannelASession = {
   }): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
@@ -2382,6 +2384,12 @@ export class SandboxChannelAService {
     if (!write) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
+    // Capture the pinned source contract before the write settles and removes
+    // its retained route. Guarded adapters throw on handle loss; their returned
+    // output may legitimately contain the same text as a legacy loss banner.
+    const typedHandleLoss =
+      hasTypedExecHandleLoss(this.session) ||
+      this.session.retainedProcessHasTypedHandleLoss?.(execSessionId) === true;
     const out = await write({
       sessionId: execSessionId,
       chars: data,
@@ -2395,7 +2403,7 @@ export class SandboxChannelAService {
     // rollover after the PTY opened. Surface it as a typed CONFLICT so the route
     // returns 409 and the client cleanly RE-OPENS the PTY against the live box,
     // instead of writing a raw "session not found: 1" into the user's xterm.
-    if (isExecSessionLostBanner(out, execSessionId)) {
+    if (!typedHandleLoss && isExecSessionLostBanner(out, execSessionId)) {
       throw new ChannelAConflictError("pty session lost on the live box; reopen the terminal");
     }
     return stripExecBanner(out);

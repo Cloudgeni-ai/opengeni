@@ -443,7 +443,10 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       }
       return terminal;
     });
-    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    const session = Object.assign(fakeSession("tar"), {
+      writeStdin,
+      activeProcesses: new Map([[7, {}]]),
+    });
 
     installOpenGeniModalSnapshotPolicy(session);
 
@@ -528,7 +531,10 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       }
       throw new Error("cleanup transport failed");
     });
-    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    const session = Object.assign(fakeSession("tar"), {
+      writeStdin,
+      activeProcesses: new Map([[11, {}]]),
+    });
 
     installOpenGeniModalSnapshotPolicy(session);
 
@@ -561,7 +567,10 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     const writeStdin = mock(async () => {
       throw failure;
     });
-    const session = Object.assign(fakeSession("tar"), { writeStdin });
+    const session = Object.assign(fakeSession("tar"), {
+      writeStdin,
+      activeProcesses: new Map([[13, {}]]),
+    });
     installOpenGeniModalSnapshotPolicy(session);
 
     await expect(session.writeStdin({ sessionId: 13, chars: "input" })).rejects.toBe(failure);

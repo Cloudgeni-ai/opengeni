@@ -2,10 +2,117 @@ import { describe, expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
+import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
+import { SandboxChannelAService } from "../src/sandbox/channel-a";
 
 // Exercise the pinned SDK process map, exec yielding, and terminal output. Only
 // the remote transport is replaced; two adapters share one physical command.
 describe("Modal retained-command observation", () => {
+  test.each([undefined, {}, { has: () => true }])(
+    "rejects unsupported SDK process-map shape before observing",
+    async (activeProcesses) => {
+      const owner = installOpenGeniModalSnapshotPolicy(
+        new ModalSandboxSession({
+          state: {
+            sandboxId: "sb-unsupported-map",
+            manifest: new Manifest({ root: "/workspace" }),
+            environment: {},
+            workspacePersistence: "tar",
+          },
+          sandbox: {},
+          modal: { version: () => "0.9.0" },
+          app: {},
+        } as never),
+      );
+      Object.assign(owner, { activeProcesses });
+      await expect(
+        owner.writeStdin({ sessionId: 1, chars: "input", yieldTimeMs: 1 }),
+      ).rejects.toThrow("observation unavailable");
+    },
+  );
+
+  test.each([
+    [0, "control"],
+    [1, "control"],
+    [0, "pty"],
+    [1, "pty"],
+  ] as const)(
+    "preserves a real exit %i through %s whose output resembles a missing SDK handle",
+    async (exitCode, surface) => {
+      let finish!: (code: number) => void;
+      const exited = new Promise<number>((resolve) => {
+        finish = resolve;
+      });
+      let output!: ReadableStreamDefaultController<string>;
+      const sandbox = {
+        exec: async () => ({
+          stdout: new ReadableStream<string>({
+            start(controller) {
+              output = controller;
+            },
+          }),
+          stderr: new ReadableStream({
+            start(controller) {
+              controller.close();
+            },
+          }),
+          wait: () => exited,
+        }),
+      };
+      const owner = installOpenGeniModalSnapshotPolicy(
+        new ModalSandboxSession({
+          state: {
+            sandboxId: "sb-output-collision",
+            manifest: new Manifest({ root: "/workspace" }),
+            environment: {},
+            workspacePersistence: "tar",
+          },
+          sandbox,
+          modal: { version: () => "0.9.0" },
+          app: {},
+        } as never),
+      );
+      const proofs: unknown[] = [];
+      const chunks: string[] = [];
+      const routed = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: owner, sandboxId: null, kind: "modal" }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        settleProcess: async ({ proof }) => {
+          proofs.push(proof);
+        },
+        captureProcessOutput: async ({ chunk }) => {
+          chunks.push(chunk);
+        },
+      });
+      const started = await routed.execCommand({
+        cmd: "print-lost-looking-output",
+        yieldTimeMs: 1,
+      });
+      expect(started).toContain("Process running with session ID 1");
+      output.enqueue("session not found: 1");
+      output.close();
+      finish(exitCode);
+      const result =
+        surface === "pty"
+          ? await new SandboxChannelAService({ session: routed }).ptyWrite(
+              { ptyId: "test-pty", data: "" },
+              1,
+              "",
+            )
+          : await routed.writeStdinForProcessControl({ sessionId: 1, chars: "", yieldTimeMs: 10 });
+      if (surface === "control") expect(result).toContain(`Process exited with code ${exitCode}`);
+      expect(result).toContain("session not found: 1");
+      expect(proofs).toEqual([{ outcome: "exited", exitCode, reason: "provider_exit_banner" }]);
+      expect(chunks.join("")).toBe("session not found: 1");
+      expect(routed.hasRetainedProcess(1)).toBe(false);
+      await expect(owner.writeStdin({ sessionId: 1, chars: "", yieldTimeMs: 1 })).rejects.toThrow(
+        "observation unavailable",
+      );
+    },
+  );
+
   test("a second adapter cannot declare the owner's still-running command lost", async () => {
     let finish!: (code: number) => void;
     const exited = new Promise<number>((resolve) => {

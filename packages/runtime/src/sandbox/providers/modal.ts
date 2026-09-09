@@ -14,7 +14,7 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
-import { isExecSessionLostBanner } from "../exec-banner";
+import { markTypedExecHandleLoss } from "../exec-banner";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -94,6 +94,8 @@ type ModalWorkspaceCaptureOptions = {
 };
 
 type MutableModalSandboxSession = {
+  // Pinned Agents Extensions 0.14.3 uses this synchronous adapter-local map.
+  activeProcesses?: unknown;
   modal?: {
     version?: () => string;
     sandboxes?: {
@@ -413,12 +415,17 @@ function installModalExecCompletionRecovery(session: MutableModalSandboxSession)
   const writeStdin = session.writeStdin;
   if (typeof writeStdin !== "function") return;
   const observe = async (args: Parameters<typeof writeStdin>[0]) => {
-    const result = await writeStdin.call(session, args);
-    if (isExecSessionLostBanner(result, args.sessionId)) {
+    // The pinned SDK looks up this map before its first await. Check the same
+    // handle synchronously, with no await before calling it: a missing entry
+    // is observer-state loss, while a real command may print the exact missing
+    // handle banner at ANY exit code. Never classify its output as authority.
+    // An SDK shape change must fail closed rather than reintroduce that guess.
+    if (!(session.activeProcesses instanceof Map) || !session.activeProcesses.has(args.sessionId)) {
       throw new ModalProcessObservationUnavailableError(args.sessionId);
     }
-    return result;
+    return await writeStdin.call(session, args);
   };
+  markTypedExecHandleLoss(session);
   session.writeStdin = async (args) => {
     try {
       return await observe(args);
