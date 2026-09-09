@@ -17,6 +17,11 @@ BEGIN
   THEN RAISE EXCEPTION '0431 requires drained application sessions' USING ERRCODE = '55000'; END IF;
 END $drain$;
 
+-- Only verified managed-human response admission may set this proof. Historical
+-- answers remain untrusted for the new Skill confirmation operation.
+ALTER TABLE session_human_input_requests
+  ADD COLUMN skill_review_human_authorized boolean NOT NULL DEFAULT false;
+
 -- NULL means the historical single content file. Never rewrite old hashes or snapshots.
 ALTER TABLE preference_registry_revisions ADD COLUMN skill_files jsonb;
 ALTER TABLE preference_registry_revisions ADD COLUMN skill_activation_mode text
@@ -176,12 +181,19 @@ DECLARE
   stable_key text := p_request->>'stableKey'; outcome text; source_id text;
   activation_mode text := 'workspace_managed';
   deferred_publication jsonb; source_effective boolean := true;
+  confirmation_source skill_write_receipts%ROWTYPE;
+  skill_review jsonb; initiating_human text; confirmation_generation integer;
+  human_choice text;
+  original_operation text := p_request->>'operation';
 BEGIN
   IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id',true),'')::uuid
     OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id',true),'')::uuid
     OR p_account_id IS NULL OR p_workspace_id IS NULL OR operation_id IS NULL
-    OR operation NOT IN ('save','install','approve','restore') OR operation IS NULL
+    OR operation NOT IN ('save','install','approve','restore','confirm_response') OR operation IS NULL
   THEN RAISE EXCEPTION 'Skill lifecycle requires exact tenant context' USING ERRCODE='42501'; END IF;
+  IF operation='confirm_response' THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('organization-membership:'||p_account_id,0));
+  END IF;
   PERFORM 1 FROM workspaces WHERE id=p_workspace_id AND account_id=p_account_id FOR KEY SHARE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Skill workspace unavailable' USING ERRCODE='42501'; END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('skill-publication:'||p_workspace_id,0));
@@ -212,6 +224,69 @@ BEGIN
     actor_subject := p_actor->>'subjectId';
   ELSE RAISE EXCEPTION 'Skill lifecycle actor is not authorized' USING ERRCODE='42501'; END IF;
 
+  IF operation='confirm_response' THEN
+    IF p_actor->>'kind' <> 'human' THEN
+      RAISE EXCEPTION 'Skill chat confirmation requires verified human response admission' USING ERRCODE='42501';
+    END IF;
+    SELECT * INTO confirmation_source FROM skill_write_receipts r
+      WHERE r.account_id=p_account_id AND r.workspace_id=p_workspace_id
+        AND r.operation_id=(p_request->>'sourceOperationId')::uuid;
+    skill_review := confirmation_source.receipt->'skillReview';
+    IF NOT FOUND OR skill_review IS NULL OR confirmation_source.actor->>'kind'<>'agent'
+ THEN
+      RAISE EXCEPTION 'Skill confirmation source unavailable' USING ERRCODE='42501';
+    END IF;
+    SELECT coalesce(t.initiating_human_subject_id, CASE WHEN t.initiator_kind='subject' THEN t.initiator_subject_id END),
+      t.execution_generation INTO initiating_human,confirmation_generation
+      FROM session_turns t JOIN sessions session ON session.active_turn_id=t.id AND session.id=t.session_id
+      JOIN session_human_input_requests response_request ON response_request.session_id=t.session_id
+        AND response_request.turn_id=t.id AND response_request.account_id=p_account_id
+        AND response_request.workspace_id=p_workspace_id
+        AND response_request.id=(p_request->>'humanInputRequestId')::uuid
+      WHERE t.id=(confirmation_source.actor->>'turnId')::uuid
+        AND t.session_id=(confirmation_source.actor->>'sessionId')::uuid AND t.workspace_id=p_workspace_id
+        AND t.account_id=p_account_id AND session.workspace_id=p_workspace_id AND session.account_id=p_account_id
+        AND t.status IN ('running','requires_action','recovering','waiting_capacity')
+      FOR SHARE OF t,session;
+    IF initiating_human IS NULL OR initiating_human IS DISTINCT FROM p_actor->>'subjectId' OR NOT (
+      EXISTS(SELECT 1 FROM workspace_memberships m WHERE m.workspace_id=p_workspace_id AND m.subject_id=initiating_human)
+      OR EXISTS(SELECT 1 FROM organization_memberships m WHERE m.account_id=p_account_id
+        AND m.subject_id=initiating_human AND m.status='active' AND m.personal_workspace_id=p_workspace_id)
+    ) OR EXISTS(SELECT 1 FROM organization_memberships m WHERE m.account_id=p_account_id
+      AND m.subject_id=initiating_human AND m.status<>'active') THEN
+      RAISE EXCEPTION 'Skill confirming human no longer has workspace authority' USING ERRCODE='42501';
+    END IF;
+    SELECT answer->'values'->>0 INTO human_choice
+      FROM session_human_input_requests h
+      CROSS JOIN LATERAL jsonb_array_elements(h.response->'answers') answer
+      WHERE h.id=(p_request->>'humanInputRequestId')::uuid AND h.account_id=p_account_id AND h.workspace_id=p_workspace_id
+        AND h.session_id=(confirmation_source.actor->>'sessionId')::uuid AND h.turn_id=(confirmation_source.actor->>'turnId')::uuid
+        AND h.turn_generation >= (confirmation_source.actor->>'executionGeneration')::integer
+        AND h.turn_generation <= confirmation_generation AND h.status='answered' AND h.responded_by=initiating_human
+        AND h.skill_review_human_authorized AND h.allow_skip=false
+        AND h.response->>'outcome'='answered'
+        AND jsonb_array_length(h.questions)=1 AND jsonb_array_length(h.response->'answers')=1
+        AND h.questions->0->>'id'='skill:'||(skill_review->>'revisionId')
+        AND h.questions->0->>'kind'='single_select'
+        AND h.questions->0->>'label'='Save this Skill?'
+        AND h.questions->0->>'helpText'='Review the complete files before saving. Saving activates this revision immediately.'
+        AND h.questions->0->'required'='true'::jsonb
+        AND coalesce(h.questions->0->'allowOther','false'::jsonb)='false'::jsonb
+        AND h.responded_at IS NOT NULL AND h.created_at >= confirmation_source.created_at
+        AND (h.expires_at IS NULL OR h.responded_at <= h.expires_at)
+        AND h.questions->0->>'prompt'='Save this exact Skill revision for this workspace?'
+        AND h.questions->0->'skillReview'=skill_review
+        AND h.questions->0->'options'='[{"id":"save","label":"Save"},{"id":"skip","label":"Don''t save"}]'::jsonb
+        AND answer->>'questionId'='skill:'||(skill_review->>'revisionId')
+        AND answer->'values' IN ('["save"]'::jsonb,'["skip"]'::jsonb)
+      FOR SHARE OF h;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Exact human Skill confirmation unavailable' USING ERRCODE='42501'; END IF;
+    skill_id := (skill_review->>'skillId')::uuid;
+    p_request := p_request || skill_review || jsonb_build_object('operationId',operation_id,
+      'reason','Approved once by the initiating human in chat');
+    operation := CASE WHEN human_choice='skip' THEN 'reject' ELSE 'approve' END;
+    actor_subject := initiating_human;
+  END IF;
   fingerprint := encode(sha256(convert_to(jsonb_build_array(p_actor,p_request)::text,'UTF8')),'hex');
   PERFORM pg_advisory_xact_lock(hashtextextended('skill-operation:'||p_workspace_id||':'||operation_id,0));
   SELECT * INTO prior FROM skill_write_receipts r WHERE r.workspace_id=p_workspace_id AND r.operation_id=lifecycle.operation_id;
@@ -227,6 +302,8 @@ BEGIN
     mode := coalesce(mode,'suggest');
     IF mode = 'off' THEN RAISE EXCEPTION 'Learning is Off; durable Skill changes are refused' USING ERRCODE='42501'; END IF;
   END IF;
+
+  IF original_operation='confirm_response' THEN mode := 'automatic'; END IF;
 
   IF operation = 'install' THEN
     SELECT f.facet_key, f.activation_mode, v.plugin_id, sf.*, coalesce(jsonb_agg(jsonb_build_object('path',ff.path,'content',ff.content) ORDER BY ff.path COLLATE "C")
@@ -266,7 +343,7 @@ BEGIN
       IF head.active_revision_id IS NOT NULL AND (rev.provenance_source <> 'portable_skill' OR rev.provenance_source_id=source_id) THEN
         revision_id := head.active_revision_id; outcome := 'preserved';
       END IF;
-    ELSIF head.active_revision_id IS DISTINCT FROM (p_request->>'expectedRevisionId')::uuid
+    ELSIF (operation <> 'reject' AND head.active_revision_id IS DISTINCT FROM (p_request->>'expectedRevisionId')::uuid)
       OR head.scope_version IS DISTINCT FROM (p_request->>'expectedScopeVersion')::integer THEN
       RAISE EXCEPTION 'Skill head changed' USING ERRCODE='40001';
     END IF;
@@ -281,10 +358,19 @@ BEGIN
   END IF;
 
   IF outcome IS NULL THEN
-    IF operation IN ('approve','restore') THEN
+    IF operation IN ('approve','restore','reject') THEN
       SELECT * INTO rev FROM preference_registry_revisions r WHERE r.id=(p_request->>'revisionId')::uuid
         AND r.account_id=p_account_id AND r.preference_id=skill_id;
       IF NOT FOUND THEN RAISE EXCEPTION 'Skill revision unavailable' USING ERRCODE='42501'; END IF;
+      IF original_operation='confirm_response' AND operation='approve' AND EXISTS(SELECT 1 FROM preference_registry_revisions newer
+        WHERE newer.preference_id=skill_id AND newer.revision>rev.revision) THEN
+        RAISE EXCEPTION 'Skill changed after chat proposal' USING ERRCODE='40001';
+      END IF;
+      IF original_operation='confirm_response' AND (
+        (operation='reject' AND rev.id=head.active_revision_id)
+        OR (operation='approve' AND EXISTS(SELECT 1 FROM preference_registry_events event
+          WHERE event.preference_id=skill_id AND event.new_revision_id=rev.id AND event.type='rejected'))
+      ) THEN RAISE EXCEPTION 'Skill proposal was already settled' USING ERRCODE='40001'; END IF;
       files := coalesce(rev.skill_files,jsonb_build_array(jsonb_build_object('path','SKILL.md','content',rev.content)));
       title := p_request->>'title'; description := p_request->>'description';
       activation_mode := coalesce(rev.skill_activation_mode,'workspace_managed');
@@ -296,7 +382,7 @@ BEGIN
     END IF;
     IF NOT skill_files_valid(files) THEN RAISE EXCEPTION 'Invalid Skill text folder' USING ERRCODE='22023'; END IF;
     SELECT f->>'content' INTO main_content FROM jsonb_array_elements(files) f WHERE f->>'path'='SKILL.md';
-    IF operation = 'approve' THEN revision_id := rev.id;
+    IF operation IN ('approve','reject') THEN revision_id := rev.id;
     ELSE
       INSERT INTO preference_registry_revisions(account_id,preference_id,title,description,content,content_hash,
         conflict_strategy,provenance_source,provenance_source_id,trust,created_by_subject_id,corrects_revision_id,skill_files,skill_activation_mode)
@@ -317,7 +403,11 @@ BEGIN
       deferred_publication := jsonb_build_object('expectedRevisionId',head.active_revision_id,
         'expectedScopeVersion',head.scope_version,'sourceFacetId',source.facet_id);
     END IF;
-    IF mode='automatic' AND deferred_publication IS NULL THEN
+    IF operation='reject' THEN
+      INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,actor_subject_id,reason)
+        VALUES(p_account_id,skill_id,'rejected',next_event,revision_id,actor_subject,'Declined by the initiating human in chat');
+      outcome := 'preserved';
+    ELSIF mode='automatic' AND deferred_publication IS NULL THEN
       PERFORM set_config('opengeni.preference_lifecycle_head_id',skill_id::text,true);
       PERFORM set_config('opengeni.preference_lifecycle_operation','activate',true);
       UPDATE preference_registry_preferences h SET status='active',active_revision_id=revision_id,
@@ -337,6 +427,12 @@ BEGIN
       WHERE b.workspace_id=p_workspace_id AND b.plugin_id=source.plugin_id AND b.facet_key=source.facet_key;
   END IF;
   result := jsonb_build_object('operationId',operation_id,'skillId',skill_id,'revisionId',revision_id,'outcome',outcome,'replayed',false);
+  IF operation='reject' THEN result := result || jsonb_build_object('decision','rejected'); END IF;
+  IF outcome='pending' AND deferred_publication IS NULL AND p_actor->>'kind'='agent' THEN
+    result := result || jsonb_build_object('pendingReason','approval','skillReview',
+      jsonb_build_object('sourceOperationId',operation_id,'skillId',skill_id,'revisionId',revision_id,
+        'expectedRevisionId',head.active_revision_id,'expectedScopeVersion',head.scope_version));
+  END IF;
   IF deferred_publication IS NOT NULL THEN result := result || jsonb_build_object('pendingReason','source_finalization'); END IF;
   INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt,activation_event_id)
     VALUES(p_account_id,p_workspace_id,operation_id,fingerprint,p_actor,

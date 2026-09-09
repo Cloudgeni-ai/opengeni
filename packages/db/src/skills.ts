@@ -7,6 +7,7 @@ import type {
   SkillWriteContext,
   SkillWriteReceipt,
   SkillActor,
+  SkillReviewReference,
 } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 
@@ -30,6 +31,17 @@ export async function applySkillLifecycle(
         sql`SELECT set_config('opengeni.principal_kind', ${context.actor.principalKind}, true)`,
       );
     } else await assertSkillReadAttempt(tx, { ...context, actor: context.actor });
+    if (request.operation === "confirm_response") {
+      const [source] = await rawRows<{ receipt: SkillWriteReceipt }>(
+        tx,
+        sql`
+        SELECT receipt FROM skill_write_receipts
+        WHERE account_id=${context.accountId}::uuid AND workspace_id=${context.workspaceId}::uuid
+          AND operation_id=${request.sourceOperationId as string}::uuid`,
+      );
+      if (!source?.receipt.skillReview) throw new Error("Skill confirmation source unavailable");
+      request = { ...request, ...source.receipt.skillReview };
+    }
     let content: string | undefined;
     if (request.operation === "save") {
       content = (request.files as SkillFile[] | undefined)?.find(
@@ -42,7 +54,11 @@ export async function applySkillLifecycle(
         WHERE skill_facet_id=${request.skillFacetId as string}::uuid AND path='SKILL.md'`,
       );
       content = main?.content;
-    } else if (request.operation === "approve" || request.operation === "restore") {
+    } else if (
+      request.operation === "approve" ||
+      request.operation === "restore" ||
+      request.operation === "confirm_response"
+    ) {
       const [revision] = await rawRows<{
         content: string;
         title: string;
@@ -56,7 +72,10 @@ export async function applySkillLifecycle(
           AND id=${request.revisionId as string}::uuid`,
       );
       content = revision?.content;
-      if (request.operation === "approve" && revision) {
+      if (
+        (request.operation === "approve" || request.operation === "confirm_response") &&
+        revision
+      ) {
         const metadata = readSkillMetadata(revision.content);
         if (
           !revision.skill_files ||
@@ -226,6 +245,136 @@ export async function listSkillRecords(
     `,
     );
     return rows.map((row) => row.skill);
+  };
+  return context.subjectId
+    ? withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, run)
+    : withWorkspaceRls(db, context.workspaceId, run);
+}
+
+export class SkillHumanResponseError extends Error {
+  constructor(
+    readonly code: "conflict" | "forbidden" | "invalid",
+    cause: unknown,
+  ) {
+    super(
+      code === "conflict"
+        ? "This Skill changed. Review a new proposal before saving."
+        : code === "forbidden"
+          ? "This Skill approval is not available to this user."
+          : "This Skill proposal cannot be saved.",
+      { cause },
+    );
+    this.name = "SkillHumanResponseError";
+  }
+}
+
+/** Called only inside canonical-human response admission, after the answer and
+ * authorization stamp were written in the same transaction. The lifecycle
+ * independently requires that stamp and the exact initiating human. */
+export async function confirmSkillHumanResponse(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; requestId: string },
+): Promise<SkillWriteReceipt | null> {
+  return withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const [row] = await rawRows<{
+      questions: Array<{ id: string; skillReview?: { sourceOperationId: string } }>;
+      response: { outcome: string; answers?: Array<{ questionId: string; values: string[] }> };
+    }>(
+      tx,
+      sql`SELECT questions,response FROM session_human_input_requests
+        WHERE id=${input.requestId}::uuid AND account_id=${input.accountId}::uuid
+          AND workspace_id=${input.workspaceId}::uuid`,
+    );
+    const question = row?.questions.find((entry) => entry.skillReview);
+    if (
+      !question ||
+      row?.response.outcome !== "answered" ||
+      !row.response.answers?.some(
+        (answer) =>
+          answer.questionId === question.id &&
+          answer.values.length === 1 &&
+          ["save", "skip"].includes(answer.values[0]!),
+      )
+    )
+      return null;
+    const hash = createHash("sha256")
+      .update("skill-human-response:" + input.requestId)
+      .digest("hex");
+    const operationId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+    try {
+      return await applySkillLifecycle(
+        tx,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          actor: { kind: "human", subjectId: input.subjectId, principalKind: "human_session" },
+        },
+        {
+          operation: "confirm_response",
+          operationId,
+          sourceOperationId: question.skillReview!.sourceOperationId,
+          humanInputRequestId: input.requestId,
+        },
+      );
+    } catch (error) {
+      let cause: unknown = error;
+      while (cause instanceof Error) {
+        const code = (cause as Error & { code?: string }).code;
+        if (code === "40001" || code === "23505")
+          throw new SkillHumanResponseError("conflict", error);
+        if (code === "42501") throw new SkillHumanResponseError("forbidden", error);
+        if (code === "22023" || code === "23514")
+          throw new SkillHumanResponseError("invalid", error);
+        if (
+          cause.message === "Skill confirmation source unavailable" ||
+          cause.message === "Skill lifecycle requires a readable SKILL.md"
+        )
+          throw new SkillHumanResponseError("conflict", error);
+        cause = cause.cause;
+      }
+      throw error;
+    }
+  });
+}
+
+/** Current projection is separate from the immutable original write receipt. */
+export async function skillReviewResolution(
+  db: Database,
+  context: SkillReadContext,
+  review: SkillReviewReference,
+): Promise<"pending" | "activated" | "declined" | "superseded" | "unavailable"> {
+  const run = async (tx: Database) => {
+    const [record] = await listSkillRecords(tx, context, {
+      skillId: review.skillId,
+      revisionId: review.revisionId,
+      metadataOnly: true,
+      limit: 1,
+    });
+    if (!record) return "unavailable" as const;
+    const [event] = await rawRows<{ type: string }>(
+      tx,
+      sql`
+      SELECT type FROM preference_registry_events WHERE account_id=${context.accountId}::uuid
+        AND preference_id=${review.skillId}::uuid AND new_revision_id=${review.revisionId}::uuid
+        AND type IN ('activated','corrected','rejected') ORDER BY version DESC LIMIT 1`,
+    );
+    if (event) return event.type === "rejected" ? ("declined" as const) : ("activated" as const);
+    const [newer] = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      SELECT newer.id FROM preference_registry_revisions newer
+      JOIN preference_registry_revisions original ON original.id=${review.revisionId}::uuid
+        AND original.account_id=${context.accountId}::uuid AND original.preference_id=${review.skillId}::uuid
+      WHERE newer.account_id=original.account_id AND newer.preference_id=original.preference_id
+        AND newer.revision>original.revision LIMIT 1`,
+    );
+    if (
+      newer ||
+      record.scopeVersion !== review.expectedScopeVersion ||
+      record.activeRevisionId !== review.expectedRevisionId
+    )
+      return "superseded" as const;
+    return "pending" as const;
   };
   return context.subjectId
     ? withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, run)

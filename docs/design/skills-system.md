@@ -166,7 +166,7 @@ Agreed target behavior:
 | Learning mode | Persistent agent change |
 | --- | --- |
 | Off | Refused; no durable Skill change |
-| Require approval | Inactive proposed change until approval |
+| Require approval | One exact-content chat decision, then immediate activation; inactive only until that decision |
 | Autonomous | Valid, authorized change becomes current without approval |
 
 Human saves bypass the agent Learning decision, not access checks or validation.
@@ -181,8 +181,11 @@ Ordinary Skill edits do not require Knowledge claims, evidence reviews or
 confidence evaluation. Implement the mode decision directly in the shared Skill
 write lifecycle, retaining tenancy, live-attempt checks, history and safe writes.
 Existing source-policy compatibility must be accounted for during migration,
-not silently discarded. A complex review inbox can wait; correct Require-approval
-backend behavior cannot be silently replaced with Autonomous or Off.
+not silently discarded. Require approval must expose the complete immutable
+folder in the chat decision. Successful confirmation activates once; no later
+review inbox is required. Autonomous activates without that decision; Off remains
+refusal. Pending proposals are retained evidence until decided, never a second
+approval after a successful chat save.
 
 ## 5. Prompt and built-in management Skill
 

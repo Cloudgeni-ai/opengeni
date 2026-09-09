@@ -1753,7 +1753,16 @@ export type HumanInputOption = {
   description?: string | null | undefined;
 };
 
+export type SkillReviewReference = {
+  sourceOperationId: string;
+  skillId: string;
+  revisionId: string;
+  expectedRevisionId: string | null;
+  expectedScopeVersion: number;
+};
+
 export type HumanInputQuestion = {
+  skillReview?: SkillReviewReference | undefined;
   id: string;
   kind: HumanInputQuestionKind;
   prompt: string;

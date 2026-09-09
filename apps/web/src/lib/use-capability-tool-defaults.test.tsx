@@ -1,13 +1,12 @@
-import { afterAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useCapabilityToolDefaults } from "./use-capability-tool-defaults";
 
-GlobalRegistrator.register();
+if (typeof document === "undefined") GlobalRegistrator.register();
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
-afterAll(() => GlobalRegistrator.unregister());
 
 test("new connections default on without undoing draft choices, including revocation and reconnection", async () => {
   const container = document.createElement("div");

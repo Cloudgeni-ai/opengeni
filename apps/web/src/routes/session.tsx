@@ -1498,6 +1498,18 @@ function SessionChatPane(props: {
   const composerPolicyValidRef = useRef(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const loadSkillReview = useCallback(
+    (reference: NonNullable<import("@opengeni/sdk").HumanInputQuestion["skillReview"]>) =>
+      context.client.readWorkspaceSkill(
+        props.session.workspaceId,
+        reference.skillId,
+        reference.revisionId,
+      ),
+    // A browser-account switch must discard the previous actor's loaded preview
+    // even when the SDK client instance and workspace remain unchanged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [context.client, props.session.workspaceId, context.accessContext.subjectId],
+  );
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
   const sessionVariableSetIds =
     props.session.variableSetIds ??
@@ -2025,6 +2037,7 @@ function SessionChatPane(props: {
                 props.session.status === "requires_action" ? (
                   <div className="pb-1" data-human-input-timeline-surface="">
                     <HumanInputSurface
+                      loadSkillReview={loadSkillReview}
                       requests={props.humanInput.requests}
                       respondingRequestId={props.humanInput.respondingRequestId}
                       error={props.humanInput.mutationError?.message}

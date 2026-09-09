@@ -1471,6 +1471,12 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 
 ---
 
+Skill approval is a revision-bound human-input decision. Only verified managed
+human response admission can authorize a Skill save; the same transaction
+checks the immutable complete-folder reference and current scope/head before
+activating the revision and settling the answer. Agent answers and delegated subject strings cannot
+supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
+
 ## 10. Security and access model
 
 - **Authenticate, authorize, then query.** API middleware establishes the

@@ -21,6 +21,10 @@ import {
   activatePreferenceRegistryRevision,
   correctPreferenceRegistry,
   applySkillLifecycle,
+  confirmSkillHumanResponse,
+  skillReviewResolution,
+  acceptSessionHumanInputResponse,
+  appendSessionEvents,
   preparePackInstallationOperation,
   finalizePackInstallationOperation,
   preparePluginPackageInstall,
@@ -31,7 +35,12 @@ import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import type { SkillSaveInput } from "@opengeni/contracts";
-import { CapabilityPack, stableJson } from "@opengeni/contracts";
+import {
+  CapabilityPack,
+  stableJson,
+  skillReviewHumanInput,
+  type SkillReviewReference,
+} from "@opengeni/contracts";
 import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "../src/domain/skills";
 
 let shared: SharedTestDatabase | null = null;
@@ -254,7 +263,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         const child = await installPortableSkill(client.db, install);
         expect(child.skillReceipt.outcome).toBe("pending");
         expect(child.skillReceipt.pendingReason).toBe(
-          mode === "automatic" ? "source_finalization" : undefined,
+          mode === "automatic" ? "source_finalization" : "approval",
         );
         expect(await listSkillDescriptors(client.db, f.context)).toEqual([]);
         expect(await listInstalledPortableSkills(client.db, f.context.workspaceId)).toEqual([]);
@@ -1169,4 +1178,318 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       .admin`select actor_subject_id from preference_registry_events where id=${sourceRemoved.skillReleases![0]!.eventId}`;
     expect(event!.actor_subject_id).toBe(f.human.actor.subjectId);
   });
+});
+
+async function answeredSkillInput(
+  f: Awaited<ReturnType<typeof fixture>>,
+  review: SkillReviewReference,
+  values = ["save"],
+  respondedBy = f.human.actor.subjectId,
+  options: { label?: string; authorized?: boolean; pending?: boolean } = {},
+) {
+  const id = crypto.randomUUID();
+  const questions = skillReviewHumanInput(review).questions.map((question) => ({
+    ...question,
+    ...(options.label ? { label: options.label } : {}),
+  }));
+  await shared!.admin`
+    insert into session_human_input_requests (
+      id,account_id,workspace_id,session_id,turn_id,turn_generation,creation_attempt_id,
+      tool_call_id,status,questions,allow_skip,response,responded_by,responded_at,skill_review_human_authorized
+    ) values (
+      ${id},${f.context.accountId},${f.context.workspaceId},${f.agent.actor.sessionId},
+      ${f.agent.actor.turnId},1,${f.agent.actor.attemptId},${`skill-${id}`},${options.pending ? "pending" : "answered"},
+      ${shared!.admin.json(questions)}::jsonb,false,
+      ${shared!.admin.json({ outcome: "answered", answers: [{ questionId: questions[0]!.id, values }] })}::jsonb,
+      ${options.pending ? null : respondedBy},${options.pending ? null : new Date()},${!options.pending && options.authorized !== false}
+    )`;
+  return id;
+}
+
+describe("one chat Skill confirmation", () => {
+  test("direct agent Skill installation returns one bound chat review and activates installed files", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest");
+    const content = skillMarkdown("Installed Skill instructions");
+    const hash = createHash("sha256").update(content).digest("hex");
+    const key = crypto.randomUUID();
+    const input: InstallPortableSkillInput = {
+      ...f.context,
+      subjectId: `service:skill-attempt:${f.agent.actor.attemptId}`,
+      skillActor: f.agent.actor,
+      skillOperationId: crypto.randomUUID(),
+      capabilityId: `skill:${key}`,
+      pluginKey: `skill/direct-chat/${key}`,
+      source: "github",
+      sourceUrl: "https://example.test/skill",
+      repositoryUrl: "https://example.test/repo",
+      sourceCommit: "a".repeat(40),
+      sourcePath: key,
+      name: "test-skill",
+      description: "Test Skill folder",
+      contentSha256: hash,
+      totalBytes: Buffer.byteLength(content),
+      files: [
+        { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: hash },
+      ],
+    };
+    // Same direct-owner default used by the worker's skill_install callback.
+    const installed = await installPortableSkill(client.db, input);
+    expect(installed.skillReceipt).toMatchObject({
+      outcome: "pending",
+      pendingReason: "approval",
+      skillReview: {
+        sourceOperationId: input.skillOperationId,
+        skillId: installed.skillReceipt.skillId,
+        revisionId: installed.skillReceipt.revisionId,
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+      },
+    });
+    const review = installed.skillReceipt.skillReview!;
+    expect(await skillReviewResolution(client.db, f.context, review)).toBe("pending");
+    expect(skillReviewHumanInput(review).questions[0]!.skillReview).toEqual(review);
+    const requestId = await answeredSkillInput(f, review);
+    expect(
+      await confirmSkillHumanResponse(client.db, {
+        ...f.context,
+        subjectId: f.human.actor.subjectId,
+        requestId,
+      }),
+    ).toMatchObject({ outcome: "applied", revisionId: installed.skillReceipt.revisionId });
+    expect(await listInstalledPortableSkills(client.db, f.context.workspaceId)).toHaveLength(1);
+    const replay = await installPortableSkill(client.db, input);
+    expect(replay.skillReceipt).toEqual({ ...installed.skillReceipt, replayed: true });
+    // Original receipt stays pending history; worker projection prevents a second prompt.
+    expect(
+      await skillReviewResolution(client.db, f.context, replay.skillReceipt.skillReview!),
+    ).toBe("activated");
+  }, 180000);
+
+  test("activates exact complete folder once; rejects agent answers, unverified humans and altered references", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest");
+    const pending = await saveSkill(client.db, {
+      ...f.input,
+      ...f.agent,
+      files: [
+        ...f.input.files,
+        { path: "references/large.txt", content: "full content".repeat(1000) },
+      ],
+    });
+    expect(pending.outcome).toBe("pending");
+    const review = pending.skillReview!;
+    const confirm = (requestId: string, subjectId = f.human.actor.subjectId) =>
+      confirmSkillHumanResponse(client!.db, { ...f.context, subjectId, requestId });
+
+    await expectDatabaseGuard(
+      confirm(
+        await answeredSkillInput(f, review, ["save"], `agent_attempt:${f.agent.actor.attemptId}`),
+      ),
+      "Exact human Skill confirmation unavailable",
+    );
+    await expectDatabaseGuard(
+      confirm(await answeredSkillInput(f, { ...review, revisionId: crypto.randomUUID() })),
+      "Exact human Skill confirmation unavailable",
+    );
+    await expectDatabaseGuard(
+      confirm(
+        await answeredSkillInput(f, review, ["save"], f.human.actor.subjectId, {
+          authorized: false,
+        }),
+      ),
+      "Exact human Skill confirmation unavailable",
+    );
+    await expectDatabaseGuard(
+      confirm(
+        await answeredSkillInput(f, review, ["save"], f.human.actor.subjectId, {
+          label: "Save harmless metadata?",
+        }),
+      ),
+      "Exact human Skill confirmation unavailable",
+    );
+    const requestId = await answeredSkillInput(f, review);
+    // The original attempt has already paused. No model continuation is needed.
+    await shared.admin`update session_turn_attempts set state='closed',outcome='requires_action',closed_at=now()
+      where id=${f.agent.actor.attemptId}`;
+    await shared.admin`update session_turns set status='requires_action' where id=${f.agent.actor.turnId}`;
+    const applied = await confirm(requestId);
+    expect(applied?.outcome).toBe("applied");
+    expect(applied?.revisionId).toBe(pending.revisionId);
+    expect(
+      await skillReviewResolution(
+        client.db,
+        { ...f.context, subjectId: f.human.actor.subjectId },
+        review,
+      ),
+    ).toBe("activated");
+
+    expect(await confirm(requestId)).toEqual({ ...applied, replayed: true });
+    const record = await readSkill(
+      client.db,
+      { ...f.context, subjectId: f.human.actor.subjectId },
+      pending.skillId,
+    );
+    expect(record?.activeRevisionId).toBe(pending.revisionId);
+    expect(record?.pendingRevisionIds).toEqual([]);
+    expect(record?.files.find((file) => file.path === "references/large.txt")?.content).toBe(
+      "full content".repeat(1000),
+    );
+  }, 180000);
+
+  test("refuses stale revisions, foreign humans and revoked workspace authority", async () => {
+    if (!client || !shared) return;
+    for (const change of ["agent", "human", "revoked", "foreign"] as const) {
+      const f = await fixture("suggest");
+      const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+      const requestId = await answeredSkillInput(f, pending.skillReview!);
+      if (change === "agent" || change === "human") {
+        await saveSkill(client.db, {
+          ...f.input,
+          ...f[change],
+          operationId: crypto.randomUUID(),
+          files: [{ path: "SKILL.md", content: skillMarkdown("Newer edit") }],
+        });
+      }
+      if (change === "revoked")
+        await shared.admin`delete from workspace_memberships where workspace_id=${f.context.workspaceId}
+        and subject_id=${f.human.actor.subjectId}`;
+      await expect(
+        confirmSkillHumanResponse(client.db, {
+          ...f.context,
+          requestId,
+          subjectId: change === "foreign" ? "user:other" : f.human.actor.subjectId,
+        }),
+      ).rejects.toThrow();
+    }
+  }, 180000);
+
+  test("real response admission activates atomically and failure leaves the question unanswered", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest");
+    const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+    const requestId = await answeredSkillInput(
+      f,
+      pending.skillReview!,
+      ["save"],
+      f.human.actor.subjectId,
+      { pending: true },
+    );
+    const [trigger] = await appendSessionEvents(
+      client.db,
+      f.context.workspaceId,
+      f.agent.actor.sessionId,
+      [{ type: "user.message", payload: { text: "Create Skill" } }],
+    );
+    await shared.admin`update session_turns set trigger_event_id=${trigger!.id} where id=${f.agent.actor.turnId}`;
+    await shared.admin`update sessions set status='requires_action' where id=${f.agent.actor.sessionId}`;
+    await shared.admin`update session_turns set status='requires_action' where id=${f.agent.actor.turnId}`;
+    await shared.admin`update session_turn_attempts set state='closed',outcome='requires_action',closed_at=now()
+      where id=${f.agent.actor.attemptId}`;
+    const response = {
+      outcome: "answered",
+      answers: [{ questionId: `skill:${pending.revisionId}`, values: ["save"] }],
+    };
+    const input = {
+      ...f.context,
+      sessionId: f.agent.actor.sessionId,
+      requestId,
+      response,
+      respondedBy: f.human.actor.subjectId,
+    };
+    await expect(acceptSessionHumanInputResponse(client.db, input)).rejects.toThrow();
+    await expect(
+      acceptSessionHumanInputResponse(client.db, {
+        ...input,
+        canonicalHumanSession: true,
+        respondedBy: "user:another",
+      }),
+    ).rejects.toThrow();
+    const [stillPending] =
+      await shared.admin`select status,skill_review_human_authorized from session_human_input_requests where id=${requestId}`;
+    expect(stillPending).toMatchObject({ status: "pending", skill_review_human_authorized: false });
+    const accepted = await acceptSessionHumanInputResponse(client.db, {
+      ...input,
+      canonicalHumanSession: true,
+    });
+    expect(accepted.action).toBe("accepted");
+    expect(
+      (
+        await readSkill(
+          client.db,
+          { ...f.context, subjectId: f.human.actor.subjectId },
+          pending.skillId,
+        )
+      )?.activeRevisionId,
+    ).toBe(pending.revisionId);
+    const replay = await acceptSessionHumanInputResponse(client.db, {
+      ...input,
+      canonicalHumanSession: true,
+    });
+    expect(replay.action).toBe("completed");
+    expect(replay.events).toEqual([]);
+  }, 180000);
+
+  test("Don't save settles only the pending revision and preserves the active Skill", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest");
+    const active = await saveSkill(client.db, f.input);
+    const proposed = await saveSkill(client.db, {
+      ...f.input,
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: active.revisionId,
+      files: [{ path: "SKILL.md", content: skillMarkdown("Proposed edit") }],
+    });
+    const requestId = await answeredSkillInput(f, proposed.skillReview!, ["skip"]);
+    const declined = await confirmSkillHumanResponse(client.db, {
+      ...f.context,
+      subjectId: f.human.actor.subjectId,
+      requestId,
+    });
+    expect(declined).toMatchObject({
+      outcome: "preserved",
+      decision: "rejected",
+      revisionId: proposed.revisionId,
+    });
+    const record = await readSkill(
+      client.db,
+      { ...f.context, subjectId: f.human.actor.subjectId },
+      proposed.skillId,
+    );
+    expect(record?.activeRevisionId).toBe(active.revisionId);
+    expect(record?.pendingRevisionIds).toEqual([]);
+    expect(
+      await skillReviewResolution(
+        client.db,
+        { ...f.context, subjectId: f.human.actor.subjectId },
+        proposed.skillReview!,
+      ),
+    ).toBe("declined");
+    const staleSave = await answeredSkillInput(f, proposed.skillReview!, ["save"]);
+    await expect(
+      confirmSkillHumanResponse(client.db, {
+        ...f.context,
+        subjectId: f.human.actor.subjectId,
+        requestId: staleSave,
+      }),
+    ).rejects.toThrow();
+  }, 180000);
+
+  test("autonomous produces no review and Off creates no durable proposal", async () => {
+    if (!client || !shared) return;
+    const auto = await fixture("automatic");
+    const result = await saveSkill(client.db, { ...auto.input, ...auto.agent });
+    expect(result.outcome).toBe("applied");
+    expect(result.skillReview).toBeUndefined();
+    const off = await fixture("off");
+    await expect(saveSkill(client.db, { ...off.input, ...off.agent })).rejects.toThrow();
+    expect(
+      await readSkill(
+        client.db,
+        { ...off.context, subjectId: off.human.actor.subjectId },
+        off.input.skillId,
+      ),
+    ).toBeNull();
+  }, 180000);
 });

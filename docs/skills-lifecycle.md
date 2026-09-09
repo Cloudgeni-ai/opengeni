@@ -1,7 +1,7 @@
 # Unified Skill content and writes
 
 `packages/core/src/domain/skills.ts` exports `listSkills`, `readSkill`,
-`saveSkill`, `installSkill`, `approveSkill`, and `restoreSkill`.
+`saveSkill`, `installSkill`, `approveSkill` and `restoreSkill`.
 `packages/contracts/src/skills.ts` owns their shared inputs and receipts.
 `packages/db/src/skills.ts` is the driver-neutral persistence adapter;
 `skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)` is the atomic database boundary.
@@ -57,8 +57,31 @@ the same Skill management authority; there is no per-agent or per-Skill ACL.
 Learning reads the current workspace policy under a shared lock: Off refuses
 durable writes, Suggest saves an inactive revision, and Automatic activates a
 valid revision directly. No active policy defaults to Suggest, matching the
-workspace Learning default. Human approval activates an exact revision with head
-CAS. Restore saves the selected historical folder as a new immutable revision
+workspace Learning default. Require approval uses one in-chat decision, not a
+second review queue: pending agent receipts carry an immutable `skillReview`
+reference. `request_human_input` displays that revision's complete text folder
+through the existing scoped content API. The verified initiating human chooses
+Save. Response admission records the answer and activates the same revision
+through the existing head transition in one transaction, before emitting the
+resume event. No model call or provider availability is needed to finish saving. The pending
+entry disappears from the current read projection after activation. Don't save records a revision-specific rejection and preserves any active Skill.
+Other, expired requests, agent answers and noncanonical bearer responses never
+activate a Skill.
+
+Confirmation validates the canonical prompt, label, help text, choices and typed
+reference against the original immutable receipt. The logical turn, initiating
+human, current workspace authority, full revision identity, latest revision,
+current head and scope version must still agree. A later edit
+requires a fresh proposal. The response-admission proof is stored separately as
+`skill_review_human_authorized`; subject strings and an agent's claimed consent
+are never human authority. Confirmed writes are attributed to the verified
+answering human. Repeated response delivery returns its original durable event
+and activation without a second save. Stale-head or authorization failure rolls
+back both answer and activation, so the UI does not claim a successful save.
+
+Autonomous saves activate directly and return no human-input payload. Off
+refuses new durable agent changes. Human UI approval still activates an exact
+revision with head CAS. Restore saves the selected historical folder as a new immutable revision
 and follows the same actor/Learning rules.
 
 Every accepted write returns an immutable operation receipt containing
