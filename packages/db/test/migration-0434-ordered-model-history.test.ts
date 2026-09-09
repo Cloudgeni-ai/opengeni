@@ -1,6 +1,7 @@
 import { beforeAll, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { executeMigrationFile } from "../src/migrate";
 import { fromPostgresLosslessJson, toPostgresLosslessJson } from "../src/lossless-json";
 
 let database: Awaited<ReturnType<typeof acquireBlankTestDatabase>>;
@@ -24,10 +25,7 @@ test("ordered history survives PostgreSQL, nested schemas and legacy updates wit
     await expect((async () => await sql.unsafe(migration))()).rejects.toThrow(
       "pending trigger events",
     );
-    const runner = await Bun.file(new URL("../src/migrate.ts", import.meta.url)).text();
-    expect(runner).toContain('file === "0434_ordered_model_history.sql"');
-    expect(runner).toContain("SET CONSTRAINTS ALL IMMEDIATE;");
-    await sql.unsafe(`SET CONSTRAINTS ALL IMMEDIATE;\n${migration}`);
+    await executeMigrationFile(sql, "0434_ordered_model_history.sql", migration);
     const live = {
       type: "tool_search_call",
       arguments: { query: "x\u0000", names: ["tool"], limit: 5 },

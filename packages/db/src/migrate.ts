@@ -168,7 +168,7 @@ export function parseBatchedBackfillMigration(
   };
 }
 
-async function executeMigrationFile(
+export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
