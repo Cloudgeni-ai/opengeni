@@ -1,3 +1,4 @@
+import { SessionWaitStatus } from "@/components/session/session-wait-status";
 import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -2141,6 +2142,8 @@ function SessionChatPane(props: {
           </div>
         </div>
       ) : null}
+
+      <SessionWaitStatus session={props.session} />
 
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}

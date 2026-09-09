@@ -3711,6 +3711,32 @@ function formatVideoDuration(seconds: number): string {
 
 function NoticeRow({ item }: { item: NoticeItem }) {
   const enter = useEntranceAnimation();
+  if (item.recordedOutcome) {
+    return (
+      <details
+        className="group text-og-sm text-og-fg-muted"
+        role="note"
+        data-og-recorded-outcome="wait"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-1 [&::-webkit-details-marker]:hidden">
+          <ChevronRightIcon
+            aria-hidden
+            className="size-3.5 transition-transform group-open:rotate-90"
+          />
+          <span>
+            Wait recorded ·{" "}
+            <time dateTime={item.occurredAt}>
+              {new Date(item.occurredAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </time>
+          </span>
+        </summary>
+        <p className="mt-1 whitespace-pre-wrap break-words pl-5 text-og-fg-muted">{item.text}</p>
+      </details>
+    );
+  }
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
