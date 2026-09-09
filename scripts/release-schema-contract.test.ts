@@ -27,7 +27,8 @@ async function buildSchemaContract(directory?: string) {
         "0402_session_input_wait_and_background_command_results.sql",
         "0403_codex_unconditional_credential_leasing.sql",
         "0429_message_boundary_session_forks.sql",
-        "0430_retained_provider_commands.sql",
+        "0430_session_personal_variable_set_continuations.sql",
+        "0431_retained_provider_commands.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -137,19 +138,44 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0429_message_boundary_session_forks.sql",
     );
     const retainedProviderCommands = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0430_retained_provider_commands.sql",
+      (migration) => migration.path === "0431_retained_provider_commands.sql",
+    );
+    const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
     );
     expect(completeSourceContract).toMatchObject({
-      fileCount: 437 + (messageBoundarySessionForks ? 1 : 0) + (retainedProviderCommands ? 1 : 0),
+      fileCount:
+        437 +
+        (messageBoundarySessionForks ? 1 : 0) +
+        (sessionPersonalVariableSetContinuations ? 1 : 0) +
+        (retainedProviderCommands ? 1 : 0),
       latestMigration: retainedProviderCommands
-        ? "0430_retained_provider_commands.sql"
-        : messageBoundarySessionForks
-          ? "0429_message_boundary_session_forks.sql"
-          : "0428_scheduled_task_creator_policy.sql",
+        ? "0431_retained_provider_commands.sql"
+        : sessionPersonalVariableSetContinuations
+          ? "0430_session_personal_variable_set_continuations.sql"
+          : messageBoundarySessionForks
+            ? "0429_message_boundary_session_forks.sql"
+            : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0430_retained_provider_commands.sql",
+      path: "0431_retained_provider_commands.sql",
       deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
+      ),
+    ).toMatchObject({
+      path: "0430_session_personal_variable_set_continuations.sql",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0429_message_boundary_session_forks.sql",
+      ),
+    ).toMatchObject({
+      path: "0429_message_boundary_session_forks.sql",
+      deploymentMode: "maintenance",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1578,7 +1604,8 @@ describe("release schema contract", () => {
       "0421_recovery_notification_claim_snapshot.sql",
       "0422_personal_workspace_organization_codex_inheritance.sql",
       "0429_message_boundary_session_forks.sql",
-      "0430_retained_provider_commands.sql",
+      "0430_session_personal_variable_set_continuations.sql",
+      "0431_retained_provider_commands.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -4331,7 +4358,8 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
     ...excludedPaths,
     "0397_sandbox_deadline_rotation_preemption.sql",
     "0429_message_boundary_session_forks.sql",
-    "0430_retained_provider_commands.sql",
+    "0430_session_personal_variable_set_continuations.sql",
+    "0431_retained_provider_commands.sql",
   ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;

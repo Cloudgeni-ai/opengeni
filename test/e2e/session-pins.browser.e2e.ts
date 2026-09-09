@@ -339,6 +339,49 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
       await page.getByRole("button", { name: "Less", exact: true }).click();
       expect(await page.getByRole("link", { name: "Plugins", exact: true }).count()).toBe(0);
+      for (const height of [400, 300]) {
+        await page.setViewportSize({ width: 1280, height });
+        const viewport = page.locator("[data-rail-scroll-viewport]");
+        await viewport.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+        });
+        const layout = await viewport.evaluate((element) => {
+          const footer = element.parentElement!.querySelector<HTMLElement>("[data-rail-footer]")!;
+          const scrollRect = element.getBoundingClientRect();
+          const footerRect = footer.getBoundingClientRect();
+          const scrollStyle = getComputedStyle(element);
+          const footerStyle = getComputedStyle(footer);
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 1;
+          const paint = canvas.getContext("2d")!;
+          paint.fillStyle = footerStyle.backgroundColor;
+          paint.fillRect(0, 0, 1, 1);
+          const settings = footer.querySelector("a[aria-current], nav a")!;
+          const settingsRect = settings.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            settingsRect.x + settingsRect.width / 2,
+            settingsRect.y + settingsRect.height / 2,
+          );
+          return {
+            siblings: element.nextElementSibling === footer,
+            overflow: scrollStyle.overflowY,
+            separated: scrollRect.bottom <= footerRect.top + 1,
+            contained: footerRect.bottom <= window.innerHeight + 1,
+            above: Number(footerStyle.zIndex) > Number(scrollStyle.zIndex),
+            backgroundAlpha: paint.getImageData(0, 0, 1, 1).data[3],
+            shrink: footerStyle.flexShrink,
+            settingsClickable: settings.contains(hit),
+          };
+        });
+        expect(layout.siblings).toBe(true);
+        expect(layout.overflow).toBe("auto");
+        expect(layout.separated).toBe(true);
+        expect(layout.contained).toBe(true);
+        expect(layout.above).toBe(true);
+        expect(layout.backgroundAlpha).toBe(255);
+        expect(layout.shrink).toBe("0");
+        expect(layout.settingsClickable).toBe(true);
+      }
       await page.setViewportSize({ width: 1280, height: 900 });
       await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
       expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);

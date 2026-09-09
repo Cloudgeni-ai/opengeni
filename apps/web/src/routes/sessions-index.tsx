@@ -1,7 +1,4 @@
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
-import { PersonalResourceScopeChoice } from "@/components/personal-resource-scope-choice";
-import { usePersonalResourceScopeChoice } from "@/lib/use-personal-resource-scope-choice";
-import type { PersonalAttachmentMode } from "@/lib/personal-resource-attachments";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -548,17 +545,7 @@ function SessionsIndexRouteContent({
   const [personalResourceCatalogRefreshPending, setPersonalResourceCatalogRefreshPending] =
     useState(false);
   const personalResourceCatalogRefreshGeneration = useRef(0);
-  const [personalScopeGeneration, setPersonalScopeGeneration] = useState(0);
-  const personalScopeChoice = usePersonalResourceScopeChoice(
-    [
-      personalOwnerScope?.identityKey ?? "ineligible",
-      personalResourceSelectionKey,
-      personalScopeGeneration,
-    ].join(":"),
-    createVisibility,
-  );
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
-    mode: personalScopeChoice.mode,
     personalResourceCount: selectedPersonalResourceCount,
     visibility: createVisibility,
   });
@@ -778,7 +765,6 @@ function SessionsIndexRouteContent({
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
     (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
-      setPersonalScopeGeneration((generation) => generation + 1);
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -1017,7 +1003,6 @@ function SessionsIndexRouteContent({
                 },
               );
               if (!created) return null;
-              setPersonalScopeGeneration((generation) => generation + 1);
               return {
                 sessionId: created.id,
                 settleDraft: async () => true,
@@ -1072,7 +1057,6 @@ function SessionsIndexRouteContent({
               },
             );
             if (!created) return null;
-            setPersonalScopeGeneration((generation) => generation + 1);
             return {
               sessionId: created.id,
               settleDraft: async () => {
@@ -1363,8 +1347,6 @@ function SessionsIndexRouteContent({
                             rigs={selectableRigs}
                             personalResourceAccess={{
                               names: selectedPersonalResourceNames,
-                              mode: personalScopeChoice.mode,
-                              onModeChange: personalScopeChoice.setMode,
                               visibility: createVisibility,
                             }}
                             catalogRecovery={{
@@ -1467,8 +1449,6 @@ function SessionsIndexRouteContent({
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
-              mode: personalScopeChoice.mode,
-              onModeChange: personalScopeChoice.setMode,
               visibility: createVisibility,
             }}
             fleet={fleet}
@@ -1953,8 +1933,6 @@ function WorkspaceRepositoryMenuBody({
 
 type NewSessionPersonalResourceAccess = {
   names: string[];
-  mode: PersonalAttachmentMode;
-  onModeChange: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
 };
 
@@ -2235,10 +2213,7 @@ function ComputeTargetControl(props: {
         />
       )}
       {draft.compute.kind === "machine" ? (
-        <PersonalResourceAccessInline
-          access={props.personalResourceAccess}
-          disabled={props.disabled}
-        />
+        <PersonalResourceAccessInline access={props.personalResourceAccess} />
       ) : null}
     </section>
   );
@@ -2477,36 +2452,24 @@ function ManagedSandboxFields(props: {
           </div>
         </div>
       ) : null}
-      <PersonalResourceAccessInline
-        access={props.personalResourceAccess}
-        disabled={props.disabled}
-        embedded
-      />
+      <PersonalResourceAccessInline access={props.personalResourceAccess} embedded />
     </div>
   );
 }
 
 function PersonalResourceAccessInline(props: {
   access: NewSessionPersonalResourceAccess;
-  disabled: boolean;
   embedded?: boolean;
 }) {
   if (props.access.names.length === 0) return null;
-  const content =
-    props.access.visibility === "workspace" ? (
-      <div className="space-y-2">
-        <p className="text-2xs text-fg-subtle">{props.access.names.join(", ")}</p>
-        <PersonalResourceScopeChoice
-          mode={props.access.mode}
-          onModeChange={props.access.onModeChange}
-          disabled={props.disabled}
-        />
-      </div>
-    ) : (
-      <p className="text-2xs text-fg-subtle">
-        {props.access.names.join(", ")} will be available only to this session.
-      </p>
-    );
+  const content = (
+    <p className="text-2xs text-fg-subtle">
+      {props.access.names.join(", ")} will be available for your work in this session.
+      {props.access.visibility === "workspace"
+        ? " Results are visible to people who can access this chat."
+        : null}
+    </p>
+  );
   return props.embedded ? (
     <div className="border-t border-border/70 px-3 py-2.5">{content}</div>
   ) : (

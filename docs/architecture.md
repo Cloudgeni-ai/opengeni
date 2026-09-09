@@ -667,8 +667,8 @@ path.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
-Message-point forks copy canonical history through an unambiguous, uncompacted,
-protocol-complete boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+Message-point forks preserve canonical history through an uncompacted protocol
+boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
 
 ### 5.2 Lifecycle overview
 
@@ -1421,7 +1421,7 @@ After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
 recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
 never authorizes exit/loss, capture, rotation, termination, or replay.
 
-Modal provider-owned command identities, output replay, and legacy observation: `docs/run-lifecycle.md`.
+Modal command retention: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
