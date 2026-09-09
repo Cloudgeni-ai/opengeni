@@ -18,15 +18,18 @@ import {
   UninstallPluginResult,
   stableJson,
   type PluginComponentPreview,
+  type SkillActor,
 } from "@opengeni/contracts";
 import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   resolveSkillImport,
   type ApiRouteDeps,
   type GitHubSkillSourceClient,
 } from "@opengeni/core";
+import { skillInstallerActor, skillRemovalActor } from "./skill-install-authority";
 import {
   buildConnectionTokenResolver,
   CapabilityComponentVersionConflictError,
@@ -40,6 +43,7 @@ import {
   installApiIntegration,
   installPluginMcpReference,
   installPortableSkill,
+  SkillSourceRemovalAuthorityError,
   listInstalledPluginPackages,
   PluginInstallationVersionConflictError,
   PluginInstallationVersionRequiredError,
@@ -71,6 +75,7 @@ type ResolvedPluginComponent = {
   install(ownerPluginInstallationId: string): Promise<{
     facetInstallationIds: string[];
     bindingIds?: string[];
+    skillReceipt?: import("@opengeni/contracts").SkillWriteReceipt;
   }>;
 };
 
@@ -120,9 +125,16 @@ export function registerPluginRoutes(
 
   app.post("/v1/workspaces/:workspaceId/plugins/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
     const payload = InstallPluginRequest.parse(await c.req.json());
     const resolved = await resolvePluginPackage({
+      skillActor: () => skillInstallerActor(access),
       deps,
       github,
       transport,
@@ -188,11 +200,13 @@ export function registerPluginRoutes(
     const retainedFacetInstallationIds: string[] = [];
     const retainedBindingIds: string[] = [];
     const completedKeys: string[] = [];
+    const skillWrites: import("@opengeni/contracts").SkillWriteReceipt[] = [];
     let activeComponentKey = "none";
     try {
       for (const component of resolved.components) {
         activeComponentKey = component.preview.key;
         const installed = await component.install(prepared.pluginInstallationId);
+        if (installed.skillReceipt) skillWrites.push(installed.skillReceipt);
         retainedFacetInstallationIds.push(...installed.facetInstallationIds);
         retainedBindingIds.push(...(installed.bindingIds ?? []));
         completedKeys.push(component.preview.key);
@@ -204,6 +218,7 @@ export function registerPluginRoutes(
         });
       }
       const result = InstalledPlugin.parse({
+        ...(skillWrites.length ? { skillWrites } : {}),
         pluginKey: prepared.pluginKey,
         version: prepared.version,
         pluginId: prepared.pluginId,
@@ -213,7 +228,9 @@ export function registerPluginRoutes(
         componentCount: resolved.components.length,
         status: "installed",
       });
-      await finalizePluginPackageInstall(deps.db, {
+      const removalActor = skillRemovalActor(access);
+      const { skillReleases, skillPublications } = await finalizePluginPackageInstall(deps.db, {
+        ...(removalActor ? { skillActor: removalActor } : {}),
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
@@ -223,7 +240,14 @@ export function registerPluginRoutes(
         retainedBindingIds,
         result,
       });
-      return c.json(result, resolved.preview.installed ? 200 : 201);
+      return c.json(
+        {
+          ...result,
+          ...(skillReleases.length ? { skillReleases } : {}),
+          ...(skillPublications.length ? { skillPublications } : {}),
+        },
+        resolved.preview.installed ? 200 : 201,
+      );
     } catch (error) {
       await deferPluginPackageOperation(deps.db, {
         workspaceId,
@@ -231,6 +255,8 @@ export function registerPluginRoutes(
         phase: `component_failed:${activeComponentKey}`,
         errorCode: pluginFailureCode(error),
       }).catch(() => undefined);
+      if (error instanceof SkillSourceRemovalAuthorityError)
+        throw new HTTPException(403, { message: error.message });
       if (error instanceof HTTPException) throw error;
       if (error instanceof CapabilityComponentVersionConflictError) {
         throw new HTTPException(409, {
@@ -253,7 +279,14 @@ export function registerPluginRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/plugins/:pluginKey", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillRemovalActor(access);
     const pluginKey = decodeURIComponent(c.req.param("pluginKey"));
     const payload = UninstallPluginRequest.parse(await c.req.json());
     try {
@@ -261,6 +294,7 @@ export function registerPluginRoutes(
         UninstallPluginResult.parse({
           pluginKey,
           ...(await uninstallPluginPackage(deps.db, {
+            ...(skillActor ? { skillActor } : {}),
             accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
@@ -283,6 +317,7 @@ async function resolvePluginPackage(input: {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  skillActor?: () => SkillActor;
   url: string;
   bindings: Record<
     string,
@@ -342,10 +377,13 @@ async function resolvePluginPackage(input: {
           },
         },
         install: async (ownerPluginInstallationId) => {
+          if (!input.skillActor)
+            throw new HTTPException(403, { message: "Skill installer authority is missing" });
           const summaries = new Map(
             resolved.preview.files.map((file) => [file.path, file] as const),
           );
           const installed = await installPortableSkill(input.deps.db, {
+            skillActor: input.skillActor(),
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: input.subjectId,
@@ -366,7 +404,10 @@ async function resolvePluginPackage(input: {
             }),
             owner: { kind: "plugin", id: ownerPluginInstallationId, removable: true },
           });
-          return { facetInstallationIds: [installed.facetInstallationId] };
+          return {
+            facetInstallationIds: [installed.facetInstallationId],
+            skillReceipt: installed.skillReceipt,
+          };
         },
       });
       continue;
@@ -725,6 +766,8 @@ function pluginDiff(
 }
 
 function pluginMutationHttpError(error: unknown): HTTPException {
+  if (error instanceof SkillSourceRemovalAuthorityError)
+    return new HTTPException(403, { message: error.message });
   if (error instanceof PluginOperationIdempotencyError) {
     return new HTTPException(409, { message: "Plugin idempotency key was already used" });
   }

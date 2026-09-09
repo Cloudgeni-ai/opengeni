@@ -20,34 +20,25 @@ import {
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
+import { lockSkillPublication } from "./skill-publication";
+import {
+  StoredSessionSkills,
+  readSkillMetadata,
+  withBundledSkillSelectionMetadata,
+  bundledSkillSelectionFromMetadata,
+  type BundledSkillId,
+  type SkillRecord,
+} from "@opengeni/contracts";
+import {
+  applySkillLifecycle,
+  confirmSkillHumanResponse,
+  assertSkillReadAttempt,
+  listSkillRecords,
+  skillFilesContentHash,
+} from "./skills";
+import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
+import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
-import {
-  normalizeHostCreateSelection,
-  metadataWithHostCreateSelection,
-  hostCreateSelectionFromMetadata,
-  type HostMcpCreateSelection,
-} from "./host-selection-identity";
-export * from "./connect-attempts";
-export * from "./external-identities";
-export * from "./external-identity-links";
-export * from "./connection-setup-authority";
-export * from "./external-link-work";
-import {
-  inheritExternalLinkTurnAuthority,
-  captureScheduledExternalLinkTurnAuthority,
-  cloneExternalLinkTaskAuthority,
-  getExternalLinkTurnAuthorization,
-} from "./external-link-work";
-export * from "./host-mcp-bindings";
-import {
-  inheritCausalHostMcpTurnAuthorities,
-  inheritChildHostMcpTurnAuthorities,
-} from "./host-mcp-bindings";
-export * from "./host-mcp-task-authority";
-import {
-  cloneHostMcpTaskAuthorities,
-  captureScheduledHostMcpTurnAuthorities,
-} from "./host-mcp-task-authority";
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
@@ -159,7 +150,7 @@ import type {
   SessionAgentAccess,
   SessionAgentAccessViewer,
   SessionAuthorizationListScope,
-  SessionScopeSubjectId,
+  SessionEndUser,
   SessionMemoryScope,
   SessionListResponse,
   SessionTenancyPublicProjection,
@@ -271,12 +262,8 @@ import {
 } from "@opengeni/contracts";
 
 import {
-  approximateSessionEventTokens,
   approvalIdentifier,
-  boundSessionEvent,
   boundWorkspaceControlEvent,
-  sessionEventJsonBytes,
-  sessionEventPayloadTruncation,
   workspaceControlUtf8Bytes,
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -362,7 +349,6 @@ import {
   type SQLWrapper,
 } from "drizzle-orm";
 import type { PgTransactionConfig } from "drizzle-orm/pg-core";
-import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   creatorColumns,
   frozenInitiatorForCommandActor,
@@ -502,6 +488,7 @@ import {
   renderWorkspaceMemoryBlock,
   memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
+  endUserMemorySubjectId,
   memoryReadScopesForAgentScope,
   memoryWriteScopeForAgentScope,
   normalizeMemoryScope,
@@ -526,6 +513,9 @@ export * from "./workspace-learning-policy";
 export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
+export * from "./skills";
+export type { SkillSourceReleaseReceipt } from "./skill-source-release";
+export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
@@ -654,7 +644,6 @@ export {
   type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
-export { normalizedHostCredentialHeaders } from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
@@ -1506,7 +1495,6 @@ export async function bootstrapWorkspace(
         and(
           eq(schema.workspaces.externalSource, input.workspaceExternalSource),
           eq(schema.workspaces.externalId, input.workspaceExternalId),
-          eq(schema.workspaces.accountId, account.id),
         ),
       )
       .limit(1);
@@ -1520,11 +1508,7 @@ export async function bootstrapWorkspace(
           externalId: input.workspaceExternalId,
         })
         .onConflictDoUpdate({
-          target: [
-            schema.workspaces.accountId,
-            schema.workspaces.externalSource,
-            schema.workspaces.externalId,
-          ],
+          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
           set: {
             name: input.workspaceName,
             updatedAt: new Date(),
@@ -1992,7 +1976,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         and(
           eq(schema.workspaces.externalSource, "better-auth:user"),
           eq(schema.workspaces.externalId, `${input.userId}:default`),
-          eq(schema.workspaces.accountId, account.id),
         ),
       )
       .limit(1);
@@ -2007,11 +1990,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           externalId: `${input.userId}:default`,
         })
         .onConflictDoUpdate({
-          target: [
-            schema.workspaces.accountId,
-            schema.workspaces.externalSource,
-            schema.workspaces.externalId,
-          ],
+          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
           // Preserve a later administrator rename on legacy fallback workspaces.
           set: { updatedAt: new Date() },
         })
@@ -2424,7 +2403,6 @@ export class WorkspaceExternalIdentityConflictError extends Error {
 export async function findWorkspaceByExternalIdentity(
   db: Database,
   input: {
-    accountId: string;
     externalSource: string;
     externalId: string;
   },
@@ -2436,7 +2414,6 @@ export async function findWorkspaceByExternalIdentity(
       and(
         eq(schema.workspaces.externalSource, input.externalSource),
         eq(schema.workspaces.externalId, input.externalId),
-        eq(schema.workspaces.accountId, input.accountId),
       ),
     )
     .limit(1);
@@ -2484,7 +2461,7 @@ async function assertWorkspaceCapacity(
 
 /**
  * Create an organization workspace exactly once for a stable external tenant
- * identity. The organization-scoped unique index is the concurrency arbiter. A replay never
+ * identity. The global unique index is the concurrency arbiter. A replay never
  * mutates presentation fields supplied by the original create.
  */
 export async function ensureWorkspaceByExternalIdentity(
@@ -2511,7 +2488,6 @@ export async function ensureWorkspaceByExternalIdentity(
         and(
           eq(schema.workspaces.externalSource, input.externalSource),
           eq(schema.workspaces.externalId, input.externalId),
-          eq(schema.workspaces.accountId, input.accountId),
         ),
       )
       .limit(1);
@@ -2546,11 +2522,7 @@ export async function ensureWorkspaceByExternalIdentity(
         agentInstructions: input.agentInstructions ?? null,
       })
       .onConflictDoNothing({
-        target: [
-          schema.workspaces.accountId,
-          schema.workspaces.externalSource,
-          schema.workspaces.externalId,
-        ],
+        target: [schema.workspaces.externalSource, schema.workspaces.externalId],
       })
       .returning();
 
@@ -2586,7 +2558,6 @@ export async function ensureWorkspaceByExternalIdentity(
         and(
           eq(schema.workspaces.externalSource, input.externalSource),
           eq(schema.workspaces.externalId, input.externalId),
-          eq(schema.workspaces.accountId, input.accountId),
         ),
       )
       .limit(1);
@@ -3737,6 +3708,20 @@ export async function deleteWorkspaceIfQuiescent(
             durationSeconds: workspaceDeletePhaseDuration(variableSetDetachStartedAt),
           });
           const cascadeStartedAt = performance.now();
+          // The activity gate flushes deferred checks with ALL IMMEDIATE.
+          // Workspace deletion owns both ends of these Skill history links;
+          // check them at commit after the complete cascade, not between rows.
+          // Keep all unrelated activity and retention constraints immediate.
+          await tx.execute(sql`
+            SET CONSTRAINTS
+              preference_registry_preferences_superseded_by_fk,
+              preference_registry_events_related_fk,
+              preference_registry_revisions_corrects_revision_id_fkey,
+              preference_registry_preferences_active_revision_fk,
+              preference_registry_events_old_revision_fk,
+              preference_registry_events_new_revision_fk
+            DEFERRED
+          `);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -5430,7 +5415,7 @@ export type AppendEventInput = {
  */
 export type ScheduledTaskCreatorSessionPolicy = {
   agentAccess: string | null;
-  scopeSubjectId: string | null;
+  endUser: { source: string; id: string } | null;
   memoryScope: string | null;
 };
 
@@ -5473,8 +5458,6 @@ export type CreateScheduledTaskInput = {
   metadata: Record<string, unknown>;
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
-  captureHostAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
-  captureLinkAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
 };
 
 export type UpdateScheduledTaskInput = Partial<{
@@ -5499,8 +5482,6 @@ export type UpdateScheduledTaskInput = Partial<{
   authorityUpdatedByActor: AgentSessionCreationActor | null;
   /** Trusted database-only admission seam. Throwing rolls the task update back. */
   beforeUpdateCommit: (tx: Database) => Promise<void>;
-  captureHostAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
-  captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
 }>;
 
 export type CreatePackInstallationInput = {
@@ -5585,7 +5566,6 @@ export type CreateSocialConnectionInput = {
 };
 
 export type UpsertSocialOAuthConnectionInput = {
-  expectedConnection?: { id: string; version: number };
   accountId: string;
   workspaceId: string;
   subjectId?: string | null;
@@ -5702,8 +5682,6 @@ export type UpdateConnectionInput = {
 };
 
 export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
-  /** Server continuation reauthorization; runs inside the credential transaction. */
-  authorize?: (tx: Database) => Promise<void>;
   visibleToSubjectId: string;
   credentialRole: string;
   providerFamily: string;
@@ -6073,6 +6051,11 @@ export type InstallPortableSkillInput = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /** Required at runtime after 0426; omission fails before distribution writes. */
+  skillActor?: SkillActor;
+  skillOperationId?: string;
+  /** Host-canonical original request, including source/options/owner/explicit CAS, before resolution. */
+  skillRequestIdentity?: Record<string, unknown>;
   capabilityId: string;
   pluginKey: string;
   source: "library" | "github" | "skills_sh" | "pack";
@@ -6102,6 +6085,7 @@ export type InstallPortableSkillInput = {
 };
 
 export type InstalledPortableSkill = {
+  skillReceipt: SkillWriteReceipt;
   created: boolean;
   capabilityId: string;
   pluginId: string;
@@ -6175,6 +6159,7 @@ export type UninstallPortableSkillResult = {
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: PortableSkillOwner[];
+  skillReleases?: SkillSourceReleaseReceipt[];
 };
 
 export class PortableSkillInstallationVersionConflictError extends Error {
@@ -6193,6 +6178,10 @@ export class PortableSkillInstallationVersionConflictError extends Error {
 
 export class PortableSkillInstallationVersionRequiredError extends Error {
   readonly name = "PortableSkillInstallationVersionRequiredError";
+}
+
+export class PortableSkillSourcePathConflictError extends Error {
+  readonly name = "PortableSkillSourcePathConflictError";
 }
 
 export type EnabledMcpCapabilityServer = {
@@ -8444,16 +8433,84 @@ function portableSkillManifestIdentity(manifest: Record<string, unknown>): strin
   return stableJson(identity);
 }
 
+/** Replay before remote resolution; callers must provide the same canonical original request used at install. */
+export async function replayPortableSkillInstall(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actor: SkillActor;
+    operationId: string;
+    requestIdentity: Record<string, unknown>;
+  },
+): Promise<InstalledPortableSkill | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    await lockSkillPublication(tx, input.workspaceId);
+    if (input.actor.kind === "agent")
+      await assertSkillReadAttempt(tx, { ...input, actor: input.actor });
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`skill-operation:${input.workspaceId}:${input.operationId}`},0))`,
+    );
+    const [prior] = await tx
+      .select()
+      .from(schema.skillWriteReceipts)
+      .where(
+        and(
+          eq(schema.skillWriteReceipts.workspaceId, input.workspaceId),
+          eq(schema.skillWriteReceipts.operationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    if (!prior) return null;
+    const envelope = (
+      prior.receipt as unknown as {
+        portableInstall?: {
+          requestHash: string;
+          result: Omit<InstalledPortableSkill, "skillReceipt">;
+        };
+      }
+    ).portableInstall;
+    if (
+      prior.accountId !== input.accountId ||
+      !envelope ||
+      envelope.requestHash !==
+        createHash("sha256").update(stableJson(input.requestIdentity)).digest("hex")
+    ) {
+      throw new Error(
+        "Skill operation key reused with different input or without a portable install receipt",
+      );
+    }
+    const skillReceipt = await applySkillLifecycle(tx, input, {
+      operation: "install",
+      operationId: input.operationId,
+      skillFacetId: envelope.result.facetId,
+      reason: "Install portable Skill through the unified registry head",
+      portableInstall: envelope,
+    });
+    return { ...envelope.result, skillReceipt };
+  });
+}
+
 /**
  * Install one immutable, already-validated Skill through the authoritative
- * Plugin/Skill-Facet ownership model. Repeating the same exact source is
- * idempotent; changing a commit's content fails instead of silently rewriting
- * immutable history.
+ * Plugin/Skill-Facet ownership model. Repeating an operation replays its original
+ * result; a new operation cannot rewrite an immutable commit's content.
  */
 export async function installPortableSkill(
   db: Database,
   input: InstallPortableSkillInput,
 ): Promise<InstalledPortableSkill> {
+  if (!input.skillActor)
+    throw new Error("Portable Skill installation requires a truthful unified Skill actor");
+  const skillActor = input.skillActor;
+  const skillOperationId = input.skillOperationId ?? randomUUID();
+  const {
+    skillActor: _actor,
+    skillOperationId: _operation,
+    skillRequestIdentity: originalIdentity,
+    ...resolvedIdentity
+  } = input;
+  const requestIdentity = originalIdentity ?? resolvedIdentity;
   return await withRlsContext(
     db,
     {
@@ -8462,6 +8519,15 @@ export async function installPortableSkill(
     },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await lockSkillPublication(tx as unknown as Database, input.workspaceId);
+        const replay = await replayPortableSkillInstall(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          actor: skillActor,
+          operationId: skillOperationId,
+          requestIdentity,
+        });
+        if (replay) return replay;
         const now = new Date();
         const version = input.version ?? input.sourceCommit;
         await lockCapabilityComponentIdentity(
@@ -8511,6 +8577,26 @@ export async function installPortableSkill(
             .returning();
         }
         if (!plugin) throw new Error("Failed to create portable Skill plugin");
+
+        // Legacy source IDs fold path case. Preserve those IDs for existing
+        // installations, but never let a distinct Git folder overwrite one.
+        if (input.source === "github" || input.source === "skills_sh") {
+          const [collision] = await tx
+            .select({ id: schema.capabilityPluginVersions.id })
+            .from(schema.capabilityPluginVersions)
+            .where(
+              and(
+                eq(schema.capabilityPluginVersions.pluginId, plugin.id),
+                sql`lower(${schema.capabilityPluginVersions.manifest}->>'sourcePath') = lower(${input.sourcePath})`,
+                sql`${schema.capabilityPluginVersions.manifest}->>'sourcePath' <> ${input.sourcePath}`,
+              ),
+            )
+            .limit(1);
+          if (collision)
+            throw new PortableSkillSourcePathConflictError(
+              "This repository folder differs only by case from an existing Skill source. Legacy source IDs cannot distinguish these folders; use a uniquely named source folder.",
+            );
+        }
 
         const manifest = {
           schemaVersion: 1,
@@ -8773,7 +8859,7 @@ export async function installPortableSkill(
           })
           .onConflictDoNothing();
 
-        return {
+        const result = {
           created: !existingOwner,
           capabilityId: input.capabilityId,
           pluginId: plugin.id,
@@ -8788,6 +8874,28 @@ export async function installPortableSkill(
           sourceCommit: input.sourceCommit,
           contentSha256: input.contentSha256,
           name: input.name,
+        };
+        const skillReceipt = await applySkillLifecycle(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: skillActor,
+          },
+          {
+            operation: "install",
+            operationId: skillOperationId,
+            skillFacetId: facet.id,
+            reason: "Install portable Skill through the unified registry head",
+            portableInstall: {
+              requestHash: createHash("sha256").update(stableJson(requestIdentity)).digest("hex"),
+              result,
+            },
+          },
+        );
+        return {
+          skillReceipt,
+          ...result,
         };
       }),
   );
@@ -8804,6 +8912,27 @@ export async function listInstalledPortableSkills(
   options: { includeSessionSelected?: boolean } = {},
 ): Promise<PortableSkillRuntime[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [workspace] = await scopedDb
+      .select({ accountId: schema.workspaces.accountId })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .limit(1);
+    if (!workspace) return [];
+    const currentSkills = new Map<string, SkillRecord>();
+    let after: { stableKey: string; id: string } | undefined;
+    for (;;) {
+      const page = await listSkillRecords(
+        scopedDb,
+        { accountId: workspace.accountId, workspaceId },
+        { limit: 1000, ...(after ? { after } : {}) },
+      );
+      for (const record of page) {
+        if (record.source) currentSkills.set(record.source.skillFacetId, record);
+      }
+      if (page.length < 1000) break;
+      const last = page[page.length - 1]!;
+      after = { stableKey: last.stableKey, id: last.id };
+    }
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
@@ -8863,12 +8992,14 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      const current = currentSkills.get(row.facetId);
+      if (!current || current.status !== "active" || !current.activeRevisionId) continue;
       if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
         throw new Error(
           `Installed Skill ${row.capabilityId} has invalid activation mode ${row.activationMode}`,
         );
       }
-      if (row.activationMode === "session_selected" && !options.includeSessionSelected) {
+      if (current.activationMode === "session_selected" && !options.includeSessionSelected) {
         continue;
       }
       const source = skillSourceFromManifest(row.manifest, row.capabilityId);
@@ -8883,7 +9014,7 @@ export async function listInstalledPortableSkills(
         version: row.version,
         name: row.name,
         description: row.description,
-        activationMode: row.activationMode,
+        activationMode: current.activationMode,
         sourceUrl: row.sourceUrl,
         sourceCommit: row.sourceCommit,
         sourcePath: row.sourcePath,
@@ -8891,7 +9022,24 @@ export async function listInstalledPortableSkills(
         files: [{ path: row.path, content: row.content }],
       });
     }
-    return [...skills.values()];
+    return [...skills.entries()].flatMap(([facetId, skill]) => {
+      const current = currentSkills.get(facetId);
+      if (!current || current.status !== "active" || !current.activeRevisionId) return [];
+      const metadata = readSkillMetadata(
+        current.files.find((file) => file.path === "SKILL.md")?.content ?? "",
+      );
+      return [
+        {
+          ...skill,
+          // The active folder owns descriptors even after an upstream Skill
+          // was renamed locally. Source labels remain provenance only.
+          name: metadata.name,
+          description: metadata.description,
+          contentSha256: skillFilesContentHash(current.files),
+          files: current.files,
+        },
+      ];
+    });
   });
 }
 
@@ -9066,6 +9214,7 @@ export async function uninstallPortableSkill(
     workspaceId: string;
     capabilityId: string;
     expectedInstallationVersion: number;
+    skillActor?: SkillActor;
   },
 ): Promise<UninstallPortableSkillResult> {
   return await withRlsContext(
@@ -9121,6 +9270,12 @@ export async function uninstallPortableSkill(
           };
         }
 
+        const skillReleases = await releaseOrphanedSkillHeads(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          facetInstallationIds: [context.facetInstallationId],
+          ...(input.skillActor ? { skillActor: input.skillActor } : {}),
+        });
+
         const now = new Date();
         await tx
           .delete(schema.capabilityFacetInstallations)
@@ -9147,6 +9302,7 @@ export async function uninstallPortableSkill(
           capabilityId: input.capabilityId,
           status: "uninstalled",
           remainingOwners: [],
+          ...(skillReleases.length ? { skillReleases } : {}),
         };
       }),
   );
@@ -9214,15 +9370,7 @@ async function portableSkillOwners(
       removable: schema.capabilityComponentOwners.removable,
     })
     .from(schema.capabilityComponentOwners)
-    .where(
-      and(
-        eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId),
-        effectiveCapabilityOwnerSql(
-          schema.capabilityComponentOwners.ownerKind,
-          schema.capabilityComponentOwners.ownerId,
-        ),
-      ),
-    )
+    .where(eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId))
     .orderBy(
       asc(schema.capabilityComponentOwners.ownerKind),
       asc(schema.capabilityComponentOwners.ownerId),
@@ -10143,11 +10291,6 @@ export async function persistProviderOAuthConnection(
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const ownerKey = input.subjectId ?? "workspace";
-        if (input.authorize) {
-          await input.authorize(tx);
-          await setRlsContext(tx, { accountId: input.accountId, workspaceId: input.workspaceId });
-          await setSubjectRlsContext(tx, input.subjectId ?? input.visibleToSubjectId ?? "");
-        }
         if (input.requireLiveUserAuthority) {
           if (!input.subjectId) {
             throw new Error("Live user authority requires a subject-owned connection");
@@ -16131,40 +16274,6 @@ export async function upsertSocialOAuthConnection(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
-      if (input.expectedConnection) {
-        const [updated] = await scopedDb
-          .update(schema.socialConnections)
-          .set({
-            accountHandle: input.accountHandle,
-            accountName: input.accountName ?? null,
-            status: "connected",
-            scopes: input.scopes,
-            credentialEncrypted: input.credentialEncrypted,
-            tokenMetadata: input.tokenMetadata ?? {},
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.socialConnections.accountId, input.accountId),
-              eq(schema.socialConnections.workspaceId, input.workspaceId),
-              eq(schema.socialConnections.id, input.expectedConnection.id),
-              eq(schema.socialConnections.version, input.expectedConnection.version),
-              eq(schema.socialConnections.provider, input.provider),
-              input.subjectId
-                ? eq(schema.socialConnections.subjectId, input.subjectId)
-                : isNull(schema.socialConnections.subjectId),
-              input.externalAccountId
-                ? eq(schema.socialConnections.externalAccountId, input.externalAccountId)
-                : sql`false`,
-            ),
-          )
-          .returning();
-        if (!updated)
-          throw new Error(
-            "Social connection changed; authorize the same account again from current state",
-          );
-        return mapSocialConnection(updated);
-      }
       const [row] = await scopedDb
         .insert(schema.socialConnections)
         .values({
@@ -16542,8 +16651,6 @@ export async function createScheduledTask(
         ${row.id}::uuid,
         ${row.authorityRevision}::bigint
       )`);
-      await input.captureHostAuthority?.(scopedDb, mapScheduledTask(row));
-      await input.captureLinkAuthority?.(scopedDb, mapScheduledTask(row));
       return mapScheduledTask(row);
     },
   );
@@ -16556,17 +16663,6 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [previousHostRevision] = await scopedDb
-      .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-        ),
-      )
-      .for("update")
-      .limit(1);
     if (
       input.refreshPersonalResourceAuthority &&
       input.clonePersonalResourceAuthorityFromRevision !== undefined
@@ -16676,26 +16772,7 @@ export async function updateScheduledTask(
         ${row.authorityRevision}::bigint
       )`);
     }
-    const mapped = mapScheduledTask(row);
-    if (input.captureLinkAuthority) await input.captureLinkAuthority(scopedDb, mapped);
-    else if (previousHostRevision)
-      await cloneExternalLinkTaskAuthority(
-        scopedDb,
-        mapped,
-        input.clonePersonalResourceAuthorityFromRevision ??
-          input.cloneConnectionAuthorityFromRevision ??
-          previousHostRevision.authorityRevision,
-      );
-    if (input.captureHostAuthority) await input.captureHostAuthority(scopedDb, mapped);
-    else if (previousHostRevision)
-      await cloneHostMcpTaskAuthorities(
-        scopedDb,
-        mapped,
-        input.clonePersonalResourceAuthorityFromRevision ??
-          input.cloneConnectionAuthorityFromRevision ??
-          previousHostRevision.authorityRevision,
-      );
-    return mapped;
+    return mapScheduledTask(row);
   });
 }
 
@@ -16896,11 +16973,8 @@ export async function getScheduledTaskCreatorPolicy(
       sessionPolicy: row.sessionPolicy
         ? {
             agentAccess: row.sessionPolicy.agentAccess ?? null,
-            scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
-            memoryScope:
-              row.sessionPolicy.memoryScope === "session"
-                ? "off"
-                : (row.sessionPolicy.memoryScope ?? null),
+            endUser: row.sessionPolicy.endUser ?? null,
+            memoryScope: row.sessionPolicy.memoryScope ?? null,
           }
         : null,
     };
@@ -17648,19 +17722,6 @@ export async function materializeScheduledTaskReusableSessionFromRun(
       if (!row) {
         throw new Error("scheduled reusable-session materialization returned no revision");
       }
-      const materializedTask = await getScheduledTask(scopedDb, input.workspaceId, input.taskId);
-      if (!materializedTask || materializedTask.authorityRevision !== Number(row.authorityRevision))
-        throw new Error("scheduled host materialization revision changed");
-      await cloneHostMcpTaskAuthorities(
-        scopedDb,
-        materializedTask,
-        input.sourceTaskAuthorityRevision,
-      );
-      await cloneExternalLinkTaskAuthority(
-        scopedDb,
-        materializedTask,
-        input.sourceTaskAuthorityRevision,
-      );
       return Number(row.authorityRevision);
     },
   );
@@ -17800,7 +17861,38 @@ export async function getScheduledTaskRevisionAuthoritySubject(
   );
 }
 
-export { getScheduledTaskRevisionAuthority } from "./scheduled-task-revision-authority";
+export async function getScheduledTaskRevisionAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+  },
+): Promise<{
+  subjectId: string;
+  organizationMembershipId: string;
+  membershipAuthorizationRevision: number;
+} | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await rawRows<{ authority: unknown }>(
+        scopedDb,
+        sql`select scheduled_task_revision_authority_snapshot(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.taskId}::uuid,
+          ${input.taskAuthorityRevision}::bigint
+        ) as authority`,
+      );
+      const authority = row?.authority;
+      if (!authority) return null;
+      return ScheduledTaskRunAcceptedExecution.shape.causalHumanAuthority.parse(authority);
+    },
+  );
+}
 
 /** Failure settlement must not rewrite a source already committed as dispatched. */
 export async function markScheduledTaskRunFailedIfQueued(
@@ -31352,21 +31444,17 @@ async function setScheduledTaskAuthorityRlsContext(
 ): Promise<void> {
   const subjectId = frozen.initiator.subjectId.trim();
   if (!subjectId) throw new Error("scheduled task authority writer has no subject");
-  // frozenSessionCreatorForInsert verified the agent attempt before reading
-  // this separate causal-human field. Keep service audit attribution intact;
-  // never substitute the session creator or parse a caller's provenance JSON.
-  const causalHumanSubjectId =
-    frozen.initiatingHumanSubjectId ?? (frozen.initiator.kind === "subject" ? subjectId : "");
   await tx.execute(sql`select
     set_config('opengeni.subject_id', ${subjectId}, true),
     set_config(
       'opengeni.initiating_human_subject_id',
-      ${causalHumanSubjectId},
+      ${frozen.initiator.kind === "subject" ? subjectId : ""},
       true
     )`);
 }
 
 export type SessionCreateInput = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   accountId: string;
   workspaceId: string;
@@ -31397,15 +31485,13 @@ export type SessionCreateInput = {
   /** Agent-to-agent reach (migration 0427); omitted means the workspace default. */
   agentAccess?: SessionAgentAccess;
   /** Opaque end-user label; omitted or null means none. */
-  scopeSubjectId?: SessionScopeSubjectId | null;
+  endUser?: SessionEndUser | null;
   /** Typed Memory selector (migration 0427); omitted means the workspace layer. */
   memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
-  /** Backend-only replay identity; does not admit host credential authority. */
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -31694,15 +31780,15 @@ async function existingSessionForCreateKey(
 }
 
 type SessionCreateReplayIdentity = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
   selectedInstalledSkillIds: string[];
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   /** Access/memory scope of the retrying request; omitted means the defaults. */
   agentAccess?: SessionAgentAccess;
-  scopeSubjectId?: SessionScopeSubjectId | null;
+  endUser?: SessionEndUser | null;
   memoryScope?: SessionMemoryScope;
 };
 
@@ -31738,8 +31824,8 @@ function assertSessionCreateReplayIdentity(
   input: SessionCreateReplayIdentity,
 ): void {
   if (
-    stableJson(hostCreateSelectionFromMetadata(existing.metadata)) !==
-    stableJson(normalizeHostCreateSelection(input.selectedHostMcpDelegations))
+    stableJson(bundledSkillSelectionFromMetadata(existing.metadata) ?? null) !==
+    stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
@@ -31770,7 +31856,8 @@ function assertSessionCreateReplayIdentity(
   if (
     existing.agentAccess !== (input.agentAccess ?? "workspace") ||
     existing.memoryScope !== (input.memoryScope ?? "workspace") ||
-    (input.scopeSubjectId !== undefined && sessionEndUserFromRow(existing) !== input.scopeSubjectId)
+    (existing.endUserSource ?? null) !== (input.endUser?.source ?? null) ||
+    (existing.endUserId ?? null) !== (input.endUser?.id ?? null)
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
@@ -31867,7 +31954,7 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    metadataWithHostCreateSelection(input.metadata, input.selectedHostMcpDelegations),
+    withBundledSkillSelectionMetadata(input.metadata, input.bundledSkillIds),
     selectedInstalledSkillIds,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
@@ -31917,15 +32004,15 @@ async function createSessionInTransaction(
       // before any first-turn repair so a retry cannot hide a requested-ID
       // conflict behind an apparently successful replay.
       assertSessionCreateReplayIdentity(existing, {
+        bundledSkillIds: input.bundledSkillIds,
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
         selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-        selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-        ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
+        ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
         ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -32082,17 +32169,8 @@ async function createSessionInTransaction(
             instructions: input.instructions ?? null,
             policyRole: input.policyRole ?? null,
             agentAccess: input.agentAccess ?? "workspace",
-            scopeSubjectId:
-              input.scopeSubjectId !== undefined
-                ? input.scopeSubjectId
-                : frozenCreator.initiator.kind === "subject" &&
-                    /^(?:user:|external_user:)/u.test(frozenCreator.initiator.subjectId)
-                  ? frozenCreator.initiator.subjectId
-                  : null,
-            // Retained columns are historical only. Canonical scope is derived
-            // from the creator resolved under the admission locks above.
-            endUserSource: null,
-            endUserId: null,
+            endUserSource: input.endUser?.source ?? null,
+            endUserId: input.endUser?.id ?? null,
             memoryScope: input.memoryScope ?? "workspace",
             parentSessionId: input.parentSessionId ?? null,
             parentTurnId,
@@ -32140,15 +32218,15 @@ async function createSessionInTransaction(
       );
       if (existing) {
         assertSessionCreateReplayIdentity(existing, {
+          bundledSkillIds: input.bundledSkillIds,
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-          selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-          ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
+          ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -32330,6 +32408,7 @@ export type InitializedSessionCreateReplay =
 export async function getInitializedSessionCreateReplay(
   db: Database,
   input: {
+    bundledSkillIds?: BundledSkillId[] | undefined;
     accountId: string;
     workspaceId: string;
     subjectId: string;
@@ -32339,7 +32418,6 @@ export async function getInitializedSessionCreateReplay(
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
     selectedInstalledSkillIds: string[];
-    selectedHostMcpDelegations?: HostMcpCreateSelection[];
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },
@@ -32798,7 +32876,7 @@ export type SessionAccessProjection = {
   sessionId: string;
   rootSessionId: string;
   agentAccess: SessionAgentAccess;
-  scopeSubjectId: SessionScopeSubjectId | null;
+  endUser: SessionEndUser | null;
   memoryScope: SessionMemoryScope;
 };
 
@@ -32809,7 +32887,7 @@ export type SessionAuthorityProjection = SessionAccessProjection & {
 
 type SessionAccessRow = Pick<
   typeof schema.sessions.$inferSelect,
-  "agentAccess" | "scopeSubjectId" | "memoryScope"
+  "agentAccess" | "endUserSource" | "endUserId" | "memoryScope"
 >;
 
 function sessionAgentAccessFromRow(row: Pick<SessionAccessRow, "agentAccess">): SessionAgentAccess {
@@ -32819,18 +32897,20 @@ function sessionAgentAccessFromRow(row: Pick<SessionAccessRow, "agentAccess">): 
 }
 
 function sessionEndUserFromRow(
-  row: Pick<SessionAccessRow, "scopeSubjectId">,
-): SessionScopeSubjectId | null {
-  return typeof row.scopeSubjectId === "string" &&
-    /^(?:user:|external_user:)/u.test(row.scopeSubjectId)
-    ? row.scopeSubjectId
+  row: Pick<SessionAccessRow, "endUserSource" | "endUserId">,
+): SessionEndUser | null {
+  return row.endUserSource !== null &&
+    row.endUserSource !== undefined &&
+    row.endUserId !== null &&
+    row.endUserId !== undefined
+    ? { source: row.endUserSource, id: row.endUserId }
     : null;
 }
 
 function sessionMemoryScopeFromRow(row: Pick<SessionAccessRow, "memoryScope">): SessionMemoryScope {
-  // Legacy task-local Memory is no longer active. Never widen it to workspace.
-  if (row.memoryScope === "session") return "off";
-  return row.memoryScope === "user" || row.memoryScope === "off" ? row.memoryScope : "workspace";
+  return row.memoryScope === "user" || row.memoryScope === "session" || row.memoryScope === "off"
+    ? row.memoryScope
+    : "workspace";
 }
 
 export async function getSessionAuthorityProjection(
@@ -32846,7 +32926,8 @@ export async function getSessionAuthorityProjection(
         visibility: schema.sessions.visibility,
         ownerSubjectId: schema.sessions.ownerSubjectId,
         agentAccess: schema.sessions.agentAccess,
-        scopeSubjectId: schema.sessions.scopeSubjectId,
+        endUserSource: schema.sessions.endUserSource,
+        endUserId: schema.sessions.endUserId,
         memoryScope: schema.sessions.memoryScope,
       })
       .from(schema.sessions)
@@ -32859,7 +32940,7 @@ export async function getSessionAuthorityProjection(
       visibility: row.visibility as SessionAuthorityProjection["visibility"],
       ownerSubjectId: row.ownerSubjectId ?? null,
       agentAccess: sessionAgentAccessFromRow(row),
-      scopeSubjectId: sessionEndUserFromRow(row),
+      endUser: sessionEndUserFromRow(row),
       memoryScope: sessionMemoryScopeFromRow(row),
     };
   });
@@ -32877,52 +32958,33 @@ export async function getSessionAccessProjection(
     sessionId: authority.sessionId,
     rootSessionId: authority.rootSessionId,
     agentAccess: authority.agentAccess,
-    scopeSubjectId: authority.scopeSubjectId,
+    endUser: authority.endUser,
     memoryScope: authority.memoryScope,
   };
 }
 
 /**
  * The typed Memory selector an agent on this session reads and writes. The
- * user subject comes from the verified active execution, not a conversation
- * label or its original creator. Task notes own temporary tree-local data.
+ * end-user subject is the opaque `end_user:v1:<tuple hash>` label and the
+ * session selector is the lineage root, so one tree shares one private layer.
  * Null when the session does not exist in the workspace.
  */
 export async function resolveSessionMemoryAgentScope(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  caller?: { turnId?: unknown; attemptId?: unknown; executionGeneration?: unknown },
 ): Promise<MemoryAgentScope | null> {
   const access = await getSessionAccessProjection(db, workspaceId, sessionId);
   if (!access) return null;
-  if (access.memoryScope === "user") {
-    const turn = await getActiveSessionTurnForExecution(db, workspaceId, sessionId);
-    const subjectId =
-      turn?.initiatingHumanSubjectId ??
-      (turn?.initiator.kind === "subject" ? turn.initiator.subjectId : null);
-    if (
-      !turn ||
-      !caller ||
-      turn.id !== caller.turnId ||
-      turn.activeAttemptId !== caller.attemptId ||
-      turn.executionGeneration !== caller.executionGeneration ||
-      !subjectId ||
-      !/^(?:user:|external_user:)/u.test(subjectId)
-    ) {
-      return { mode: "off", userSubjectId: null, rootSessionId: access.rootSessionId };
-    }
-    return memoryAgentScopeForSessionAccess({ ...access, scopeSubjectId: subjectId });
-  }
   return memoryAgentScopeForSessionAccess(access);
 }
 
 export function memoryAgentScopeForSessionAccess(
-  access: Pick<SessionAccessProjection, "rootSessionId" | "scopeSubjectId" | "memoryScope">,
+  access: Pick<SessionAccessProjection, "rootSessionId" | "endUser" | "memoryScope">,
 ): MemoryAgentScope {
   return {
     mode: access.memoryScope,
-    userSubjectId: access.scopeSubjectId,
+    endUserSubjectId: access.endUser ? endUserMemorySubjectId(access.endUser) : null,
     rootSessionId: access.rootSessionId,
   };
 }
@@ -33330,7 +33392,7 @@ export type SessionListFilterOptions = {
   /** Exclusive creation upper bound. */
   createdBefore?: Date;
   /** Exact opaque end-user label pair (both parts). */
-  scopeSubjectId?: SessionScopeSubjectId;
+  endUser?: SessionEndUser;
 };
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
@@ -33361,13 +33423,13 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
  *
  * **This flag is the authorization.** The resolver it gates is not: it answers
  * "does subject X hold authority here" and establishes nothing about who the
- * caller is. The exception requires verified native-cookie or dedicated
- * external owning-user provenance. Unscoped service keys and account or
- * organization administrators receive no Personal access through it.
- * A host-signed delegated bearer chooses its own `subjectId`,
+ * caller is. The exception is for "the canonical managed-cookie (Better Auth)
+ * session" only — "Bearer/delegated principals, API keys, and account or
+ * organization administrators receive no personal-workspace access through that
+ * exception" — and a host-signed delegated bearer chooses its own `subjectId`,
  * `principalKind`, `metadata.delegated`, and `serviceInitiator` claims, so no
  * inspection of the grant can carry that distinction. Set this ONLY from
- * `hasVerifiedOwningUserAuthorization` (`@opengeni/core`),
+ * `AccessGrantAuthorization.canonicalManagedHumanSession` (`@opengeni/core`),
  * which reflects HOW the request authenticated. Omitted/false keeps the
  * historical bare-membership fence exactly.
  */
@@ -34127,7 +34189,7 @@ function sessionFilters(
     | "updatedBefore"
     | "createdFrom"
     | "createdBefore"
-    | "scopeSubjectId"
+    | "endUser"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -34196,30 +34258,43 @@ function sessionFilters(
   if (options.updatedBefore) filters.push(lt(schema.sessions.updatedAt, options.updatedBefore));
   if (options.createdFrom) filters.push(gte(schema.sessions.createdAt, options.createdFrom));
   if (options.createdBefore) filters.push(lt(schema.sessions.createdAt, options.createdBefore));
-  if (options.scopeSubjectId) {
-    filters.push(eq(schema.sessions.scopeSubjectId, options.scopeSubjectId));
+  if (options.endUser) {
+    filters.push(
+      eq(schema.sessions.endUserSource, options.endUser.source),
+      eq(schema.sessions.endUserId, options.endUser.id),
+    );
   }
   return filters;
 }
 
 /**
  * The agent-access predicate for one calling attempt (migration 0427). It
- * mirrors outgoing reach in the core seam: own tree, same canonical user, or
- * workspace. Target task scope never hides the conversation. This predicate
- * remains intersected with host scope and ordinary private-session visibility.
+ * mirrors the pairwise rule in the core seam exactly: a caller always keeps
+ * its own root tree; a `session` caller sees nothing else; a `user` caller
+ * additionally sees non-`session` sessions carrying its own end-user label; a
+ * `workspace` caller additionally sees every `workspace` session and the
+ * `user` sessions carrying its own label. A caller without a label can never
+ * match a labelled `user` session.
  */
 export function sessionAgentAccessViewerFilter(viewer: SessionAgentAccessViewer): SQL {
   const ownTree = eq(schema.sessions.rootSessionId, viewer.callerRootSessionId);
-  const sameUser = viewer.scopeSubjectId
-    ? and(eq(schema.sessions.scopeSubjectId, viewer.scopeSubjectId))!
+  const sameEndUser = viewer.endUser
+    ? and(
+        eq(schema.sessions.endUserSource, viewer.endUser.source),
+        eq(schema.sessions.endUserId, viewer.endUser.id),
+      )!
     : sql`false`;
   switch (viewer.agentAccess) {
     case "session":
       return ownTree;
     case "user":
-      return or(ownTree, sameUser)!;
+      return or(ownTree, and(ne(schema.sessions.agentAccess, "session"), sameEndUser)!)!;
     case "workspace":
-      return sql`true`;
+      return or(
+        ownTree,
+        eq(schema.sessions.agentAccess, "workspace"),
+        and(eq(schema.sessions.agentAccess, "user"), sameEndUser)!,
+      )!;
   }
 }
 
@@ -34356,7 +34431,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.updatedBefore &&
     !options.createdFrom &&
     !options.createdBefore &&
-    !options.scopeSubjectId
+    !options.endUser
   ) {
     return "all";
   }
@@ -34368,7 +34443,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.updatedBefore ? ["updatedBefore", options.updatedBefore.toISOString()] : null,
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
-    options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
+    options.endUser ? ["endUser", options.endUser.source, options.endUser.id] : null,
   ]);
 }
 
@@ -37264,7 +37339,7 @@ export type ListSessionEventsOptions = {
 };
 
 export type ListSessionEventPageOptions = ListSessionEventsOptions & {
-  /** Exact UTF-8 JSON-array envelope budget for rows materialized by the app. */
+  /** UTF-8 JSON-array page target; one oversized full event is returned alone. */
   maxBytes?: number;
   /** Internal SQL fetch size. Batches never escape the surrounding RLS transaction. */
   batchSize?: number;
@@ -37285,7 +37360,7 @@ export type SessionEventPage = {
 
 const POSTGRES_INT_MAX = 2_147_483_647;
 export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
-const SESSION_EVENT_DB_BATCH_SIZE = 64;
+const SESSION_EVENT_DB_BATCH_SIZE = 256;
 const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
 type SessionEventProjectionRow = {
@@ -37319,9 +37394,8 @@ type SessionEventProjectionSource = {
 
 /**
  * Read one direction-aware session-event page. Full mode selects the canonical
- * row exactly when it fits the page; an oversized historical row that predates
- * the durable write guard is projected at the bounded database-read boundary
- * when it would otherwise strand its cursor forever. Summary/none modes derive
+ * row exactly, allowing one oversized event alone so its cursor can progress.
+ * The byte budget bounds page selection, never retained payloads. Summary/none modes derive
  * bounded monitoring projections in SQL without rewriting the retained source.
  * `bytes` is the exact UTF-8 size of `JSON.stringify(events)`; `hasMore` is true
  * whenever count or byte selection stopped before the durable range ended.
@@ -37351,8 +37425,9 @@ export async function listSessionEventPage(
   );
   // Interactive browser pages intentionally stop at 255 rows. Carry their
   // one-row continuation lookahead in the same indexed query so latency is not
-  // multiplied by transaction-pool or cross-region round trips. Larger audit
-  // reads retain the smaller default batch to preserve their memory envelope.
+  // multiplied by transaction-pool or cross-region round trips. Larger reads
+  // use bounded 256-row batches; full-mode metadata planning below preserves
+  // the page's byte budget before any canonical payload is transferred.
   const defaultBatchSize =
     requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX
       ? requestedLimit + 1
@@ -37367,7 +37442,7 @@ export async function listSessionEventPage(
     let bytes = 2; // []
     let cursor = direction === "before" ? before : after;
     let hasMore = false;
-    let fullPayloadsExact = payloadMode === "full";
+    const fullPayloadsExact = payloadMode === "full";
     let truncatedBy: SessionEventPage["truncatedBy"] = null;
 
     for (;;) {
@@ -37419,7 +37494,7 @@ export async function listSessionEventPage(
       let rows: SessionEventProjectionRow[];
       let sourceRowCount: number;
       let sourceRowsFullyConsumed = true;
-      let databaseReadProjected = false;
+
       if (payloadMode === "full") {
         if (
           requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX &&
@@ -37446,12 +37521,8 @@ export async function listSessionEventPage(
           const rankedRows = scopedDb.$with("session_event_page_ranked").as(
             scopedDb
               .select({
-                ...sessionEventProjectionSelect("full", {}, candidateRows),
+                ...sessionEventProjectionSelect("full", candidateRows),
                 transferBytes: sql<number>`${candidateRows.transferBytes}`.as("transfer_bytes"),
-                firstTransferBytes:
-                  sql<number>`first_value(${candidateRows.transferBytes}) over (order by ${candidateOrdering})`.as(
-                    "first_transfer_bytes",
-                  ),
                 rowNumber: sql<number>`row_number() over (order by ${candidateOrdering})::int`.as(
                   "row_number",
                 ),
@@ -37468,51 +37539,26 @@ export async function listSessionEventPage(
             1,
             maxBytes - bytes + (events.length === 0 ? 1 : 0),
           );
-          const firstRowExceedsTransferBudget = sql<boolean>`
-            ${rankedRows.firstTransferBytes} + 1 > ${availableTransferBytes}`;
-          const boundedCumulativeTransferBytes = sql<number>`case
-            when ${firstRowExceedsTransferBudget}
-              then ${rankedRows.cumulativeTransferBytes}
-                - ${rankedRows.firstTransferBytes}
-                + ${SESSION_EVENT_ENVELOPE_MAX_BYTES}
-            else ${rankedRows.cumulativeTransferBytes}
-          end`;
-          const projectionCondition = sql<boolean>`${rankedRows.rowNumber} = 1
-            and ${firstRowExceedsTransferBudget}`;
           const selectedRows = await scopedDb
             .with(candidateRows, rankedRows)
             .select({
-              ...sessionEventProjectionSelect(
-                "full",
-                {
-                  databaseReadProjection: projectionCondition,
-                  originalEventBytes: rankedRows.transferBytes,
-                },
-                rankedRows,
-              ),
+              ...sessionEventProjectionSelect("full", rankedRows),
               sourceRowCount: rankedRows.sourceRowCount,
-              databaseReadProjected: projectionCondition.as("database_read_projected"),
             })
             .from(rankedRows)
             .where(
               and(
                 lte(rankedRows.rowNumber, remainingCount),
                 or(
-                  lte(boundedCumulativeTransferBytes, availableTransferBytes),
+                  lte(rankedRows.cumulativeTransferBytes, availableTransferBytes),
                   eq(rankedRows.rowNumber, 1),
                 ),
               ),
             )
             .orderBy(asc(rankedRows.rowNumber));
           sourceRowCount = Number(selectedRows[0]?.sourceRowCount ?? 0);
-          rows = selectedRows.map(
-            ({ sourceRowCount: _sourceRowCount, databaseReadProjected: _projected, ...row }) => row,
-          );
+          rows = selectedRows.map(({ sourceRowCount: _sourceRowCount, ...row }) => row);
           sourceRowsFullyConsumed = rows.length >= sourceRowCount;
-          databaseReadProjected = selectedRows.some((row) => row.databaseReadProjected);
-          if (databaseReadProjected) {
-            fullPayloadsExact = false;
-          }
           if (!sourceRowsFullyConsumed) {
             hasMore = true;
             truncatedBy = rows.length >= remainingCount ? "count" : "bytes";
@@ -37520,8 +37566,8 @@ export async function listSessionEventPage(
         } else {
           // Plan the page from bounded metadata before selecting any canonical
           // payload. row_to_json includes private storage columns omitted by the
-          // public event, so this conservatively bounds payload transfer without
-          // moving an oversized legacy value through postgres.js.
+          // public event, so this conservatively bounds ordinary page transfer.
+          // One oversized event is selected alone and remains exact.
           const metadataRows = await scopedDb
             .select(sessionEventProjectionMetadataSelect())
             .from(schema.sessionEvents)
@@ -37532,7 +37578,7 @@ export async function listSessionEventPage(
           if (metadataRows.length === 0) break;
 
           const exactIds: string[] = [];
-          let projectId: string | null = null;
+
           let estimatedBytes = bytes;
           for (const metadata of metadataRows) {
             if (events.length + exactIds.length >= requestedLimit) {
@@ -37544,7 +37590,11 @@ export async function listSessionEventPage(
             const transferBytes = Number(metadata.transferBytes);
             if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
               if (events.length === 0 && exactIds.length === 0) {
-                projectId = metadata.id;
+                exactIds.push(metadata.id);
+                if (metadataRows.length > 1) {
+                  hasMore = true;
+                  truncatedBy = "bytes";
+                }
               } else {
                 hasMore = true;
                 truncatedBy = "bytes";
@@ -37554,19 +37604,9 @@ export async function listSessionEventPage(
             exactIds.push(metadata.id);
             estimatedBytes += separatorBytes + transferBytes;
           }
-          sourceRowsFullyConsumed =
-            exactIds.length + (projectId === null ? 0 : 1) >= metadataRows.length;
+          sourceRowsFullyConsumed = exactIds.length >= metadataRows.length;
 
-          if (projectId !== null) {
-            rows = await scopedDb
-              .select(sessionEventProjectionSelect("full", { databaseReadProjection: true }))
-              .from(schema.sessionEvents)
-              .where(and(...filters, eq(schema.sessionEvents.id, projectId)))
-              .orderBy(ordering)
-              .limit(1);
-            fullPayloadsExact = false;
-            databaseReadProjected = true;
-          } else if (exactIds.length > 0) {
+          if (exactIds.length > 0) {
             rows = await scopedDb
               .select(sessionEventProjectionSelect("full"))
               .from(schema.sessionEvents)
@@ -37588,29 +37628,18 @@ export async function listSessionEventPage(
         if (rows.length === 0) break;
       }
 
-      if (databaseReadProjected) {
-        for (const row of rows) {
-          settleDatabaseReadProjectionPayload(row.payload);
-        }
-      }
-
       for (const row of rows) {
         if (events.length >= requestedLimit) {
           hasMore = true;
           truncatedBy = "count";
           break;
         }
-        let event = mapProjectedEvent(row);
-        let eventBytes = utf8JsonBytes(event);
+        const event = mapProjectedEvent(row);
+        const eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
           if (events.length === 0) {
-            if (payloadMode === "full") {
-              event = boundSessionEvent(event, { surface: "database_read_projection" });
-              eventBytes = utf8JsonBytes(event);
-              fullPayloadsExact = false;
-            }
-            if (eventBytes + 2 > maxBytes) {
+            if (payloadMode !== "full" && eventBytes + 2 > maxBytes) {
               throw new RangeError(
                 `A projected session event cannot fit in the database page envelope (${eventBytes + 2} > ${maxBytes} bytes)`,
               );
@@ -37656,7 +37685,6 @@ function sessionEventProjectionMetadataSelect() {
 
 function sessionEventProjectionSelect(
   payloadMode: SessionEventPayloadMode = "full",
-  options: { databaseReadProjection?: boolean | SQL; originalEventBytes?: SQLWrapper } = {},
   source: SessionEventProjectionSource = schema.sessionEvents,
 ) {
   const typeInvalid = sql`(
@@ -37726,7 +37754,7 @@ function sessionEventProjectionSelect(
   const projectedPayload = sql<unknown>`case
     when ${envelopeInvalid} then jsonb_build_object(
       'preview', '[legacy event envelope normalized at bounded database read boundary]',
-      'originalEventBytes', ${options.originalEventBytes ?? sql`octet_length(row_to_json(${schema.sessionEvents})::text)`},
+      'originalEventBytes', octet_length(row_to_json(${schema.sessionEvents})::text),
       'originalType', left(${source.type}, 64),
       'envelopeProjection', jsonb_build_object(
         'truncated', true,
@@ -37737,46 +37765,10 @@ function sessionEventProjectionSelect(
     )
     else opengeni_private.project_session_event_payload(${source.payload})
   end`;
-  const databaseReadProjectedPayload = sql<unknown>`case
-    when ${envelopeInvalid} then ${projectedPayload}
-    else jsonb_build_object(
-      'preview', jsonb_build_object(
-        'head', left(${source.payload}::text, 2048),
-        'omission', '[middle payload bytes omitted at bounded database read boundary]',
-        'tail', right(${source.payload}::text, 2048)
-      ),
-      'truncation', jsonb_build_object(
-        'truncated', true,
-        'surface', 'database_read_projection',
-        'reason', 'payload_bytes_exceeded',
-        'originalBytes', octet_length(${source.payload}::text),
-        'deliveredBytes', 0,
-        'omittedBytes', octet_length(${source.payload}::text),
-        'estimatedOriginalTokens', ceil(
-          octet_length(${source.payload}::text) / 4.0
-        )::integer,
-        'estimatedDeliveredTokens', 0,
-        'fullEvidence', jsonb_build_object('available', false, 'reason', 'not_retained'),
-        'details', jsonb_build_array(jsonb_build_object(
-          'path', '$',
-          'kind', 'object',
-          'originalBytes', octet_length(${source.payload}::text)
-        ))
-      )
-    )
-  end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
-  const databaseReadProjection = options.databaseReadProjection ?? false;
   const selectedPayload =
     payloadMode === "full"
-      ? databaseReadProjection === false
-        ? sql<unknown>`${source.payload}`
-        : databaseReadProjection === true
-          ? databaseReadProjectedPayload
-          : sql<unknown>`case
-            when ${databaseReadProjection} then ${databaseReadProjectedPayload}
-            else ${source.payload}
-          end`
+      ? sql<unknown>`${source.payload}`
       : payloadMode === "none"
         ? sql<unknown>`jsonb_build_object(
           '_monitoring', jsonb_build_object(
@@ -37804,83 +37796,32 @@ function sessionEventProjectionSelect(
     sessionId: sql<string>`${source.sessionId}`.as("session_id"),
     sequence: sql<number>`${source.sequence}`.as("sequence"),
     type:
-      payloadMode === "full" && databaseReadProjection === false
-        ? sql<string>`${source.type}`.as("type")
-        : payloadMode === "full" && databaseReadProjection !== true
-          ? sql<string>`case
-            when ${databaseReadProjection} then ${projectedType}
-            else ${source.type}
-          end`.as("type")
-          : projectedType.as("type"),
+      payloadMode === "full" ? sql<string>`${source.type}`.as("type") : projectedType.as("type"),
     payload: selectedPayload.as("payload"),
     payloadCodecVersion:
-      payloadMode === "full" && databaseReadProjection === false
+      payloadMode === "full"
         ? sql<number | null>`${source.payloadCodecVersion}`.as("payload_codec_version")
-        : payloadMode === "full" && databaseReadProjection !== true
-          ? sql<number | null>`case
-            when ${databaseReadProjection} then null
-            else ${source.payloadCodecVersion}
-          end`.as("payload_codec_version")
-          : sql<number | null>`null`.as("payload_codec_version"),
+        : sql<number | null>`null`.as("payload_codec_version"),
     occurredAt: sql<Date>`${source.occurredAt}`.as("occurred_at"),
     clientEventId:
-      payloadMode === "full" && databaseReadProjection === false
+      payloadMode === "full"
         ? sql<string | null>`${source.clientEventId}`.as("client_event_id")
-        : payloadMode === "full" && databaseReadProjection !== true
-          ? sql<string | null>`case
-            when ${databaseReadProjection} then ${projectedClientEventId}
-            else ${source.clientEventId}
-          end`.as("client_event_id")
-          : projectedClientEventId.as("client_event_id"),
+        : projectedClientEventId.as("client_event_id"),
     turnId: sql<string | null>`${source.turnId}`.as("turn_id"),
     turnGeneration: sql<number | null>`${source.turnGeneration}`.as("turn_generation"),
     turnAttemptId: sql<string | null>`${source.turnAttemptId}`.as("turn_attempt_id"),
     turnAssociation:
-      payloadMode === "full" && databaseReadProjection === false
+      payloadMode === "full"
         ? sql<string | null>`${source.turnAssociation}`.as("turn_association")
-        : payloadMode === "full" && databaseReadProjection !== true
-          ? sql<string | null>`case
-            when ${databaseReadProjection} then ${projectedTurnAssociation}
-            else ${source.turnAssociation}
-          end`.as("turn_association")
-          : projectedTurnAssociation.as("turn_association"),
+        : projectedTurnAssociation.as("turn_association"),
     duplicateOfEventId: sql<string | null>`${source.duplicateOfEventId}`.as(
       "duplicate_of_event_id",
     ),
     duplicateReason:
-      payloadMode === "full" && databaseReadProjection === false
+      payloadMode === "full"
         ? sql<string | null>`${source.duplicateReason}`.as("duplicate_reason")
-        : payloadMode === "full" && databaseReadProjection !== true
-          ? sql<string | null>`case
-            when ${databaseReadProjection} then ${projectedDuplicateReason}
-            else ${source.duplicateReason}
-          end`.as("duplicate_reason")
-          : projectedDuplicateReason.as("duplicate_reason"),
+        : projectedDuplicateReason.as("duplicate_reason"),
   };
-}
-
-function settleDatabaseReadProjectionPayload(payload: unknown): void {
-  const truncation = sessionEventPayloadTruncation(payload);
-  if (truncation?.surface !== "database_read_projection") return;
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    const deliveredBytes = sessionEventJsonBytes(payload);
-    const omittedBytes =
-      truncation.originalBytes === null
-        ? null
-        : Math.max(0, truncation.originalBytes - deliveredBytes);
-    const deliveredTokens = approximateSessionEventTokens(deliveredBytes);
-    if (
-      truncation.deliveredBytes === deliveredBytes &&
-      truncation.omittedBytes === omittedBytes &&
-      truncation.estimatedDeliveredTokens === deliveredTokens
-    ) {
-      return;
-    }
-    truncation.deliveredBytes = deliveredBytes;
-    truncation.omittedBytes = omittedBytes;
-    truncation.estimatedDeliveredTokens = deliveredTokens;
-  }
-  throw new RangeError("Database-read session event payload byte accounting did not converge");
 }
 
 export async function listSessionEvents(
@@ -38457,7 +38398,7 @@ export class HumanInputResponseValidationError extends Error {
   readonly name = "HumanInputResponseValidationError";
 
   constructor(
-    readonly code: "INVALID_RESPONSE" | "SKIP_NOT_ALLOWED",
+    readonly code: "INVALID_RESPONSE" | "SKIP_NOT_ALLOWED" | "HUMAN_AUTH_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -38797,6 +38738,8 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
+    /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
+    canonicalHumanSession?: boolean;
     /** Bounded responder kind for the parent's resolution notice; derived from `respondedBy` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
@@ -38808,6 +38751,31 @@ export async function acceptSessionHumanInputResponse(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Skill activation shares the response transaction. Acquire its canonical
+        // organization/workspace/publication prefix before any session row lock.
+        // Questions are immutable after request creation; recheck below anyway.
+        const [requestPreview] = await tx
+          .select({ questions: schema.sessionHumanInputRequests.questions })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.id, input.requestId),
+            ),
+          )
+          .limit(1);
+        const skillScopeLocked =
+          requestPreview?.questions.some((question) => question.skillReview !== undefined) ?? false;
+        if (skillScopeLocked) {
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+          );
+          await tx.execute(
+            sql`SELECT id FROM workspaces WHERE id=${input.workspaceId}::uuid AND account_id=${input.accountId}::uuid FOR KEY SHARE`,
+          );
+          await lockSkillPublication(tx as unknown as Database, input.workspaceId);
+        }
         // The parent (when notices are enabled) joins the same UUID-ordered
         // session lock so the resolution notice can be enqueued for it here.
         const sessionIds = await sessionIdsWithParentTx(
@@ -38835,6 +38803,21 @@ export async function acceptSessionHumanInputResponse(
           .for("update")
           .limit(1);
         if (!request) return { action: "not_found" } as const;
+        const hasSkillReview = request.questions.some(
+          (question) => question.skillReview !== undefined,
+        );
+        if (hasSkillReview && !skillScopeLocked) {
+          throw new HumanInputResponseValidationError(
+            "INVALID_RESPONSE",
+            "The review request changed. Reload before responding.",
+          );
+        }
+        if (hasSkillReview && !input.expireOnly && input.canonicalHumanSession !== true) {
+          throw new HumanInputResponseValidationError(
+            "HUMAN_AUTH_REQUIRED",
+            "Skill approval requires a verified human browser session.",
+          );
+        }
         if (input.clientEventId) {
           const [existing] = await tx
             .select()
@@ -38982,6 +38965,19 @@ export async function acceptSessionHumanInputResponse(
               })
             ).turns[0]
           : undefined;
+        if (
+          hasSkillReview &&
+          !input.expireOnly &&
+          turn &&
+          input.respondedBy !==
+            (turn.initiatingHumanSubjectId ??
+              (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null))
+        ) {
+          throw new HumanInputResponseValidationError(
+            "HUMAN_AUTH_REQUIRED",
+            "Only the human who started this work can answer its Skill review.",
+          );
+        }
         const boundaryOwnsRequest =
           session.status === "requires_action" &&
           turn?.status === "requires_action" &&
@@ -39024,12 +39020,28 @@ export async function acceptSessionHumanInputResponse(
         const response: HumanInputResponse = expired
           ? { outcome: "expired" }
           : validateHumanInputResponse(mapSessionHumanInputRequest(request), input.response);
+        if (
+          hasSkillReview &&
+          !expired &&
+          (response.outcome !== "answered" ||
+            response.answers.length !== 1 ||
+            response.answers[0]!.values.length !== 1 ||
+            !["save", "skip"].includes(response.answers[0]!.values[0]!) ||
+            Boolean(response.answers[0]!.other?.trim()))
+        ) {
+          throw new HumanInputResponseValidationError(
+            "INVALID_RESPONSE",
+            "Choose Save or Don't save for this Skill review.",
+          );
+        }
         const [updated] = await tx
           .update(schema.sessionHumanInputRequests)
           .set({
             status: response.outcome,
             response,
             respondedBy: expired ? "system:expired" : input.respondedBy,
+            skillReviewHumanAuthorized:
+              !expired && hasSkillReview && input.canonicalHumanSession === true,
             respondedAt: now,
             updatedAt: now,
           })
@@ -39048,6 +39060,14 @@ export async function acceptSessionHumanInputResponse(
             events: [],
             workflowWakeRevision: null,
           } as const;
+        }
+        if (!expired && hasSkillReview) {
+          await confirmSkillHumanResponse(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.respondedBy,
+            requestId: request.id,
+          });
         }
         const [event] = await tx
           .insert(schema.sessionEvents)
@@ -42148,6 +42168,7 @@ export type SandboxRecoveryState = {
 // Typed with an index signature so it satisfies db.execute<TRow extends
 // Record<string, unknown>>.
 type LeaseRow = {
+  unobservable_command_drain_ids?: string[] | null;
   id: string;
   account_id: string;
   workspace_id: string;
@@ -42207,6 +42228,8 @@ type LeaseRow = {
 } & Record<string, unknown>;
 
 export interface LeaseSnapshot {
+  /** Exact idle-only enrollment. Commands remain active until provider stop. */
+  unobservableCommandDrainIds?: string[] | null;
   id: string;
   sandboxGroupId: string;
   liveness: SandboxLeaseLiveness;
@@ -42791,6 +42814,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
   const recovery = recoveryStateFromLeaseRow(row);
   return {
+    unobservableCommandDrainIds: row.unobservable_command_drain_ids ?? null,
     id: row.id,
     sandboxGroupId: row.sandbox_group_id,
     liveness: row.liveness,
@@ -43216,6 +43240,11 @@ function resumeStateWithPreservedArchives(
       : {};
   return {
     ...(resumeState ?? {}),
+    ...(typeof archiveSource?.opengeniHistoricalArchiveRecoveryId === "string"
+      ? {
+          opengeniHistoricalArchiveRecoveryId: archiveSource.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
@@ -43252,6 +43281,11 @@ function archiveOnlyResumeState(
         ? current.backendId
         : (row.resume_backend_id ?? row.backend),
     ...(Object.keys(durableSession).length > 0 ? { sessionState: durableSession } : {}),
+    ...(typeof current?.opengeniHistoricalArchiveRecoveryId === "string"
+      ? {
+          opengeniHistoricalArchiveRecoveryId: current.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -43680,8 +43714,9 @@ async function acquireLeaseOnce(
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
           if (
-            (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
-            recovery.restore.status === "unrecoverable"
+            ((recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
+              recovery.restore.status === "unrecoverable") &&
+            (await authorizedHistoricalArchiveGeneration(tx, row)) === null
           ) {
             return {
               role: "blocked" as const,
@@ -43805,7 +43840,12 @@ export async function acquireLease(
         now,
       );
     }
-    if (result.role !== "fenced" || result.reason === "superseded" || now >= deadline) {
+    if (
+      result.role !== "fenced" ||
+      result.reason === "superseded" ||
+      result.reason === "rotation_in_progress" ||
+      now >= deadline
+    ) {
       return result;
     }
     await waitForSandboxTransition(
@@ -43881,6 +43921,164 @@ function validatedLegacyNativeSnapshotAdoption(
     return null;
   }
   return { archiveBase64: value.archiveBase64, descriptor };
+}
+
+/** Reuse the session control quiescence receipt instead of treating every
+ * historical closed attempt without a receipt as an active writer. Caller
+ * holds the workspace inference fence, which also serializes new claims. */
+async function hasSandboxGroupAttemptActivityTx(
+  tx: Database,
+  input: { workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+): Promise<boolean> {
+  const sessions = await tx.execute<{ id: string; active: boolean }>(sql`
+    select session.id, exists(select 1 from session_turn_attempts attempt
+      where attempt.workspace_id = session.workspace_id and attempt.session_id = session.id
+        and (attempt.state in ('claimed','running') or
+          coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at) > now() -
+            (${input.idleGraceMs}::bigint * interval '1 millisecond'))) as active
+    from sessions session where session.workspace_id = ${input.workspaceId}
+      and session.sandbox_group_id = ${input.sandboxGroupId}
+  `);
+  for (const session of sessions) {
+    if (
+      session.active ||
+      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+      }))
+    )
+      return true;
+  }
+  return false;
+}
+
+/** Operator-only authorization for an exact historical checkpoint. Direct
+ * database access is the authority boundary; subjectId records attribution.
+ * This never resumes a turn or changes the archive/workspace generations. */
+export async function authorizeHistoricalSandboxCheckpointRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedWorkspaceGeneration: number;
+    expectedArchiveGeneration: number;
+    selectedRevision: string;
+    operationId: string;
+    subjectId: string;
+    reason: string;
+    acceptHistoricalCheckpoint: true;
+  },
+): Promise<{ authorized: boolean }> {
+  if (
+    input.acceptHistoricalCheckpoint !== true ||
+    !input.subjectId.trim() ||
+    !input.reason.trim()
+  ) {
+    throw new Error(
+      "Historical checkpoint recovery requires an identified operator and explicit reason",
+    );
+  }
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId} for update`);
+    const row = rows[0];
+    if (
+      !row ||
+      row.backend !== "modal" ||
+      row.liveness !== "cold" ||
+      row.instance_id !== null ||
+      Number(row.lease_epoch) !== input.expectedEpoch ||
+      Number(row.refcount) !== 0 ||
+      Number(row.workspace_generation) !== input.expectedWorkspaceGeneration ||
+      row.archive_generation === null ||
+      Number(row.archive_generation) !== input.expectedArchiveGeneration ||
+      input.expectedArchiveGeneration >= input.expectedWorkspaceGeneration ||
+      recoveryStateFromLeaseRow(row).archive.current?.revision !== input.selectedRevision
+    )
+      return { authorized: false };
+    if (await hasSandboxGroupAttemptActivityTx(tx, { ...input, idleGraceMs: 0 }))
+      return { authorized: false };
+    const blockers = await tx.execute<{ present: boolean }>(sql`select
+      exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+      or exists(select 1 from sandbox_workspace_mutation_admissions where lease_id = ${row.id} and settled_at is null)
+      or exists(select 1 from sandbox_retained_processes where lease_id = ${row.id} and state = 'active') as present`);
+    if (blockers[0]?.present) return { authorized: false };
+    if (
+      row.resume_state?.opengeniHistoricalArchiveRecoveryId === input.operationId &&
+      (await authorizedHistoricalArchiveGeneration(tx, row)) === input.expectedArchiveGeneration
+    )
+      return { authorized: true };
+    const metadata = {
+      version: 1,
+      leaseId: row.id,
+      leaseEpoch: input.expectedEpoch,
+      workspaceGeneration: input.expectedWorkspaceGeneration,
+      archiveGeneration: input.expectedArchiveGeneration,
+      selectedRevision: input.selectedRevision,
+      reason: input.reason,
+      acceptedHistoricalCheckpoint: true,
+    };
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          id: input.operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "sandbox.historical_checkpoint_recovery.authorized",
+          targetType: "sandbox_group",
+          targetId: input.sandboxGroupId,
+          metadata,
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    await tx.execute(sql`update sandbox_leases set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+      '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(input.operationId)}::jsonb), updated_at = now()
+      where id = ${row.id}`);
+    return { authorized: true };
+  });
+}
+
+async function authorizedHistoricalArchiveGeneration(
+  db: Database,
+  row: LeaseRow,
+): Promise<number | null> {
+  const operationId = row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+  if (
+    typeof operationId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId)
+  )
+    return null;
+  const [receipt] = await db
+    .select({ metadata: schema.auditEvents.metadata })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.id, operationId),
+        eq(schema.auditEvents.accountId, row.account_id),
+        eq(schema.auditEvents.workspaceId, row.workspace_id),
+        eq(schema.auditEvents.targetId, row.sandbox_group_id),
+        eq(schema.auditEvents.action, "sandbox.historical_checkpoint_recovery.authorized"),
+      ),
+    );
+  const metadata = receipt?.metadata;
+  const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  return metadata?.version === 1 &&
+    metadata.acceptedHistoricalCheckpoint === true &&
+    metadata.leaseId === row.id &&
+    metadata.leaseEpoch === Number(row.lease_epoch) &&
+    metadata.workspaceGeneration === Number(row.workspace_generation) &&
+    metadata.archiveGeneration === archiveGeneration &&
+    archiveGeneration !== null &&
+    archiveGeneration < Number(row.workspace_generation) &&
+    metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
+    ? archiveGeneration
+    : null;
 }
 
 /** Records the single cold->warming winner's exact restore attempt. The lease
@@ -43999,7 +44197,9 @@ export async function beginSandboxRematerialization(
             importedArchiveGeneration = true;
           }
         }
-        const archiveComplete = hasCompleteWorkspaceArchive(workingRow);
+        const historicalGeneration = await authorizedHistoricalArchiveGeneration(tx, workingRow);
+        const archiveComplete =
+          hasCompleteWorkspaceArchive(workingRow) || historicalGeneration !== null;
         if (
           current.archive.status !== "available" ||
           !current.archive.current ||
@@ -44115,7 +44315,7 @@ export async function beginSandboxRematerialization(
             ((artifact.provenance === "native_capture" &&
               artifact.source_workspace_generation !== null &&
               Number(artifact.source_workspace_generation) ===
-                Number(workingRow.workspace_generation)) ||
+                (historicalGeneration ?? Number(workingRow.workspace_generation))) ||
               (artifact.provenance === "legacy_provider_adopted" &&
                 artifact.source_workspace_generation === null)) &&
             artifact.provider_backend === workingRow.backend &&
@@ -44600,7 +44800,11 @@ export async function commitWarmingToWarm(
             reason: "archive_revision_mismatch" as const,
           };
         }
-        if (rematerialization && !hasCompleteWorkspaceArchive(row)) {
+        if (
+          rematerialization &&
+          !hasCompleteWorkspaceArchive(row) &&
+          (await authorizedHistoricalArchiveGeneration(tx, row)) === null
+        ) {
           return {
             committed: false,
             lease: mapLeaseRow(row),
@@ -47912,6 +48116,123 @@ export async function reapStaleLeaseHolders(
 // is the sanctioned cross-workspace read). Each invocation runs in its own
 // transaction and opts into the recovery protocol fence; this also makes the
 // legacy fallback safe after PostgreSQL aborts an undefined-function call.
+export async function enrollUnobservableCommandIdleDrain(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+): Promise<ReapDrainable | null> {
+  await withRlsContext(db, input, async (tx) => {
+    // Round-robin inventory: an ineligible live lease cannot starve later rows.
+    // This updates only the inspection cursor, never provider/holder authority.
+    await tx.execute(sql`update sandbox_leases set unobservable_command_checked_at = now()
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}`);
+  });
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const initial = await readLease(tx, input.workspaceId, input.sandboxGroupId);
+    if (
+      !initial ||
+      initial.backend !== "modal" ||
+      !initial.instanceId ||
+      !["warm", "draining"].includes(initial.liveness)
+    )
+      return null;
+    // A command observation backoff must not suppress provider-death checks
+    // during a mandatory rotation. Do not steal an in-flight reconciler claim.
+    if (initial.rotationRequestedAt !== null) {
+      await tx.execute(sql`
+        update sandbox_retained_processes set reconcile_after = least(reconcile_after, now())
+        where lease_id = ${initial.id} and state = 'active' and reconcile_claim_id is null
+          and last_reconcile_outcome in ('process_observation_unavailable',
+            'quarantined_process_observation_unavailable', 'provider_binding_missing',
+            'quarantined_provider_binding_missing', 'provider_binding_mismatch',
+            'quarantined_provider_binding_mismatch')
+      `);
+    }
+    // Preserve process -> admission -> lease ordering used by settlement.
+    const processes = await rawRows<{
+      id: string;
+      parent_admission_id: string;
+      holder_id: string;
+      eligible: boolean;
+    }>(
+      tx,
+      sql`
+      select process.id, process.parent_admission_id, process.holder_id,
+        (process.lease_epoch = ${initial.leaseEpoch}
+          and process.provider_instance_id = ${initial.instanceId}
+          and process.provider_backend = 'modal' and process.route_target_id is null
+          and process.last_reconcile_outcome in ('process_observation_unavailable',
+            'quarantined_process_observation_unavailable')
+          and attempt.state = 'closed'
+          and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
+            (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
+      from sandbox_retained_processes process
+      left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
+      where process.lease_id = ${initial.id} and process.state = 'active'
+      order by process.id for update of process
+    `,
+    );
+    const admissions = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      select id from sandbox_workspace_mutation_admissions
+      where lease_id = ${initial.id} and settled_at is null order by id for update
+    `,
+    );
+    const rows = await tx.execute<LeaseRow>(sql`
+      select * from sandbox_leases where id = ${initial.id} for update
+    `);
+    const lease = rows[0];
+    if (
+      !lease ||
+      Number(lease.lease_epoch) !== initial.leaseEpoch ||
+      lease.instance_id !== initial.instanceId ||
+      !["warm", "draining"].includes(lease.liveness) ||
+      (lease.reaper_hold_until && new Date(lease.reaper_hold_until).getTime() > Date.now())
+    )
+      return null;
+    const enrolled = lease.unobservable_command_drain_ids;
+    const ids = enrolled ?? processes.map((p) => p.id);
+    if (
+      !ids.length ||
+      (!enrolled && processes.some((p) => !p.eligible)) ||
+      processes.some((p) => !ids.includes(p.id))
+    )
+      return null;
+    const parents = new Set(processes.map((p) => p.parent_admission_id));
+    if (admissions.some((a) => !parents.has(a.id))) return null;
+    const holders = await rawRows<{ kind: string; holder_id: string }>(
+      tx,
+      sql`
+      select kind, holder_id from sandbox_lease_holders where lease_id = ${lease.id}
+    `,
+    );
+    if (
+      holders.some(
+        (h) => h.kind !== "process" || !processes.some((p) => p.holder_id === h.holder_id),
+      )
+    )
+      return null;
+    if (!enrolled) {
+      if (lease.archive_capture_id !== null || (await hasSandboxGroupAttemptActivityTx(tx, input)))
+        return null;
+      await tx.execute(sql`
+        update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+          liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
+          rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
+        where id = ${lease.id}
+      `);
+    }
+    return {
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      instanceId: initial.instanceId,
+      leaseEpoch: initial.leaseEpoch,
+    };
+  });
+}
+
 export async function reapStaleLeaseHoldersGlobal(
   db: Database,
   input: {
@@ -47921,6 +48242,7 @@ export async function reapStaleLeaseHoldersGlobal(
     turnHolderTtlMs?: number;
     interactionHolderTtlMs?: number;
     idleGraceMs: number;
+    onUnobservableCommandDrainError?: (error: unknown) => void;
   },
 ): Promise<ReapDrainable[]> {
   // Active interaction holders represent durable BrowserSession/ComputerSession
@@ -47963,12 +48285,47 @@ export async function reapStaleLeaseHoldersGlobal(
       `,
     );
   });
-  return rows.map((r) => ({
+  const ordinary = rows.map((r) => ({
     workspaceId: r.workspace_id,
     sandboxGroupId: r.sandbox_group_id,
     instanceId: r.instance_id,
     leaseEpoch: Number(r.lease_epoch),
   }));
+  const reportDrainError =
+    input.onUnobservableCommandDrainError ??
+    ((error: unknown) => {
+      console.warn("sandbox reaper: unobservable command drain inspection failed", error);
+    });
+  const candidates = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+  }>(db, sql`select * from opengeni_private.list_unobservable_command_drain_candidates(32)`).catch(
+    (error) => {
+      reportDrainError(error);
+      return [];
+    },
+  );
+  for (const candidate of candidates) {
+    const enrolled = await enrollUnobservableCommandIdleDrain(db, {
+      accountId: candidate.account_id,
+      workspaceId: candidate.workspace_id,
+      sandboxGroupId: candidate.sandbox_group_id,
+      idleGraceMs: input.idleGraceMs,
+    }).catch((error) => {
+      reportDrainError(error);
+      return null;
+    });
+    if (
+      enrolled &&
+      !ordinary.some(
+        (r) =>
+          r.workspaceId === enrolled.workspaceId && r.sandboxGroupId === enrolled.sandboxGroupId,
+      )
+    )
+      ordinary.push(enrolled);
+  }
+  return ordinary;
 }
 
 // §2.2 (global) — the warm-meter read for the REAPER tick (P2.1). Returns one row
@@ -48263,14 +48620,15 @@ export async function confirmDrainCold(
           !observed ||
           observed.liveness !== "draining" ||
           observed.reaper_hold_active ||
-          observed.refcount !== 0 ||
+          (observed.refcount !== 0 && !observed.unobservable_command_drain_ids?.length) ||
           Number(observed.lease_epoch) !== input.expectedEpoch ||
           observed.archive_capture_id !== (input.expectedCaptureId ?? null)
         ) {
           return { wentCold: false };
         }
         const blockerScope =
-          input.providerMissingBeforeCapture && observed.instance_id
+          (input.providerMissingBeforeCapture || observed.unobservable_command_drain_ids?.length) &&
+          observed.instance_id
             ? {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
@@ -48302,7 +48660,7 @@ export async function confirmDrainCold(
           row.id !== observed.id ||
           row.liveness !== "draining" ||
           row.reaper_hold_active ||
-          row.refcount !== 0 ||
+          (row.refcount !== 0 && !row.unobservable_command_drain_ids?.length) ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
           (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
@@ -49429,15 +49787,6 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const locked = await lockWorkspaceMutationAuthorityTx(tx, authority);
-        // Keep the admission UPDATE and its rejection diagnostic on one lease
-        // state. A concurrent capture release between these READ COMMITTED
-        // statements otherwise turns a recoverable capture wait into a false
-        // lease_fenced error. Take this after the canonical actor/attempt prefix.
-        await tx.execute(sql`select id from sandbox_leases
-          where account_id = ${locked.accountId}
-            and workspace_id = ${locked.workspaceId}
-            and sandbox_group_id = ${locked.sandboxGroupId}
-          for update`);
         const rows = await tx.execute<{
           id: string;
           lease_id: string;
@@ -51348,7 +51697,19 @@ export async function readWorkspaceArchiveCapturePreflight(
           and lease.liveness = ${input.liveness}
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
-          ${input.liveness === "draining" ? sql`and lease.refcount = 0` : sql``}
+          ${
+            input.liveness === "draining"
+              ? sql`and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
+            and not exists (select 1 from sandbox_lease_holders holder where holder.lease_id = lease.id
+              and not (holder.kind = 'process' and exists (
+                select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.lease_id = lease.id and process.holder_id = holder.holder_id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id
+              )))`
+              : sql``
+          }
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
@@ -51366,6 +51727,11 @@ export async function readWorkspaceArchiveCapturePreflight(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -51828,7 +52194,9 @@ export async function claimWorkspaceArchiveCapture(
       if (
         !row ||
         row.liveness !== input.liveness ||
-        (input.liveness === "draining" && Number(row.refcount) !== 0) ||
+        (input.liveness === "draining" &&
+          Number(row.refcount) !== 0 &&
+          !row.unobservable_command_drain_ids?.length) ||
         Number(row.lease_epoch) !== input.expectedEpoch ||
         row.instance_id !== input.expectedInstanceId
       ) {
@@ -51861,6 +52229,12 @@ export async function claimWorkspaceArchiveCapture(
             select count(*)::integer as total, 0::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
+              and not (kind = 'process' and exists (
+                select 1 from sandbox_retained_processes process
+                where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
+                  and process.holder_id = sandbox_lease_holders.holder_id
+                  and process.lease_id = ${row.id}
+              ))
           `);
       if (input.warmAttempt && holderCounts[0]?.exact !== 1) {
         return { status: "attempt_fenced" as const };
@@ -51894,6 +52268,9 @@ export async function claimWorkspaceArchiveCapture(
             and admission.provider_instance_id = ${input.expectedInstanceId}
             and admission.workspace_generation <= ${Number(row.workspace_generation)}
             and admission.settled_at is null
+            and not exists(select 1 from sandbox_retained_processes process
+              where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
+                and process.parent_admission_id = admission.id and process.lease_id = ${row.id})
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
         ) as present
       `);
@@ -52103,7 +52480,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
           and lease.liveness = 'draining'
-          and lease.refcount = 0
+          and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.archive_capture_id = ${input.priorCaptureId}::uuid
@@ -52121,6 +52498,13 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           and not exists (
             select 1 from sandbox_lease_holders holder
             where holder.lease_id = lease.id
+              and not (holder.kind = 'process' and exists (
+                select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.lease_id = lease.id and process.holder_id = holder.holder_id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id
+              ))
           )
           and not exists (
             select 1
@@ -52139,6 +52523,11 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -53014,6 +53403,9 @@ export async function persistDrainSnapshot(
             where admission.lease_id = lease.id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           ) as unsettled_mutation
         from sandbox_leases as lease
@@ -53037,7 +53429,7 @@ export async function persistDrainSnapshot(
       const activePublication =
         sourceLeaseMatches &&
         row.liveness === "draining" &&
-        Number(row.refcount) === 0 &&
+        (Number(row.refcount) === 0 || Boolean(row.unobservable_command_drain_ids?.length)) &&
         Number(row.lease_epoch) === input.expectedEpoch &&
         row.instance_id === input.expectedInstanceId &&
         Number(row.workspace_generation) === input.expectedWorkspaceGeneration &&
@@ -53299,7 +53691,7 @@ async function foldWorkspaceArchiveOntoLease(
   const currentInstanceId = input.livenessGuard === "cold_late" ? null : input.expectedInstanceId;
   const livenessGuard =
     input.livenessGuard === "draining"
-      ? sql`lease.liveness = 'draining' and lease.refcount = 0`
+      ? sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)`
       : input.livenessGuard === "warm"
         ? sql`lease.liveness = 'warm'`
         : sql`lease.liveness = 'cold' and lease.refcount = 0 and lease.archive_capture_id is null`;
@@ -53475,6 +53867,12 @@ async function foldWorkspaceArchiveOntoLease(
           and admission.provider_instance_id = ${input.expectedInstanceId}
           and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
           and admission.settled_at is null
+          and not exists(select 1 from sandbox_retained_processes process
+            where lease.liveness = 'draining'
+              and process.id = any(lease.unobservable_command_drain_ids)
+              and process.parent_admission_id = admission.id and process.lease_id = lease.id
+              and process.lease_epoch = lease.lease_epoch
+              and process.provider_instance_id = lease.instance_id)
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
@@ -61860,10 +62258,6 @@ export type InitializeSessionStartInput = {
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
-  /** Trusted backend-only capture for a newly inserted initial turn. Runs under
-   * the canonical activity transaction; failure rolls back events and turn.
-   * Never invoked on replay or deferred starts; not caller JSON authority. */
-  captureInitialTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   /** Sensitive-safe semantic title supplied by the trusted agent-child create
    * path. It is committed with the initial timeline, never as a bare row edit. */
   initialAutomaticTitle?: string | null;
@@ -61920,8 +62314,6 @@ export async function initializeSessionStartAtomically(
   db: Database,
   input: InitializeSessionStartInput,
 ): Promise<InitializeSessionStartResult> {
-  if (input.deferInitialTurn && input.captureInitialTurnAuthority)
-    throw new Error("Deferred session starts cannot capture initial turn authority");
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -62452,30 +62844,6 @@ export async function initializeSessionStartAtomically(
         });
 
         const initialPersonalResourceIntent = session.initialPersonalResourceAttachmentIntent;
-        if (insertedTurn && input.captureInitialTurnAuthority)
-          await input.captureInitialTurnAuthority(tx as unknown as Database, turn.id);
-        if (insertedTurn && session.parentSessionId && session.parentTurnId)
-          await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: session.id,
-            turnId: turn.id,
-            sourceTurnId: session.parentTurnId,
-            kind: "child",
-          });
-        if (
-          insertedTurn &&
-          session.parentSessionId &&
-          session.parentTurnId &&
-          turn.initiatingHumanSubjectId
-        )
-          await inheritChildHostMcpTurnAuthorities(tx as unknown as Database, {
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: session.id,
-            turnId: turn.id,
-            subjectId: turn.initiatingHumanSubjectId,
-          });
         if (initialPersonalResourceIntent) {
           const attachmentInitiatingHumanSubjectId =
             turn.initiatingHumanSubjectId ??
@@ -65443,39 +65811,6 @@ export async function claimSessionWorkForAttempt(
             frozenGoalSnapshot,
             goalContinuationHistoryItem ?? scheduledOccurrenceHistoryItem,
           );
-          if (scheduledTaskRunId) {
-            await captureScheduledExternalLinkTurnAuthority(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              turnId: internalTurn.id,
-              runId: scheduledTaskRunId,
-            });
-            await captureScheduledHostMcpTurnAuthorities(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              turnId: internalTurn.id,
-              runId: scheduledTaskRunId,
-            });
-          } else if (causalHumanTurnId && initiatingHumanSubjectId) {
-            await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              turnId: internalTurn.id,
-              sourceTurnId: causalHumanTurnId,
-              kind: "causal",
-            });
-            await inheritCausalHostMcpTurnAuthorities(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              subjectId: initiatingHumanSubjectId,
-              sourceTurnId: causalHumanTurnId,
-              targetTurnId: internalTurn.id,
-            });
-          }
           // The batch is now durable model memory. Every child it reports on has
           // been carried to this turn's initiating human, so their read fence on
           // those children advances with the same commit.
@@ -71958,15 +72293,6 @@ export async function getActiveSessionTurnForExecution(
       )
       .limit(1);
     if (!row) return null;
-    const linked = await getExternalLinkTurnAuthorization(
-      scopedDb,
-      {
-        accountId: row.turn.accountId,
-        workspaceId,
-      },
-      row.turn.id,
-    );
-    if (linked && !linked.authorized) return null;
     await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
     return mapSessionTurnForExecution(row.turn);
   });
@@ -71979,10 +72305,50 @@ export async function getSessionTurnForAttempt(
   attemptId: string,
 ): Promise<SessionTurnForExecution | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const row = await getLiveSessionAttemptTurn(scopedDb, workspaceId, sessionId, attemptId);
+    const [row] = await scopedDb
+      .select({ turn: schema.sessionTurns })
+      .from(schema.sessionTurnAttempts)
+      .innerJoin(
+        schema.sessionTurns,
+        and(
+          eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        ),
+      )
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.id, attemptId),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+          eq(schema.sessionTurns.activeAttemptId, attemptId),
+          eq(schema.sessions.activeTurnId, schema.sessionTurns.id),
+          inArray(schema.sessionTurns.status, [
+            "running",
+            "requires_action",
+            "recovering",
+            "waiting_capacity",
+          ]),
+          sql`not exists (
+            select 1
+            from ${schema.sessionAttemptInterruptions} interruption
+            where interruption.workspace_id = ${workspaceId}
+              and interruption.attempt_id = ${attemptId}
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          )`,
+        ),
+      )
+      .limit(1);
     if (!row) return null;
-    await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row);
-    return mapSessionTurnForExecution(row);
+    await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
+    return mapSessionTurnForExecution(row.turn);
   });
 }
 
@@ -76389,10 +76755,13 @@ function mapSession(
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),
-    scopeSubjectId: sessionEndUserFromRow(row),
+    endUser: sessionEndUserFromRow(row),
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
-    skills: (row.skills as SessionSkill[]) ?? [],
+    skills: StoredSessionSkills.parse(row.skills ?? []),
+    ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
+      ? { bundledSkillIds: bundledSkillSelectionFromMetadata(row.metadata) }
+      : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
@@ -76716,9 +77085,7 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     packId: row.packId,
     status: row.status as PackInstallationStatus,
     version: row.version,
-    manifestSnapshot: row.manifestSnapshot
-      ? (row.manifestSnapshot as unknown as CapabilityPack)
-      : null,
+    manifestSnapshot: row.manifestSnapshot,
     manifestDigest: row.manifestDigest,
     selectedRigId: row.selectedRigId,
     installedBySubjectId: row.installedBySubjectId,
@@ -77176,7 +77543,6 @@ function mapSocialConnection(
 ): SocialConnection {
   return {
     id: row.id,
-    version: row.version,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     provider: row.provider as SocialProvider,
@@ -77553,7 +77919,6 @@ export {
 
 export {
   buildHostConnectionTokenResolver,
-  buildHostGatewayConnectionTokenResolver,
   ConnectionRefreshHttpError,
   HostMcpCredentialBindingError,
   HostMcpCredentialScopeError,

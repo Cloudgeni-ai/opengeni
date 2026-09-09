@@ -4,6 +4,7 @@ import {
   stableJson,
   type CapabilityPackComponentReference,
   type PackComponentResolution,
+  type SkillActor,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, ne, notInArray, or, sql } from "drizzle-orm";
 
@@ -16,6 +17,7 @@ import {
   type ApiIntegrationRuntime,
 } from "./capability-integrations";
 import { withRlsContext, withWorkspaceRls, type Database } from "./database";
+import type { SkillSourceReleaseReceipt } from "./skill-source-release";
 import {
   addIntegrationFacetBindingOwner,
   removeIntegrationFacetBindingOwner,
@@ -375,15 +377,17 @@ export async function finalizePackComponentOwnership(
     retainedComponentKeys: string[];
     retainedFacetInstallationIds: string[];
     retainedBindingIds: string[];
+    skillActor?: SkillActor;
   },
-): Promise<void> {
-  await withRlsContext(
+): Promise<{ skillReleases: SkillSourceReleaseReceipt[] }> {
+  return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const retainedFacets = new Set(input.retainedFacetInstallationIds);
+        let skillReleases: SkillSourceReleaseReceipt[] = [];
         const ownedFacets = await tx
           .select({
             id: schema.capabilityComponentOwners.id,
@@ -407,10 +411,11 @@ export async function finalizePackComponentOwnership(
               staleFacets.map((owner) => owner.id),
             ),
           );
-          await cleanupOrphanedCapabilityComponents(
+          skillReleases = await cleanupOrphanedCapabilityComponents(
             tx,
             input.workspaceId,
             staleFacets.map((owner) => owner.facetInstallationId),
+            input.skillActor,
           );
         }
         const retainedBindings = new Set(input.retainedBindingIds);
@@ -449,6 +454,7 @@ export async function finalizePackComponentOwnership(
                 : sql`true`,
             ),
           );
+        return { skillReleases };
       }),
   );
 }
@@ -546,8 +552,13 @@ async function previewPackComponentReleaseInRlsContext(
 
 export async function releasePackComponents(
   db: Database,
-  input: { accountId: string; workspaceId: string; packInstallationId: string },
-): Promise<{ retainedComponents: string[] }> {
+  input: {
+    accountId: string;
+    workspaceId: string;
+    packInstallationId: string;
+    skillActor?: SkillActor;
+  },
+): Promise<{ retainedComponents: string[]; skillReleases?: SkillSourceReleaseReceipt[] }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -573,10 +584,11 @@ export async function releasePackComponents(
             ),
           )
           .returning({ facetInstallationId: schema.capabilityComponentOwners.facetInstallationId });
-        await cleanupOrphanedCapabilityComponents(
+        const skillReleases = await cleanupOrphanedCapabilityComponents(
           tx,
           input.workspaceId,
           deletedOwners.map((row) => row.facetInstallationId),
+          input.skillActor,
         );
         await tx
           .delete(schema.packInstallationComponents)
@@ -587,6 +599,7 @@ export async function releasePackComponents(
             ),
           );
         return {
+          ...(skillReleases.length ? { skillReleases } : {}),
           retainedComponents: preview
             .filter((component) => component.retainedByOtherOwners)
             .map((component) => component.capabilityId),

@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8c565573aa4ad3688853993793a035192d98c9b1f79df77cd9652560f3fa5f3f"
+      "sha256": "9bbb2a039087284319c8b9635376ae62830eb767e5d70051cd5f45eb0b74e4b0"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -614,12 +614,6 @@
       "job": "package-contracts",
       "step": "Build React demo harness",
       "sha256": "70903471db4d7508f1e7e3e60e06259d1a936bc290469ed38f117692e45d548e"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "package-contracts",
-      "step": "Built embedding package exports",
-      "sha256": "e9fd69268d8d35f117eaf01cd4e99ab65e3d471dd58885c69b56f101760f246c"
     },
     {
       "workflow": ".github/workflows/ci.yml",

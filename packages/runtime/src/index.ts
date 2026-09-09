@@ -1,5 +1,7 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
+import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
+export { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
@@ -275,15 +277,13 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
-  builtinSkillIndex,
-  builtinSkillLoader,
-  BUILTIN_PROJECT_SKILL_SELECTION,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
 } from "./runtime-skills";
 export {
   composeRuntimeSkills,
+  loadNativeToolSkillArtifacts,
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
@@ -1875,6 +1875,10 @@ export type BuildAgentOptions = {
    * executable tool catalog.
    */
   skillActivations?: readonly RuntimeSkillActivation[];
+  /** Server-backed Skill descriptors, independent of sandbox capabilities. */
+  skillCatalog?: readonly SkillCatalogDescriptor[];
+  /** Shared reader serves configured Skills; filesystem discovery remains for repo Skills only. */
+  serverSkillReading?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -1963,7 +1967,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Use remember lane=preference for reusable conditional guidance (a Skill), lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
+    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Reusable conditional guidance belongs in Skills. Skill changes use the shared file lifecycle governed by Learning mode, not Knowledge evidence or confidence. Follow Skill management guidance only when it is present in the Skill index. Use remember lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2059,7 +2063,6 @@ export function inspectPersistentAgentInstructions(
       content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
-    { id: "builtin_skills", title: "Built-in skills", content: builtinSkillIndex() },
   ];
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
@@ -2086,9 +2089,13 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
+    if (options.skillCatalog)
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
+    if (options.skillCatalog)
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
       layers.push({
@@ -2430,7 +2437,6 @@ export function buildOpenGeniAgent(
           },
         });
   const agentTools = [
-    builtinSkillLoader(),
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
     ...(videoGenerationCapabilityTool ? [videoGenerationCapabilityTool] : []),
@@ -2498,7 +2504,6 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
-    agentSkillSelections.set(agent, [BUILTIN_PROJECT_SKILL_SELECTION]);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -2529,19 +2534,26 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
-    editableArtifacts: editableArtifactToolsAvailable,
-    // Sites guidance is bundled capability metadata, not eager tool authority.
-    // Tool discovery/execution remains governed by the lazy attempt gateway.
-    sites: (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
-    // A connected machine owns its filesystem, and its session deliberately
-    // does not materialize host-local lazy entries. Advertising this bundled
-    // skill there makes load_skill report a path that does not exist. Keep the
-    // executable tools (whose descriptions contain the full short workflow),
-    // but expose the filesystem-backed helper only where it can be delivered.
-    videoGeneration:
-      Boolean(options.videoGeneration) && options.activeSandboxBackend !== "selfhosted",
-  });
+  const skillComposition = composeRuntimeSkills(
+    options.serverSkillReading ? [] : (options.skillActivations ?? []),
+    {
+      editableArtifacts: !options.serverSkillReading && editableArtifactToolsAvailable,
+      // Sites guidance is bundled capability metadata, not eager tool authority.
+      // Tool discovery/execution remains governed by the lazy attempt gateway.
+      sites:
+        !options.serverSkillReading &&
+        (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
+      // A connected machine owns its filesystem, and its session deliberately
+      // does not materialize host-local lazy entries. Advertising this bundled
+      // skill there makes load_skill report a path that does not exist. Keep the
+      // executable tools (whose descriptions contain the full short workflow),
+      // but expose the filesystem-backed helper only where it can be delivered.
+      videoGeneration:
+        !options.serverSkillReading &&
+        Boolean(options.videoGeneration) &&
+        options.activeSandboxBackend !== "selfhosted",
+    },
+  );
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
@@ -2764,7 +2776,7 @@ type ApprovalCapableAgent = {
  * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
  * unprefixed tool name.
  *
- * CLONE SURVIVAL (mirrors `installCodexToolSearch`): the sandbox runtime
+ * CLONE SURVIVAL (also used by `installLazyToolRuntime`): the sandbox runtime
  * resolves tools not on the agent we build here but on a FRESH clone —
  * `prepareSandboxAgent` calls `agent.clone(...)`, and `SandboxAgent.clone`
  * reconstructs from a FIXED field list (name/tools/mcpServers/…), so an

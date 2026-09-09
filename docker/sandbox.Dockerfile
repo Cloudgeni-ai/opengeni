@@ -163,6 +163,7 @@ RUN set -eux; \
       cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
     done; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
+    cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \

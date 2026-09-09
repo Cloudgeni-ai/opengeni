@@ -8,6 +8,7 @@ export const MODEL_CONTEXT_TOOL_MAX_COUNT = 2_048;
 export const MODEL_CONTEXT_SKILL_MAX_COUNT = 1_024;
 
 export const ModelContextInstructionLayerId = z.enum([
+  "skill_catalog",
   "operational_contract",
   "persona_and_core",
   "workspace_governance",

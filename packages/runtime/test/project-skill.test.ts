@@ -1,55 +1,71 @@
 import { expect, test } from "bun:test";
-import { RunContext } from "@openai/agents";
 import { testSettings } from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
   effectiveSkillSelectionsForAgent,
   persistentAgentInstructionInspectionFor,
 } from "../src/index";
-import { builtinSkillLoader, composeRuntimeSkills } from "../src/runtime-skills";
+import { composeRuntimeSkills, loadNativeToolSkillArtifacts } from "../src/runtime-skills";
 
-test("every compute backend indexes and loads the project skill without a sandbox session", async () => {
+test("Projects guidance is a canonical packaged artifact, not sandbox materialization", async () => {
   const markdown = await Bun.file(
     new URL("../src/bundled_project_skills/opengeni-projects/SKILL.md", import.meta.url),
   ).text();
-  for (const sandboxBackend of ["none", "local", "docker", "modal", "selfhosted"] as const) {
-    const agent = buildOpenGeniAgent(
-      testSettings({ sandboxBackend, webSearchEnabled: false }),
-      [],
-      {
-        activeSandboxBackend: sandboxBackend,
-        ...(sandboxBackend === "selfhosted" ? { sandboxWorkspaceRoot: "/srv/project" } : {}),
-      },
-    );
-    const instructions = persistentAgentInstructionInspectionFor(agent).composed;
-    expect(instructions).toContain("opengeni-projects");
-    expect(instructions).toContain("load_builtin_skill");
-    expect(instructions).not.toContain("Projects are named, workspace-shared groups of sessions.");
-    expect(effectiveSkillSelectionsForAgent(agent).map((s) => s.name)).toContain(
-      "opengeni-projects",
-    );
-    const loader = agent.tools.find(
-      (t) => t.type === "function" && t.name === "load_builtin_skill",
-    );
-    if (!loader || loader.type !== "function") throw new Error("Missing built-in skill loader");
-    expect(
-      await loader.invoke(new RunContext(), JSON.stringify({ skill_name: "opengeni-projects" })),
-    ).toBe(markdown);
-  }
+  const [artifact] = loadNativeToolSkillArtifacts({
+    projects: true,
+    editableArtifacts: false,
+    videoGeneration: false,
+  });
+  expect(artifact?.name).toBe("opengeni-projects");
+  expect(artifact?.files).toEqual([{ path: "SKILL.md", content: markdown }]);
+  const composition = composeRuntimeSkills([]);
+  expect(composition.nativeToolNames).not.toContain("opengeni-projects");
+  expect(composition.selections).toEqual([]);
+  expect(composition.lazySource.getIndex!({ extraPathGrants: [] } as never, ".agents")).toEqual([]);
 });
 
-test("built-in skills stay outside sandbox materialization and reject arbitrary names", async () => {
-  const composition = composeRuntimeSkills([]);
-  expect(composition.nativeToolNames).toContain("opengeni-projects");
-  expect(
-    composition.lazySource.getIndex!({ extraPathGrants: [] } as never, ".agents").map(
-      (s) => s.name,
-    ),
-  ).not.toContain("opengeni-projects");
-  const loader = builtinSkillLoader();
-  const result = await loader.invoke(
-    new RunContext(),
-    JSON.stringify({ skill_name: "../../secrets" }),
-  );
-  expect(result).not.toContain("Projects are named, workspace-shared groups of sessions.");
+test("every compute backend inspects only selected Project descriptors with no eager loader", () => {
+  const [artifact] = loadNativeToolSkillArtifacts({
+    projects: true,
+    editableArtifacts: false,
+    videoGeneration: false,
+  });
+  if (!artifact) throw new Error("Missing Projects artifact");
+  for (const sandboxBackend of ["none", "local", "docker", "modal", "selfhosted"] as const) {
+    for (const selected of [false, true]) {
+      const agent = buildOpenGeniAgent(
+        testSettings({ sandboxBackend, webSearchEnabled: false }),
+        [],
+        {
+          activeSandboxBackend: sandboxBackend,
+          ...(sandboxBackend === "selfhosted" ? { sandboxWorkspaceRoot: "/srv/project" } : {}),
+          skillCatalog: selected
+            ? [
+                {
+                  id: "builtin:opengeni-projects",
+                  name: artifact.name,
+                  description: artifact.description!,
+                },
+              ]
+            : [],
+        },
+      );
+      const inspection = persistentAgentInstructionInspectionFor(agent);
+      expect(inspection.composed.includes("opengeni-projects")).toBe(selected);
+      expect(inspection.layers.some((layer) => layer.id === "builtin_skills")).toBe(false);
+      expect(inspection.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain(
+        "skill_read",
+      );
+      expect(inspection.composed).not.toContain(
+        "Projects are named, workspace-shared groups of sessions.",
+      );
+      expect(inspection.composed).not.toContain("load_builtin_skill");
+      expect(
+        agent.tools.some((tool) => tool.type === "function" && tool.name === "load_builtin_skill"),
+      ).toBe(false);
+      expect(effectiveSkillSelectionsForAgent(agent).map((skill) => skill.id)).not.toContain(
+        "native-tool:opengeni-projects",
+      );
+    }
+  }
 });

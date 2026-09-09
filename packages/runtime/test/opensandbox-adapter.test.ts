@@ -38,6 +38,7 @@ class FakeOpenSandbox {
   resolveCommand: (() => void) | null = null;
   commandFailureAfterInit: Error | null = null;
   signedEndpointError: Error | null = null;
+  filesystemReadError: Error | null = null;
   commandStatus = { running: false, exitCode: 0, content: "" };
   lifecycleRequestTimeoutSeconds: number | null = null;
   reportedImage = IMAGE;
@@ -185,6 +186,7 @@ class FakeOpenSandbox {
         return [];
       },
       async listDirectory({ path }: { path: string }) {
+        if (self.filesystemReadError) throw self.filesystemReadError;
         const prefix = path.endsWith("/") ? path : `${path}/`;
         return [...self.files.entries()]
           .filter(
@@ -226,6 +228,7 @@ class FakeOpenSandbox {
         return new TextDecoder().decode(self.files.get(path)?.data ?? new Uint8Array());
       },
       async readBytes(path: string, options?: { limit?: number }) {
+        if (self.filesystemReadError) throw self.filesystemReadError;
         const bytes = self.files.get(path)?.data ?? new Uint8Array();
         return options?.limit === undefined
           ? Uint8Array.from(bytes)
@@ -592,6 +595,26 @@ describe("OpenSandbox adapter", () => {
     expect(settled).toContain("Process exited with code 17");
     expect(session.hasRetainedProcess(sessionId)).toBe(false);
     expect(fake.calls.filter((call) => call === "command:run")).toHaveLength(1);
+  });
+
+  test("filesystem absence is typed only while the exact provider exists", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    await session.listDir({ path: "." });
+    fake.filesystemReadError = new SandboxApiException({ message: "missing", statusCode: 404 });
+    for (const read of [
+      () => session.listDir({ path: ".agents/skills" }),
+      () => session.readFile({ path: "SKILL.md" }),
+    ]) {
+      await expect(read()).rejects.toMatchObject({ name: "SandboxWorkspaceReadNotFoundError" });
+    }
+    fake.sandboxExists = false;
+    await expect(session.listDir({ path: ".agents/skills" })).rejects.toBeInstanceOf(
+      SandboxApiException,
+    );
+    await expect(session.readFile({ path: "SKILL.md" })).rejects.toBeInstanceOf(
+      SandboxApiException,
+    );
   });
 
   test("files and ports stay inside the declared workspace/private roots", async () => {

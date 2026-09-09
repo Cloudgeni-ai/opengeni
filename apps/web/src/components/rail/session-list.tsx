@@ -194,6 +194,7 @@ import {
   authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
   commitSessionBranchPage,
+  readLoadedSessionBranchWindow,
   failSessionBranchRequest,
   sessionBranchNeedsHydration,
   sessionBranchSummaryKey,
@@ -1715,7 +1716,10 @@ export function SessionList() {
       if (!branchSummaryKeys.current.has(parentSessionId)) {
         const parent = branchParentsById.current.get(parentSessionId);
         if (parent) {
-          branchSummaryKeys.current.set(parentSessionId, sessionBranchSummaryKey(parent));
+          branchSummaryKeys.current.set(
+            parentSessionId,
+            sessionBranchSummaryKey(parent, rootReadRevision),
+          );
         }
       }
       childRequestSequence.current += 1;
@@ -1727,23 +1731,31 @@ export function SessionList() {
       );
       try {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
-        const page = await context.client.listSessionPage(rail.workspaceId, {
-          limit: 50,
-          parentSessionId,
-          ...(cursor ? { cursor } : {}),
-          archivedOnly: false,
-        });
+        const page = await readLoadedSessionBranchWindow(
+          (pageCursor) =>
+            context.client.listSessionPage(rail.workspaceId, {
+              limit: 50,
+              parentSessionId,
+              ...(pageCursor ? { cursor: pageCursor } : {}),
+              archivedOnly: false,
+            }),
+          cursor === undefined
+            ? Math.max(50, childPagesRef.current.get(parentSessionId)?.channelGenerations.size ?? 0)
+            : 1,
+          cursor,
+        );
         if (childLoadEpoch.current !== epoch) return;
         setChildPages((current) =>
           commitSessionBranchPage(
             current,
             parentSessionId,
             {
-              sessions: [...page.sessions, ...page.pinned],
+              sessions: page.sessions,
               nextCursor: page.nextCursor,
             },
             {
               append: cursor !== undefined,
+              replaceWindow: cursor === undefined,
               preserve: options.preserve,
               requestId,
               readGeneration,
@@ -1755,7 +1767,7 @@ export function SessionList() {
         setChildPages((current) => failSessionBranchRequest(current, parentSessionId, requestId));
       }
     },
-    [context.client, context.sessionChannelProjectionAuthority, rail.workspaceId],
+    [context.client, context.sessionChannelProjectionAuthority, rail.workspaceId, rootReadRevision],
   );
   // The active route supplies exact child + ancestor detail even before the
   // lazy branch query catches up. Commit that projection into the branch cache
@@ -1807,6 +1819,7 @@ export function SessionList() {
   ]);
 
   // Root pages are polled server truth and carry bounded descendant summaries.
+  // Accepted root reads also refresh observation-only changes in loaded branches.
   // When a loaded branch's summary changes (notably directChildren after an
   // orchestrator spawn), refresh that exact branch instead of retaining its old
   // child list forever. This preserves root-only pagination and lazy hierarchy
@@ -1821,7 +1834,7 @@ export function SessionList() {
     for (const [parentId, page] of childPages) {
       const parent = parentsById.get(parentId);
       if (!parent) continue;
-      const nextKey = sessionBranchSummaryKey(parent);
+      const nextKey = sessionBranchSummaryKey(parent, rootReadRevision);
       const previousKey = branchSummaryKeys.current.get(parentId);
       const decision = sessionBranchSummaryDecision({
         previousKey,
@@ -1832,7 +1845,10 @@ export function SessionList() {
       });
       if (decision.acknowledge) branchSummaryKeys.current.set(parentId, nextKey);
       if (decision.refresh) {
-        void loadChildPage(parentId, undefined, { feedbackVisible: false });
+        void loadChildPage(parentId, undefined, {
+          feedbackVisible: false,
+          preserve: context.session?.parentSessionId === parentId ? [context.session] : undefined,
+        });
       } else if (decision.markStale) newlyStale.add(parentId);
     }
     if (newlyStale.size > 0) {
@@ -1845,7 +1861,7 @@ export function SessionList() {
         return next;
       });
     }
-  }, [allSessions, childPages, expanded, loadChildPage]);
+  }, [allSessions, childPages, context.session, expanded, loadChildPage, rootReadRevision]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);

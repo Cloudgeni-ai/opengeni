@@ -147,6 +147,20 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
         role: "admin",
       }),
     ]);
+    // This fixture holds 0433 while exercising the current deletion adapter.
+    // Supply its FK timing contract without replaying the Skill cutover or
+    // changing the 0398 authorization/replay behavior under test.
+    await admin.unsafe(`
+      ALTER TABLE preference_registry_preferences
+        ALTER CONSTRAINT preference_registry_preferences_superseded_by_fk DEFERRABLE INITIALLY DEFERRED,
+        ALTER CONSTRAINT preference_registry_preferences_active_revision_fk DEFERRABLE INITIALLY DEFERRED;
+      ALTER TABLE preference_registry_revisions
+        ALTER CONSTRAINT preference_registry_revisions_corrects_revision_id_fkey DEFERRABLE INITIALLY DEFERRED;
+      ALTER TABLE preference_registry_events
+        ALTER CONSTRAINT preference_registry_events_related_fk DEFERRABLE INITIALLY DEFERRED,
+        ALTER CONSTRAINT preference_registry_events_old_revision_fk DEFERRABLE INITIALLY DEFERRED,
+        ALTER CONSTRAINT preference_registry_events_new_revision_fk DEFERRABLE INITIALLY DEFERRED;
+    `);
     expect(
       await deleteWorkspaceIfQuiescent(client.db, {
         accountId: membership!.organizationId,

@@ -1000,7 +1000,6 @@ describe("contracts", () => {
           ],
         },
         {
-          name: "RELEASE",
           files: [
             {
               path: "SKILL.md",
@@ -1023,11 +1022,21 @@ describe("contracts", () => {
         skills: [
           {
             name: "release",
-            files: [{ path: "SKILL.md", content: "# One\n" }],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# One\n",
+              },
+            ],
           },
           {
-            name: "RELEASE",
-            files: [{ path: "SKILL.md", content: "# Two\n" }],
+            name: "release",
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# Two\n",
+              },
+            ],
           },
         ],
       }),

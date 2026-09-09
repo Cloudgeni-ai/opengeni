@@ -50,6 +50,9 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  // Two cold demo navigations and real accessibility scans need the same
+  // explicit browser-test budget as the adjacent resize journey, not Bun's
+  // default five seconds (baseline CI already measures this case near four).
   test("conversation paints a matched surface on light hosts in both themes", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -81,7 +84,7 @@ describe("container-responsive public composer demo", () => {
     } finally {
       await context.close();
     }
-  });
+  }, 30_000);
 
   test("desktop measurement does not widen the document after a mobile resize", async () => {
     const context = await browser.newContext({

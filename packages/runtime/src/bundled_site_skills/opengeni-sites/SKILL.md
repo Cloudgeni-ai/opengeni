@@ -42,15 +42,13 @@ bun build --compile --target=browser ./index.html --outdir=dist
 ```
 
 Install OpenGeni packages from the npm registry using the exact versions in
-`package-versions.json` beside this skill. Do not use `latest`, `canary`, or
-version ranges. First check for the local-development exception below.
-Otherwise, from the project directory:
-
-```bash
-bun add --exact $(bun -e 'const pins=await Bun.file("/workspace/.agents/opengeni-sites/package-versions.json").json(); console.log(Object.entries(pins).map(([name,version])=>name+"@"+version).join(" "))')
-```
-
-Use the skill's actual location if different. Keep these exact dependencies
+this Skill's `package-versions.json`. With `skill_read`, request
+`{"skill":"opengeni-sites","paths":["package-versions.json"]}` and use the
+returned package/version pairs in `bun add --exact package@version ...`.
+Reading a Skill does not create local files: do not assume a `/workspace/.agents`
+path exists. If this Skill is already checked out, read the file at its actual
+location instead. Do not use `latest`, `canary`, or version ranges. First check
+for the local-development exception below. Keep these exact dependencies
 in saved source. Missing expected exports indicate a package mismatch, not a
 reason to replace the standard conversation component with custom wiring.
 The pins include `@opengeni/ogtool`. Run `bun run ogtool ...` from this

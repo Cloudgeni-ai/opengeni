@@ -336,7 +336,12 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       skills: [
         {
           name: "release",
-          files: [{ path: "SKILL.md", content: "# Release\n" }],
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: release\ndescription: Prepare a release.\n---\n# Release\n",
+            },
+          ],
         },
       ],
       mcpServers: [
@@ -510,7 +515,12 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         skills: [
           {
             name: "release",
-            files: [{ path: "SKILL.md", content: "# Release\n" }],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# Release\n",
+              },
+            ],
           },
         ],
       },

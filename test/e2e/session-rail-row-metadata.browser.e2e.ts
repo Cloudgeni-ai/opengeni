@@ -52,7 +52,10 @@ describe("Session rail row metadata in Chromium", () => {
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 850 });
       await page.reload({ waitUntil: "networkidle" });
-      expect(await preview.innerText()).toContain("Continues automatically");
+      expect(await preview.innerText()).toContain("Checks again at");
+      expect(await preview.locator("header").innerText()).not.toContain("recheck");
+      expect(await preview.locator("header [data-session-wait-badge]").innerText()).toBe("Waiting");
+      expect(await preview.locator("[data-session-wait-status]").count()).toBe(1);
       expect(await page.getByTestId("waiting-row").innerText()).toContain("Waiting · ");
       expect(await preview.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
       await page.screenshot({ path: `/tmp/opengeni-wait-status-${width}.png`, fullPage: true });
@@ -60,12 +63,14 @@ describe("Session rail row metadata in Chromium", () => {
       await page.waitForFunction(() =>
         document
           .querySelector('[data-testid="wait-preview"]')
-          ?.textContent?.includes("The scheduled recheck is due"),
+          ?.textContent?.includes("Recheck due · waiting to resume"),
       );
       expect(await page.getByTestId("waiting-row").innerText()).toContain("Recheck due");
       await page.getByRole("button", { name: "Complete work", exact: true }).click();
       expect(await preview.innerText()).not.toContain("Waiting ·");
-      expect(await preview.innerText()).not.toContain("Continues automatically");
+      expect(await preview.innerText()).not.toContain("Checks again at");
+      expect(await preview.locator("[data-session-wait-status]").count()).toBe(0);
+      expect(await preview.locator("[data-session-wait-badge]").count()).toBe(0);
     }
     await page.setViewportSize({ width: 1280, height: 800 });
   });

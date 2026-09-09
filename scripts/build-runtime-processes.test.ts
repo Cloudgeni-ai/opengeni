@@ -22,6 +22,7 @@ test("production process bundles retain every runtime skill asset directory", as
       "bundled_project_skills",
       "bundled_site_skills",
       "bundled_video_skills",
+      "bundled_management_skills",
     ]);
     for (const [directoryName, skillName] of [
       ["curated_skill_library", "azure-verified-modules"],
@@ -29,6 +30,7 @@ test("production process bundles retain every runtime skill asset directory", as
       ["bundled_project_skills", "opengeni-projects"],
       ["bundled_site_skills", "opengeni-sites"],
       ["bundled_video_skills", "opengeni-video-generation"],
+      ["bundled_management_skills", "opengeni-skills"],
     ] as const) {
       const skill = await readFile(
         join(outdir, "assets", "runtime", directoryName, skillName, "SKILL.md"),

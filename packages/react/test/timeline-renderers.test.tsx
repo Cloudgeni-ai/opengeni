@@ -1321,6 +1321,9 @@ describe("MessageTimeline — settled turn folding", () => {
       r.container.querySelectorAll('[data-og-recorded-outcome="wait"]'),
     ).find((element) => element.textContent?.includes(`Waiting: ${reason}`));
     expect(visibleOutcome).not.toBeUndefined();
+    expect(visibleOutcome?.tagName).toBe("DETAILS");
+    expect(visibleOutcome?.hasAttribute("open")).toBe(false);
+    expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
     expect(visibleOutcome?.getAttribute("role")).toBe("note");
     expect(visibleOutcome?.textContent).toContain("Wait recorded");
     expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
@@ -2559,6 +2562,27 @@ describe("SandboxRow — failed chip", () => {
 });
 
 describe("StartupPhaseRow", () => {
+  test("names a sandbox rotation wait", async () => {
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rotation-wait",
+      turnId: "turn-rotation",
+      phase: "sandbox",
+      status: "cancelled",
+      blockedReason: "rotation_in_progress",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1000).toISOString(),
+      durationMs: 1000,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    expect(r.container.textContent ?? "").toContain("Waiting for sandbox rotation");
+    expect(r.container.textContent ?? "").not.toContain("Sandbox startup interrupted");
+    await r.unmount();
+  });
+
   test("shows the settled phase duration and truthful sandbox origin", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",

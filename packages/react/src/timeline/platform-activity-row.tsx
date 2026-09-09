@@ -65,7 +65,10 @@ export default function PlatformActivityRow({
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
-    title: startupPhaseTitle(item.phase, item.status, item.outcome),
+    title:
+      item.blockedReason === "rotation_in_progress"
+        ? "Waiting for sandbox rotation"
+        : startupPhaseTitle(item.phase, item.status, item.outcome),
     preview:
       item.phase === "model_preparation"
         ? "Includes overlapping sandbox, rig, repository, and runtime setup shown below."

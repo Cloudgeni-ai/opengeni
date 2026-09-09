@@ -82,6 +82,10 @@ snapshot. Private work additionally requires the exact initiating human.
 
 ## Allocation, pins, and leases
 
+Disconnecting a workspace or personal credential clears its session pin and pin
+source atomically before deletion. Pin versions advance to reject stale edits;
+unrelated account pins remain unchanged.
+
 One rotation row serializes each organization, workspace, or exact-user pool. Credentials have
 separate health and allocator state: `status=active` is credential health, while
 `allocator_enabled` controls only new selection. Reconnect and refresh restore

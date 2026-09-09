@@ -1,5 +1,6 @@
 import {
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_ATTACHMENT_CATALOG_MARKER,
   FileResourceRef,
   resourceMountPath,
   type FileAsset,
@@ -134,6 +135,20 @@ async function measureHistoryPreparationPhase<T>(
 }
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// Raw-byte allowance; base64 and request serialization add memory overhead.
+// This is transport admission, never an instruction to rewrite old messages.
+export const MAX_RETAINED_MODEL_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+
+export class RetainedAttachmentTransportLimitError extends Error {
+  constructor() {
+    super(
+      "Active uploaded images exceed the 64 MiB inline transport limit. " +
+        "History was preserved and no new image bytes were downloaded. " +
+        "Start a smaller conversation or fork before the image-heavy messages.",
+    );
+    this.name = "RetainedAttachmentTransportLimitError";
+  }
+}
 
 export type ModelAttachmentContent = {
   kind: "image" | "file";
@@ -202,13 +217,16 @@ function modelAttachmentDescriptor(
 export async function modelAttachmentContentForFiles(
   files: FileAsset[],
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
+  options: { retainAll?: boolean } = {},
 ): Promise<ModelAttachmentContent[]> {
   const selected: Array<{
     file: FileAsset;
     descriptor: Pick<ModelAttachmentContent, "kind" | "contentType">;
     checksum: string;
   }> = [];
-  let remainingBytes = MAX_INLINE_MODEL_ATTACHMENT_BYTES;
+  let remainingBytes = options.retainAll
+    ? Number.POSITIVE_INFINITY
+    : MAX_INLINE_MODEL_ATTACHMENT_BYTES;
   for (const file of files) {
     const descriptor = modelAttachmentDescriptor(file.contentType);
     const checksum = file.sha256?.trim().toLowerCase() ?? "";
@@ -216,6 +234,7 @@ export async function modelAttachmentContentForFiles(
       file.status !== "ready" ||
       !descriptor ||
       descriptor.kind !== "image" ||
+      file.sizeBytes > MAX_INLINE_MODEL_ATTACHMENT_BYTES ||
       file.sizeBytes > remainingBytes ||
       !/^[a-f0-9]{64}$/.test(checksum)
     ) {
@@ -301,19 +320,26 @@ function attachmentReceiptText(ref: FileResourceRef, file: FileAsset | undefined
 }
 
 /**
- * Build one turn-scoped durable-attachment projector. Current attachment
- * metadata arrives already authorized; bytes are memoized for same-turn retry.
- * Historical projection has no database or object-storage path.
+ * Build one turn-scoped durable-attachment projector. Resolve active refs under
+ * current file authority and memoize metadata/bytes for retries and compaction.
+ * A turn boundary never changes an authorized attachment's representation.
  */
 export function createModelHistoryAttachmentProjector(
   policy: ModelAttachmentInputPolicy,
   readFileBytes?: (file: FileAsset) => Promise<Uint8Array>,
+  loadAuthorizedFiles?: (fileIds: readonly string[]) => Promise<readonly FileAsset[]>,
 ): ModelHistoryAttachmentProjector {
   const contentById = new Map<string, ModelAttachmentContent>();
   const attemptedContentIds = new Set<string>();
+  const fileById = new Map<string, FileAsset>();
+  const resolvedFileIds = new Set<string>();
+  const retainedByteSizes = new Map<string, number>();
 
   return async (items, options = {}) => {
-    const currentFileById = new Map((options.inlineFiles ?? []).map((file) => [file.id, file]));
+    for (const file of options.inlineFiles ?? []) {
+      fileById.set(file.id, file);
+      resolvedFileIds.add(file.id);
+    }
     const refsByIndex = new Map<number, FileResourceRef[]>();
     const orderedFileIds: string[] = [];
     const seenFileIds = new Set<string>();
@@ -322,27 +348,76 @@ export function createModelHistoryAttachmentProjector(
       if (refs.length === 0) continue;
       refsByIndex.set(index, refs);
       for (const ref of refs) {
-        if (seenFileIds.has(ref.fileId)) continue;
+        if (items[index]![MODEL_ATTACHMENT_CATALOG_MARKER] === true || seenFileIds.has(ref.fileId))
+          continue;
         seenFileIds.add(ref.fileId);
         orderedFileIds.push(ref.fileId);
       }
     }
     if (refsByIndex.size === 0) return items;
+    const unresolved = orderedFileIds.filter((id) => !resolvedFileIds.has(id));
+    if (loadAuthorizedFiles && unresolved.length > 0) {
+      const files = await loadAuthorizedFiles(unresolved);
+      for (const file of files) fileById.set(file.id, file);
+      for (const id of unresolved) resolvedFileIds.add(id);
+    }
 
     if (readFileBytes) {
-      // Only the triggering message's attachments cross the provider byte
-      // boundary. Historical messages retain compact durable receipts and can
-      // recover bytes explicitly through the existing Files MCP + shell path.
+      const admitted = new Map(retainedByteSizes);
+      let requestImageBytes = 0;
+      for (const [index, refs] of refsByIndex) {
+        if (items[index]![MODEL_ATTACHMENT_CATALOG_MARKER] === true) continue;
+        for (const ref of refs) {
+          const file = fileById.get(ref.fileId);
+          if (
+            !file ||
+            !policy.supportsImageInput ||
+            file.status !== "ready" ||
+            file.sizeBytes > MAX_INLINE_MODEL_ATTACHMENT_BYTES ||
+            modelAttachmentDescriptor(file.contentType)?.kind !== "image" ||
+            !/^[a-f0-9]{64}$/i.test(file.sha256?.trim() ?? "")
+          )
+            continue;
+          // Repeated references share cached bytes but repeat in the wire body.
+          requestImageBytes += file.sizeBytes;
+          admitted.set(file.id, file.sizeBytes);
+        }
+      }
+      const turnImageBytes = [...admitted.values()].reduce((sum, bytes) => sum + bytes, 0);
+      if (
+        requestImageBytes > MAX_RETAINED_MODEL_ATTACHMENT_BYTES ||
+        turnImageBytes > MAX_RETAINED_MODEL_ATTACHMENT_BYTES
+      ) {
+        throw new RetainedAttachmentTransportLimitError();
+      }
+      for (const [id, bytes] of admitted) retainedByteSizes.set(id, bytes);
+      // Every active attachment uses the same authorized projection. Metadata
+      // and bytes are resolved once per turn, including compaction and retries.
       const readable = [...orderedFileIds]
         .reverse()
-        .map((id) => currentFileById.get(id))
+        .map((id) => fileById.get(id))
         .filter((file): file is FileAsset => {
           if (!file || attemptedContentIds.has(file.id)) return false;
           const descriptor = modelAttachmentDescriptor(file.contentType);
           return Boolean(descriptor && descriptor.kind === "image" && policy.supportsImageInput);
         });
       for (const file of readable) attemptedContentIds.add(file.id);
-      const content = await modelAttachmentContentForFiles(readable, readFileBytes);
+      const content = await modelAttachmentContentForFiles(readable, readFileBytes, {
+        retainAll: true,
+      });
+      const loadedIds = new Set(content.map((entry) => entry.fileId));
+      for (const file of readable) {
+        if (
+          file.status === "ready" &&
+          file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES &&
+          /^[a-f0-9]{64}$/i.test(file.sha256 ?? "") &&
+          !loadedIds.has(file.id)
+        ) {
+          // Do not let a retry silently proceed with pixels removed.
+          for (const candidate of readable) attemptedContentIds.delete(candidate.id);
+          throw new Error(`Retained attachment bytes unavailable or invalid: ${file.id}`);
+        }
+      }
       for (const attachment of content) contentById.set(attachment.fileId, attachment);
     }
 
@@ -353,7 +428,8 @@ export function createModelHistoryAttachmentProjector(
         ? [...original.content]
         : [{ type: "input_text", text: String(original.content ?? "") }];
       const attachmentParts = refs.flatMap((ref) => {
-        const currentFile = currentFileById.get(ref.fileId);
+        const currentFile =
+          original[MODEL_ATTACHMENT_CATALOG_MARKER] === true ? undefined : fileById.get(ref.fileId);
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
         const receipt = {
           type: "input_text",

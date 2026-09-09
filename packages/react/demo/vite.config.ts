@@ -57,6 +57,7 @@ export default defineConfig({
       input: timelineScrollTestBuild
         ? {
             timelineScrollTest: resolve(__dirname, "timeline-scroll-test.html"),
+            timelineTableTest: resolve(__dirname, "timeline-table-test.html"),
             timelineScrollMergeTest: resolve(__dirname, "timeline-scroll-merge-test.html"),
             timelineCollapsedHistoryTest: resolve(
               __dirname,
