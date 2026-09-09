@@ -52,6 +52,8 @@ const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "guard_workspace_owned_skill_head_delete()",
+  "guard_workspace_owned_skill_history_delete()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -3336,6 +3338,17 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      [
+        "guard_workspace_owned_skill_head_delete()",
+        "guard_workspace_owned_skill_history_delete()",
+      ].includes(routine.name) &&
+      (routine.execute || routine.publicExecute)
+    ) {
+      violations.push(
+        `runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard ${routine.name}`,
+      );
+    }
     if (!routine.execute && !ownerInternalRoutine) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
