@@ -30,6 +30,8 @@ export type UseSessionEventsResult = {
   timeline: TimelineItem[];
   /** Latest session status observed in the event log, if any. */
   sessionStatus: SessionStatus | null;
+  /** Sequence of the retained status projection, including events evicted from the window. */
+  sessionStatusSequence?: number;
   connectionState: SessionEventsConnectionState;
   /** Highest sequence seen so far (0 before the first event). */
   lastSequence: number;
@@ -554,7 +556,7 @@ export function useSessionEvents(
 
   const loadOlder = useCallback(
     (): OlderHistoryLoadReceipt =>
-      createOlderHistoryLoadReceipt(async (markCommitted) => {
+      createOlderHistoryLoadReceipt(async (markCommitted, preserveTail, markTailPreserved) => {
         if (!sessionId || navigationBusy() || !hasOlderRef.current) {
           return false;
         }
@@ -590,11 +592,17 @@ export function useSessionEvents(
           // Freeze the live iterator before replacing its in-memory window. Rows
           // pending in the aborted iterator were never cursor-committed and will
           // be replayed from the retained high-water mark below.
-          streamAbortRef.current?.abort();
-          const status = observeSessionStatus(window.events, sessionStatusRef);
           const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
             direction: "oldest",
           });
+          if (preserveTail && maxResumeSequence(next.events) < maxResumeSequence(current.events)) {
+            // Automatic viewport filling must not navigate away from the
+            // reader's retained tail. Explicit history navigation may do so.
+            markTailPreserved();
+            return false;
+          }
+          streamAbortRef.current?.abort();
+          const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = {
             ...next,
             truncated: current.truncated || next.truncated,
@@ -875,6 +883,7 @@ export function useSessionEvents(
     events: visibleEvents,
     timeline,
     sessionStatus: identityMatches ? sessionStatusProjection : null,
+    sessionStatusSequence: identityMatches ? sessionStatusRef.current.sequence : 0,
     connectionState: identityMatches ? connectionState : "idle",
     lastSequence: identityMatches ? lastSequenceRef.current : after,
     windowBytes: identityMatches ? eventWindow.bytes : 2,

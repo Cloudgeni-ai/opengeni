@@ -6,7 +6,7 @@ import type {
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -28,7 +28,9 @@ export type WakeSessionWorkflowSignal = (input: {
   workflowId: string;
   wakeRevision: number;
   interruptionRequested?: boolean;
-}) => Promise<void>;
+  /** Called after transport acceptance, before the fallible durable ACK. */
+  onSignalAccepted?: () => void;
+}) => Promise<SessionWorkflowWakeDeliveryResult | void>;
 
 export type SignalCodexCapacityWorkflow = (input: {
   accountId: string;

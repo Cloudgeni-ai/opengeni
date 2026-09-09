@@ -1,8 +1,9 @@
 import {
   AutomationAcceptedExecution,
+  StoredAutomationAcceptedExecution,
   AutomationNormalizedEvent,
-  AutomationSessionTemplate,
-  CapabilityPack,
+  StoredAutomationSessionTemplate,
+  StoredCapabilityPack,
   stableJson,
   type AutomationRun,
   type AutomationSource,
@@ -271,7 +272,7 @@ export async function createAutomationTrigger(
             )
             .limit(1);
           const manifest = installation?.manifestSnapshot
-            ? CapabilityPack.safeParse(installation.manifestSnapshot)
+            ? StoredCapabilityPack.safeParse(installation.manifestSnapshot)
             : null;
           if (!installation || installation.status !== "active" || !manifest?.success) {
             throw new Error("Automation Pack installation is not active");
@@ -862,7 +863,7 @@ function mapTrigger(
     eventTypes: revision.eventTypes,
     configuration: revision.configuration,
     parameters: revision.parameters,
-    sessionTemplate: AutomationSessionTemplate.parse(revision.sessionTemplate),
+    sessionTemplate: StoredAutomationSessionTemplate.parse(revision.sessionTemplate),
     status: head.status as AutomationTrigger["status"],
     revision: revisionNumber,
     packInstallationId: head.packInstallationId,
@@ -914,6 +915,6 @@ function mapRun(row: RunRow): AutomationRun {
 function mapRunExecution(row: RunRow): AutomationRunExecution {
   return {
     ...mapRun(row),
-    acceptedExecution: AutomationAcceptedExecution.parse(row.acceptedExecution),
+    acceptedExecution: StoredAutomationAcceptedExecution.parse(row.acceptedExecution),
   };
 }

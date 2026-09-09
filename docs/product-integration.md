@@ -31,6 +31,106 @@ When a create uses an idempotency key, its ordered `installedSkillIds`
 selection is immutable: a retry may repeat it exactly, but changing or removing
 the selection conflicts instead of replaying a differently configured session.
 
+## Simplest integration
+
+Install the packages, keep the organization API key on your server, and put one
+handler behind your existing chat endpoint:
+
+```bash
+bun add @opengeni/sdk @opengeni/react
+```
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!, // organization API key
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
+
+// Your endpoint. `resolve` is your auth hook: tenant and user come from the
+// request you authenticated, never from the request body.
+export const POST = createChatHandler(og, {
+  resolve: async (request) => {
+    const me = await authenticate(request);
+    if (!me) return new Response("Unauthorized", { status: 401 });
+    return { tenant: me.accountId, user: me.userId };
+  },
+});
+```
+
+Or drive it from any server code:
+
+```ts
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+const reply = await chat.send("What did we decide about the invoice?");
+console.log(reply.text);
+for await (const chunk of chat.stream("And the next step?")) {
+  if (chunk.type === "text") process.stdout.write(chunk.text);
+}
+```
+
+`tenant` becomes one organization workspace, created idempotently on first use
+through `ensureWorkspace`; `conversation` becomes one deterministic session; and
+`send` or `stream` creates that session on the first message. Conversation ids
+are namespaced per `user`: the handler reads the client's conversation id (the
+`x-opengeni-conversation` header, else the wire format's own field) and scopes
+it to the user `resolve` returned, so one user cannot continue another user's
+chat by guessing its id. Without a `user`, the host must name the
+`conversation` from `resolve`. A custom browser client can restore
+history and unresolved approvals/questions with `GET` on the same endpoint.
+There is no dedicated React component for this simplified protocol. If the product already uses the
+Vercel AI SDK, pass `format: "vercel"` and keep `useChat` unchanged; for an
+OpenAI-shaped client pass `format: "openai-chat"` or
+`format: "openai-responses"`. These adapters send only the latest user message
+and import the earlier messages in the request once, as context on the first
+message of a conversation; after that OpenGeni owns the history. The runnable
+[chat quickstart example](../examples/chat-quickstart) is this section as one
+backend server file with a command-line request example.
+
+### Pick the privacy and memory of each chat
+
+Every chat lives in the customer's one workspace, so all of them share that
+customer's documents, workspace instructions, Connections, and integrations.
+Two per-session options decide what the agent may reach beyond its own
+conversation:
+
+| Scenario | `agentAccess` | `memory` |
+| --- | --- | --- |
+| Support desk: every chat isolated | `"session"` (facade default) | `"session"` (default) |
+| One customer, several users, private from each other | `"user"` plus a `user` label | `"user"` |
+| A team that collaborates across chats | `"workspace"` | `"workspace"` |
+| Any of the above without Memory tools | any | `false` |
+
+`agentAccess` is enforced for agents in the single session-authorization seam:
+a session's own tree (its children and their children) is always reachable,
+peers are reachable only when both sides allow it, and the most restrictive side
+wins. `memory` selects which Memory rows the agent reads and where it saves:
+session-scoped memories stay with that conversation tree, user-scoped memories
+follow the `user` label across that user's chats, and both layer on top of
+workspace memory. `user` is an opaque label owned by your product: it scopes
+memory and filters lists (`og.sessions.list({ tenant, user })`); it is not an
+OpenGeni login and grants no authority. Children inherit all three values and
+may only narrow them. On the raw API these are `CreateSessionRequest.agentAccess`,
+`endUser: { source, id }`, and `memoryScope`; the platform default for a raw
+create stays `agentAccess: "workspace"`.
+
+Human visibility is a separate axis: these sessions stay `workspace_shared` for
+the console and for the organization API key, so an operator or a read-only
+organization key can still read every transcript (see
+[Choose the credential boundary](#choose-the-credential-boundary)).
+
+### When to graduate to the full client
+
+`og.client` is the ordinary `OpenGeniClient`, and `chat.sessionId` with
+`chat.workspaceId` name the session the facade created, so files, tools,
+approvals with policies, forks, realtime voice, and `SessionConversation` all
+work on the same session without a migration. Pass anything the facade does not
+name through `create` (a partial `CreateSessionRequest`); identity and
+idempotency fields always come from the facade. A turn that stops for an
+approval or structured human input returns a `pending` reply, and
+`chat.respond` continues it.
+
 ## Boundary and ownership
 
 ```text
@@ -63,37 +163,40 @@ OpenGeni API credential.
 
 ## Choose the isolation unit first
 
-Do not automatically equate one product tenant with one OpenGeni workspace.
-Choose the workspace from the product's sharing rule:
+The workspace is the unit that shares documents, workspace instructions,
+Connections, and integrations. Session isolation inside it is a per-session
+setting, so the default is one workspace per customer:
 
 | Product rule | Default OpenGeni mapping |
 | --- | --- |
-| Everyone in one product tenant may collaborate across chats | One workspace per tenant |
-| Each end user's chats must be private from other end users | One workspace per end user |
-| Every chat must be isolated, including from the same user's other chats | One workspace per chat |
-| Several users access the same upstream data but their chats are private | Separate user/chat workspaces with equivalent appropriately scoped data access |
+| Everyone in one product tenant may collaborate across chats | One workspace per tenant, `agentAccess: "workspace"` |
+| Each end user's chats must be private from other end users | One workspace per tenant, `agentAccess: "user"` with an `endUser` label |
+| Every chat must be isolated, including from the same user's other chats | One workspace per tenant, `agentAccess: "session"` |
+| Several users access the same upstream data but their chats are private | One workspace per tenant; the shared data lives there, the chats are `"user"` or `"session"` scoped |
+| Groups need different Connections, integrations, or workspace instructions | One workspace per group |
 
 This is an agent-authority decision, not only a UI visibility decision. A live
-agent attempt holding the relevant first-party session tools and permissions
-may read, message, and control unrelated sessions in the same workspace.
-Parent/child lineage is not the general access boundary. Turning
-`memoryEnabled` off only disables workspace Memory retrieval/saving; it does not
-isolate session history or remove cross-session tools.
+agent attempt may read, message, and control another session in the same
+workspace only when both sessions' `agentAccess` scopes allow it; the seam in
+`packages/core/src/session-authorization.ts` applies the most restrictive side,
+always allows a session's own tree, and filters `sessions_list` and the session
+list routes the same way. Turning `memoryEnabled` off only disables workspace
+Memory retrieval/saving; use `memoryScope` for per-session memory behavior.
 
-An organization-key-created top-level session is `workspace_shared`. The
-managed-human `user_private` / **Only me** capability requires the exact
-supported managed-cookie human path and is not a service-backend privacy
-mechanism. Creating an OpenGeni human per product user is not required for the
-canonical backend integration.
+An organization-key-created top-level session is `workspace_shared` for humans
+and for the organization key. The managed-human `user_private` / **Only me**
+capability is a console visibility feature for OpenGeni logins; product privacy
+between end users is `agentAccess` plus the `endUser` label, and creating an
+OpenGeni human per product user is not required.
 
-When the product deliberately accepts a softer same-workspace boundary, an
-explicit minimal `firstPartyMcpTools` selection can remove unnecessary
-cross-session capabilities as defense in depth. It is not a hard tenant
-boundary. Omitting `firstPartyMcpTools` inherits the deployment's non-connector
-default catalog, and omitting `tools` inherits workspace MCP defaults; explicit
-empty arrays suppress those respective selections. Recheck the live catalog
-rather than assuming that removing only `sessions_list` and `session_get` is
-complete.
+`firstPartyMcpTools` and `firstPartyMcpPermissions` still narrow what a session
+can do, and narrowing is monotone: a child session, an agent updating its own
+tool policy, a scheduled task created by an agent, and the Codemode SDK proxy
+can never widen tools, permissions, `agentAccess`, `endUser`, or `memoryScope`
+beyond the creating session. Omitting `firstPartyMcpTools` inherits the
+deployment's non-connector default catalog, and omitting `tools` inherits
+workspace MCP defaults; explicit empty arrays suppress those respective
+selections.
 
 Creating a workspace does not create a dedicated cluster or permanently
 running sandbox. It adds control-plane state and may require per-workspace
@@ -106,6 +209,7 @@ reconciliation and cleanup rather than repeated manual setup.
 | Credential | Use it when | Do not use it for |
 | --- | --- | --- |
 | Organization API key | One server-side product integration provisions or manages many organization workspaces in one organization | Browser/mobile clients or Personal workspaces |
+| Organization API key with `access: "read"` | A reporting, audit, or analytics backend that must read every shared workspace's sessions and transcripts and nothing else | Creating sessions, controlling turns, or minting keys |
 | Workspace API key | One backend or automation is deliberately constrained to a single organization workspace | Multi-workspace provisioning or organization administration |
 | Delegated token | A host acts with short-lived, explicit user/workspace authority | A standing multi-tenant backend credential |
 | Deployment access key | An operator needs a coarse configured/self-hosted deployment perimeter | Tenant identity, account selection, or workspace authorization |
@@ -113,6 +217,15 @@ reconciliation and cleanup rather than repeated manual setup.
 An organization API key is the default for the product shape on this page.
 Choosing it does not remove the product backend's obligation to authenticate
 its own users and resolve their allowed tenant before every proxy call.
+
+Either organization key reads every shared workspace in the organization. To
+read all transcripts without touching each workspace, call
+`listOrganizationSessions(organizationId, { limit, cursor, endUser?, status? })`
+or iterate `iterateOrganizationSessions`; the route is
+`GET /v1/organizations/:organizationId/sessions`, every row carries its
+`workspaceId`, and events are then read through the ordinary workspace routes.
+Personal workspaces and managed-human **Only me** sessions are never included.
+Mint the narrower key with `createOrganizationApiKey(organizationId, { name, access: "read" })`.
 
 ## Canonical provisioning flow
 
@@ -256,6 +369,19 @@ operation.
 
 ## Skills are external product data
 
+Control OpenGeni's bundled guidance separately from your product Skills with
+`CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
+`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. Selection
+only narrows each bundle's normal inclusion conditions and grants no tool
+permissions. Child sessions inherit the choice and may only narrow it.
+Scheduled-task `agentConfig` and automation `sessionTemplate` accept the same
+field. Keep the same effective choice when retrying keyed session creation.
+
+This does not disable workspace-authored/installed Skills or your inline
+`skills`. Those keep their own ownership and sharing rules. The eager
+`skill_read` tool remains available even with no bundled guidance. Bundle
+selection does not wait for lazy tool discovery or sandbox startup.
+
 The external backend owns its reusable Skills. Store and version them with the
 product's integration code or in the product's own Skill store, then pass the
 selected Skill definitions inline in `CreateSessionRequest.skills` for each
@@ -271,8 +397,6 @@ const session = await client.createSession(workspace.id, {
   initialMessage: userMessage,
   idempotencyKey: productRequest.id,
   skills: selectedSkills.map((skill) => ({
-    name: skill.name,
-    description: skill.description,
     files: skill.files.map((file) => ({
       path: file.path,
       content: file.content,
@@ -281,9 +405,13 @@ const session = await client.createSession(workspace.id, {
 });
 ```
 
-Every inline Skill must include a top-level `SKILL.md`; additional reference
-files remain relative to that Skill directory. Skill content is session
-configuration, not a secret store.
+Every inline Skill must include a top-level `SKILL.md` with valid YAML
+frontmatter containing `name` and `description`. Those values are the source of
+the context index metadata; do not maintain a separate short description.
+Submit `files` alone. Legacy `name` and `description` fields are optional
+consistency assertions and, when supplied, must exactly match the frontmatter.
+Additional reference files remain relative to that Skill directory. Skill
+content is session configuration, not a secret store.
 
 There is no organization-wide Skill registry or Skill inheritance for this
 integration contract. Installing or selecting a Skill in the external product
@@ -396,6 +524,14 @@ not attach implementation guidance about integrating OpenGeni to the end-user
 runtime agent.
 
 ## Browser and React integration
+
+Use `SessionConversation` for a packaged existing-session experience, or
+compose the timeline and composer. These use the normal SDK, not the
+simplified backend chat-handler protocol. Custom clients of that protocol
+must implement history restoration, pending decisions, and streaming themselves.
+On sign-out or user/tenant changes, clear private UI state and abort old
+requests before restoring another conversation. Backend authorization remains
+mandatory regardless of UI state.
 
 Use `@opengeni/react/session` for headless session semantics, or the focused
 styled subpaths when the product wants packaged OpenGeni visuals. The React

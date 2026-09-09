@@ -36,6 +36,8 @@ import {
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 
+import { siteSessionPath } from "@opengeni/contracts/site-session-http";
+
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
 export type AttemptToolScope = Pick<
@@ -411,11 +413,11 @@ export class CodemodeClient {
     return CodemodeOperation.parse(await response.json());
   }
 
-  /** Server-side Site preview forwarding. The attempt bearer never enters the page. */
+  /** Server-side Site preview forwarding. The attempt bearer never enters the
+   * page. Validate tenant routing here; ordinary API handlers authorize the
+   * operation under the existing agent proxy permission ceiling. */
   async sessionRequest(path: string, init: RequestInit): Promise<Response> {
-    if (!path.startsWith("/v1/")) {
-      throw new Error("Unsupported Site session API path");
-    }
+    siteSessionPath(path, "site-host", init.method ?? "GET");
     return this.request(`/sdk${path}`, init, false);
   }
 

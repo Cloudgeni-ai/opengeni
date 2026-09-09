@@ -21,7 +21,17 @@ test("Site skill composition needs no writable application directory", () => {
         process.execPath,
         "--eval",
         `
-      const { composeRuntimeSkills } = await import(${JSON.stringify(modulePath)});
+      const { composeRuntimeSkills, loadNativeToolSkillArtifacts } = await import(${JSON.stringify(modulePath)});
+      const native = loadNativeToolSkillArtifacts({
+        sites: true, editableArtifacts: true, videoGeneration: true,
+      });
+      if (native.length !== 5) throw new Error("missing native Skill artifacts");
+      if (loadNativeToolSkillArtifacts({ editableArtifacts: false, videoGeneration: false }).length !== 0)
+        throw new Error("disabled native Skills leaked");
+      const nativeSite = native.find(entry => entry.name === "opengeni-sites");
+      const nativePins = nativeSite.files.find(entry => entry.path === "package-versions.json");
+      if (nativePins.content !== JSON.stringify(${JSON.stringify(pins)}, null, 2))
+        throw new Error("incorrect server-side package pins");
       const composition = composeRuntimeSkills([], {
         sites: true, editableArtifacts: false, videoGeneration: false,
       });

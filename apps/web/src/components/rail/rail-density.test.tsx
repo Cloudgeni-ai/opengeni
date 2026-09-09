@@ -52,6 +52,20 @@ window.matchMedia = (query) => {
 };
 const railShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
+describe("rail overflow boundaries", () => {
+  test("contains scrolling session controls below an opaque, non-shrinking footer", () => {
+    expect(railShell).toContain(
+      "isolate flex h-full min-h-0 flex-col overflow-hidden bg-surface/40",
+    );
+    expect(railShell).toMatch(
+      /data-rail-scroll-viewport\s+className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"/,
+    );
+    expect(railShell).toMatch(
+      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border bg-surface pt-2"/,
+    );
+  });
+});
+
 afterAll(() => {
   window.matchMedia = originalMatchMedia;
   mock.restore();

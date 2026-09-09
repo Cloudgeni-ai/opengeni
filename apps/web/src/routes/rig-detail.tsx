@@ -137,7 +137,9 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
                 <span className="text-brand">
                   <ServerCogIcon className="size-5" />
                 </span>
-                <h1 className="min-w-0 truncate text-lg font-semibold">{current.name}</h1>
+                <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
+                  {current.name}
+                </h1>
                 {active ? (
                   <MetaChip title="Active version">v{active.version}</MetaChip>
                 ) : (

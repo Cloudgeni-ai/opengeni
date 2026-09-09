@@ -157,9 +157,20 @@ describe("timeline scroll ownership browser regression", () => {
 
     const scroller = page.locator("[data-timeline-test] .og-root > div");
     await scroller.hover();
-    await page.mouse.wheel(0, -96);
-    await page.waitForTimeout(100);
+    // wheel() dispatches input without waiting for native scrolling to finish.
+    // Capture the reader's new anchor at scrollend, not at an arbitrary timer
+    // that can expire before the compositor applies the gesture on a busy runner.
+    await Promise.all([
+      scroller.evaluate(
+        (node) =>
+          new Promise<void>((resolve) =>
+            node.addEventListener("scrollend", () => resolve(), { once: true }),
+          ),
+      ),
+      page.mouse.wheel(0, -96),
+    ]);
     const afterWheel = await visible(page);
+    expect(afterWheel.id).not.toBe(duringPrepend.id);
 
     await page.locator('[data-timeline-row="row-900"]').waitFor({ timeout: 15_000 });
     await page.waitForTimeout(100);
@@ -1443,39 +1454,48 @@ describe("timeline scroll ownership browser regression", () => {
     ).toBeGreaterThan(0);
   }, 30_000);
 
-  test("keeps one held-turn commentary reply visible across disclosure collapse and expand", async () => {
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(`${baseUrl}/timeline-held-turn-test.html`);
+  test.each(["commentary", "streamed"])(
+    "keeps one held-turn %s reply visible across disclosure collapse and expand",
+    async (mode) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(
+        `${baseUrl}/timeline-held-turn-test.html?streamed=${mode === "streamed" ? "1" : "0"}`,
+      );
 
-    const fallback = page.getByText("The child is still running; I will resume when it finishes.", {
-      exact: true,
-    });
-    const disclosure = page.getByRole("button", { name: /steps?/ }).first();
+      const fallback = page.getByText(
+        "The child is still running; I will resume when it finishes.",
+        {
+          exact: true,
+        },
+      );
+      const disclosure = page.getByRole("button", { name: /steps?/ }).first();
 
-    await fallback.waitFor({ timeout: 5_000 });
-    expect(await fallback.count()).toBe(1);
-    expect(await fallback.isVisible()).toBe(true);
-    expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
+      await fallback.waitFor({ timeout: 5_000 });
+      expect(await fallback.count()).toBe(1);
+      expect(await fallback.isVisible()).toBe(true);
+      expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
 
-    await disclosure.click();
-    expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
-    expect(await fallback.count()).toBe(1);
-    expect(await fallback.isVisible()).toBe(true);
-    expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
+      await disclosure.click();
+      expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
+      expect(await fallback.count()).toBe(1);
+      expect(await fallback.isVisible()).toBe(true);
+      expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
 
-    await disclosure.click();
-    expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(await fallback.count()).toBe(1);
-    expect(await fallback.isVisible()).toBe(true);
+      await disclosure.click();
+      expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
+      expect(await fallback.count()).toBe(1);
+      expect(await fallback.isVisible()).toBe(true);
 
-    if (artifactDir) {
-      await mkdir(artifactDir, { recursive: true });
-      await page.screenshot({
-        path: `${artifactDir}/timeline-held-turn-commentary-visible.png`,
-        fullPage: true,
-      });
-    }
-  }, 30_000);
+      if (artifactDir) {
+        await mkdir(artifactDir, { recursive: true });
+        await page.screenshot({
+          path: `${artifactDir}/timeline-held-turn-${mode}-visible.png`,
+          fullPage: true,
+        });
+      }
+    },
+    30_000,
+  );
 });
 
 async function visible(page: Page): Promise<VisibleRow> {

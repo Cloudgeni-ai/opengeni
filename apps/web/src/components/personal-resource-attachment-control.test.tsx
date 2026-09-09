@@ -24,9 +24,7 @@ function controller(
       personalResourceCount: 1,
       closureUnverified: false,
     },
-    mode: "once",
-    setMode: () => {},
-    ongoingScope: null,
+    mode: "session",
     visibility: "workspace",
     requiresDecision: false,
     intent: undefined,
@@ -38,11 +36,16 @@ function controller(
 }
 
 describe("PersonalResourceAttachmentControl", () => {
-  test("shows explicit duration choice for selected personal resources", () => {
-    expect(
-      renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller()} compact />),
-    ).toContain("For my ongoing work in this session");
-  });
+  test.each(["private", "workspace"] as const)(
+    "adds no authorization UI for healthy %s attachments",
+    (visibility) => {
+      expect(
+        renderToStaticMarkup(
+          <PersonalResourceAttachmentControl controller={controller({ visibility })} compact />,
+        ),
+      ).toBe("");
+    },
+  );
 
   test("keeps actionable recovery states visible", () => {
     const markup = renderToStaticMarkup(
@@ -65,7 +68,6 @@ test.each([
   ["reloading", "Session authority changed. Reloading personal resources before retrying."],
   ["reload_failed", "Session authority could not be refreshed. Retry before sending again."],
   ["reloaded", "Session authority changed. Personal resources were reloaded before retrying."],
-  ["accepted", "Personal-resource use was accepted for this work."],
 ] as const)("renders exact %s status text from the lazy notice projection", (notice, message) => {
   expect(
     renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller({ notice })} />),

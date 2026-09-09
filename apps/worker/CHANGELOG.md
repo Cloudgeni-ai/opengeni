@@ -1,5 +1,177 @@
 # @opengeni/worker-bundle
 
+## 0.27.2
+
+### Patch Changes
+
+- 69924e8: Preserve structured model-history ordering through PostgreSQL replay and pending-tool recovery. Retain authorized uploaded images across turns and compaction input, preserve images in retained messages, and include their projected token cost in compaction retention budgets. Migration requires draining writers.
+- 2fa33e4: Unify installed and authored workspace Skills behind one versioned text-folder
+  store and shared editor. Derive names and descriptions from mandatory SKILL.md
+  frontmatter, provide eager sandbox-free reading with exact requested paths, and
+  expose lazy search, install, save, checkout, and publish tools under workspace
+  Learning policy. Preserve workspace customizations on source updates and let
+  embedding hosts narrow bundled guidance independently of lazy tool discovery.
+
+  Migration 0433 is a maintenance cutover: drain old runtimes and use the
+  parser-backed migration runner. Preserve historical snapshots and archive legacy
+  configuration before conversion; invalid or pinned headerless configuration
+  requires explicit repair before migration. See docs/skills-lifecycle.md for the
+  deployment procedure and compatibility boundaries.
+
+- Updated dependencies [068be26]
+- Updated dependencies [69924e8]
+- Updated dependencies [d1cb266]
+- Updated dependencies [9233c88]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+  - @opengeni/db@4.2.1
+  - @opengeni/runtime@2.4.2
+  - @opengeni/events@0.4.20
+  - @opengeni/config@1.0.3
+  - @opengeni/core@2.8.2
+  - @opengeni/codemode@0.5.2
+  - @opengeni/documents@0.8.22
+  - @opengeni/github@0.7.6
+  - @opengeni/observability@0.8.22
+  - @opengeni/storage@0.2.123
+
+## 0.27.1
+
+### Patch Changes
+
+- 392c575: Retain Modal command handles, provider execution identities, output, and exact exit status across provider-client reconstruction. Persist stream pages before acknowledging their cursors, and treat unavailable historical locators as unknown rather than proof of process loss. Execution status is provider-owned and never read from sandbox-writable files.
+- f3bd0d0: Preserve unknown Modal command observations instead of falsely settling local SDK handle loss as physical process loss. Retain exact command holders with explicit deferred/quarantine diagnostics while allowing the original owner's terminal proof to settle normally.
+- f04243d: Preserve durable wake acknowledgment receipts through API and worker signalers. Report pending admission and unconfirmed legacy signal delivery separately from acknowledged revisions, so transport acceptance cannot be mistaken for agent execution progress. Existing wake retries and admission fences remain authoritative.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [befd389]
+- Updated dependencies [9827c25]
+- Updated dependencies [f3bd0d0]
+- Updated dependencies [c915b0f]
+- Updated dependencies [7e73418]
+- Updated dependencies [5904fd1]
+- Updated dependencies [29551cb]
+- Updated dependencies [14dd6fe]
+- Updated dependencies [f04243d]
+  - @opengeni/db@4.2.0
+  - @opengeni/contracts@2.15.0
+  - @opengeni/runtime@2.4.1
+  - @opengeni/core@2.8.1
+  - @opengeni/codemode@0.5.1
+  - @opengeni/documents@0.8.21
+  - @opengeni/events@0.4.19
+  - @opengeni/config@1.0.2
+  - @opengeni/github@0.7.5
+  - @opengeni/observability@0.8.21
+  - @opengeni/storage@0.2.122
+
+## 0.27.0
+
+### Minor Changes
+
+- fa12951: Separate command interaction from session history. Add bounded retained-output command reads and use the same operation for command waits. Terminal reads observe completion and suppress only still-pending completion notifications; running reads, claimed notifications, and historical tool results remain unchanged.
+
+  Make session history conversation-first with complete-message pagination and explicit results, tools, and debug views. Preserve cursor detail selection, provide oversized-message continuation, and keep queued prompts distinct from processed conversation. Update concise model guidance for the new surfaces.
+
+  `command_wait` now uses `waitSeconds`, an output cursor, and the same flat result as `command_read`; clients using the previous command wrapper must update. Apply the additive command-observation migration before starting the new readers.
+
+- 0a81cc8: Add durable workspace pause/resume timers with duration controls, countdowns,
+  manual cancellation, and idempotent worker execution. Migration 0420 requires a
+  maintenance deployment: drain old writers and deploy matching API/workers.
+
+### Patch Changes
+
+- 22a6704: Correct oversized session-message continuation with bounded source slicing, preserve typed runner terminal failures during command observation, and keep retained command output readable when live refresh encounters a recognized temporary transport failure. Refresh fallback rechecks API authorization and explicitly marks unavailable freshness; it does not mask integrity or authorization errors.
+- 8db607e: Make GitHub connector writes capability-first when no explicit workspace action policy matches, while preserving explicit Allow, Ask, and Block decisions.
+- d8b0012: Keep parked child waits and active goals from reporting successful completion to their parent. Preserve durable wake deadlines and actual terminal result delivery.
+- ac7e07c: Retire background-command tracking after a connected agent instance is replaced, explicitly stopped, or revoked. Preserve historical records without waking old sessions, drain cleanup batches promptly, and scope session stopping counts to the requested trees.
+- c04711c: Retain PostgreSQL SQLSTATE and existing database identifier diagnostics for otherwise unclassified turn failures, without changing their error text or retry behavior.
+- ba9e5a4: Preserve the exact causal human on child lifecycle follow-up turns so personal session resources remain admissible, isolate child/goal causal claims from complete Agent Steer identities and malformed authority-bearing updates, keep atomic pre-claim database failures—including replay-compatible disposition-only results—retryable instead of terminally discarding pending work, and provide a root-only, failure-epoch-fenced repair whose idempotency receipt binds the exact recovery authority for sessions terminalized by older workers.
+- c69ad5f: Preserve externally managed history across opaque compaction checkpoints and verify conversation persistence before continuation. Reject shifted history prefixes and conflicting saved items instead of silently losing completed work.
+- 6e167eb: Preserve the supplied admission failure message and classified cause on the durable session failure event when no turn could be claimed.
+- 3673900: Preserve receipt wakeups received during quiescence reconciliation so an interrupted session admits its queued replacement. Retain historical workflow behavior behind a Temporal patch marker.
+- 732bece: Park sandbox rotation recovery until durable lease progress, and wake the exact waiting turn when provider loss, failed warming, reaping, or teardown release ends its rotation wait.
+- b1d3673: Add the `@opengeni/sdk/chat` facade (`OpenGeni`, `Chat`, `createChatHandler`, Vercel AI SDK and OpenAI adapters) and the `@opengeni/react/chat` drop-in component. Sessions gain `agentAccess`, an opaque `endUser` label, and `memoryScope`, enforced in the session-authorization seam so one workspace per customer can hold isolated, per-user, or shared chats. Organization API keys gain `access: "read"` and `GET /v1/organizations/:id/sessions`. Close the tool-widening paths: child tool selection, agent tool-policy updates, scheduled-task sessions, and the Codemode SDK proxy can no longer exceed the creating session.
+
+  Private-memory identities use bounded hashes of exact source/user tuples. Correction, archival, and replacement enforce the private writable scope. Chat reload restores unresolved approvals and questions, and the chat component uses the complete human-input form with multiple selections and Other answers.
+
+  Session-scoped discovery preserves the embedding host's allowlist. Responses streams emit the complete message/content lifecycle with stable per-response IDs, including incomplete settlement for human waits and cancellation. Streaming text preserves the same paragraph separators as the final reply.
+
+- d8a70ec: Unify first-party and integration tools behind one workspace gateway for MCP, model execution, Codemode, SDK, and browser clients; require host-confirmed SDK approval for human-gated model calls, keep Codemode claims live through gateway preparation, and deduplicate reclaimed tool-created events; add opt-in resource-bound MCP OAuth; ship governed self-contained HTML Sites with retained source, version rollback, an exact-version direct-call tool allowlist, and a native Site-authoring Skill; and default Modal self-hosts to OpenGeni's public digest-pinned desktop runtime image.
+- Updated dependencies [7dac7e3]
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [8db607e]
+- Updated dependencies [582dc62]
+- Updated dependencies [d8b0012]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [694c1ff]
+- Updated dependencies [5cc0aac]
+- Updated dependencies [341a7f6]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [ac7e07c]
+- Updated dependencies [09de906]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [52cf486]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [1fc0889]
+- Updated dependencies [ba9e5a4]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [123a72a]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [712967e]
+- Updated dependencies [0c39126]
+- Updated dependencies [ba890d1]
+- Updated dependencies [0c39126]
+- Updated dependencies [b1d479b]
+- Updated dependencies [7772511]
+- Updated dependencies [64c7c5c]
+- Updated dependencies [ccbf227]
+- Updated dependencies [6e167eb]
+- Updated dependencies [575af5b]
+- Updated dependencies [66326b3]
+- Updated dependencies [b43a821]
+- Updated dependencies [b272df2]
+- Updated dependencies [eac6a61]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [732bece]
+- Updated dependencies [19c51e2]
+- Updated dependencies [baa1c36]
+- Updated dependencies [380bba5]
+- Updated dependencies [cda46e8]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [92cdc31]
+- Updated dependencies [9e412ef]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/runtime@2.4.0
+  - @opengeni/contracts@2.14.0
+  - @opengeni/db@4.1.0
+  - @opengeni/core@2.8.0
+  - @opengeni/codex@0.2.22
+  - @opengeni/config@1.0.1
+  - @opengeni/network@0.3.1
+  - @opengeni/codemode@0.5.0
+  - @opengeni/storage@0.2.121
+  - @opengeni/xai-subscription@0.1.4
+  - @opengeni/documents@0.8.20
+  - @opengeni/events@0.4.18
+  - @opengeni/github@0.7.4
+  - @opengeni/observability@0.8.20
+  - @opengeni/capabilities@0.3.3
+
 ## 0.26.0
 
 ### Minor Changes

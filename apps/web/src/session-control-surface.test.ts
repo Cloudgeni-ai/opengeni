@@ -94,7 +94,7 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain('id: "agents"');
   });
 
-  test("keeps setup above the prompt and model beside voice/send on new sessions", async () => {
+  test("keeps the folder above the prompt and context actions inside plus on new sessions", async () => {
     const route = await source("routes/sessions-index.tsx");
     const actions = route.indexOf("actions={");
     const model = route.indexOf("<SessionModelControl", actions);
@@ -111,9 +111,11 @@ describe("session control surface architecture", () => {
       route.indexOf("function SessionSetupStrip"),
       route.indexOf("function SessionModelControl"),
     );
-    expect(setupImplementation).toContain("<SessionToolPicker");
+    expect(route).toContain("<ComposerMobilePlus");
+    expect(route).toContain("<RepositoryContextMenuBody");
+    expect(setupImplementation).not.toContain("<SessionToolPicker");
     expect(setupImplementation).toContain("<SessionFolderPicker");
-    expect(setupImplementation).toContain("<WorkspaceRepositoryPicker");
+    expect(setupImplementation).not.toContain("<WorkspaceRepositoryPicker");
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
@@ -189,7 +191,7 @@ describe("session control surface architecture", () => {
     expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
   });
 
-  test("keeps Variable Sets editable at create time and beside an established composer", async () => {
+  test("keeps Variable Sets editable through create and established composer actions", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),
       source("routes/session.tsx"),
@@ -198,17 +200,14 @@ describe("session control surface architecture", () => {
     ]);
     expect(route).toContain("Add Variable Set…");
     expect(route).toContain("<SelectedVariableSetList");
-    expect(route).toContain(
-      "const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets",
-    );
+    expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).toContain("PersonalResourceScopeChoice");
-    expect(route).toContain("mode: personalScopeChoice.mode");
-    expect(route).toContain('personalOwnerScope?.identityKey ?? "ineligible"');
-    expect(
-      route.match(/setPersonalScopeGeneration\(\(generation\) => generation \+ 1\)/g),
-    ).toHaveLength(3);
+    expect(route).not.toContain("PersonalResourceScopeChoice");
+    expect(route).not.toContain("personalScopeChoice");
+    expect(route).not.toContain("setPersonalScopeGeneration");
+    expect(route).toContain("personalResourceCount: selectedPersonalResourceCount");
+    expect(route).toContain("will be available for your work in this session.");
     expect(route).not.toContain("personalResourceSendBlocker");
     expect(route).not.toContain("Confirm private credential or resource use before sending");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
@@ -244,8 +243,8 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("The update committed");
     expect(establishedPicker).toContain("Retry refresh");
     expect(establishedPicker).toContain("updateSessionVariableSets");
-    expect(establishedPicker).toContain(
-      "const visible = refreshRequired || currentIds.length > 0 || canAdd",
+    expect(establishedPicker.replace(/\s+/g, " ")).toContain(
+      "const visible = refreshRequired || currentIds.length > 0 ||",
     );
     expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
     expect(establishedRoute).toContain("const variableSetComposerBlocked =");
@@ -258,20 +257,24 @@ describe("session control surface architecture", () => {
       establishedRoute.match(
         /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
       ),
-    ).toHaveLength(2);
-    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(1);
     expect(establishedRoute).toContain(
       "const [variableSetPickerState, setVariableSetPickerState] =",
     );
-    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(2);
-    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(1);
+    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(1);
     expect(establishedPicker).toContain(
-      "const busy = props.busy || props.goalActive || props.voiceActive",
+      "const busy = workPending || props.goalActive || props.voiceActive",
     );
+    expect(establishedPicker).toContain("sessionHasVariableSetBlockingWork(props.session)");
     expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
-    expect(establishedPicker).toContain("Only-me Variable Sets are authorized for your own work.");
+    expect(establishedPicker).toContain(
+      "Attached Only-me Variable Sets are available for your work in this session.",
+    );
+    expect(establishedControl).not.toContain("PersonalResourceScopeChoice");
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');

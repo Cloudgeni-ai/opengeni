@@ -57,6 +57,8 @@ export type SandboxFilesProps = {
   workspaceWaking?: boolean | undefined;
   /** Whether live reads are currently authoritative. */
   liveWorkspaceReady?: boolean | undefined;
+  /** Failed live negotiation; never present a failure as an ongoing wake. */
+  workspaceError?: Error | null | undefined;
   /** Deliberately wake the machine to read content absent from the capture. */
   onWakeWorkspace?: (() => void) | undefined;
   themeType?: "dark" | "light" | undefined;
@@ -87,6 +89,7 @@ export function SandboxFiles({
   workspaceResting = false,
   workspaceWaking = false,
   liveWorkspaceReady = true,
+  workspaceError = null,
   onWakeWorkspace,
   themeType,
   className,
@@ -254,9 +257,21 @@ export function SandboxFiles({
   const captureFileUnavailable =
     fileView.error instanceof CapturedFileUnavailableError ? fileView.error : null;
   const waitingForSelectedFile =
+    !workspaceError &&
     liveRequestedPath === viewPath &&
     (!liveWorkspaceReady || files.loading) &&
     captureFileUnavailable !== null;
+
+  if (workspaceError && !liveWorkspaceReady && files.source !== "capture") {
+    return (
+      <Notice className={className} title="Could not open live workspace" announce="alert">
+        <p>{workspaceError.message}</p>
+        {onWakeWorkspace ? (
+          <WakeButton onClick={onWakeWorkspace}>Retry live workspace</WakeButton>
+        ) : null}
+      </Notice>
+    );
+  }
 
   if (workspaceResting || workspaceWaking) {
     return (
@@ -415,6 +430,15 @@ export function SandboxFiles({
                   {...(onEditIntent ? { onEditIntent } : {})}
                   className="h-full"
                 />
+              ) : workspaceError &&
+                (liveRequestedPath === viewPath || requestedPath === viewPath) &&
+                !liveWorkspaceReady ? (
+                <Notice title="Could not open live file" announce="alert">
+                  <p>{workspaceError.message}</p>
+                  {onWakeWorkspace ? (
+                    <WakeButton onClick={onWakeWorkspace}>Retry live file</WakeButton>
+                  ) : null}
+                </Notice>
               ) : waitingForSelectedFile ? (
                 <Notice
                   icon={
@@ -455,6 +479,12 @@ export function SandboxFiles({
                 </Notice>
               ) : fileView.loading ? (
                 <Notice announce="status">Loading {viewPath}…</Notice>
+              ) : fileView.imageUrl ? (
+                <RasterFilePreview
+                  key={fileView.imageUrl}
+                  src={fileView.imageUrl}
+                  path={viewPath}
+                />
               ) : fileView.isBinary ? (
                 <Notice>
                   {viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).
@@ -497,18 +527,27 @@ export function SandboxFiles({
               )
             ) : // Nothing selected — the tree shows the whole workspace; pick a file.
             requestedPath && !requestedPathReady ? (
-              <Notice
-                icon={
-                  <LoaderCircleIcon
-                    className="size-5 animate-spin motion-reduce:animate-none"
-                    aria-hidden
-                  />
-                }
-                title="Waking sandbox"
-                announce="status"
-              >
-                Opening {requestedPath} when the live workspace is ready…
-              </Notice>
+              workspaceError ? (
+                <Notice title="Could not open live file" announce="alert">
+                  <p>{workspaceError.message}</p>
+                  {onWakeWorkspace ? (
+                    <WakeButton onClick={onWakeWorkspace}>Retry live file</WakeButton>
+                  ) : null}
+                </Notice>
+              ) : (
+                <Notice
+                  icon={
+                    <LoaderCircleIcon
+                      className="size-5 animate-spin motion-reduce:animate-none"
+                      aria-hidden
+                    />
+                  }
+                  title="Waking sandbox"
+                  announce="status"
+                >
+                  Opening {requestedPath} when the live workspace is ready…
+                </Notice>
+              )
             ) : (
               <Notice icon={<FileCode2Icon className="size-5" aria-hidden />} title="Choose a file">
                 Select a file in the tree to preview it.
@@ -628,8 +667,10 @@ function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boo
       </span>
       {(git.ahead > 0 || git.behind > 0) && (
         <span className="flex shrink-0 items-center gap-1.5 text-og-xs text-og-fg-subtle">
-          {git.ahead > 0 && <span>↑{git.ahead}</span>}
-          {git.behind > 0 && <span>↓{git.behind}</span>}
+          {/* Small arrow glyphs can make axe's pixel overlap heuristic inconclusive.
+              Keep both counters in the same computed-contrast audit as the dirty count. */}
+          {git.ahead > 0 && <span data-contrast-audited>↑{git.ahead}</span>}
+          {git.behind > 0 && <span data-contrast-audited>↓{git.behind}</span>}
         </span>
       )}
       {dirty && (
@@ -677,6 +718,7 @@ function Segmented({
 
 type FileViewState = {
   content: string | null;
+  imageUrl?: string | null;
   isBinary: boolean;
   /** The backend truncated the read (size cap hit) — content is a PREFIX only.
    *  Editing+saving such a file would write the prefix back and corrupt it, so
@@ -749,6 +791,8 @@ function useFileView(
             : res.content;
         setState({
           content,
+          imageUrl:
+            !res.truncated && res.encoding === "base64" ? rasterImageUrl(path, res.content) : null,
           isBinary: res.isBinary,
           truncated: res.truncated,
           sizeBytes: res.sizeBytes,
@@ -778,6 +822,38 @@ function useFileView(
     };
   }, [path, readFile, reloadRevision]);
   return state;
+}
+
+/** Only raster formats belong in this preview; never interpret SVG/HTML as a document. */
+function rasterImageUrl(path: string, content: string): string | null {
+  const extension = path.split(".").pop()?.toLowerCase();
+  const mime =
+    extension === "png"
+      ? "image/png"
+      : extension === "jpg" || extension === "jpeg"
+        ? "image/jpeg"
+        : extension === "gif"
+          ? "image/gif"
+          : extension === "webp"
+            ? "image/webp"
+            : null;
+  return mime ? `data:${mime};base64,${content}` : null;
+}
+
+function RasterFilePreview({ src, path }: { src: string; path: string }) {
+  const [failed, setFailed] = useState(false);
+  return failed ? (
+    <Notice title="Image preview unavailable" announce="alert">
+      Could not decode {path} as an image.
+    </Notice>
+  ) : (
+    <img
+      src={src}
+      alt={path}
+      onError={() => setFailed(true)}
+      className="max-w-full object-contain"
+    />
+  );
 }
 
 /** Decode a base64 payload to a UTF-8 string (browser `atob` + TextDecoder). */

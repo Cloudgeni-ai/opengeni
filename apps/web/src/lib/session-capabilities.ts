@@ -81,6 +81,13 @@ const CONNECTED_APP_GROUPS: CapabilityGroupDefinition[] = [
 
 const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
+    id: "commands",
+    name: "Command output",
+    description: "Read output and wait for commands already running.",
+    kind: "opengeni",
+    matches: (tool) => tool === "command_read" || tool === "command_wait",
+  },
+  {
     id: "knowledge",
     name: "Memory & learning",
     description: "Use durable facts, task notes, preferences, and workspace guidance.",
@@ -98,15 +105,14 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "agents",
     name: "Agents and delegation",
-    description: "Set goals, create workers, and coordinate other sessions.",
+    description: "Set goals, create workers, organize projects, and coordinate sessions.",
     kind: "opengeni",
     matches: (tool) =>
       tool === "set_session_title" ||
       tool === "set_other_session_title" ||
       tool === "wait_for_input" ||
-      tool === "command_read" ||
-      tool === "command_wait" ||
       tool.startsWith("goal_") ||
+      tool.startsWith("project_") ||
       tool.startsWith("session_") ||
       tool.startsWith("sessions_") ||
       tool.startsWith("work_claim_"),

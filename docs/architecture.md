@@ -3,44 +3,42 @@
 > Whole-system orientation; code and focused docs own exact behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
-## How to use this document
+## Navigation
 
 1. **New here?** Read §2–4; skim §6.
-2. **Changing a subsystem?** Start with §13 and its canonical sources.
-3. **Exact behavior?** Follow source links, not this summary.
-4. **Stale boundary?** Update this map; see §14.
+2. **Subsystem changes:** §13 links canonical sources.
+3. **Exact behavior:** follow source links.
+4. **Stale boundaries:** update per §14.
 
 ---
 
 ## 1. Scope
 
-Product shape, invariants, execution paths, and source ownership. Exact inventories live in code.
+Product shape, invariants, execution, and ownership.
 
 ---
 
 ## 2. What OpenGeni is
 
-OpenGeni is a self-hostable, session-based managed agent runtime. It runs
-side-effectful agents while owning the durable control plane around them:
-identity, tenancy, session state, human intervention, long-running goals,
-recovery, compute routing, files, artifacts, usage, and observability.
+OpenGeni is a self-hostable, session-based agent runtime. Its durable control
+plane owns identity, tenancy, sessions, human intervention, goals, recovery,
+compute, files, artifacts, usage, and observability.
 
-Public control and authorization begin at the HTTP API. After the API grants a
-bounded capability, high-bandwidth browser data planes may connect directly to
-object storage, a sandbox/provider or relay stream, Codex WebRTC, or the AI
-Gateway realtime WebSocket. Agent execution happens in a worker, either inside
-a provisioned sandbox or directly on a Connected Machine. Postgres holds durable
-truth, Temporal coordinates long-lived work, and NATS provides reconstructible
-live fanout plus Connected Machine transport.
+The HTTP API authorizes public control and bounded direct browser access to
+storage, sandboxes, relays, Codex WebRTC, and Gateway realtime WebSockets.
+Workers execute agents in provisioned sandboxes or Connected Machines.
+Postgres owns durable truth; Temporal coordinates work; NATS transports
+reconstructible live updates and Connected Machine traffic.
 
-The product has several deliberately separate surfaces:
+Separate surfaces:
 
 - **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
   goals, approvals, structured human input, durable semantic titles, and
   durable history.
-- **Browser voice** has two separate boundaries: realtime conversation is a
-  coexisting transport for an ordinary session, while composer transcription
-  produces an editable draft that reaches session truth only through Send.
+- **Browser voice** supports realtime sessions and editable transcription drafts.
+  Drafts enter session history through Send. Workspace settings select billing
+  provider and fallback; successful or uncertain attempts pin the provider.
+  See [transcription](transcription.md) for recovery rules.
 - **Compute** supports provisioned sandbox providers and user-owned Connected
   Machines without changing the session model.
 - **Tools and integrations** combine first-party MCP, per-session MCP servers,
@@ -54,23 +52,20 @@ The product has several deliberately separate surfaces:
   ComputerSession interaction, terminals, and published outputs.
 - **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
   stock web console, and advanced in-process host seams.
+- **[Feedback](feedback.md)**.
 - **Operations** include usage metering, entitlement admission, billing,
   deployment contracts, observability, and release evidence.
 
-OpenGeni makes long-lived, interruptible, multi-tenant agent runs durable and
-recoverable without turning live transports, workflow memory, or provider state
-into authority.
-
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
+
+Skills: [`content, authority, and migration`](skills-lifecycle.md).
 
 ---
 
 ## 3. Core invariants
 
-These rules cross package and process boundaries. Focused docs contain the
-complete contracts and edge cases; this section preserves the architectural
-reason each rule exists.
+Cross-package invariants; focused docs own complete contracts and edge cases.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -172,11 +167,10 @@ Docker/local SDK processes expose turn-scoped handles after a bounded wait.
 They remain on the turn cancellation fence and stop before finalization, allowing
 an agent to test a preview server without waiting for it to exit.
 
-Long external waits are session state, not workflow memory or goals.
-`wait_for_input` records the declaring turn and absolute PostgreSQL deadline,
-then ends the turn and workflow. Durable input or the deadline outbox restarts
-it; timeout becomes typed input. `session_wait` and `command_wait` are short
-in-turn reads.
+`wait_for_input` persists a turn and deadline; input or timeout resumes execution.
+Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
+drives working/recheck UI separately from unread. `session_wait`/`command_wait`
+are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
@@ -217,13 +211,12 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
-Workspace Memory is the autonomous agent-retention lane. It is enabled by
-default; an explicit workspace opt-out disables agent writes. When enabled,
-exact live agent attempts save and correct active
-facts, decisions, incidents, fixes, and outcomes without consulting Learning
-mode. It remains retrieval-only model context through `memory_search`; it is
-not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
-claim.
+Workspace Memory stores retrieval context. It is enabled by default: exact
+live agent attempts autonomously save and correct active facts, decisions,
+incidents, fixes, and outcomes independently of Learning mode. A workspace
+opt-out disables agent writes. Private sessions can read shared facts, but
+mutations require their exact writable scope. Memory is distinct from Skills,
+instructions, organization profiles, and reviewed Knowledge.
 
 Organization identity has a separate organization-owner autonomy policy. Off
 rejects agent-authored identity changes before proposal creation, Require approval
@@ -240,8 +233,8 @@ rest and exposed only through explicit permissioned operations with
 metadata-only audit.
 
 Generated media and editable artifacts are durable workspace artifacts, not
-conversation blobs. Model-facing history retains compact receipts and resolves
-bytes through the file or artifact authority when needed.
+conversation blobs. Active image history resolves authorized references, including
+compaction input. History preserves JSON key order; JSONB serves queries.
 
 Canonical: [`run-lifecycle.md`](run-lifecycle.md),
 [`hierarchical-memory.md`](hierarchical-memory.md),
@@ -677,6 +670,9 @@ path.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
+Message-point forks preserve canonical history through an uncompacted protocol
+boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
@@ -834,6 +830,15 @@ billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
+Workspace built-in tool and MCP-server defaults inherit independently when
+their respective `settings.sessionToolDefaults` key is absent. Existing arrays
+remain exact custom selections (including empty arrays). The settings API
+merges these nested keys atomically; explicit `null` removes only that override.
+The UI requires deliberate customization and exposes partial selections;
+saving plugin defaults never freezes built-in defaults. Persistence lives in
+`packages/db/src/workspace-tool-defaults.ts`; deployment ceilings still apply,
+and changing defaults never rewrites existing sessions or accepted attempts.
+
 A fresh session selecting a workspace Gateway or OpenRouter custom model, an
 existing session explicitly switching from another model, a new/materially
 reaccepted scheduled task, automation trigger, or PR-review binding, or a fresh
@@ -861,11 +866,13 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `load_skill`,
+`write_stdin`, `apply_patch`, `view_image`, `load_skill`, `skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
+
+Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no
@@ -912,6 +919,8 @@ Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 [`artifact-collaboration.md`](artifact-collaboration.md).
 
 ### 5.7 Usage, limits, and billing
+
+Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
@@ -1034,7 +1043,8 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/northstar-support` | `@opengeni/example-northstar-support` | Executable standalone-product integration reference with a server-side SDK proxy, authenticated product MCP, React embedding, and independent event streams |
+| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
+| `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
 ### 6.4 Rust agent and relay
@@ -1123,6 +1133,8 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
+Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
+
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
@@ -1175,10 +1187,10 @@ injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
 Multiple SDK clients in the same document retain independent ports; connecting
-one must not cancel another. The same Site client exposes the ordinary session
-SDK for React providers, timelines, and composers. Published requests use the
-viewer-authenticated parent; sandbox previews use the existing attempt-bound
-Codemode HTTP handler, including incremental, cancellable event streams.
+one must not cancel another. Workspace SDK requests have no endpoint allowlist:
+the host binds routing; API handlers authorize. Published calls use viewer auth;
+previews retain the Codemode permission ceiling and cancellable streaming.
+Build/edit shortcuts send user prompts without authority overrides.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
@@ -1269,7 +1281,7 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
-Canonical: [`artifact-engine.md`](artifact-engine.md),
+Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
 
@@ -1289,21 +1301,19 @@ Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased archives at
 `/opt/opengeni/site-packages`; deployed images do not.
 
-Timeline history ownership stays in `packages/react`: `use-session-events.ts`
-fences history navigation by session/client lifetime, independently of SSE
-reconnects. The web route supplies source events alongside projected rows;
-it keys the timeline by session so pagination ownership and reading state cannot
-survive navigation to another session.
-The database event-page reader uses at most 256 rows per internal batch to limit
-round trips on large history reads. Full-payload reads plan against the page's
-byte budget before transferring canonical payloads; increasing the batch count
-does not increase the default 1 MiB page envelope.
-Retained event identity determines window overlap because partial-message row
-IDs can change on prepend. `timeline-anchor.tsx` captures the reading position
-immediately before React mutates the DOM; `message-timeline.tsx` applies only
-the residual correction after browser anchoring. Corrections cannot resume
-tip-follow, and continued upward input permits bounded sequential older-page
-loads even when collapsed content adds no scroll range.
+Timeline history belongs to `packages/react`. `use-session-events.ts` fences
+navigation by session/client lifetime, independently of SSE reconnects. The web
+route supplies source events and keys the timeline by session. Retained event
+identity determines overlap; partial-message row IDs can change on prepend.
+`timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx`
+corrects only residual browser-anchor movement, without resuming tip-follow.
+Continued upward input permits bounded older-page loads despite collapsed rows.
+Automatic underfill preserves the tail and offers explicit earlier navigation
+at the window limit. Underfilled history never auto-pages forward; Jump to latest
+restores the live tail. Provider message identity survives normalization and
+coalescing, joining interleaved chunks without merging distinct messages.
+The database reader batches up to 256 events, preserving the default 1 MiB
+full-payload page budget through metadata planning before payload transfer.
 
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
@@ -1414,11 +1424,11 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Repeated retained-process Modal binding-missing or binding-mismatch observations
-may be quarantined for a 24-hour recheck after five claimed probes, but the
-process, admission, PTY, and holder remain capture blockers. Quarantine never
-becomes exit/loss proof and never authorizes capture, rotation, provider
-termination, or replay.
+After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
+recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
+never authorizes exit/loss, capture, rotation, termination, or replay.
+
+Modal command retention: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
@@ -1463,6 +1473,10 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
 
 ---
+
+Skill approval atomically settles a verified managed/local human response and
+activates the exact folder under scope/head checks. Agents and delegated
+subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
 
 ## 10. Security and access model
 
@@ -1550,7 +1564,7 @@ This index intentionally routes at subsystem granularity. Use
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Session Debug model-visible context | `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/inspector.tsx` | this map §4 and [`run-lifecycle.md`](run-lifecycle.md) |
+| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
@@ -1567,7 +1581,7 @@ This index intentionally routes at subsystem granularity. Use
 | Setting, default, or boot validation | `packages/config/src/index.ts` | [`deployment.md`](deployment.md) when operator-visible |
 | Authentication or workspace grants | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts` | [`../SECURITY.md`](../SECURITY.md) |
 | Managed browser login actors or session sets | `packages/contracts/src/managed-auth-session-sets.ts`, `packages/core/src/managed-auth-session-sets.ts`, `apps/api/src/routes/managed-auth-session-sets.ts` | [`browser-login-session-sets.md`](browser-login-session-sets.md) |
-| Agent access to peer sessions | `packages/core/src/session-authorization.ts`, `packages/db/src/session-control.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
+| Agent access to peer sessions or memory scope | `packages/core/src/session-authorization.ts`, `test/session-agent-access-contract-surface.test.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
 | Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
@@ -1632,20 +1646,9 @@ authority. Update this file in the same change when you:
   §5; or
 - change the canonical source or topic doc for a row in §13.
 
-Use [`README.md`](README.md) as the complete docs map. Update the focused topic
-doc—not this file—with feature mechanics, migration histories, rollout
-instructions, exact settings, provider-specific behavior, route inventories,
-or schema detail.
-
-Keep additions concise:
-
-1. State the stable architectural rule.
-2. Explain why the boundary exists.
-3. Link to the code and focused document that own exact behavior.
-4. Prefer deletion over retaining a stale enumeration.
-
-This file should remain an orientation document that can be read in one sitting,
-not an append-only ledger of everything the repository has ever learned.
+Use [`README.md`](README.md) for the docs map. Put feature mechanics and rollout
+details in focused docs. Keep this orientation concise: state each invariant,
+its purpose, and its canonical source; remove stale material.
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
 

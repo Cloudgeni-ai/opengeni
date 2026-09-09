@@ -38,6 +38,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
 const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
@@ -111,6 +112,8 @@ describe("fail-closed change impact", () => {
       RESTORED_ATTACHMENT_PREVIEW_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
+      SITE_CONVERSATIONS_E2E,
+      "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
@@ -349,6 +352,8 @@ describe("fail-closed change impact", () => {
       RESTORED_ATTACHMENT_PREVIEW_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
+      SITE_CONVERSATIONS_E2E,
+      "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",

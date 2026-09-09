@@ -141,7 +141,7 @@ describe("Bundles section browser acceptance", () => {
       });
       // One Bundles section, one search, and a row for every kind in it.
       await expectVisible(page.getByRole("heading", { name: "Bundles" }));
-      const search = page.getByLabel("Search bundles");
+      const search = page.getByLabel("Search all plugins");
       await search.fill("research");
       await expectVisible(pluginRow);
       await expectHidden(skillRow);
@@ -426,6 +426,12 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: state.skillInstalled ? [installedSkillSummary(state)] : [] });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/skills/content`
+    ) {
+      return json({ skills: [], nextCursor: null });
     }
     if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: state.pluginInstalled ? [installedPlugin(state)] : [] });

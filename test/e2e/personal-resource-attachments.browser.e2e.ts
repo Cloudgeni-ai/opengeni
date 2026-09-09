@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
@@ -39,7 +40,12 @@ describe("personal resource attachments in Chromium", () => {
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({
+      headless: true,
+      executablePath:
+        process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ??
+        (existsSync("/usr/local/bin/chromium") ? "/usr/local/bin/chromium" : undefined),
+    });
     browserContext = await browser.newContext({ viewport: { width: 375, height: 812 } });
     page = await browserContext.newPage();
     await page.goto(`${baseUrl}/test/personal-resource-attachments.html`, {
@@ -51,20 +57,21 @@ describe("personal resource attachments in Chromium", () => {
     await Promise.allSettled([browserContext?.close(), browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("create and Send/Steer retain message-only default with explicit ongoing choice", async () => {
+  test("Create, Send, Steer and Continue authorize attached resources without another control", async () => {
     const control = page.locator("[data-personal-resource-attachment]");
-    expect(await control.count()).toBe(2);
+    expect(await control.count()).toBe(0);
+    expect(await page.getByRole("radio").count()).toBe(0);
     expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(false);
     await page.getByRole("button", { name: "Create session" }).click();
     expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}")).toEqual({
-      mode: "once",
+      mode: "session",
       workspaceSharedAcknowledged: true,
       sharedOutputWarningVersion: 1,
     });
 
     await page.getByRole("button", { name: "Send" }).click();
     expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}")).toEqual({
-      mode: "once",
+      mode: "session",
       expectedAuthorityEpoch: 3,
       workspaceSharedAcknowledged: true,
       sharedOutputWarningVersion: 1,
@@ -72,31 +79,16 @@ describe("personal resource attachments in Chromium", () => {
     await page.getByRole("button", { name: "Steer" }).click();
     expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}")).toEqual({
       delivery: "steer",
-      mode: "once",
+      mode: "session",
       expectedAuthorityEpoch: 3,
       workspaceSharedAcknowledged: true,
       sharedOutputWarningVersion: 1,
     });
 
-    const setup = page.getByRole("region", { name: "New session create" });
     const existing = page.getByRole("region", { name: "Existing session Send and Steer" });
-    await setup.getByRole("radio", { name: "For my ongoing work in this session" }).check();
-    expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}").mode).toBe(
-      "once",
-    );
     await page.getByRole("button", { name: "Create session", exact: true }).click();
     expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}").mode).toBe(
       "session",
-    );
-    expect(
-      await existing.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
-    ).toBe(true);
-    expect(
-      await setup.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
-    ).toBe(true);
-    await existing.getByRole("radio", { name: "For my ongoing work in this session" }).check();
-    expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
-      "once",
     );
     expect(await existing.getByTestId("failed-session-banner").textContent()).toContain(
       "matching personal-resource grant required",
@@ -112,12 +104,9 @@ describe("personal resource attachments in Chromium", () => {
     expect(
       JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}"),
     ).toMatchObject({ delivery: "continue", mode: "session", expectedAuthorityEpoch: 3 });
-    expect(
-      await existing.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
-    ).toBe(true);
     await existing.getByRole("button", { name: "Send", exact: true }).click();
     expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
-      "once",
+      "session",
     );
     await page.screenshot({
       fullPage: true,
@@ -129,7 +118,6 @@ describe("personal resource attachments in Chromium", () => {
       path: `${process.env.TMPDIR ?? "/tmp"}/personal-scope-desktop.png`,
     });
     await page.setViewportSize({ width: 375, height: 812 });
-    await existing.getByRole("radio", { name: "This message only", exact: true }).check();
     const axe = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
       .analyze();
@@ -139,7 +127,7 @@ describe("personal resource attachments in Chromium", () => {
     );
   }, 60_000);
 
-  test("optional scope chunk loading and failure keep the composer usable and authorization unchanged", async () => {
+  test("recovery chunk loads only for status and fails without bypassing the submission fence", async () => {
     const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
     try {
       const loadingPage = await context.newPage();
@@ -157,6 +145,9 @@ describe("personal resource attachments in Chromium", () => {
       await loadingPage.goto(`${baseUrl}/test/personal-resource-attachments.html`, {
         waitUntil: "domcontentloaded",
       });
+      await loadingPage.getByRole("button", { name: "Send", exact: true }).waitFor();
+      expect(await loadingPage.locator("[data-personal-resource-attachment]").count()).toBe(0);
+      await loadingPage.getByRole("button", { name: "Simulate stale epoch" }).click();
       await loadingPage
         .getByRole("status")
         .filter({ hasText: "Loading personal resource options" })
@@ -168,15 +159,11 @@ describe("personal resource attachments in Chromium", () => {
       expect(await loadingPage.getByTestId("send-receipt").textContent()).toBe("");
       release();
       await loadingPage
-        .getByRole("radio", { name: "This message only", exact: true })
+        .getByRole("status")
+        .filter({ hasText: "Personal resources were reloaded" })
         .first()
         .waitFor();
-      expect(
-        await loadingPage
-          .getByRole("radio", { name: "This message only", exact: true })
-          .first()
-          .isChecked(),
-      ).toBe(true);
+      expect(await loadingPage.getByRole("radio").count()).toBe(0);
       await loadingPage.close();
       const failedPage = await context.newPage();
       await failedPage.route(
@@ -186,6 +173,7 @@ describe("personal resource attachments in Chromium", () => {
       await failedPage.goto(`${baseUrl}/test/personal-resource-attachments.html`, {
         waitUntil: "domcontentloaded",
       });
+      await failedPage.getByRole("button", { name: "Simulate stale epoch" }).click();
       await failedPage
         .getByRole("alert")
         .filter({ hasText: "Personal resource options are unavailable" })
@@ -213,6 +201,11 @@ describe("personal resource attachments in Chromium", () => {
 
   test("stale epoch reloads automatically while source loss and principal transition fence state", async () => {
     await page.getByRole("button", { name: "Simulate stale epoch" }).click();
+    await page
+      .getByRole("status")
+      .filter({ hasText: "Session authority changed" })
+      .first()
+      .waitFor();
     expect(await page.getByRole("button", { name: "Send" }).isDisabled()).toBe(false);
     expect(
       await page.getByRole("status").filter({ hasText: "Session authority changed" }).count(),
@@ -221,7 +214,7 @@ describe("personal resource attachments in Chromium", () => {
     expect(
       JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}"),
     ).toMatchObject({
-      mode: "once",
+      mode: "session",
       expectedAuthorityEpoch: 4,
     });
 

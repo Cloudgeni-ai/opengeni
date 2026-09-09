@@ -123,7 +123,8 @@ delegations and voice-end handoffs inherit that same model, reasoning and latenc
 policy through `packages/db/src/session-execution-policy.ts`. Creation settings
 are used only before any turn starts. Existing drafts and accepted queued turns
 keep their explicit settings; a rejected admission never changes inheritance.
-The stored session creation fields are not rewritten. API admission freezes its
+The stored session creation fields are not rewritten. Scheduled generated-session
+recovery validates those stored fields, not the public latest-turn projection. API admission freezes its
 resolved policy so billing validation and the accepted turn cannot disagree if
 another turn starts before the prompt transaction commits. A removed or blocked
 inherited model requires a new selection, never a silent switch to the original.
@@ -630,8 +631,12 @@ five-hour reset semantics, and rollout fence are canonical in
 The first successful lease also stores a bounded accepted Codex allocator-policy
 snapshot in turn metadata. Re-acquisition and definitive-failure settlement use
 that snapshot for active-pointer, rotation, strategy, and pin constraints while
-using current account health/cooldowns; mutable policy changes affect later
-logical turns. Immediately before provider dispatch, a missing or expired
+using current account health/cooldowns; background policy changes affect later
+logical turns. An explicit session account switch may revise selection for a
+capacity-blocked turn under the allocator/session/turn/waiter locks, with a
+closed attempt and matching wait generation. It preserves the accepted
+credential source, authority, conversation history, and logical turn identity.
+Immediately before provider dispatch, a missing or expired
 last-confirmed lease deadline is treated as lease loss and follows lease-loss
 settlement instead of reaching the provider.
 
@@ -676,10 +681,12 @@ Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
 optional goal, downstream accepted credential-policy hash, or blocked-turn
-generation supersede the waiter/turn under their durable fences. Mutable Codex
-rotation or pin settings do not replace the accepted snapshot for this turn, so
-no stale timer or signal can produce double inference or silently change its
-policy.
+generation supersede the waiter/turn under their durable fences. Background
+Codex rotation or pin settings do not replace the accepted snapshot. An explicit
+account switch uses `switchSessionCodexAccount` to update a blocked selection,
+record its control receipt, and request a capacity recheck atomically. Ordinary
+lease claim reads that same revised selection; no new turn or automatic model
+retry is created by the switch itself.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
@@ -845,8 +852,8 @@ operation enters the existing single-flight provisioner, writes that exact
 resolved material to the lease before the waiting operation, and starts renewal.
 A model-only turn therefore owns no credential write, renewal, lease, box, or
 exact-generation cleanup work. Signed file resources are eager only on the exact
-turn that attached them; historical attachment ids do not cause sandbox or
-object-storage work. This-turn generated-video files may still copy onto the
+turn that attached them; historical attachment ids do not cause sandbox work.
+Active model-history images are independently read from object storage. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
 Source-bearing `generate_video` calls join that same single-flight provisioner
@@ -1489,6 +1496,39 @@ stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
 
+### Modal retained-command observation
+
+A resumed Modal SDK session restores the sandbox but not adapter-local numeric
+process handles. New commands use `modal-command-control.ts` and the verified
+Modal 0.9.0 control-plane RPC contract: the admitted workspace generation is
+their route-scoped numeric alias, while opaque provider execution identity and
+per-stream output cursors live in `sandbox_retained_processes.provider_command`.
+Promotion commits the locator with process retention. API, worker, and reaper
+readers adopt only the original sandbox identity, capture stable stream pages,
+then acknowledge cursors. Both streams must drain through provider terminal
+status before settlement. Sandbox files and printed status text are never
+execution authority. Failed initial observation still retains a successful
+start's locator; an ambiguous start is never automatically replayed.
+The dedicated command client preserves abort signals through a version-guarded
+non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
+and retry-disabled calls. Cancelling observation is not process-exit proof;
+the existing token/PGID cleanup fence still owns physical cancellation.
+
+For historical commands without that locator, the reaper reports
+`process_observation_unavailable`, retaining the exact process/admission/holder.
+After five probes it records `quarantined_process_observation_unavailable` and
+rechecks after 24 hours through the existing reconciliation diagnostics/metrics.
+A current owner's exact exit proof still settles immediately; independently
+verified loss of the bound provider instance remains authoritative. Neither a
+missing SDK map entry nor failure to recover terminal output proves command loss,
+including when a completed entry aged out in its original adapter.
+
+Historical containment cannot reconstruct an execution ID the old adapter never
+retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
+operators must reconcile the exact command/provider identity rather than replay
+unknown side effects or clear holders by age. No new process is launched by probing.
+
+
 Migration 0419 records the exact launch turn, attempt, and execution generation
 when either provider adopts a background command under the existing attempt
 fence. Terminal results resolve that immutable receipt, copy only eligible
@@ -1798,7 +1838,11 @@ audit reads may return it, so it is never a secret boundary.
    content and RLS-scoped. Token-shaped strings, headers, assignments, URLs,
    PEM-looking text, and configured-secret-shaped strings are never classified
    or rewritten. A new turn's
-   input is built from this store. It is dual-written as the agent streams
+   input is built from this store. Ordered PostgreSQL `json` columns preserve
+   object-key order, with trigger-synchronized `jsonb` projections for existing
+   SQL queries. The pending-call ledger uses the same representation. Reads use
+   normal JSON decoding without sorting or another database round trip. Legacy
+   rows retain their already-normalized order. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
    second conversation-memory read path. At this persistence boundary only,
@@ -1838,15 +1882,21 @@ audit reads may return it, so it is never a secret boundary.
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
-   User attachments use a separate one-turn delivery rule. The accepted user
-   row stores private stable file references beside the message. Only that
-   triggering turn resolves metadata, optionally inlines supported bytes, and
-   materializes the files into active compute. Later model requests project the
-   references as compact `fileId` receipts without file metadata reads,
-   object-storage reads, filesystem checks, remounts, or downloads. Compaction
-   preserves omitted references in one compact catalog. When old bytes are
-   actually needed, the model uses the existing dedicated Files MCP download
-   URL plus shell instead of startup rematerialization.
+   User attachment rows store stable file references, not inline bytes. Active
+   messages reconstruct the same authorized receipt and supported image content
+   across turns and before compaction. File metadata is batch-authorized once
+   per turn and bytes are memoized; object reads have bounded concurrency.
+   Historical images do not cause sandbox remounts. Each image retains the
+   existing inline admission limit; adding an image does not evict older images.
+   Before blob reads, a 64 MiB raw-image transport limit bounds both accumulated
+   per-turn bytes and repeated images in each request. Exceeding it fails the
+   turn explicitly without altering history; compaction cannot bypass it.
+   Such histories require a smaller conversation or a fork before the heavy
+   messages until a streaming image transport exists.
+   Missing/corrupt eligible bytes fail preparation rather than silently changing
+   context. Compaction preserves images in retained messages and charges their
+   projected token cost. Its omitted-file catalog is reference-only, so it does
+   not rehydrate images from messages deliberately replaced by compaction.
 2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
    Pauses flush completed-pair history, then persist the bounded open suffix
    on `session_pending_tool_calls` (the pending call item, tied reasoning the
@@ -1988,6 +2038,15 @@ session. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.
+
+Provider bookkeeping is not an explicit session mutation for this purpose:
+workspace Codex source changes, automatic policy pins, and recording the last
+used Codex credential preserve both activity fields. A human's explicit
+in-session account switch still counts, as do the ordinary turn/message events.
+Migration 0426 corrects the workspace affinity-reset trigger without rewriting
+historical activity. Retained events cannot reconstruct every legitimate
+non-event session edit, so historical recency repair requires explicit reviewed
+candidates rather than an automatic global backfill.
 
 Operation-keyed session commands retry only their rolled-back database
 transaction on PostgreSQL deadlock or serialization SQLSTATEs, with a bounded
@@ -2169,3 +2228,30 @@ An already-paused session can receive Pause with a new idempotency key to re-arm
 its own settled interruption's missing quiescence wake. This preserves control
 revision and paused admission; the existing worker still proves exact activity
 settlement and writer quiescence. Replaying the same key adds no wake revision.
+
+## Debug context capture
+
+The session Context inspector reads the latest attempt-fenced capture. The runtime
+observes the final HTTP body inside `instrumentedModelFetch`, after Responses/chat
+conversion and Codex, SuperGrok or gateway normalization. It stores the original
+JSON string, including instructions, tools, input and settings; it never rebuilds
+conversation content from events or current configuration. Dispatch proves an
+outbound body, not provider acceptance or expansion of server-side state.
+
+Streaming bodies are teed only when capture is enabled, capped at 4 MiB, and
+cancelled with a failed/aborted transport. Inspection and persistence do not block
+inference. Oversized/unsupported bodies produce an explicit unavailable receipt;
+historical SDK-prefix captures and non-HTTP transports are labeled incomplete.
+Capture ordinals are reserved before reading, so a slower older upload cannot
+replace a newer request. The existing 16 MiB snapshot storage limit still applies.
+
+Section and item token counts are character-based estimates, not provider usage.
+Instructions display as the captured string without reconstructed sub-sections. Media, encrypted state and provider overhead have no exact local count.
+The UI never substitutes the latest session usage event for usage of this exact
+capture. Headers (including provider credentials) are outside the body capture.
+
+The context browser shows 30 item previews per page and searches the full readable
+captured content. Detail views read continuously, virtualize large text internally, support full-text
+Find, and preserve full content for copying. New captures wait for an
+explicit Load latest action while a user inspects an existing request. This is the
+last captured model request, not an archive of the entire session.

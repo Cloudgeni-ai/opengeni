@@ -50,6 +50,9 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  // Two cold demo navigations and real accessibility scans need the same
+  // explicit browser-test budget as the adjacent resize journey, not Bun's
+  // default five seconds (baseline CI already measures this case near four).
   test("conversation paints a matched surface on light hosts in both themes", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -81,7 +84,7 @@ describe("container-responsive public composer demo", () => {
     } finally {
       await context.close();
     }
-  });
+  }, 30_000);
 
   test("desktop measurement does not widen the document after a mobile resize", async () => {
     const context = await browser.newContext({
@@ -194,8 +197,10 @@ describe("container-responsive public composer demo", () => {
     await search.fill("no-such-model");
     await page.getByText("No matching models. Try a model or provider name.").waitFor();
     await search.fill("codex");
-    await page.getByRole("combobox", { name: "Thinking effort" }).selectOption("high");
-    expect(await page.getByRole("combobox", { name: "Thinking effort" }).inputValue()).toBe("high");
+    await page.getByRole("radio", { name: "High", exact: true }).click();
+    expect(
+      await page.getByRole("radio", { name: "High", exact: true }).getAttribute("aria-checked"),
+    ).toBe("true");
     await search.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");

@@ -199,6 +199,45 @@ afterEach(() => {
 });
 
 describe("MessageTimeline pagination affordances", () => {
+  test("places host message actions beside Copy and suppresses them while streaming", async () => {
+    const selected: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          userItem("prompt", "Question"),
+          {
+            kind: "agent-message",
+            id: "reply",
+            turnId: "turn",
+            text: "Answer",
+            streaming: false,
+            occurredAt: "2026-09-09T07:00:00Z",
+          },
+          {
+            kind: "agent-message",
+            id: "stream",
+            turnId: "next",
+            text: "Working",
+            streaming: true,
+            occurredAt: "2026-09-09T07:01:00Z",
+          },
+        ]}
+        renderMessageActions={(item) => (
+          <button data-message-action={item.id} onClick={() => selected.push(item.id)}>
+            Fork from here
+          </button>
+        )}
+      />,
+    );
+    const buttons = r.container.querySelectorAll<HTMLButtonElement>("[data-message-action]");
+    expect([...buttons].map((button) => button.dataset.messageAction)).toEqual(["prompt", "reply"]);
+    for (const button of buttons)
+      expect(button.parentElement?.querySelector("[data-og-copy]")).not.toBeNull();
+    await actRun(() => buttons[1]!.click());
+    expect(selected).toEqual(["reply"]);
+    await r.unmount();
+  });
+
   test("can reveal a known-fresh first message without blanking the scroller", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {

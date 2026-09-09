@@ -220,17 +220,13 @@ function SessionCapabilityPickerItem(props: {
   );
 }
 
-export function SessionToolPicker(props: {
+export const SESSION_TOOLS_PANEL_CLASS =
+  "flex max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] w-[min(20rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl";
+
+export function sessionToolSelectionSummary(props: {
   servers: McpServerOption[];
   firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
   selection: SessionToolSelection;
-  disabled?: boolean;
-  saving?: boolean;
-  /** Prefer `bottom` on home/new-chat; `top` when composer is docked at bottom. */
-  menuSide?: "top" | "bottom";
-  /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
-  triggerClassName?: string;
-  onChange: (selection: SessionToolSelection) => void;
 }) {
   const visibleSelection = visibleSessionToolSelection(
     props.selection,
@@ -244,6 +240,27 @@ export function SessionToolPicker(props: {
     (group) => capabilityGroupSelection(group, visibleSelection.firstPartyToolIds) !== "none",
   ).length;
   const selectedCapabilities = visibleSelection.mcpServerIds.size + selectedGroups;
+  return {
+    total,
+    selected,
+    selectedCapabilities,
+    label: selected === total ? "All" : String(selectedCapabilities),
+  };
+}
+
+export function SessionToolPicker(props: {
+  servers: McpServerOption[];
+  firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
+  selection: SessionToolSelection;
+  disabled?: boolean;
+  saving?: boolean;
+  /** Prefer `bottom` on home/new-chat; `top` when composer is docked at bottom. */
+  menuSide?: "top" | "bottom";
+  /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
+  triggerClassName?: string;
+  onChange: (selection: SessionToolSelection) => void;
+}) {
+  const { total, selected, label } = sessionToolSelectionSummary(props);
   const menuSide = props.menuSide ?? "bottom";
   if (total === 0) return null;
 
@@ -260,11 +277,7 @@ export function SessionToolPicker(props: {
         >
           <PlugIcon className="size-3.5" />
           <span className="session-tools-label truncate @max-[14rem]/model-controls:hidden">
-            {props.saving
-              ? "Saving tools"
-              : selected === total
-                ? "Tools · All"
-                : `Tools · ${selectedCapabilities}`}
+            {props.saving ? "Saving tools" : `Tools · ${label}`}
           </span>
           <ChevronDownIcon className="session-tools-chevron size-3 shrink-0" />
         </Button>
@@ -274,7 +287,7 @@ export function SessionToolPicker(props: {
         side={menuSide}
         sideOffset={8}
         collisionPadding={12}
-        className="flex max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] w-80 flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
+        className={SESSION_TOOLS_PANEL_CLASS}
       >
         <SessionToolsMenuBody
           servers={props.servers}

@@ -87,6 +87,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
@@ -157,6 +158,7 @@ RUN set -eux; \
       cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
     done; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
+    cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \

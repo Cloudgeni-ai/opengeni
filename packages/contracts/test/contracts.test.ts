@@ -136,7 +136,14 @@ describe("API key descriptions", () => {
       name: "Product backend",
       description: "Provisions tenants",
       expiresAt: "2027-01-01T00:00:00+00:00",
+      access: "full",
     });
+    expect(CreateOrganizationApiKeyRequest.parse({ name: "reader", access: "read" }).access).toBe(
+      "read",
+    );
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({ name: "backend", access: "write" }).success,
+    ).toBe(false);
     expect(
       CreateOrganizationApiKeyRequest.safeParse({ name: "backend", permissions: [] }).success,
     ).toBe(false);
@@ -993,7 +1000,6 @@ describe("contracts", () => {
           ],
         },
         {
-          name: "RELEASE",
           files: [
             {
               path: "SKILL.md",
@@ -1016,11 +1022,21 @@ describe("contracts", () => {
         skills: [
           {
             name: "release",
-            files: [{ path: "SKILL.md", content: "# One\n" }],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# One\n",
+              },
+            ],
           },
           {
-            name: "RELEASE",
-            files: [{ path: "SKILL.md", content: "# Two\n" }],
+            name: "release",
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# Two\n",
+              },
+            ],
           },
         ],
       }),

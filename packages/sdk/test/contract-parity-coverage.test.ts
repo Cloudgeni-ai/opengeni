@@ -454,7 +454,16 @@ describe("SDK / contracts parity (full coverage)", () => {
       sandboxProviderImages: {
         modal: { imageId: "im-1234567890123456789012" },
       },
-      skills: [{ name: "runbooks", files: [{ path: "SKILL.md", content: "# Runbooks" }] }],
+      skills: [
+        {
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: runbooks\ndescription: Operational runbooks\n---\n# Runbooks",
+            },
+          ],
+        },
+      ],
     };
     expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);
 
