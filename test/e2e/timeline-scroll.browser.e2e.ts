@@ -236,6 +236,66 @@ describe("timeline scroll ownership browser regression", () => {
       }
     }, 25_000);
 
+    test(`lazy table layout survives unmount before loading and remount (${consumer})`, async () => {
+      const tablePage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      observeBrowserErrors(tablePage, browserErrors);
+      let releaseImport!: () => void;
+      const importGate = new Promise<void>((resolve) => {
+        releaseImport = resolve;
+      });
+      const layoutChunk = /\/assets\/markdown-table-layout-[^/]+\.js$/;
+      await tablePage.route(layoutChunk, async (route) => {
+        await importGate;
+        await route.continue();
+      });
+      try {
+        const requested = tablePage.waitForRequest((request) => layoutChunk.test(request.url()), {
+          timeout: 5_000,
+        });
+        await tablePage.goto(`${baseUrl}/timeline-table-test.html${compiled ? "?compiled" : ""}`);
+        await requested;
+        await tablePage.locator("table").first().waitFor();
+        const detached = await tablePage.locator("table").first().locator("../..").elementHandle();
+        await tablePage.evaluate(() => window.timelineTableHarness!.mount(false));
+        await tablePage.locator("table").waitFor({ state: "detached" });
+        const before = await detached!.getAttribute("style");
+        const loaded = tablePage.waitForResponse((response) => layoutChunk.test(response.url()));
+        releaseImport();
+        await (await loaded).finished();
+        // Let promise continuations and any queued observer frame run while the
+        // old table is detached, before mounting another owner of the module.
+        await tablePage.evaluate(
+          () =>
+            new Promise<void>((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+            ),
+        );
+        expect(await detached!.getAttribute("style")).toBe(before);
+        await detached!.dispose();
+        await tablePage.evaluate(() => {
+          window.timelineTableHarness!.content("wide");
+          window.timelineTableHarness!.mount(true);
+        });
+        await tablePage.waitForFunction(
+          () =>
+            document.querySelector("table")?.parentElement!.getBoundingClientRect().width! > 868,
+        );
+        assertTableContainment(await tableGeometry(tablePage));
+        // Also dispose an attached observer, then remount in a narrower owner.
+        await tablePage.evaluate(() => window.timelineTableHarness!.mount(false));
+        await tablePage.locator("table").waitFor({ state: "detached" });
+        await tablePage.evaluate(() => {
+          window.timelineTableHarness!.panel(560);
+          window.timelineTableHarness!.mount(true);
+        });
+        await tablePage.locator("table").waitFor();
+        assertTableContainment(await tableGeometry(tablePage));
+      } finally {
+        releaseImport();
+        await tablePage.close();
+      }
+    }, 15_000);
+
     test(`table TSV copy and focused keyboard scrolling remain local (${consumer})`, async () => {
       const tablePage = await openTables();
       try {
@@ -1813,6 +1873,7 @@ declare global {
     timelineTableHarness?: {
       content: (value: "baseline" | "small" | "wide" | "oversized") => void;
       panel: (width: number | null) => void;
+      mount: (value: boolean) => void;
     };
     timelineScrollHarness?: {
       append: () => void;

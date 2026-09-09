@@ -42,6 +42,7 @@ declare global {
     timelineTableHarness?: {
       content: (value: TableContent) => void;
       panel: (width: number | null) => void;
+      mount: (value: boolean) => void;
     };
   }
 }
@@ -49,8 +50,9 @@ declare global {
 function Harness() {
   const [content, setContent] = useState<TableContent>("baseline");
   const [panel, setPanel] = useState<number | null>(null);
+  const [mounted, setMounted] = useState(true);
   useEffect(() => {
-    window.timelineTableHarness = { content: setContent, panel: setPanel };
+    window.timelineTableHarness = { content: setContent, panel: setPanel, mount: setMounted };
     return () => {
       delete window.timelineTableHarness;
     };
@@ -79,7 +81,7 @@ function Harness() {
       style={{ padding: "0 12px", display: "flex", justifyContent: "flex-end" }}
     >
       <section data-table-panel style={{ width: panel ?? "100%", maxWidth: "100%", minWidth: 0 }}>
-        <MessageTimeline className="table-test-shell" items={items} />
+        {mounted ? <MessageTimeline className="table-test-shell" items={items} /> : null}
       </section>
     </main>
   );
