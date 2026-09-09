@@ -865,7 +865,8 @@ export async function runTurnStreamAttempt(
                 },
               }
             : {}),
-          contextCompactionSignal: () => modelResponseContextSignal(modelResponseState),
+          contextCompactionSignal: () =>
+            modelResponseContextSignal(modelResponseState, responseCountBeforeStream),
           contextCompactionRequested: () =>
             isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
           onModelPreparationPhase: (measurement) => {

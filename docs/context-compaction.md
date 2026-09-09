@@ -65,7 +65,11 @@ guard anchors to that exact response's provider-reported **total** tokens and
 adds only items appended after the last model-generated item plus positive
 instruction or tool-schema growth. That anchor is accepted only when the usage
 revision belongs to the immediately preceding model request; a delayed signal
-is ignored rather than attached to newer input. At a later turn boundary, the
+is ignored rather than attached to newer input. Each in-activity stream retry
+captures the activity-wide response count at entry. Reports at or before that
+boundary are ineligible, and newer report revisions are translated to the new
+stream's request numbering. Usage identities and deduplication remain
+activity-wide and are never reset by compaction. At a later turn boundary, the
 attempt-fenced provider-reported `last_input_tokens` is the only durable
 automatic signal. Every newer authoritative terminal response replaces it with
 that response's usable input count or null when the provider supplied none;
