@@ -2244,6 +2244,9 @@ describe("embedding host session authorization routes", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        // A session-scoped grant registers only its signed selection; an
+        // omitted claim now fails closed instead of exposing the default catalog.
+        firstPartyMcpTools: ["session_get" as const],
       },
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, agentGrant);

@@ -989,6 +989,15 @@ describe("API component integration", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: [
+          "goal_set",
+          "goal_update",
+          "goal_progress",
+          "wait_for_input",
+          "goal_pause",
+          "goal_resume",
+          "goal_complete",
+        ],
       },
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
@@ -10540,6 +10549,7 @@ describe("API component integration", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: ["variable_set_get_variable"],
       },
     };
 

@@ -7,6 +7,9 @@ import {
   resolveWorkspaceCodexCompactionDefault,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   ScheduledTaskRunAcceptedExecution,
+  SessionAgentAccess,
+  SessionEndUser,
+  SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
@@ -35,6 +38,7 @@ import {
   enqueueSessionWorkflowWakeIfRunnable,
   failScheduledGeneratedSessionRoute,
   getScheduledTask,
+  getScheduledTaskCreatorPolicy,
   getScheduledTaskRunAcceptedExecution,
   getScheduledTaskRunByProducerKey,
   getScheduledTargetSessionExecution,
@@ -72,7 +76,11 @@ import {
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { resolveFirstPartyMcpToolPolicy, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveFirstPartyMcpToolPolicy,
+  resolveTurnExecutionPolicyV1,
+} from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
 import {
@@ -505,7 +513,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
       let sandboxOs: "linux" | "macos" | "windows" = "linux";
       const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
-      const firstPartyMcpTools = resolveFirstPartyMcpToolPolicy(settings).default;
+      // A task created by a live agent attempt froze its creator's effective
+      // first-party selection, permission set, and session access policy;
+      // its generated sessions inherit that boundary under today's
+      // deployment ceiling. A human/API-created task (null policy) keeps the
+      // deployment default exactly as before.
+      const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
+      const firstPartyMcpTools = creatorPolicy?.firstPartyMcpTools
+        ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
+        : resolveFirstPartyMcpToolPolicy(settings).default;
+      const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
+        ? [...creatorPolicy.firstPartyMcpPermissions]
+        : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
+      const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
+        creatorPolicy?.sessionPolicy ?? null,
+      );
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
@@ -701,7 +723,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             : {
                 tools: taskTools,
                 firstPartyMcpTools,
-                firstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+                firstPartyMcpPermissions,
                 variableSetId: acceptedVariableSet?.id ?? null,
                 rigId: acceptedRig?.id ?? null,
                 rigVersionId: acceptedRig?.activeVersion?.id ?? null,
@@ -848,7 +870,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedSandboxOs: sandboxOs,
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
-          resolvedFirstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+          resolvedFirstPartyMcpPermissions: firstPartyMcpPermissions,
           resolvedVariableSet: acceptedVariableSet
             ? { id: acceptedVariableSet.id, generation: acceptedVariableSet.generation }
             : null,
@@ -1060,7 +1082,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 resources: task.agentConfig.resources,
                 tools: taskTools,
                 firstPartyMcpTools,
-                firstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+                firstPartyMcpPermissions,
+                ...creatorSessionPolicy,
                 metadata: {
                   ...taskMetadata,
                   model,
@@ -2069,6 +2092,14 @@ async function recoverBoundScheduledTaskDispatch(input: {
     }
     const taskMetadata = { ...task.agentConfig.metadata };
     delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
+    // Tools and permissions were frozen into the accepted execution. The
+    // creator session policy is immutable on the task row (a tombstoned task
+    // still answers), so re-reading it here is deterministic for the same run.
+    const recoveredCreatorPolicy = await getScheduledTaskCreatorPolicy(
+      input.db,
+      task.workspaceId,
+      task.id,
+    );
     const created = await createSessionWithIdempotencyKeyResult(input.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
@@ -2077,6 +2108,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
       tools: input.acceptedExecution.resolvedTools,
       firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
+      ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
       metadata: {
         ...taskMetadata,
         model: input.acceptedExecution.resolvedModel,
@@ -2537,6 +2569,35 @@ async function replayScheduledTaskDispatch(input: {
     });
   }
   return result;
+}
+
+/**
+ * Session-create fields carried by a frozen creator session policy. Only the
+ * facts the creating session projection exposed at task creation are set;
+ * a null (or no longer valid) key leaves the generated session on its own
+ * default. The field names are the session access-scope contract
+ * (`agentAccess`, `endUser`, `memoryScope`) consumed by session create.
+ */
+function scheduledCreatorSessionPolicyInput(
+  policy: {
+    agentAccess: string | null;
+    endUser: { source: string; id: string } | null;
+    memoryScope: string | null;
+  } | null,
+): {
+  agentAccess?: SessionAgentAccess;
+  endUser?: SessionEndUser;
+  memoryScope?: SessionMemoryScope;
+} {
+  if (!policy) return {};
+  const agentAccess = SessionAgentAccess.safeParse(policy.agentAccess);
+  const endUser = SessionEndUser.safeParse(policy.endUser);
+  const memoryScope = SessionMemoryScope.safeParse(policy.memoryScope);
+  return {
+    ...(agentAccess.success ? { agentAccess: agentAccess.data } : {}),
+    ...(endUser.success ? { endUser: endUser.data } : {}),
+    ...(memoryScope.success ? { memoryScope: memoryScope.data } : {}),
+  };
 }
 
 function knowledgeSourceSyncEffectivelyPaused(task: {

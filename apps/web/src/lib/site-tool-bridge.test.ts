@@ -57,6 +57,43 @@ function staleCatalogError(): ApiError {
 }
 
 describe("Site tool bridge direct calls", () => {
+  test("HTTP session calls use host-owned provenance and resolve current Site filters", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; headers: Headers }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), headers: new Headers(init?.headers) });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const bridge = createSiteToolBridge({
+        workspaceTools: {} as OpenGeniWorkspaceTools,
+        workspaceId,
+        artifactId,
+        siteVersionId,
+        requestedTools: [],
+      });
+      await bridge.fetch!(
+        {
+          path: "/v1/workspaces/site-host/sessions?view=page&originSiteId=current",
+          type: "opengeni.site.http",
+          requestId: "origin-test",
+          method: "GET",
+          headers: [
+            ["x-opengeni-site-id", "forged"],
+            ["x-opengeni-site-version", "forged"],
+          ],
+        },
+        signal,
+      );
+      expect(requests[0]!.url).toContain(`originSiteId=${artifactId}`);
+      expect(requests[0]!.url).toContain(`/workspaces/${workspaceId}/sessions`);
+      expect(requests[0]!.headers.get("x-opengeni-site-id")).toBe(artifactId);
+      expect(requests[0]!.headers.get("x-opengeni-site-version")).toBe(siteVersionId);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("calls an allowed live tool directly with host-owned Site context", async () => {
     const catalogCalls: Array<boolean | undefined> = [];
     let callRequest: Record<string, unknown> | null = null;

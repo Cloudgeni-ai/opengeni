@@ -24,6 +24,26 @@ export function sessionStatusLabel(status: Session["status"]): string {
   }
 }
 
+export function sessionInputWait(
+  session: Pick<Session, "status" | "effectiveControl" | "inputWait">,
+) {
+  return session.status === "idle" && session.effectiveControl?.state === "active"
+    ? (session.inputWait ?? null)
+    : null;
+}
+
+export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact = false): string {
+  const deadline = new Date(deadlineAt);
+  if (deadline.getTime() <= now) return compact ? "Recheck due" : "Waiting · recheck due";
+  const sameDay = deadline.toDateString() === new Date(now).toDateString();
+  const time = deadline.toLocaleString(undefined, {
+    ...(sameDay ? {} : { month: "short", day: "numeric" }),
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return compact ? `Waiting · ${time}` : `Waiting · recheck at ${time}`;
+}
+
 /** Honest user-facing state: lifecycle first, then the effective pause policy. */
 export function sessionStateLabel(session: Session): string {
   const commandActivity = session.backgroundCommandActivity;
@@ -37,7 +57,10 @@ export function sessionStateLabel(session: Session): string {
       ? "Background command running"
       : `${commandActivity.count} background commands running`;
   }
-  const lifecycle = sessionStatusLabel(session.status);
+  const waiting = sessionInputWait(session);
+  const lifecycle = waiting
+    ? sessionWaitLabel(waiting.deadlineAt, Date.now(), true)
+    : sessionStatusLabel(session.status);
   const attentionOrTerminal =
     session.status === "requires_action" ||
     session.status === "failed" ||

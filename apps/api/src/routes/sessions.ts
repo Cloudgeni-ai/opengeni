@@ -1,4 +1,6 @@
 import { scheduledSessionIds } from "@opengeni/db";
+import { withSiteSessionOrigin } from "@opengeni/core";
+import { resolveSiteSessionOrigin } from "../site-session-origin";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -46,6 +48,9 @@ import {
   SessionEventReadMode,
   SessionEventLatestClass,
   SessionEventResultMode,
+  SessionEndUser,
+  SESSION_END_USER_ID_MAX_CHARS,
+  SESSION_END_USER_SOURCE_MAX_CHARS,
   SessionEventSemanticClass,
   SessionEventType,
   SessionMcpServerId,
@@ -559,7 +564,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+      const origin = await resolveSiteSessionOrigin(
+        db,
+        workspaceId,
+        c.req.header("x-opengeni-site-id"),
+        c.req.header("x-opengeni-site-version"),
+      );
+      const create = () =>
+        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
@@ -670,11 +683,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.archivedOnly ? { archivedOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
         ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         ...(query.createdBy ? { createdBy: query.createdBy } : {}),
         ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
         ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
         ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
         ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+        ...(query.endUser ? { endUser: query.endUser } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
         // the list's removal fence must fall back to the organization-membership
@@ -732,6 +747,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json({
         ...page,
         ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorate),
         sessions: page.sessions.map(decorate),
       });
@@ -4679,6 +4695,7 @@ function sessionListQuery(
   query: Record<string, string>,
   allowCursor = true,
 ): {
+  originSiteId: string | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
@@ -4691,9 +4708,13 @@ function sessionListQuery(
   updatedBefore: Date | undefined;
   createdFrom: Date | undefined;
   createdBefore: Date | undefined;
+  endUser: SessionEndUser | undefined;
   hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
+  const originSiteId = query.originSiteId;
+  if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
+    throw new HTTPException(400, { message: "originSiteId must be a Site id" });
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
   // failure -> 500 rather than an honest 400).
@@ -4781,13 +4802,34 @@ function sessionListQuery(
   if (createdFrom && createdBefore && createdFrom >= createdBefore) {
     throw new HTTPException(400, { message: "createdFrom must be earlier than createdBefore" });
   }
+  // The opaque end-user label filter is an exact pair: one half alone is a
+  // client error rather than a silently unfiltered list.
+  const endUserSource = query.endUserSource;
+  const endUserId = query.endUserId;
+  if ((endUserSource === undefined) !== (endUserId === undefined)) {
+    throw new HTTPException(400, {
+      message: "endUserSource and endUserId must be supplied together",
+    });
+  }
+  let endUser: SessionEndUser | undefined;
+  if (endUserSource !== undefined && endUserId !== undefined) {
+    const parsedEndUser = SessionEndUser.safeParse({ source: endUserSource, id: endUserId });
+    if (!parsedEndUser.success) {
+      throw new HTTPException(400, {
+        message: `endUserSource must be 1-${SESSION_END_USER_SOURCE_MAX_CHARS} and endUserId 1-${SESSION_END_USER_ID_MAX_CHARS} well-formed characters`,
+      });
+    }
+    endUser = parsedEndUser.data;
+  }
   const hasPageFilters =
+    originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
     updatedFrom !== undefined ||
     updatedBefore !== undefined ||
     createdFrom !== undefined ||
-    createdBefore !== undefined;
+    createdBefore !== undefined ||
+    endUser !== undefined;
   if (pinsOnly && !allowCursor) {
     throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
   }
@@ -4801,6 +4843,7 @@ function sessionListQuery(
   }
   return {
     limit: query.limit,
+    originSiteId,
     parentSessionId:
       parentSessionId === undefined
         ? undefined
@@ -4820,6 +4863,7 @@ function sessionListQuery(
     updatedBefore,
     createdFrom,
     createdBefore,
+    endUser,
     hasPageFilters,
   };
 }

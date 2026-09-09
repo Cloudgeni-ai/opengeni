@@ -591,3 +591,42 @@ the presence of shadow records alone is not evidence of adaptive benefit.
 - Production release proof must additionally show concurrent live turns selecting
   distinct eligible credential ids and one controlled exhausted credential
   recovering on another id without a duplicate turn/message.
+
+### Conversation recency and historical repair
+
+Workspace pool changes, automatic policy assignments, and last-used credential
+bookkeeping preserve session recency. Manual in-session account switches remain
+explicit session activity. Migration 0426 fixes the bulk reset for old and new
+API binaries; deploy the matching worker binary to fix automatic assignment and
+last-used writes too.
+
+Historical timestamps cannot be reconstructed exactly from events alone: explicit
+session edits may have no event, retention may have removed evidence, and the
+workspace preference timestamp is not a reliable record of previous bulk resets.
+Never blanket-backfill cleared-affinity sessions. An operator must first confirm
+an affected set and independently review the proposed timestamp for each session.
+Use the ordinary configured database identity and tenant scope; the tool grants
+no additional access and does not bypass private-session RLS.
+
+For at most 50 explicit idle sessions, generate a private manifest (no writes):
+
+```bash
+bun scripts/session-recency-repair.ts --workspace-id <uuid> \
+  --session-ids <uuid>,<uuid> --evidence "confirmed incident evidence" > /private/path/recency-plan.json
+```
+
+The proposal is the latest retained semantic event, turn start/finish, or creation
+time. It includes title events and excludes the same raw delta types as ordinary
+activity tracking. Review the manifest against incident evidence before applying:
+
+```bash
+bun scripts/session-recency-repair.ts --apply /private/path/recency-plan.json
+```
+
+Apply rechecks the exact microsecond timestamp, activity revision, durable event
+cursor, idle state, and retained reconstruction under canonical session/cursor
+locks. Changed candidates are skipped. Each successful repair advances the normal
+activity revision (so incremental discovery sees it once), preserves event truth,
+and restores only the timestamp. Save the result beside the manifest. Replaying
+a successfully applied plan is a no-op. No deployment or historical write is
+performed merely by installing the migration.

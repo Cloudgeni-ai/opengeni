@@ -1,4 +1,5 @@
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
+import { sessionCreationMetadata } from "../site-session-origin";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -42,7 +43,10 @@ import {
   type ReasoningEffort,
   type ResourceRef,
   type Session,
+  type SessionAgentAccess,
   type SessionCommandReceipt,
+  type SessionEndUser,
+  type SessionMemoryScope,
   type SessionSkill,
   type SessionEvent,
   SessionMcpApprovalPolicy,
@@ -135,6 +139,7 @@ import type {
   SessionWorkflowClient,
 } from "../dependencies";
 import {
+  grantHasAgentAttemptAuthority,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -238,10 +243,33 @@ export class SessionSpawnDeniedError extends Error {
 }
 
 /**
+ * A session's effective first-party selection as a ceiling for narrowing:
+ * the stored selection (or the deployment default for a legacy null) under
+ * the deployment ceiling, with the resume counterpart of pause authority the
+ * runtime already grants to existing sessions.
+ */
+export function effectiveFirstPartyMcpToolCeiling(
+  stored: readonly FirstPartyMcpToolName[] | null | undefined,
+  policy: {
+    default: readonly FirstPartyMcpToolName[];
+    allowed: readonly FirstPartyMcpToolName[];
+  },
+): Set<FirstPartyMcpToolName> {
+  const allowed = new Set(policy.allowed);
+  const ceiling = new Set([...(stored ?? policy.default)].filter((tool) => allowed.has(tool)));
+  if (ceiling.has("goal_pause") && allowed.has("goal_resume")) ceiling.add("goal_resume");
+  return ceiling;
+}
+
+/**
  * Resolve per-session first-party tool visibility without consulting
  * authorization. Top-level omission snapshots the complete runtime default;
  * child omission snapshots the parent's exact effective selection. Explicit
- * [] is authoritative and must never widen.
+ * [] is authoritative and must never widen. An explicit child selection may
+ * only narrow the parent's effective selection: a session that was handed a
+ * reduced catalog cannot spawn a child that sees more than it does. A
+ * top-level explicit selection keeps only the deployment ceiling (checked by
+ * the caller) because there is no creator selection to narrow.
  */
 export function resolveFirstPartyMcpToolsForCreate(
   requested: FirstPartyMcpToolName[] | undefined,
@@ -254,7 +282,18 @@ export function resolveFirstPartyMcpToolsForCreate(
     allowed: FIRST_PARTY_MCP_TOOL_NAMES,
   },
 ): FirstPartyMcpToolName[] {
-  if (requested !== undefined) return [...requested];
+  if (requested !== undefined) {
+    if (parentStored !== undefined) {
+      const parentCeiling = effectiveFirstPartyMcpToolCeiling(parentStored, policy);
+      const widened = requested.find((tool) => !parentCeiling.has(tool));
+      if (widened) {
+        throw new HTTPException(403, {
+          message: `child first-party MCP tools may only narrow the parent session selection: ${widened}`,
+        });
+      }
+    }
+    return [...requested];
+  }
   const allowed = new Set(policy.allowed);
   const inherited = parentStored === undefined ? policy.default : (parentStored ?? policy.default);
   return [...inherited].filter((tool) => allowed.has(tool));
@@ -756,6 +795,12 @@ export async function createAndStartSessionWithOutcome(input: {
   // Model-visible first-party tool names. Authorization remains controlled by
   // firstPartyMcpPermissions and the target resource checks.
   firstPartyMcpTools: FirstPartyMcpToolName[];
+  // Agent-access scope, opaque end-user label, and typed Memory selector
+  // (migration 0427), already resolved against the parent by the caller.
+  // Omitted keeps the workspace defaults for internal lifecycle callers.
+  agentAccess?: SessionAgentAccess;
+  endUser?: SessionEndUser | null;
+  memoryScope?: SessionMemoryScope;
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
@@ -969,6 +1014,9 @@ export async function createAndStartSessionWithOutcome(input: {
       firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
       policyRole: input.policyRole ?? null,
+      ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+      ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
+      ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
       selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
@@ -1059,6 +1107,9 @@ export async function createAndStartSessionWithOutcome(input: {
       firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
       policyRole: input.policyRole ?? null,
+      ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+      ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
+      ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       parentSessionId: input.parentSessionId ?? null,
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
@@ -1763,6 +1814,87 @@ export function resolveSessionCreateVisibility(input: {
   return input.requestedVisibility === "private" ? "user_private" : "workspace_shared";
 }
 
+export type SessionCreateScope = {
+  agentAccess: SessionAgentAccess;
+  endUser: SessionEndUser | null;
+  memoryScope: SessionMemoryScope;
+};
+
+const AGENT_ACCESS_WIDTH: Record<SessionAgentAccess, number> = {
+  session: 0,
+  user: 1,
+  workspace: 2,
+};
+
+const MEMORY_SCOPE_WIDTH: Record<SessionMemoryScope, number> = {
+  off: 0,
+  session: 1,
+  user: 2,
+  workspace: 3,
+};
+
+/**
+ * Resolve a new session's agent-access scope, end-user label, and Memory
+ * selector (migration 0427). A top-level request takes its own values. An
+ * agent-created child inherits every omitted value from its trusted parent
+ * and may only NARROW an explicit one: agent access workspace > user >
+ * session, memory workspace > user > session > off, and the label must equal
+ * the parent's. Widening is a 403 because the parent's declared reach is a
+ * security boundary the child's own request cannot cross; a memory `user`
+ * selector without a label is a 422 in either position.
+ */
+export function resolveSessionCreateScope(input: {
+  requested: {
+    agentAccess: SessionAgentAccess;
+    agentAccessProvided: boolean;
+    endUser: SessionEndUser | null;
+    endUserProvided: boolean;
+    memoryScope: SessionMemoryScope;
+    memoryScopeProvided: boolean;
+  };
+  parent: SessionCreateScope | null;
+}): SessionCreateScope {
+  const { requested, parent } = input;
+  let resolved: SessionCreateScope;
+  if (!parent) {
+    resolved = {
+      agentAccess: requested.agentAccess,
+      endUser: requested.endUser,
+      memoryScope: requested.memoryScope,
+    };
+  } else {
+    const agentAccess = requested.agentAccessProvided ? requested.agentAccess : parent.agentAccess;
+    if (AGENT_ACCESS_WIDTH[agentAccess] > AGENT_ACCESS_WIDTH[parent.agentAccess]) {
+      throw new HTTPException(403, {
+        message: "child agent access may only narrow the parent session",
+      });
+    }
+    if (requested.endUserProvided) {
+      const same =
+        requested.endUser !== null &&
+        parent.endUser !== null &&
+        requested.endUser.source === parent.endUser.source &&
+        requested.endUser.id === parent.endUser.id;
+      if (!same) {
+        throw new HTTPException(403, {
+          message: "child end-user label must equal the parent session label",
+        });
+      }
+    }
+    const memoryScope = requested.memoryScopeProvided ? requested.memoryScope : parent.memoryScope;
+    if (MEMORY_SCOPE_WIDTH[memoryScope] > MEMORY_SCOPE_WIDTH[parent.memoryScope]) {
+      throw new HTTPException(403, {
+        message: "child memory scope may only narrow the parent session",
+      });
+    }
+    resolved = { agentAccess, endUser: parent.endUser, memoryScope };
+  }
+  if (resolved.memoryScope === "user" && resolved.endUser === null) {
+    throw new HTTPException(422, { message: 'memoryScope "user" requires an endUser label' });
+  }
+  return resolved;
+}
+
 async function resolveWorkspaceModelBoundarySettings(
   deps: Pick<ApiRouteDeps, "db" | "settings" | "catalogSourceSettings">,
   grant: AccessGrant,
@@ -1835,6 +1967,7 @@ export async function createSessionForRequestWithOutcome(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  payload.metadata = sessionCreationMetadata(payload.metadata);
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
@@ -1905,6 +2038,27 @@ export async function createSessionForRequestWithOutcome(
       message: error instanceof Error ? error.message : "invalid child visibility",
     });
   }
+  // Agent-access/end-user/memory scope inherit and narrow exactly like
+  // visibility: presence is read from the raw request because the Zod
+  // defaults erase absent-vs-explicit, and the parent side comes from the
+  // durable row rather than anything the caller sent.
+  const sessionScope = resolveSessionCreateScope({
+    requested: {
+      agentAccess: payload.agentAccess,
+      agentAccessProvided: hasOwnProperty(rawPayload, "agentAccess"),
+      endUser: payload.endUser ?? null,
+      endUserProvided: hasOwnProperty(rawPayload, "endUser"),
+      memoryScope: payload.memoryScope,
+      memoryScopeProvided: hasOwnProperty(rawPayload, "memoryScope"),
+    },
+    parent: parentAuthority
+      ? {
+          agentAccess: parentAuthority.agentAccess,
+          endUser: parentAuthority.endUser,
+          memoryScope: parentAuthority.memoryScope,
+        }
+      : null,
+  });
   const creationInitiator = creationInitiatorForGrant(grant);
   const parentCallingTurn =
     parentSession && creationInitiator.actor
@@ -2824,6 +2978,9 @@ export async function createSessionForRequestWithOutcome(
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
       policyRole: payload.policyRole ?? null,
+      agentAccess: sessionScope.agentAccess,
+      endUser: sessionScope.endUser,
+      memoryScope: sessionScope.memoryScope,
       firstPartyMcpPermissions,
       firstPartyMcpTools,
       mcpServers: sessionMcpServers.dbServers,
@@ -3535,6 +3692,7 @@ export async function updateSessionToolPolicy(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
@@ -3673,6 +3831,41 @@ export async function updateSessionToolPolicy(
             ? workspaceDefaultFirstPartyTools
             : explicitRequestedFirstPartyTools!;
         nextPolicy = { mode: requestedMode, inheritedFromSessionId: null };
+        if (agentAttemptCaller) {
+          // A human or API key may widen a top-level session; a live agent
+          // attempt may only narrow relative to the session's CURRENT
+          // effective policy, in either mode. Adopting workspace defaults is a
+          // widen whenever it adds a server or tool the session does not hold.
+          const sessionTracksWorkspaceDefaults = session.toolPolicy?.mode === "workspace_default";
+          const currentEffectiveTools = withFirstPartyTools(
+            sessionTracksWorkspaceDefaults
+              ? withWorkspaceDefaultMcpTools(
+                  availableToolRefs(session.tools, runtimeSettings),
+                  deps.settings,
+                  runtimeSettings,
+                  workspaceSessionToolDefaults,
+                )
+              : session.tools,
+            runtimeSettings,
+          );
+          assertToolRefsSubset(
+            nextTools,
+            currentEffectiveTools,
+            "an agent may only narrow its session tool policy",
+          );
+          const currentFirstPartyCeiling = effectiveFirstPartyMcpToolCeiling(
+            session.firstPartyMcpTools,
+            deploymentFirstPartyMcpToolPolicy,
+          );
+          const widenedFirstPartyTool = nextFirstPartyMcpTools.find(
+            (tool) => !currentFirstPartyCeiling.has(tool),
+          );
+          if (widenedFirstPartyTool) {
+            throw new HTTPException(403, {
+              message: `an agent may only narrow its session OpenGeni tools: ${widenedFirstPartyTool}`,
+            });
+          }
+        }
       }
 
       const currentPolicy = session.toolPolicy;

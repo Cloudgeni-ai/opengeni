@@ -164,11 +164,10 @@ Docker/local SDK processes expose turn-scoped handles after a bounded wait.
 They remain on the turn cancellation fence and stop before finalization, allowing
 an agent to test a preview server without waiting for it to exit.
 
-Long external waits are session state, not workflow memory or goals.
-`wait_for_input` records the declaring turn and absolute PostgreSQL deadline,
-then ends the turn and workflow. Durable input or the deadline outbox restarts
-it; timeout becomes typed input. `session_wait` and `command_wait` are short
-in-turn reads.
+`wait_for_input` persists a turn and deadline; input or timeout resumes execution.
+Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
+drives working/recheck UI separately from unread. `session_wait`/`command_wait`
+are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
@@ -209,13 +208,12 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
-Workspace Memory is the autonomous agent-retention lane. It is enabled by
-default; an explicit workspace opt-out disables agent writes. When enabled,
-exact live agent attempts save and correct active
-facts, decisions, incidents, fixes, and outcomes without consulting Learning
-mode. It remains retrieval-only model context through `memory_search`; it is
-not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
-claim.
+Workspace Memory stores retrieval context. It is enabled by default: exact
+live agent attempts autonomously save and correct active facts, decisions,
+incidents, fixes, and outcomes independently of Learning mode. A workspace
+opt-out disables agent writes. Private sessions can read shared facts, but
+mutations require their exact writable scope. Memory is distinct from Skills,
+instructions, organization profiles, and reviewed Knowledge.
 
 Organization identity has a separate organization-owner autonomy policy. Off
 rejects agent-authored identity changes before proposal creation, Require approval
@@ -1035,7 +1033,8 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/northstar-support` | `@opengeni/example-northstar-support` | Executable standalone-product integration reference with a server-side SDK proxy, authenticated product MCP, React embedding, and independent event streams |
+| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Smallest integration example |
+| `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
 ### 6.4 Rust agent and relay
@@ -1272,7 +1271,7 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
-Canonical: [`artifact-engine.md`](artifact-engine.md),
+Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
 
@@ -1566,7 +1565,7 @@ This index intentionally routes at subsystem granularity. Use
 | Setting, default, or boot validation | `packages/config/src/index.ts` | [`deployment.md`](deployment.md) when operator-visible |
 | Authentication or workspace grants | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts` | [`../SECURITY.md`](../SECURITY.md) |
 | Managed browser login actors or session sets | `packages/contracts/src/managed-auth-session-sets.ts`, `packages/core/src/managed-auth-session-sets.ts`, `apps/api/src/routes/managed-auth-session-sets.ts` | [`browser-login-session-sets.md`](browser-login-session-sets.md) |
-| Agent access to peer sessions | `packages/core/src/session-authorization.ts`, `packages/db/src/session-control.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
+| Agent access to peer sessions or memory scope | `packages/core/src/session-authorization.ts`, `test/session-agent-access-contract-surface.test.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
 | Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |

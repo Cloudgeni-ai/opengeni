@@ -831,6 +831,68 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await hook.unmount();
   });
 
+  test("Files retries a failed viewer attach and clears the failure on success", async () => {
+    let attempts = 0;
+    const { client } = coldClient({
+      attachViewer: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("Sandbox provider unavailable");
+        return fakeAttachResponse();
+      },
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    const fileProps = () =>
+      (
+        hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES)!
+          .content as ReactElement<{
+          onWakeWorkspace: () => void;
+          workspaceError: Error | null;
+          liveWorkspaceReady: boolean;
+        }>
+      ).props;
+    await flush(60);
+    expect(attempts).toBe(0);
+    await act(async () => fileProps().onWakeWorkspace());
+    await flush(60);
+    expect(attempts).toBe(1);
+    expect(fileProps().workspaceError?.message).toBe("Sandbox provider unavailable");
+    expect(fileProps().liveWorkspaceReady).toBe(false);
+    await act(async () => fileProps().onWakeWorkspace());
+    await flush(60);
+    expect(attempts).toBe(2);
+    expect(fileProps().workspaceError).toBeNull();
+    expect(fileProps().liveWorkspaceReady).toBe(true);
+    await hook.unmount();
+  });
+
+  test("Files reports an unsupported live filesystem instead of pretending to wake it", async () => {
+    const caps = fakeColdCapabilities();
+    const { client, spy } = coldClient({
+      getStreamCapabilities: async () => ({
+        ...caps,
+        FileSystem: { ...caps.FileSystem, available: false },
+      }),
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    const fileProps = () =>
+      (
+        hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES)!
+          .content as ReactElement<{
+          onWakeWorkspace: () => void;
+          workspaceError: Error | null;
+        }>
+      ).props;
+    await flush(60);
+    expect(fileProps().workspaceError).toBeNull();
+    await act(async () => fileProps().onWakeWorkspace());
+    await flush(60);
+    expect(spy.attachCalls).toBe(0);
+    expect(fileProps().workspaceError?.message).toContain(
+      "does not currently expose a live file system",
+    );
+    await hook.unmount();
+  });
+
   test("opening a deliberate file is explicit live-file intent and warms a cold box", async () => {
     const opened: string[] = [];
     const { client, spy } = coldClient();

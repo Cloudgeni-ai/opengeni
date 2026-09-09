@@ -106,6 +106,7 @@ type TaskRunHistory =
  * connections at once on a page the user has only just landed on.
  */
 const RUN_PROBE_CONCURRENCY = 8;
+const SCHEDULES_POLL_MS = 30_000;
 
 /**
  * The rendered list and the ordering keys it is sorted by, committed as one
@@ -275,79 +276,102 @@ export function SchedulesRoute({
   // error can never masquerade as a failed mutation in the callers' catch
   // blocks. The toast still fires because a failed refresh with tasks already
   // on screen keeps rendering the stale list.
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [next, targetSessions, exactSourceSession] = await Promise.all([
-        targetSessionId
-          ? loadSessionSchedules(client, workspaceId, targetSessionId)
-          : client.listScheduledTasks(workspaceId),
-        canTargetSessions
-          ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
-          : Promise.resolve([]),
-        canTargetSessions && sourceSessionId
-          ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
-          : Promise.resolve(null),
-      ]);
-      setSessions(
-        [
-          ...(exactSourceSession ? [exactSourceSession] : []),
-          ...targetSessions.filter((session) => session.id !== exactSourceSession?.id),
-        ].filter((session) => session.status !== "cancelled"),
-      );
-      setLoadError(null);
+  const refresh = useCallback(
+    async (background = false) => {
+      if (!background) setLoading(true);
+      try {
+        const [next, targetSessions, exactSourceSession] = await Promise.all([
+          targetSessionId
+            ? loadSessionSchedules(client, workspaceId, targetSessionId)
+            : client.listScheduledTasks(workspaceId),
+          canTargetSessions
+            ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
+            : Promise.resolve([]),
+          canTargetSessions && sourceSessionId
+            ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        setSessions(
+          [
+            ...(exactSourceSession ? [exactSourceSession] : []),
+            ...targetSessions.filter((session) => session.id !== exactSourceSession?.id),
+          ].filter((session) => session.status !== "cancelled"),
+        );
+        setLoadError(null);
 
-      // Deleted schedules must not keep an expanded panel or a cached history
-      // alive, and a collapsed card must never reopen onto a history from before
-      // this reload, so cached history is dropped wholesale and only the panels
-      // that are actually open are read again below.
-      const liveTaskIds = new Set(next.map((task) => task.id));
-      const openTaskIds = [...expandedTaskIdsRef.current].filter((id) => liveTaskIds.has(id));
-      setExpandedTaskIds(new Set(openTaskIds));
-      setRunHistory({});
+        // Deleted schedules must not keep an expanded panel or a cached history
+        // alive, and a collapsed card must never reopen onto a history from before
+        // this reload, so cached history is dropped wholesale and only the panels
+        // that are actually open are read again below.
+        const liveTaskIds = new Set(next.map((task) => task.id));
+        const openTaskIds = [...expandedTaskIdsRef.current].filter((id) => liveTaskIds.has(id));
+        setExpandedTaskIds(new Set(openTaskIds));
+        setRunHistory({});
 
-      // Both the ordering and the collapsed last-run line need one last-run fact
-      // per task, and the wire `ScheduledTask` carries none. A single-row probe
-      // (the runs list is newest-first) is the smallest read that answers both;
-      // the full history behind a card stays strictly on demand.
-      type LastRunProbe = readonly [string, ScheduledTaskRun | null];
-      const probes = await mapWithConcurrency<ScheduledTask, LastRunProbe | null>(
-        next,
-        RUN_PROBE_CONCURRENCY,
-        async (task) => {
-          try {
-            const [newest] = await client.listScheduledTaskRuns(workspaceId, task.id, { limit: 1 });
-            return [task.id, newest ?? null];
-          } catch {
-            // A failed probe leaves the key absent ("unknown") rather than
-            // null, which would claim the task has never run.
-            return null;
-          }
-        },
-      );
-      // The list and its ordering keys land in the same commit, so the order the
-      // user sees is the final one from the first paint onward. Awaiting the
-      // probes first is what pays for that; see ScheduleListSnapshot.
-      setList({
-        tasks: next,
-        lastRuns: Object.fromEntries(
-          probes.filter((entry): entry is LastRunProbe => entry !== null),
-        ),
-      });
+        // Both the ordering and the collapsed last-run line need one last-run fact
+        // per task, and the wire `ScheduledTask` carries none. A single-row probe
+        // (the runs list is newest-first) is the smallest read that answers both;
+        // the full history behind a card stays strictly on demand.
+        type LastRunProbe = readonly [string, ScheduledTaskRun | null];
+        const probes = await mapWithConcurrency<ScheduledTask, LastRunProbe | null>(
+          next,
+          RUN_PROBE_CONCURRENCY,
+          async (task) => {
+            try {
+              const [newest] = await client.listScheduledTaskRuns(workspaceId, task.id, {
+                limit: 1,
+              });
+              return [task.id, newest ?? null];
+            } catch {
+              // A failed probe leaves the key absent ("unknown") rather than
+              // null, which would claim the task has never run.
+              return null;
+            }
+          },
+        );
+        // The list and its ordering keys land in the same commit, so the order the
+        // user sees is the final one from the first paint onward. Awaiting the
+        // probes first is what pays for that; see ScheduleListSnapshot.
+        setList({
+          tasks: next,
+          lastRuns: Object.fromEntries(
+            probes.filter((entry): entry is LastRunProbe => entry !== null),
+          ),
+        });
 
-      await Promise.all(openTaskIds.map((id) => loadRunHistory(id, { notify: false })));
-    } catch (error) {
-      setLoadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load scheduled tasks", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [canTargetSessions, client, loadRunHistory, sourceSessionId, targetSessionId, workspaceId]);
+        await Promise.all(openTaskIds.map((id) => loadRunHistory(id, { notify: false })));
+      } catch (error) {
+        if (!background) {
+          setLoadError(error instanceof Error ? error : new Error(String(error)));
+          toast.error("Failed to load scheduled tasks", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        if (!background) setLoading(false);
+      }
+    },
+    [canTargetSessions, client, loadRunHistory, sourceSessionId, targetSessionId, workspaceId],
+  );
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const reconcileForeground = () => {
+      if (document.visibilityState === "visible") {
+        void refresh(true);
+      }
+    };
+    const interval = window.setInterval(reconcileForeground, SCHEDULES_POLL_MS);
+    window.addEventListener("focus", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
   }, [refresh]);
 
   // Ordering keys come only from the probe, which is refilled by `refresh`.
@@ -646,32 +670,19 @@ export function SchedulesRoute({
         title="Schedules"
         description="Create and manage recurring work."
         actions={
-          <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void refresh()}
-              disabled={loading}
-              className="h-9 pointer-coarse:min-h-10"
-            >
-              <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
-              Refresh
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              className="h-9 pointer-coarse:min-h-10"
-              onClick={() => {
-                clearRecurringLaunch();
-                setOpen((value) => !value);
-                setEditingTaskId(null);
-              }}
-            >
-              <PlusIcon className="size-3.5" />
-              New schedule
-            </Button>
-          </>
+          <Button
+            type="button"
+            size="sm"
+            className="h-9 pointer-coarse:min-h-10"
+            onClick={() => {
+              clearRecurringLaunch();
+              setOpen((value) => !value);
+              setEditingTaskId(null);
+            }}
+          >
+            <PlusIcon className="size-3.5" />
+            New schedule
+          </Button>
         }
       />
 

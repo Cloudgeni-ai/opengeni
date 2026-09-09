@@ -421,7 +421,15 @@ const budgets = {
   // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
   // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of
   // headroom; gzip and every unrelated cap remain fixed.
-  directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  // Composer action consolidation and picker polish, after keeping repository
+  // editor imports behind their existing boundary: main 19d3f195b measures
+  // 2,321,455 raw / 647,272 gzip; the merged graph is 2,326,574 / 648,938
+  // on Bun 1.4 macOS/arm64, with the same 29 files. Bound only this measured
+  // feature delta with the established whole-KiB headroom.
+  // Fresh main 2fb17fdd7 adds Site-origin metadata: the combined graph measures
+  // 2,329,400 raw / 649,936 gzip across 31 files. Advance only the raw envelope;
+  // the existing compressed/file caps still cover this integration.
+  directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400)),
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
@@ -444,7 +452,20 @@ const effectiveBudgets = {
   // entry points merged with 380bba5e6 measure 2,326,478 raw / 649,427 gzip
   // bytes on macOS/arm64.
   // Keep the established whole-KiB headroom and gzip platform-skew allowance.
-  directSessionRaw: Math.max(budgets.directSessionRaw, wholeKibEnvelope(2_326_478)),
+  // Chat integration against main 8e0bf0d28 on Bun 1.3.14 macOS/arm64:
+  // base 2,329,705 raw / 650,067 gzip; integrated 2,333,912 / 651,444.
+  // Organization-session SDK methods and the explicit Site route allowlist
+  // stay in the shared graph; the chat UI remains outside it. Both trees have
+  // 31 direct-session files and identical CSS. Bound only this measured delta
+  // with the existing raw headroom and gzip platform-skew policy.
+  directSessionRaw: Math.max(
+    budgets.directSessionRaw,
+    wholeKibEnvelope(2_326_478),
+    wholeKibEnvelope(2_333_912),
+    // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
+    // Restore the existing whole-KiB headroom; all other caps stay unchanged.
+    wholeKibEnvelope(2_335_755),
+  ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -456,6 +477,7 @@ const effectiveBudgets = {
     // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
     // history anchoring + keyboard/touch demand adds 964, with no new chunk.
     wholeKibEnvelope(644_833, 1.5 * kib),
+    wholeKibEnvelope(648_938),
     // Unchanged d06450ca3 browser source measures 647,170–647,174 gzip
     // bytes in Linux/x64 acceptance builds with randomized loopback API ports.
     // Restore the established whole-KiB headroom; keep every other cap fixed.
@@ -463,12 +485,17 @@ const effectiveBudgets = {
     wholeKibEnvelope(647_413, 1.5 * kib),
     // Merged 380bba5e6 model/context UI: 649,427 gzip bytes locally.
     wholeKibEnvelope(649_427, 1.5 * kib),
+    wholeKibEnvelope(651_444, 1.5 * kib),
     // Timeline-annotation UX (grouped composer chip + numbered
     // MessageTimeline badges) plus the first current-main merge's
     // unified-gateway rebound of this same graph (170045166): 652,195
     // configured gzip. Keep this envelope so the annotation graph is
     // not judged against `d06450ca3`'s smaller gzip pin.
     wholeKibEnvelope(652_195, 1.5 * kib),
+    // Merged current main a7a60271a plus annotation UX: 653,717 gzip on
+    // Linux/x64 Bun 1.4. Restore the established 1.5 KiB platform-skew
+    // envelope; all other caps stay unchanged.
+    wholeKibEnvelope(653_717, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

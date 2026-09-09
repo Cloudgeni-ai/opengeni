@@ -21,16 +21,16 @@ describe("unified tool gateway web bundle budget", () => {
     );
   });
   test("fits the measured subscription SDK and session graph with bounded headroom", () => {
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBeGreaterThanOrEqual(2269 * KIB);
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_321_561).toBeGreaterThanOrEqual(1_895);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBeGreaterThanOrEqual(2272 * KIB);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_324_500).toBeGreaterThanOrEqual(2_028);
   });
   test("fits the measured session-history graph with bounded headroom", () => {
-    expect(TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(2_339_388);
-    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET).toBe(2286 * KIB);
-    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(1_476);
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2286 * KIB);
+    expect(TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(2_350_418);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET).toBe(2297 * KIB);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(1_710);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2297 * KIB);
     expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(
-      1_476,
+      1_710,
     );
   });
 });

@@ -116,7 +116,7 @@
 @property --og-model-picker-menu-width {
   syntax: "*";
   inherits: true;
-  initial-value: 18rem;
+  initial-value: 22rem;
 }
 @property --og-model-picker-menu-padding {
   syntax: "*";
@@ -521,7 +521,7 @@
   --og-line-height-composer-wide: 20px;
   --og-model-picker-trigger-height: 1.75rem;
   --og-model-picker-trigger-height-mobile: 1.75rem;
-  --og-model-picker-menu-width: 15rem;
+  --og-model-picker-menu-width: 20rem;
   --og-model-picker-menu-padding: 0.25rem;
   --og-model-picker-row-padding-x: 0.5rem;
   --og-model-picker-row-padding-y: 0.375rem;
@@ -1623,6 +1623,9 @@
 :where(.og-root).min-w-4,:where(.og-root) .min-w-4 {
     min-width: calc(var(--spacing) * 4);
   }
+:where(.og-root).min-w-10,:where(.og-root) .min-w-10 {
+    min-width: calc(var(--spacing) * 10);
+  }
 :where(.og-root).min-w-11,:where(.og-root) .min-w-11 {
     min-width: calc(var(--spacing) * 11);
   }
@@ -2181,12 +2184,6 @@
     border-color: var(--og-color-border);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--og-color-border) 50%, transparent);
-    }
-  }
-:where(.og-root).border-og-border\/60,:where(.og-root) .border-og-border\/60 {
-    border-color: var(--og-color-border);
-    @supports (color: color-mix(in lab, red, red)) {
-      border-color: color-mix(in oklab, var(--og-color-border) 60%, transparent);
     }
   }
 :where(.og-root).border-og-border\/70,:where(.og-root) .border-og-border\/70 {
@@ -4023,6 +4020,25 @@
       box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     }
   }
+:where(.og-root).focus-within\:outline-2,:where(.og-root) .focus-within\:outline-2 {
+    &:focus-within {
+      outline-style: var(--tw-outline-style);
+      outline-width: 2px;
+    }
+  }
+:where(.og-root).focus-within\:-outline-offset-2,:where(.og-root) .focus-within\:-outline-offset-2 {
+    &:focus-within {
+      outline-offset: calc(2px * -1);
+    }
+  }
+:where(.og-root).focus-within\:outline-og-accent\/40,:where(.og-root) .focus-within\:outline-og-accent\/40 {
+    &:focus-within {
+      outline-color: var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        outline-color: color-mix(in oklab, var(--og-color-accent) 40%, transparent);
+      }
+    }
+  }
 :where(.og-root).hover\:-translate-y-0\.5,:where(.og-root) .hover\:-translate-y-0\.5 {
     &:hover {
       @media (hover: hover) {
@@ -4732,6 +4748,22 @@
 :where(.og-root).data-\[separator-state\=dragging\]\:bg-og-accent,:where(.og-root) .data-\[separator-state\=dragging\]\:bg-og-accent {
     &[data-separator-state="dragging"] {
       background-color: var(--og-color-accent);
+    }
+  }
+:where(.og-root).data-\[state\=checked\]\:bg-og-surface-1,:where(.og-root) .data-\[state\=checked\]\:bg-og-surface-1 {
+    &[data-state="checked"] {
+      background-color: var(--og-color-surface-1);
+    }
+  }
+:where(.og-root).data-\[state\=checked\]\:text-og-fg,:where(.og-root) .data-\[state\=checked\]\:text-og-fg {
+    &[data-state="checked"] {
+      color: var(--og-color-fg);
+    }
+  }
+:where(.og-root).data-\[state\=checked\]\:shadow-sm,:where(.og-root) .data-\[state\=checked\]\:shadow-sm {
+    &[data-state="checked"] {
+      --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+      box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     }
   }
 :where(.og-root).data-\[state\=closed\]\:animate-og-collapse,:where(.og-root) .data-\[state\=closed\]\:animate-og-collapse {
