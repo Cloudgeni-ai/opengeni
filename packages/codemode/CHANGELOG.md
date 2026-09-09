@@ -1,5 +1,18 @@
 # @opengeni/codemode
 
+## 0.5.1
+
+### Patch Changes
+
+- 5904fd1: Remove the Site SDK endpoint allowlist. Workspace API requests now reach ordinary authorization handlers in published Sites and sandbox previews; tenant routing, agent permission limits, and direct integration-tool checks remain unchanged. Clarify the distinction between authoring, preview, and viewer access in the Sites skill, including honest reporting of viewer-only verification.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/contracts@2.15.0
+  - @opengeni/tool-gateway@0.1.2
+
 ## 0.5.0
 
 ### Minor Changes

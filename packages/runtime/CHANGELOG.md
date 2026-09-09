@@ -1,5 +1,25 @@
 # @opengeni/runtime
 
+## 2.4.1
+
+### Patch Changes
+
+- 392c575: Retain Modal command handles, provider execution identities, output, and exact exit status across provider-client reconstruction. Persist stream pages before acknowledging their cursors, and treat unavailable historical locators as unknown rather than proof of process loss. Execution status is provider-owned and never read from sandbox-writable files.
+- befd389: Preserve prompt-cache reuse across turns with unchanged governance by keeping attempt-specific snapshot receipt UUIDs out of system instructions. Stable content hashes, policy revisions, and skill retrieval handles remain model-visible; exact-attempt snapshot IDs remain in durable audit records.
+- f3bd0d0: Preserve unknown Modal command observations instead of falsely settling local SDK handle loss as physical process loss. Retain exact command holders with explicit deferred/quarantine diagnostics while allowing the original owner's terminal proof to settle normally.
+- 5904fd1: Remove the Site SDK endpoint allowlist. Workspace API requests now reach ordinary authorization handlers in published Sites and sandbox previews; tenant routing, agent permission limits, and direct integration-tool checks remain unchanged. Clarify the distinction between authoring, preview, and viewer access in the Sites skill, including honest reporting of viewer-only verification.
+- 29551cb: Clarify that ancestor Pause interrupts the calling agent and that accepted coordination messages require identity-correlated delivery and result verification. Preserve existing recursive controls and discourage duplicate unconsumed messages.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/contracts@2.15.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/codemode@0.5.1
+  - @opengeni/config@1.0.2
+  - @opengeni/tool-gateway@0.1.2
+
 ## 2.4.0
 
 ### Minor Changes
