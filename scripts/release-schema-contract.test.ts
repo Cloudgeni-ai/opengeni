@@ -29,6 +29,7 @@ async function buildSchemaContract(directory?: string) {
         "0429_message_boundary_session_forks.sql",
         "0430_session_personal_variable_set_continuations.sql",
         "0431_retained_provider_commands.sql",
+        "0432_xai_disconnect_session_pins.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -134,6 +135,9 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
+    const xaiDisconnectPins = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0432_xai_disconnect_session_pins.sql",
+    );
     const messageBoundarySessionForks = completeSourceContract.migrations.some(
       (migration) => migration.path === "0429_message_boundary_session_forks.sql",
     );
@@ -146,19 +150,22 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         437 +
+        (xaiDisconnectPins ? 1 : 0) +
         (messageBoundarySessionForks ? 1 : 0) +
         (sessionPersonalVariableSetContinuations ? 1 : 0) +
         (retainedProviderCommands ? 1 : 0),
-      latestMigration: retainedProviderCommands
-        ? "0431_retained_provider_commands.sql"
-        : sessionPersonalVariableSetContinuations
-          ? "0430_session_personal_variable_set_continuations.sql"
-          : messageBoundarySessionForks
-            ? "0429_message_boundary_session_forks.sql"
-            : "0428_scheduled_task_creator_policy.sql",
+      latestMigration: xaiDisconnectPins
+        ? "0432_xai_disconnect_session_pins.sql"
+        : retainedProviderCommands
+          ? "0431_retained_provider_commands.sql"
+          : sessionPersonalVariableSetContinuations
+            ? "0430_session_personal_variable_set_continuations.sql"
+            : messageBoundarySessionForks
+              ? "0429_message_boundary_session_forks.sql"
+              : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0431_retained_provider_commands.sql",
+      path: "0432_xai_disconnect_session_pins.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1606,6 +1613,7 @@ describe("release schema contract", () => {
       "0429_message_boundary_session_forks.sql",
       "0430_session_personal_variable_set_continuations.sql",
       "0431_retained_provider_commands.sql",
+      "0432_xai_disconnect_session_pins.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -4360,6 +4368,7 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
     "0429_message_boundary_session_forks.sql",
     "0430_session_personal_variable_set_continuations.sql",
     "0431_retained_provider_commands.sql",
+    "0432_xai_disconnect_session_pins.sql",
   ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
