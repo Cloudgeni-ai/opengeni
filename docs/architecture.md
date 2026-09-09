@@ -1418,7 +1418,7 @@ process, admission, PTY, and holder remain capture blockers. Quarantine never
 becomes exit/loss proof and never authorizes capture, rotation, provider
 termination, or replay.
 
-Modal command handles are observer-local; see `docs/run-lifecycle.md`.
+Modal command observation: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
