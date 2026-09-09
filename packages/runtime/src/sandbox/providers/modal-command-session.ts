@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
-import { markTypedExecHandleLoss } from "../exec-banner";
 import { ModalProcessObservationUnavailableError } from "../errors";
+import { markTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import {
-  admittedProviderCommandHandle,
+  MAX_PROVIDER_COMMAND_HANDLE,
   type ProviderCommandOutput,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
+  admittedProviderCommandHandle,
 } from "../provider-command-session";
-import { ModalCommandControl, type ModalProviderCommand } from "./modal-command-control";
+import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
 
 type Entry = {
   command: ModalProviderCommand;
@@ -37,10 +38,32 @@ export function installModalCommandSession(
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
+  const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
   const entries = new Map<number, Entry>();
+  // Current SDK setup commands are not retained/admitted commands. Give their
+  // live observer handles a disjoint, adapter-local range; never use a missing
+  // retained alias as permission to poll an unrelated SDK process with that id.
+  const setupHandles = new Map<number, number>();
+  let nextSetupHandle = MAX_PROVIDER_COMMAND_HANDLE + 1;
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
+
+  const setupPage = (raw: string, handle: number, sdkHandle: number): string => {
+    const banner = parseExecResponseBanner(raw);
+    if (banner.kind === "exited") {
+      setupHandles.delete(handle);
+      return raw;
+    }
+    if (banner.kind !== "running" || banner.sessionId !== sdkHandle)
+      throw new ModalProcessObservationUnavailableError(handle);
+    // The parser validated the unique status in the metadata header, before
+    // command-controlled Output. Replace only that first trusted status line.
+    return raw.replace(
+      /^Process running with session ID \d+(?=\r?$)/mu,
+      `Process running with session ID ${handle}`,
+    );
+  };
 
   const formatPage = (
     handle: number,
@@ -83,11 +106,17 @@ export function installModalCommandSession(
 
   session.execCommand = async (args) => {
     const handle = admittedProviderCommandHandle();
-    // SDK-internal setup/readiness commands have no mutation admission. They
-    // retain their existing foreground path and never publish durable handles.
+    // Setup/readiness may yield too. Retain only its original local observer,
+    // without publishing a durable locator or replaying its command.
     if (handle === undefined) {
       if (!originalExec) throw new Error("Modal command requires mutation admission");
-      return originalExec(args);
+      if (!Number.isSafeInteger(nextSetupHandle)) throw new Error("Modal setup handles exhausted");
+      const setupHandle = nextSetupHandle++;
+      const raw = await originalExec(args);
+      const banner = parseExecResponseBanner(raw);
+      if (banner.kind !== "running") return raw;
+      setupHandles.set(setupHandle, banner.sessionId);
+      return setupPage(raw, setupHandle, banner.sessionId);
     }
     if (entries.has(handle)) throw new Error("Modal command handle is already bound");
     const cancellation = new AbortController();
@@ -106,7 +135,11 @@ export function installModalCommandSession(
       } catch {
         // Start succeeded. A failed/cancelled first observation must still
         // publish the known locator for durable retention and exact cleanup.
-        return formatPage(handle, { command: entry.command, chunks: [], exitCode: null });
+        return formatPage(handle, {
+          command: entry.command,
+          chunks: [],
+          exitCode: null,
+        });
       }
     } finally {
       pendingStarts.delete(cancellation);
@@ -128,7 +161,7 @@ export function installModalCommandSession(
     return entry ? structuredClone(entry.command) : null;
   };
   session.bindProviderCommand = (handle, command, persistence) => {
-    if (!Number.isSafeInteger(handle) || handle <= 0)
+    if (!Number.isSafeInteger(handle) || handle <= 0 || handle > MAX_PROVIDER_COMMAND_HANDLE)
       throw new Error("Invalid retained Modal command handle");
     const existing = entries.get(handle);
     if (existing && !sameExecution(existing.command, command))
@@ -150,6 +183,11 @@ export function installModalCommandSession(
     receipts.delete(result);
   };
   session.writeStdin = async (args) => {
+    const sdkHandle = setupHandles.get(args.sessionId);
+    if (sdkHandle !== undefined && originalWrite) {
+      const raw = await originalWrite({ ...args, sessionId: sdkHandle });
+      return setupPage(raw, args.sessionId, sdkHandle);
+    }
     const entry = entries.get(args.sessionId);
     if (!entry?.persistence)
       throw new ModalProcessObservationUnavailableError(args.sessionId, {
