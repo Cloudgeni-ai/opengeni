@@ -4,7 +4,7 @@ description: "The durable unit of agent work, and how input, streaming, and cont
 icon: "comments"
 ---
 
-A **session** is one durable conversation and workstream: its history, policy, visibility, and compute context. Sessions belong to a workspace, and every API route for them is workspace-scoped.
+A **session** is one durable conversation and workstream: its history, policy, visibility, and compute context. Sessions belong to a workspace. Operational session routes use that workspace; an organization-wide inventory can list readable sessions across shared workspaces.
 
 ## Three identities
 
@@ -45,6 +45,20 @@ An agent can spawn child sessions for parallel or delegated work. Children run a
 ## Visibility
 
 Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
+
+## Agent access in product integrations
+
+`agentAccess` controls how an agent reaches other session trees within its workspace:
+
+| Scope       | Agent reach                                                                                    |
+| ----------- | ---------------------------------------------------------------------------------------------- |
+| `session`   | Its own conversation tree, including children                                                  |
+| `user`      | Other trees with the same non-null product/user label, when the target also permits access     |
+| `workspace` | Other trees in the workspace, subject to the target's scope and existing private-session rules |
+
+The more restrictive side wins across trees. Children inherit the parent's scope and can only narrow it. These rules do not make product-created chats invisible to authorized human workspace members or organization API keys. The product backend must still authorize each user's requests.
+
+The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Memory](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Integrate your product](/guides/integrate-your-product#choose-agent-access-and-memory).
 
 ## Browsing and archiving
 
