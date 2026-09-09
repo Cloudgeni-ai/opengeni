@@ -30,6 +30,7 @@ async function buildSchemaContract(directory?: string) {
         "0430_session_personal_variable_set_continuations.sql",
         "0431_retained_provider_commands.sql",
         "0432_xai_disconnect_session_pins.sql",
+        "0434_ordered_model_history.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -135,6 +136,9 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
+    const orderedModelHistory = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0434_ordered_model_history.sql",
+    );
     const xaiDisconnectPins = completeSourceContract.migrations.some(
       (migration) => migration.path === "0432_xai_disconnect_session_pins.sql",
     );
@@ -156,6 +160,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         437 +
+        (orderedModelHistory ? 1 : 0) +
         (xaiDisconnectPins ? 1 : 0) +
         (messageBoundarySessionForks ? 1 : 0) +
         (sessionPersonalVariableSetContinuations ? 1 : 0) +
@@ -164,17 +169,19 @@ describe("release schema contract", () => {
         (skillChatConfirmation ? 1 : 0),
       latestMigration: skillChatConfirmation
         ? "0435_skill_chat_confirmation.sql"
-        : unifiedSkillLifecycle
-          ? "0433_unified_skill_lifecycle.sql"
-          : xaiDisconnectPins
-            ? "0432_xai_disconnect_session_pins.sql"
-            : retainedProviderCommands
-              ? "0431_retained_provider_commands.sql"
-              : sessionPersonalVariableSetContinuations
-                ? "0430_session_personal_variable_set_continuations.sql"
-                : messageBoundarySessionForks
-                  ? "0429_message_boundary_session_forks.sql"
-                  : "0428_scheduled_task_creator_policy.sql",
+        : orderedModelHistory
+          ? "0434_ordered_model_history.sql"
+          : unifiedSkillLifecycle
+            ? "0433_unified_skill_lifecycle.sql"
+            : xaiDisconnectPins
+              ? "0432_xai_disconnect_session_pins.sql"
+              : retainedProviderCommands
+                ? "0431_retained_provider_commands.sql"
+                : sessionPersonalVariableSetContinuations
+                  ? "0430_session_personal_variable_set_continuations.sql"
+                  : messageBoundarySessionForks
+                    ? "0429_message_boundary_session_forks.sql"
+                    : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: "0435_skill_chat_confirmation.sql",
@@ -1658,6 +1665,7 @@ describe("release schema contract", () => {
       "0431_retained_provider_commands.sql",
       "0433_unified_skill_lifecycle.sql",
       "0432_xai_disconnect_session_pins.sql",
+      "0434_ordered_model_history.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -4422,6 +4430,7 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
     "0430_session_personal_variable_set_continuations.sql",
     "0431_retained_provider_commands.sql",
     "0432_xai_disconnect_session_pins.sql",
+    "0434_ordered_model_history.sql",
     "0435_skill_chat_confirmation.sql",
   ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
