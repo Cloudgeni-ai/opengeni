@@ -142,7 +142,7 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
         role: "admin",
       }),
     ]);
-    // This fixture holds 0432 while exercising the current deletion adapter.
+    // This fixture holds 0433 while exercising the current deletion adapter.
     // Supply its FK timing contract without replaying the Skill cutover or
     // changing the 0398 authorization/replay behavior under test.
     await admin.unsafe(`

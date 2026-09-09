@@ -293,13 +293,18 @@ function invokeOlderLoad(
   load: OlderHistoryLoader,
   noProgress: () => void,
   attempt: OlderLoadAttempt,
+  preserveTail = false,
 ): 1 | undefined {
   try {
     // Receipt creation is captured synchronously through legacy wrappers such
     // as `() => void loadOlder()`, even when the wrapper discards the return.
-    const result = invokeOlderHistoryLoaderWithReceiptCapture(load, (receipt) => {
-      attempt[2] = receipt;
-    }) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
+    const result = invokeOlderHistoryLoaderWithReceiptCapture(
+      load,
+      (receipt) => {
+        attempt[2] = receipt;
+      },
+      preserveTail,
+    ) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
     const receipt =
       attempt[2] ??
       (typeof (result as { committed?: unknown } | undefined)?.committed === "boolean"
@@ -978,7 +983,7 @@ export function MessageTimeline({
       // exact `false` is the first-party request-not-accepted receipt.
       // All other fulfillment retains this exact owner until its prepend
       // boundary commits; promise settlement alone cannot prove progress.
-      invokeOlderLoad(onLoadOlder, noProgress, attempt);
+      invokeOlderLoad(onLoadOlder, noProgress, attempt, !retry);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
@@ -1536,7 +1541,9 @@ export function MessageTimeline({
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+        // An underfilled history window has both sentinels visible. Advancing
+        // it automatically would undo an explicit older-page navigation.
+        if (maxScrollOf(root) > 1 && entries.some((entry) => entry.isIntersecting)) {
           onLoadNewer();
         }
       },
@@ -1959,7 +1966,9 @@ export function MessageTimeline({
                                     className="pointer-events-auto rounded-full border border-og-border px-3 py-1.5 text-og-control"
                                   >
                                     {underfillRetryReady
-                                      ? "Retry earlier activity"
+                                      ? underfillSettledAttempt?.[2]?.tailPreserved
+                                        ? "Load earlier activity"
+                                        : "Retry earlier activity"
                                       : "Jump to start"}
                                   </button>
                                 ) : null}

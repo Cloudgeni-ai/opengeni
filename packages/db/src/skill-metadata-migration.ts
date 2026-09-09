@@ -1,7 +1,7 @@
 import { readSkillMetadata, type SkillFile } from "@opengeni/contracts";
 import type postgres from "postgres";
 
-/** Exact runner seam for 0432, not a general callback or runtime capability. */
+/** Exact runner seam for 0433, not a general callback or runtime capability. */
 export const SKILL_METADATA_MIGRATION_MARKER = "-- opengeni:skill-metadata-stage-v1";
 
 export function prepareLegacySkillFolder(
@@ -75,7 +75,7 @@ export async function stageSkillMetadataMigration(tx: postgres.TransactionSql): 
       });
     } catch (cause) {
       throw new Error(
-        `Skill ${source.source_kind}:${source.source_id} needs explicit frontmatter repair before 0432`,
+        `Skill ${source.source_kind}:${source.source_id} needs explicit frontmatter repair before 0433`,
         { cause },
       );
     }
