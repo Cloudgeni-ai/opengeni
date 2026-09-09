@@ -38,6 +38,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
+  skillReviewHumanInput,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
@@ -499,6 +500,30 @@ describe("structured human-input runtime boundary", () => {
         },
       },
     ]);
+  });
+
+  test("preserves the exact Skill review envelope through interruption serialization", () => {
+    const input = skillReviewHumanInput({
+      sourceOperationId: "00000000-0000-4000-8000-000000000001",
+      skillId: "00000000-0000-4000-8000-000000000002",
+      revisionId: "00000000-0000-4000-8000-000000000003",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    });
+    const serialized = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "skill-review-call",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify(input),
+        },
+      },
+    ]);
+    expect(serialized).toEqual([
+      { toolCallId: "skill-review-call", input: { ...input, allowSkip: false } },
+    ]);
+    expect(serialized[0]!.input.questions[0]!.allowOther).toBe(false);
   });
 
   test("partitions typed interaction waits while preserving their exact SDK approval", () => {
