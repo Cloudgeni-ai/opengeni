@@ -1325,6 +1325,24 @@ replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
 
+An operator may explicitly authorize recovery from an older, verified checkpoint
+after the provider is gone. `scripts/operator/historical-checkpoint-recovery.ts`
+accepts `preview` or `authorize` and a private JSON input file. Preview needs
+account/workspace/group IDs. Authorization additionally requires the exact lease
+epoch, workspace and archive generations, selected revision, operation UUID,
+operator subject, reason, and `acceptHistoricalCheckpoint: true`. Authorization
+uses operator-controlled database access; the subject is audit attribution.
+Activity checks reuse session control's pending-quiescence predicate: a historical
+closed attempt without a quiescence timestamp is not itself an active writer.
+Claimed/running attempts and actual pending interruption receipts remain blockers.
+Every attempt in the group must be quiescent and the cold lease must have no holders or
+unsettled mutations. The existing audit store retains that decision and its
+generation gap. Neither generation nor checkpoint artifact provenance is
+rewritten. Existing election, restore verification, and warm publication consume
+the exact receipt; unrelated revisions or newer writes invalidate it. Only a
+subsequent fresh checkpoint makes the archive current. This operation does not
+resume a turn, modify session history, or claim recovery of unavailable writes.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected rig/pack/base
 image instead of replacing the whole machine. Existing serialized sessions keep
@@ -1456,6 +1474,12 @@ lookup and ordinary reconciliation.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
+Command reads expose `observationStatus: unavailable` when the exact retained
+process cannot be observed; session aggregates expose `unavailableCount`.
+The panel and sidebar distinguish that uncertainty from running or a requested
+stop. Observation failure never invents terminal state, and definitive settlement
+clears the unavailable projection.
+
 Connected Machine background commands use the same proof-before-settlement
 discipline without borrowing managed lease identity. The global maintenance pass
 claims oldest-due rows with `SKIP LOCKED`, sends `OpQuery` for `running` or
@@ -1522,6 +1546,18 @@ A current owner's exact exit proof still settles immediately; independently
 verified loss of the bound provider instance remains authoritative. Neither a
 missing SDK map entry nor failure to recover terminal output proves command loss,
 including when a completed entry aged out in its original adapter.
+
+Observation backoff does not suppress provider-lifecycle checks during rotation.
+An idle Modal lease held only by unobservable commands can enroll their exact
+identities into the existing drain. Enrollment requires every attempt in the
+sandbox group to be quiescent beyond idle grace, no other holders, and no child
+mutation admissions. It fences new admission while preserving command records
+and holders until provider termination. Capture excludes only enrolled parent
+admissions and holders; checkpoint publication, termination, cold commit, and
+durable wake remain owned by the existing lifecycle. Unknown commands settle
+lost, never successful; a real exit arriving during drain retains its exit code.
+Failed checkpoints retain the provider and command holders for retry. Filesystem
+snapshots preserve neither running processes nor application transaction state.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;

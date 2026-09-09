@@ -158,6 +158,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     mode = 0,
     explicitStartedAt?: string,
     explicitId?: string,
+    blockedReason?: StartupPhaseItem["blockedReason"],
   ): void => {
     const key = `${startupTurnId}:${phase}`;
     const priorState = startupPhases.get(key);
@@ -184,6 +185,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           ? elapsedDurationMs(open.startedAt, startupEvent.occurredAt)
           : Math.max(0, duration);
       open.outcome = outcome ?? open.outcome;
+      open.blockedReason = blockedReason;
       return;
     }
     const running = status === "running";
@@ -202,6 +204,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         completedAt: running ? null : startupEvent.occurredAt,
         durationMs,
         outcome,
+        blockedReason,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -217,6 +220,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       completedAt: running ? null : startupEvent.occurredAt,
       durationMs,
       outcome,
+      blockedReason,
       occurredAt: startedAt,
     };
     items.push(item);
@@ -738,7 +742,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const startupPhase = startupPhaseForSandboxOperation(name);
         if (startupPhase) {
           closeStreamingTail();
-          settleStartupPhase(startupPhase, status, numberOrNull(payload.durationMs), origin);
+          settleStartupPhase(
+            startupPhase,
+            status,
+            numberOrNull(payload.durationMs),
+            origin,
+            0,
+            undefined,
+            undefined,
+            status === "cancelled" && payload.failureCode === "rotation_in_progress"
+              ? "rotation_in_progress"
+              : undefined,
+          );
           break;
         }
         // Routine per-turn platform plumbing that runs before EVERY turn to

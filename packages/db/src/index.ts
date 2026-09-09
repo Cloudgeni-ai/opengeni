@@ -42168,6 +42168,7 @@ export type SandboxRecoveryState = {
 // Typed with an index signature so it satisfies db.execute<TRow extends
 // Record<string, unknown>>.
 type LeaseRow = {
+  unobservable_command_drain_ids?: string[] | null;
   id: string;
   account_id: string;
   workspace_id: string;
@@ -42227,6 +42228,8 @@ type LeaseRow = {
 } & Record<string, unknown>;
 
 export interface LeaseSnapshot {
+  /** Exact idle-only enrollment. Commands remain active until provider stop. */
+  unobservableCommandDrainIds?: string[] | null;
   id: string;
   sandboxGroupId: string;
   liveness: SandboxLeaseLiveness;
@@ -42811,6 +42814,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
   const recovery = recoveryStateFromLeaseRow(row);
   return {
+    unobservableCommandDrainIds: row.unobservable_command_drain_ids ?? null,
     id: row.id,
     sandboxGroupId: row.sandbox_group_id,
     liveness: row.liveness,
@@ -43236,6 +43240,11 @@ function resumeStateWithPreservedArchives(
       : {};
   return {
     ...(resumeState ?? {}),
+    ...(typeof archiveSource?.opengeniHistoricalArchiveRecoveryId === "string"
+      ? {
+          opengeniHistoricalArchiveRecoveryId: archiveSource.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
@@ -43272,6 +43281,11 @@ function archiveOnlyResumeState(
         ? current.backendId
         : (row.resume_backend_id ?? row.backend),
     ...(Object.keys(durableSession).length > 0 ? { sessionState: durableSession } : {}),
+    ...(typeof current?.opengeniHistoricalArchiveRecoveryId === "string"
+      ? {
+          opengeniHistoricalArchiveRecoveryId: current.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -43700,8 +43714,9 @@ async function acquireLeaseOnce(
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
           if (
-            (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
-            recovery.restore.status === "unrecoverable"
+            ((recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
+              recovery.restore.status === "unrecoverable") &&
+            (await authorizedHistoricalArchiveGeneration(tx, row)) === null
           ) {
             return {
               role: "blocked" as const,
@@ -43825,7 +43840,12 @@ export async function acquireLease(
         now,
       );
     }
-    if (result.role !== "fenced" || result.reason === "superseded" || now >= deadline) {
+    if (
+      result.role !== "fenced" ||
+      result.reason === "superseded" ||
+      result.reason === "rotation_in_progress" ||
+      now >= deadline
+    ) {
       return result;
     }
     await waitForSandboxTransition(
@@ -43901,6 +43921,164 @@ function validatedLegacyNativeSnapshotAdoption(
     return null;
   }
   return { archiveBase64: value.archiveBase64, descriptor };
+}
+
+/** Reuse the session control quiescence receipt instead of treating every
+ * historical closed attempt without a receipt as an active writer. Caller
+ * holds the workspace inference fence, which also serializes new claims. */
+async function hasSandboxGroupAttemptActivityTx(
+  tx: Database,
+  input: { workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+): Promise<boolean> {
+  const sessions = await tx.execute<{ id: string; active: boolean }>(sql`
+    select session.id, exists(select 1 from session_turn_attempts attempt
+      where attempt.workspace_id = session.workspace_id and attempt.session_id = session.id
+        and (attempt.state in ('claimed','running') or
+          coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at) > now() -
+            (${input.idleGraceMs}::bigint * interval '1 millisecond'))) as active
+    from sessions session where session.workspace_id = ${input.workspaceId}
+      and session.sandbox_group_id = ${input.sandboxGroupId}
+  `);
+  for (const session of sessions) {
+    if (
+      session.active ||
+      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+      }))
+    )
+      return true;
+  }
+  return false;
+}
+
+/** Operator-only authorization for an exact historical checkpoint. Direct
+ * database access is the authority boundary; subjectId records attribution.
+ * This never resumes a turn or changes the archive/workspace generations. */
+export async function authorizeHistoricalSandboxCheckpointRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedWorkspaceGeneration: number;
+    expectedArchiveGeneration: number;
+    selectedRevision: string;
+    operationId: string;
+    subjectId: string;
+    reason: string;
+    acceptHistoricalCheckpoint: true;
+  },
+): Promise<{ authorized: boolean }> {
+  if (
+    input.acceptHistoricalCheckpoint !== true ||
+    !input.subjectId.trim() ||
+    !input.reason.trim()
+  ) {
+    throw new Error(
+      "Historical checkpoint recovery requires an identified operator and explicit reason",
+    );
+  }
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId} for update`);
+    const row = rows[0];
+    if (
+      !row ||
+      row.backend !== "modal" ||
+      row.liveness !== "cold" ||
+      row.instance_id !== null ||
+      Number(row.lease_epoch) !== input.expectedEpoch ||
+      Number(row.refcount) !== 0 ||
+      Number(row.workspace_generation) !== input.expectedWorkspaceGeneration ||
+      row.archive_generation === null ||
+      Number(row.archive_generation) !== input.expectedArchiveGeneration ||
+      input.expectedArchiveGeneration >= input.expectedWorkspaceGeneration ||
+      recoveryStateFromLeaseRow(row).archive.current?.revision !== input.selectedRevision
+    )
+      return { authorized: false };
+    if (await hasSandboxGroupAttemptActivityTx(tx, { ...input, idleGraceMs: 0 }))
+      return { authorized: false };
+    const blockers = await tx.execute<{ present: boolean }>(sql`select
+      exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+      or exists(select 1 from sandbox_workspace_mutation_admissions where lease_id = ${row.id} and settled_at is null)
+      or exists(select 1 from sandbox_retained_processes where lease_id = ${row.id} and state = 'active') as present`);
+    if (blockers[0]?.present) return { authorized: false };
+    if (
+      row.resume_state?.opengeniHistoricalArchiveRecoveryId === input.operationId &&
+      (await authorizedHistoricalArchiveGeneration(tx, row)) === input.expectedArchiveGeneration
+    )
+      return { authorized: true };
+    const metadata = {
+      version: 1,
+      leaseId: row.id,
+      leaseEpoch: input.expectedEpoch,
+      workspaceGeneration: input.expectedWorkspaceGeneration,
+      archiveGeneration: input.expectedArchiveGeneration,
+      selectedRevision: input.selectedRevision,
+      reason: input.reason,
+      acceptedHistoricalCheckpoint: true,
+    };
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          id: input.operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "sandbox.historical_checkpoint_recovery.authorized",
+          targetType: "sandbox_group",
+          targetId: input.sandboxGroupId,
+          metadata,
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    await tx.execute(sql`update sandbox_leases set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+      '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(input.operationId)}::jsonb), updated_at = now()
+      where id = ${row.id}`);
+    return { authorized: true };
+  });
+}
+
+async function authorizedHistoricalArchiveGeneration(
+  db: Database,
+  row: LeaseRow,
+): Promise<number | null> {
+  const operationId = row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+  if (
+    typeof operationId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId)
+  )
+    return null;
+  const [receipt] = await db
+    .select({ metadata: schema.auditEvents.metadata })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.id, operationId),
+        eq(schema.auditEvents.accountId, row.account_id),
+        eq(schema.auditEvents.workspaceId, row.workspace_id),
+        eq(schema.auditEvents.targetId, row.sandbox_group_id),
+        eq(schema.auditEvents.action, "sandbox.historical_checkpoint_recovery.authorized"),
+      ),
+    );
+  const metadata = receipt?.metadata;
+  const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  return metadata?.version === 1 &&
+    metadata.acceptedHistoricalCheckpoint === true &&
+    metadata.leaseId === row.id &&
+    metadata.leaseEpoch === Number(row.lease_epoch) &&
+    metadata.workspaceGeneration === Number(row.workspace_generation) &&
+    metadata.archiveGeneration === archiveGeneration &&
+    archiveGeneration !== null &&
+    archiveGeneration < Number(row.workspace_generation) &&
+    metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
+    ? archiveGeneration
+    : null;
 }
 
 /** Records the single cold->warming winner's exact restore attempt. The lease
@@ -44019,7 +44197,9 @@ export async function beginSandboxRematerialization(
             importedArchiveGeneration = true;
           }
         }
-        const archiveComplete = hasCompleteWorkspaceArchive(workingRow);
+        const historicalGeneration = await authorizedHistoricalArchiveGeneration(tx, workingRow);
+        const archiveComplete =
+          hasCompleteWorkspaceArchive(workingRow) || historicalGeneration !== null;
         if (
           current.archive.status !== "available" ||
           !current.archive.current ||
@@ -44135,7 +44315,7 @@ export async function beginSandboxRematerialization(
             ((artifact.provenance === "native_capture" &&
               artifact.source_workspace_generation !== null &&
               Number(artifact.source_workspace_generation) ===
-                Number(workingRow.workspace_generation)) ||
+                (historicalGeneration ?? Number(workingRow.workspace_generation))) ||
               (artifact.provenance === "legacy_provider_adopted" &&
                 artifact.source_workspace_generation === null)) &&
             artifact.provider_backend === workingRow.backend &&
@@ -44620,7 +44800,11 @@ export async function commitWarmingToWarm(
             reason: "archive_revision_mismatch" as const,
           };
         }
-        if (rematerialization && !hasCompleteWorkspaceArchive(row)) {
+        if (
+          rematerialization &&
+          !hasCompleteWorkspaceArchive(row) &&
+          (await authorizedHistoricalArchiveGeneration(tx, row)) === null
+        ) {
           return {
             committed: false,
             lease: mapLeaseRow(row),
@@ -47932,6 +48116,123 @@ export async function reapStaleLeaseHolders(
 // is the sanctioned cross-workspace read). Each invocation runs in its own
 // transaction and opts into the recovery protocol fence; this also makes the
 // legacy fallback safe after PostgreSQL aborts an undefined-function call.
+export async function enrollUnobservableCommandIdleDrain(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+): Promise<ReapDrainable | null> {
+  await withRlsContext(db, input, async (tx) => {
+    // Round-robin inventory: an ineligible live lease cannot starve later rows.
+    // This updates only the inspection cursor, never provider/holder authority.
+    await tx.execute(sql`update sandbox_leases set unobservable_command_checked_at = now()
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}`);
+  });
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const initial = await readLease(tx, input.workspaceId, input.sandboxGroupId);
+    if (
+      !initial ||
+      initial.backend !== "modal" ||
+      !initial.instanceId ||
+      !["warm", "draining"].includes(initial.liveness)
+    )
+      return null;
+    // A command observation backoff must not suppress provider-death checks
+    // during a mandatory rotation. Do not steal an in-flight reconciler claim.
+    if (initial.rotationRequestedAt !== null) {
+      await tx.execute(sql`
+        update sandbox_retained_processes set reconcile_after = least(reconcile_after, now())
+        where lease_id = ${initial.id} and state = 'active' and reconcile_claim_id is null
+          and last_reconcile_outcome in ('process_observation_unavailable',
+            'quarantined_process_observation_unavailable', 'provider_binding_missing',
+            'quarantined_provider_binding_missing', 'provider_binding_mismatch',
+            'quarantined_provider_binding_mismatch')
+      `);
+    }
+    // Preserve process -> admission -> lease ordering used by settlement.
+    const processes = await rawRows<{
+      id: string;
+      parent_admission_id: string;
+      holder_id: string;
+      eligible: boolean;
+    }>(
+      tx,
+      sql`
+      select process.id, process.parent_admission_id, process.holder_id,
+        (process.lease_epoch = ${initial.leaseEpoch}
+          and process.provider_instance_id = ${initial.instanceId}
+          and process.provider_backend = 'modal' and process.route_target_id is null
+          and process.last_reconcile_outcome in ('process_observation_unavailable',
+            'quarantined_process_observation_unavailable')
+          and attempt.state = 'closed'
+          and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
+            (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
+      from sandbox_retained_processes process
+      left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
+      where process.lease_id = ${initial.id} and process.state = 'active'
+      order by process.id for update of process
+    `,
+    );
+    const admissions = await rawRows<{ id: string }>(
+      tx,
+      sql`
+      select id from sandbox_workspace_mutation_admissions
+      where lease_id = ${initial.id} and settled_at is null order by id for update
+    `,
+    );
+    const rows = await tx.execute<LeaseRow>(sql`
+      select * from sandbox_leases where id = ${initial.id} for update
+    `);
+    const lease = rows[0];
+    if (
+      !lease ||
+      Number(lease.lease_epoch) !== initial.leaseEpoch ||
+      lease.instance_id !== initial.instanceId ||
+      !["warm", "draining"].includes(lease.liveness) ||
+      (lease.reaper_hold_until && new Date(lease.reaper_hold_until).getTime() > Date.now())
+    )
+      return null;
+    const enrolled = lease.unobservable_command_drain_ids;
+    const ids = enrolled ?? processes.map((p) => p.id);
+    if (
+      !ids.length ||
+      (!enrolled && processes.some((p) => !p.eligible)) ||
+      processes.some((p) => !ids.includes(p.id))
+    )
+      return null;
+    const parents = new Set(processes.map((p) => p.parent_admission_id));
+    if (admissions.some((a) => !parents.has(a.id))) return null;
+    const holders = await rawRows<{ kind: string; holder_id: string }>(
+      tx,
+      sql`
+      select kind, holder_id from sandbox_lease_holders where lease_id = ${lease.id}
+    `,
+    );
+    if (
+      holders.some(
+        (h) => h.kind !== "process" || !processes.some((p) => p.holder_id === h.holder_id),
+      )
+    )
+      return null;
+    if (!enrolled) {
+      if (lease.archive_capture_id !== null || (await hasSandboxGroupAttemptActivityTx(tx, input)))
+        return null;
+      await tx.execute(sql`
+        update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
+          liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
+          rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
+        where id = ${lease.id}
+      `);
+    }
+    return {
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.sandboxGroupId,
+      instanceId: initial.instanceId,
+      leaseEpoch: initial.leaseEpoch,
+    };
+  });
+}
+
 export async function reapStaleLeaseHoldersGlobal(
   db: Database,
   input: {
@@ -47941,6 +48242,7 @@ export async function reapStaleLeaseHoldersGlobal(
     turnHolderTtlMs?: number;
     interactionHolderTtlMs?: number;
     idleGraceMs: number;
+    onUnobservableCommandDrainError?: (error: unknown) => void;
   },
 ): Promise<ReapDrainable[]> {
   // Active interaction holders represent durable BrowserSession/ComputerSession
@@ -47983,12 +48285,47 @@ export async function reapStaleLeaseHoldersGlobal(
       `,
     );
   });
-  return rows.map((r) => ({
+  const ordinary = rows.map((r) => ({
     workspaceId: r.workspace_id,
     sandboxGroupId: r.sandbox_group_id,
     instanceId: r.instance_id,
     leaseEpoch: Number(r.lease_epoch),
   }));
+  const reportDrainError =
+    input.onUnobservableCommandDrainError ??
+    ((error: unknown) => {
+      console.warn("sandbox reaper: unobservable command drain inspection failed", error);
+    });
+  const candidates = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+  }>(db, sql`select * from opengeni_private.list_unobservable_command_drain_candidates(32)`).catch(
+    (error) => {
+      reportDrainError(error);
+      return [];
+    },
+  );
+  for (const candidate of candidates) {
+    const enrolled = await enrollUnobservableCommandIdleDrain(db, {
+      accountId: candidate.account_id,
+      workspaceId: candidate.workspace_id,
+      sandboxGroupId: candidate.sandbox_group_id,
+      idleGraceMs: input.idleGraceMs,
+    }).catch((error) => {
+      reportDrainError(error);
+      return null;
+    });
+    if (
+      enrolled &&
+      !ordinary.some(
+        (r) =>
+          r.workspaceId === enrolled.workspaceId && r.sandboxGroupId === enrolled.sandboxGroupId,
+      )
+    )
+      ordinary.push(enrolled);
+  }
+  return ordinary;
 }
 
 // §2.2 (global) — the warm-meter read for the REAPER tick (P2.1). Returns one row
@@ -48283,14 +48620,15 @@ export async function confirmDrainCold(
           !observed ||
           observed.liveness !== "draining" ||
           observed.reaper_hold_active ||
-          observed.refcount !== 0 ||
+          (observed.refcount !== 0 && !observed.unobservable_command_drain_ids?.length) ||
           Number(observed.lease_epoch) !== input.expectedEpoch ||
           observed.archive_capture_id !== (input.expectedCaptureId ?? null)
         ) {
           return { wentCold: false };
         }
         const blockerScope =
-          input.providerMissingBeforeCapture && observed.instance_id
+          (input.providerMissingBeforeCapture || observed.unobservable_command_drain_ids?.length) &&
+          observed.instance_id
             ? {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
@@ -48322,7 +48660,7 @@ export async function confirmDrainCold(
           row.id !== observed.id ||
           row.liveness !== "draining" ||
           row.reaper_hold_active ||
-          row.refcount !== 0 ||
+          (row.refcount !== 0 && !row.unobservable_command_drain_ids?.length) ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
           (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
@@ -51359,7 +51697,19 @@ export async function readWorkspaceArchiveCapturePreflight(
           and lease.liveness = ${input.liveness}
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
-          ${input.liveness === "draining" ? sql`and lease.refcount = 0` : sql``}
+          ${
+            input.liveness === "draining"
+              ? sql`and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
+            and not exists (select 1 from sandbox_lease_holders holder where holder.lease_id = lease.id
+              and not (holder.kind = 'process' and exists (
+                select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.lease_id = lease.id and process.holder_id = holder.holder_id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id
+              )))`
+              : sql``
+          }
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
@@ -51377,6 +51727,11 @@ export async function readWorkspaceArchiveCapturePreflight(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -51839,7 +52194,9 @@ export async function claimWorkspaceArchiveCapture(
       if (
         !row ||
         row.liveness !== input.liveness ||
-        (input.liveness === "draining" && Number(row.refcount) !== 0) ||
+        (input.liveness === "draining" &&
+          Number(row.refcount) !== 0 &&
+          !row.unobservable_command_drain_ids?.length) ||
         Number(row.lease_epoch) !== input.expectedEpoch ||
         row.instance_id !== input.expectedInstanceId
       ) {
@@ -51872,6 +52229,12 @@ export async function claimWorkspaceArchiveCapture(
             select count(*)::integer as total, 0::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
+              and not (kind = 'process' and exists (
+                select 1 from sandbox_retained_processes process
+                where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
+                  and process.holder_id = sandbox_lease_holders.holder_id
+                  and process.lease_id = ${row.id}
+              ))
           `);
       if (input.warmAttempt && holderCounts[0]?.exact !== 1) {
         return { status: "attempt_fenced" as const };
@@ -51905,6 +52268,9 @@ export async function claimWorkspaceArchiveCapture(
             and admission.provider_instance_id = ${input.expectedInstanceId}
             and admission.workspace_generation <= ${Number(row.workspace_generation)}
             and admission.settled_at is null
+            and not exists(select 1 from sandbox_retained_processes process
+              where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
+                and process.parent_admission_id = admission.id and process.lease_id = ${row.id})
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
         ) as present
       `);
@@ -52114,7 +52480,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
           and lease.liveness = 'draining'
-          and lease.refcount = 0
+          and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.archive_capture_id = ${input.priorCaptureId}::uuid
@@ -52132,6 +52498,13 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           and not exists (
             select 1 from sandbox_lease_holders holder
             where holder.lease_id = lease.id
+              and not (holder.kind = 'process' and exists (
+                select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.lease_id = lease.id and process.holder_id = holder.holder_id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id
+              ))
           )
           and not exists (
             select 1
@@ -52150,6 +52523,11 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -53025,6 +53403,9 @@ export async function persistDrainSnapshot(
             where admission.lease_id = lease.id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           ) as unsettled_mutation
         from sandbox_leases as lease
@@ -53048,7 +53429,7 @@ export async function persistDrainSnapshot(
       const activePublication =
         sourceLeaseMatches &&
         row.liveness === "draining" &&
-        Number(row.refcount) === 0 &&
+        (Number(row.refcount) === 0 || Boolean(row.unobservable_command_drain_ids?.length)) &&
         Number(row.lease_epoch) === input.expectedEpoch &&
         row.instance_id === input.expectedInstanceId &&
         Number(row.workspace_generation) === input.expectedWorkspaceGeneration &&
@@ -53310,7 +53691,7 @@ async function foldWorkspaceArchiveOntoLease(
   const currentInstanceId = input.livenessGuard === "cold_late" ? null : input.expectedInstanceId;
   const livenessGuard =
     input.livenessGuard === "draining"
-      ? sql`lease.liveness = 'draining' and lease.refcount = 0`
+      ? sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)`
       : input.livenessGuard === "warm"
         ? sql`lease.liveness = 'warm'`
         : sql`lease.liveness = 'cold' and lease.refcount = 0 and lease.archive_capture_id is null`;
@@ -53486,6 +53867,12 @@ async function foldWorkspaceArchiveOntoLease(
           and admission.provider_instance_id = ${input.expectedInstanceId}
           and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
           and admission.settled_at is null
+          and not exists(select 1 from sandbox_retained_processes process
+            where lease.liveness = 'draining'
+              and process.id = any(lease.unobservable_command_drain_ids)
+              and process.parent_admission_id = admission.id and process.lease_id = lease.id
+              and process.lease_epoch = lease.lease_epoch
+              and process.provider_instance_id = lease.instance_id)
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id

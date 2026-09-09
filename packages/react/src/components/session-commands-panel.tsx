@@ -80,7 +80,13 @@ export function SessionCommandsPanel({
                   </div>
                 </details>
                 <p className="mt-1 text-og-fg-subtle">
-                  {command.state === "stopping" ? "Stopping…" : "Running"}
+                  {command.observationStatus === "unavailable"
+                    ? command.state === "stopping"
+                      ? "Stop requested · status unavailable"
+                      : "Command status unavailable"
+                    : command.state === "stopping"
+                      ? "Stopping…"
+                      : "Running"}
                 </p>
               </div>
               {!readOnly ? (

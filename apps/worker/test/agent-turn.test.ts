@@ -3400,6 +3400,28 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(2);
   });
 
+  test("rotation yields to durable recovery without internal retries or a fresh memo", async () => {
+    let establishes = 0;
+    const failure = new SandboxLeaseTransitionError(
+      "group-1",
+      7,
+      "rotation_in_progress",
+      "modal",
+      "sb-1",
+      "warm",
+    );
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw failure;
+      },
+      { backoffMs: 1 },
+    );
+    await expect(provisioner.get()).rejects.toBe(failure);
+    await expect(provisioner.get()).rejects.toBe(failure);
+    expect(establishes).toBe(1);
+  });
+
   test("command-readiness timeout creates at most one sandbox for the turn", async () => {
     let establishes = 0;
     let failures = 0;

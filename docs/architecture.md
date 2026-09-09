@@ -1116,6 +1116,7 @@ it may not detach a rejecting task or install an `unhandledRejection` handler
 that exits the shared worker. The worker's global rejection listener is a
 last-resort observational boundary, while deliberate restart remains an
 OpenGeni drain-and-checkpoint decision.
+Audited historical recovery preserves generation gaps; see [`run-lifecycle.md`](run-lifecycle.md).
 
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
@@ -1375,6 +1376,9 @@ holders, workspace mutation generation, archive/recovery state, and teardown
 authority. The active session pointer selects an effective target without
 rewriting the session's durable home policy.
 
+Repository skill discovery skips definite path misses. Other failures reach
+turn settlement; rotation resumes through the durable lifecycle wake.
+
 Immutable rig setup is single-flight at the lease boundary. The exact lease
 epoch, provider instance, and non-secret setup specification hash own one
 durable claim/revision/settlement receipt. Sibling turns join or reuse that
@@ -1426,11 +1430,10 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
-recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
-never authorizes exit/loss, capture, rotation, termination, or replay.
-
-Modal command retention: `docs/run-lifecycle.md`.
+Idle, unobservable Modal commands use the existing drain after group-wide agent,
+holder, mutation, and idle-grace checks. Records remain until termination;
+unobserved outcomes become lost. Command backoff never suppresses rotation's
+provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
