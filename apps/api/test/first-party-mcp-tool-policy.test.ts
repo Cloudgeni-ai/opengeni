@@ -292,7 +292,7 @@ describe("first-party MCP tool visibility policy", () => {
   });
 
   test("agent discovery exposes recursive pause scope and receipt-versus-progress guidance", async () => {
-    const names: FirstPartyMcpToolName[] = ["session_pause", "session_send_message", "session_get"];
+    const names: FirstPartyMcpToolName[] = ["session_pause", "session_send_message", "session_get", "session_events"];
     const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read", "sessions:control"], names));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "session-coordination-guidance-test", version: "1" });
@@ -304,6 +304,16 @@ describe("first-party MCP tool visibility policy", () => {
       expect(descriptions.get("session_pause")).toContain("including descendants");
       expect(descriptions.get("session_pause")).toContain("pausing an ancestor also stops this caller");
       expect(descriptions.get("session_send_message")).toContain("Acceptance is not execution");
+      expect(descriptions.get("session_send_message")).toContain("match that ID in payload.updateIds");
+      expect(descriptions.get("session_send_message")).toContain("retain the event turnId");
+      expect(descriptions.get("session_send_message")).toContain("an unrelated in-flight turn completing does not prove delivery");
+      expect(registeredToolInputSchema(server, "session_events").safeParse({
+        sessionId,
+        view: "debug",
+        includeTypes: ["system.update.delivered"],
+        payloadMode: "full",
+        after: 0,
+      }).success).toBeTrue();
       expect(descriptions.get("session_send_message")).toContain("Do not resend an unconsumed message");
       expect(descriptions.get("session_get")).toContain("Queued status and updatedAt are not proof of execution");
       const catalog = createAttemptToolEnvironment({
@@ -322,6 +332,8 @@ describe("first-party MCP tool visibility policy", () => {
       const declarations = generateCodemodeDeclarations(catalog);
       expect(declarations).toContain("pausing an ancestor also stops this caller");
       expect(declarations).toContain("Acceptance is not execution");
+      expect(declarations).toContain("match that ID in payload.updateIds");
+      expect(declarations).toContain("an unrelated in-flight turn completing does not prove delivery");
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

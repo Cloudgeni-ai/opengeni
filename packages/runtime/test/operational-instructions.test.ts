@@ -107,7 +107,8 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("pausing an ancestor also stops you");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Verify a subsequent turn or result");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Keep the accepted update/turn ID");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("an older in-flight turn finishing does not prove your input was consumed");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not repeatedly send unconsumed input");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Preserve explicit human pauses and approvals");
   });
