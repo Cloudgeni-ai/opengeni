@@ -631,8 +631,12 @@ five-hour reset semantics, and rollout fence are canonical in
 The first successful lease also stores a bounded accepted Codex allocator-policy
 snapshot in turn metadata. Re-acquisition and definitive-failure settlement use
 that snapshot for active-pointer, rotation, strategy, and pin constraints while
-using current account health/cooldowns; mutable policy changes affect later
-logical turns. Immediately before provider dispatch, a missing or expired
+using current account health/cooldowns; background policy changes affect later
+logical turns. An explicit session account switch may revise selection for a
+capacity-blocked turn under the allocator/session/turn/waiter locks, with a
+closed attempt and matching wait generation. It preserves the accepted
+credential source, authority, conversation history, and logical turn identity.
+Immediately before provider dispatch, a missing or expired
 last-confirmed lease deadline is treated as lease loss and follows lease-loss
 settlement instead of reaching the provider.
 
@@ -677,10 +681,12 @@ Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
 optional goal, downstream accepted credential-policy hash, or blocked-turn
-generation supersede the waiter/turn under their durable fences. Mutable Codex
-rotation or pin settings do not replace the accepted snapshot for this turn, so
-no stale timer or signal can produce double inference or silently change its
-policy.
+generation supersede the waiter/turn under their durable fences. Background
+Codex rotation or pin settings do not replace the accepted snapshot. An explicit
+account switch uses `switchSessionCodexAccount` to update a blocked selection,
+record its control receipt, and request a capacity recheck atomically. Ordinary
+lease claim reads that same revised selection; no new turn or automatic model
+retry is created by the switch itself.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,

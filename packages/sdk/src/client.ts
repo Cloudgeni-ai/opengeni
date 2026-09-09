@@ -7689,13 +7689,13 @@ export class OpenGeniClient {
     );
   }
 
-  /** Pin (or unpin via "auto") a session's Codex account. Applies on the next turn. */
+  /** Pin/unpin a Codex account. Overrides a capacity-blocked turn; otherwise applies next turn. */
   async pinSessionCodexAccount(
     workspaceId: string,
     sessionId: string,
     target: string,
-  ): Promise<{ pinned: string }> {
-    return await this.requestJson<{ pinned: string }>(
+  ): Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }> {
+    return await this.requestJson<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
       { target },
