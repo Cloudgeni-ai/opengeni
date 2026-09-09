@@ -149,9 +149,13 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
-const SessionFeedback = lazy(() =>
-  import("@/components/feedback").then((module) => ({ default: module.SessionFeedback })),
+const MessageForkDialog = lazy(() =>
+  import("@/components/session/session-tenancy-control").then((module) => ({
+    default: module.SessionTenancyRouteControl,
+  })),
 );
+
+const MessageActions = lazy(() => import("@/components/session/message-actions"));
 
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
@@ -1826,6 +1830,80 @@ function SessionChatPane(props: {
     ],
   );
 
+  const [forkEventId, setForkEventId] = useState<string | null>(null);
+  const [turnRatings, setTurnRatings] = useState<Record<string, "positive" | "negative">>({});
+  const mayRate = hasWorkspacePermission(
+    context.accessContext,
+    props.session.workspaceId,
+    "sessions:create",
+  );
+  useEffect(() => {
+    let current = true;
+    setTurnRatings({});
+    setForkEventId(null);
+    if (mayRate)
+      void context.client
+        .listOwnFeedback(props.session.workspaceId, {
+          sessionId: props.session.id,
+          includeTurns: true,
+        })
+        .then(({ feedback }) => {
+          if (!current) return;
+          const ratings: Record<string, "positive" | "negative"> = {};
+          for (const entry of feedback) {
+            if (entry.turnId && entry.sentiment && !ratings[entry.turnId])
+              ratings[entry.turnId] = entry.sentiment;
+          }
+          setTurnRatings((saved) => ({ ...ratings, ...saved }));
+        })
+        .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [
+    context.client,
+    props.session.workspaceId,
+    props.session.id,
+    mayRate,
+    context.accessContext.subjectId,
+  ]);
+  const mayForkMessage =
+    context.clientConfig.auth.mode === "managedSession" &&
+    context.authSession !== null &&
+    Boolean(props.session.tenancy) &&
+    mayRate;
+  const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
+    setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
+  }, []);
+  const renderMessageActions = useCallback(
+    (item: AgentMessageItem | UserMessageItem) => (
+      <Suspense fallback={null}>
+        <MessageActions
+          item={item}
+          client={context.client}
+          workspaceId={props.session.workspaceId}
+          sessionId={props.session.id}
+          mayRate={mayRate}
+          mayFork={mayForkMessage}
+          savedSentiment={
+            item.kind === "agent-message" && item.turnId ? (turnRatings[item.turnId] ?? null) : null
+          }
+          onRated={onMessageRated}
+          onFork={setForkEventId}
+        />
+      </Suspense>
+    ),
+    [
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      mayRate,
+      mayForkMessage,
+      turnRatings,
+      onMessageRated,
+    ],
+  );
+
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
@@ -1925,6 +2003,7 @@ function SessionChatPane(props: {
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
+              renderMessageActions={renderMessageActions}
               onAnnotate={composer.addAnnotation}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
@@ -2004,17 +2083,14 @@ function SessionChatPane(props: {
         </>
       )}
 
-      {hasWorkspacePermission(
-        context.accessContext,
-        props.session.workspaceId,
-        "sessions:create",
-      ) ? (
+      {forkEventId ? (
         <Suspense fallback={null}>
-          <SessionFeedback
-            key={props.session.id}
-            client={context.client}
-            workspaceId={props.session.workspaceId}
-            sessionId={props.session.id}
+          <MessageForkDialog
+            key={forkEventId}
+            session={props.session}
+            events={props.events}
+            sourceEventId={forkEventId}
+            onForkClose={() => setForkEventId(null)}
           />
         </Suspense>
       ) : null}

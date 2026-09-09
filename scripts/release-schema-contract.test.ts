@@ -26,6 +26,7 @@ async function buildSchemaContract(directory?: string) {
         "0401_organization_user_setup_token_transport.sql",
         "0402_session_input_wait_and_background_command_results.sql",
         "0403_codex_unconditional_credential_leasing.sql",
+        "0429_message_boundary_session_forks.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -131,7 +132,19 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe("0428_scheduled_task_creator_policy.sql");
+    const messageBoundarySessionForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0429_message_boundary_session_forks.sql",
+    );
+    expect(completeSourceContract).toMatchObject({
+      fileCount: 437 + (messageBoundarySessionForks ? 1 : 0),
+      latestMigration: messageBoundarySessionForks
+        ? "0429_message_boundary_session_forks.sql"
+        : "0428_scheduled_task_creator_policy.sql",
+    });
+    expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      path: "0429_message_boundary_session_forks.sql",
+      deploymentMode: "maintenance",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) =>
@@ -1558,6 +1571,7 @@ describe("release schema contract", () => {
       "0419_background_command_launch_authority.sql",
       "0421_recovery_notification_claim_snapshot.sql",
       "0422_personal_workspace_organization_codex_inheritance.sql",
+      "0429_message_boundary_session_forks.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -4306,7 +4320,11 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
   const source = join(import.meta.dir, "../packages/db/drizzle");
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
-  const excluded = new Set([...excludedPaths, "0397_sandbox_deadline_rotation_preemption.sql"]);
+  const excluded = new Set([
+    ...excludedPaths,
+    "0397_sandbox_deadline_rotation_preemption.sql",
+    "0429_message_boundary_session_forks.sql",
+  ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));

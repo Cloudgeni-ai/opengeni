@@ -449,9 +449,8 @@ export function SessionList() {
     await Promise.all([refresh(), refreshArchivedSessions(), refreshGlobalPins()]);
   }, [refresh, refreshArchivedSessions, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
-  // polled hook owns the shared discovery page; every visible folder/group
-  // owns an independent filtered continuation so reaching one section's end
-  // cannot silently add rows to another section.
+  // polled hook owns the shared discovery page. Projects share a workspace
+  // continuation; filtered browsing and Archived retain their own cursors.
   const paginationDate = new Date();
   const paginationKey = sessionPageKey(
     rail.workspaceId,
@@ -2378,6 +2377,12 @@ export function SessionList() {
             ? [bucket]
             : [];
         });
+  // The discovery cursor is workspace-wide, so it cannot prove that any
+  // individual project contains older rows. Keep its control outside projects.
+  const workspacePagination = paginationForGroup(
+    { key: "workspace", label: "this workspace", kind: "results" },
+    nextCursor,
+  );
   const activePagination = paginationForGroup(
     { key: "activity:active", label: "Active", kind: "activity", group: "active" },
     nextCursor,
@@ -2812,15 +2817,6 @@ export function SessionList() {
                   sectionExpanded={!collapsedChannelSections.has(section.key)}
                   onToggleSection={() => toggleChannelSection(section.key)}
                   nodes={section.sessions}
-                  pagination={paginationForGroup(
-                    {
-                      key: `channel:${section.key}`,
-                      label: section.name,
-                      kind: "channel",
-                      channelId: section.channelId,
-                    },
-                    nextCursor,
-                  )}
                   localDeliveryAttention={localDeliveryAttention}
                   flat={flat}
                   activeSessionId={activeSessionId}
@@ -2928,6 +2924,9 @@ export function SessionList() {
                 ) : null}
               </>
             )}
+            {channelMode && workspacePagination ? (
+              <SessionGroupPaginationControl {...workspacePagination} />
+            ) : null}
             {channelMode ? (
               <SessionGroup
                 label="Archived"
@@ -3066,7 +3065,9 @@ function SessionGroupPaginationControl(
             ? "Loading older…"
             : failed
               ? "Retry older"
-              : "Load older"}
+              : group.kind === "results"
+                ? "Load older sessions"
+                : "Load older"}
       </button>
       {failed ? (
         <p role="status" className="mt-1 text-2xs text-status-failed">

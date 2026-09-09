@@ -667,6 +667,12 @@ path.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
+A human message-point fork resolves its durable source event to a unique
+canonical history prefix under the existing session-tenancy lifecycle locks.
+It never rebuilds conversation memory from timeline events; ambiguous,
+compacted, or protocol-incomplete boundaries fail closed. The whole-session
+fork remains available. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
