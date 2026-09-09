@@ -8944,7 +8944,9 @@ export const sandboxLeases = pgTable(
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
-    unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", { withTimezone: true }),
+    unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {
+      withTimezone: true,
+    }),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
     turnHolders: integer("turn_holders").notNull().default(0),
