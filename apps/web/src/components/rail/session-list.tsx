@@ -3563,7 +3563,6 @@ function SessionRow(props: {
 
   const rowClassName = cn(
     "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-1.5 pr-1 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
-    waiting && "h-12",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     "hover:bg-surface-2",
     props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
@@ -3733,7 +3732,6 @@ function SessionRow(props: {
                 className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
               >
                 <SessionRowContent
-                  waiting={waiting}
                   quickActionSlots={
                     Number(!props.session.archived) + Number(props.session.parentSessionId === null)
                   }

@@ -169,11 +169,10 @@ function SessionRailRowMetadataFixture() {
           onRename={async () => null}
           onPin={async () => null}
         />
-        <div data-testid="waiting-row" className="flex h-12 w-[244px] items-center px-3">
+        <div data-testid="waiting-row" className="flex h-8 w-[244px] items-center px-3">
           <SessionRowContent
             title={waitSession.title!}
             stateLabel={sessionStateLabel(waitSession)}
-            waiting={Boolean(waitSession.inputWait)}
             mobile={false}
             depthLabel={null}
             descendantLabel={null}
