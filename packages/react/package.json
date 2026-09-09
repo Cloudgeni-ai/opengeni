@@ -78,10 +78,6 @@
       "types": "./src/clipboard.ts",
       "default": "./src/clipboard.ts"
     },
-    "./chat": {
-      "types": "./src/chat.tsx",
-      "default": "./src/chat.tsx"
-    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "style": "./styles/index.css",

@@ -64,40 +64,21 @@ Register the same `handleChat(request)` function for all three routes in your se
 
 Protect all three routes through the handler's `resolve` hook. A framework's `POST` export for `/api/chat` does not automatically register `/api/chat/respond`.
 
-Keep one stable conversation ID per chat thread. The React component sends it in `x-opengeni-conversation`; the handler scopes it to the authenticated user. Two users supplying the same conversation ID reach different sessions. If your host omits `user`, it must return an authorized `conversation` from `resolve` itself. Host-supplied conversation IDs take precedence over client IDs.
+Keep one stable conversation ID per chat thread. Custom clients send it in `x-opengeni-conversation`; the handler scopes it to the authenticated user. Two users supplying the same conversation ID reach different sessions. If your host omits `user`, it must return an authorized `conversation` from `resolve` itself. Host-supplied conversation IDs take precedence over client IDs.
 
 ## Render the chat
 
-Use your product's authenticated user and tenant state to render the component:
+The backend handler is independent of the frontend. Use your own UI or a client
+compatible with the selected adapter. Native clients can consume chunks with
+`parseChatChunkStream` from `@opengeni/sdk/chat`; implement history restoration
+and pending approval/question handling using the routes above. On sign-out or
+user/tenant changes, abort old requests and clear private UI state. Your
+backend's `resolve` hook still owns authorization.
 
-```tsx
-import { OpenGeniChat } from "@opengeni/react/chat";
-import "@opengeni/react/compiled.css";
-
-export function ProductChat({
-  tenantId,
-  userId,
-  conversationId,
-}: {
-  tenantId: string;
-  userId: string;
-  conversationId: string;
-}) {
-  return (
-    <OpenGeniChat
-      handlerUrl="/api/chat"
-      conversation={conversationId}
-      authKey={JSON.stringify([tenantId, userId])}
-    />
-  );
-}
-```
-
-The component restores history and unresolved decisions on reload, streams replies, and renders approval and structured-question forms. It needs no SDK client or OpenGeni credential in the browser.
-
-For cookie authentication, change `authKey` when the signed-in user or tenant changes, and unmount the chat on sign-out. This clears messages, pending cards, drafts, and in-flight requests before loading the new identity's history, even if the conversation ID stays the same. `authKey` is a local reset key, not an authentication credential, and is never sent to the server.
-
-If your product uses an auth header, pass it through `headers`. Changed header values also reset the chat. Header callbacks are evaluated on each host render, so re-render the host when their credentials change. Your backend's `resolve` hook still owns authorization.
+For the full OpenGeni React experience, use `SessionConversation` or compose
+`MessageTimeline` and `ChatComposer` through the normal session SDK and an
+authenticated backend proxy. These components do not consume the simplified
+chat-handler protocol. See the [SDK reference](/reference/sdk).
 
 ## Choose agent access and memory
 
@@ -131,12 +112,12 @@ Use separate workspaces when groups need different workspace resources or integr
 
 Set the handler's `format` when your product already has a text-chat client:
 
-| `format`             | Client protocol                                           |
-| -------------------- | --------------------------------------------------------- |
-| `"native"` (default) | `OpenGeniChat` or a client consuming OpenGeni chat chunks |
-| `"vercel"`           | Vercel AI SDK UI message stream                           |
-| `"openai-chat"`      | OpenAI Chat Completions-shaped requests and responses     |
-| `"openai-responses"` | OpenAI Responses-shaped requests and responses            |
+| `format`             | Client protocol                                       |
+| -------------------- | ----------------------------------------------------- |
+| `"native"` (default) | A custom client consuming OpenGeni chat chunks        |
+| `"vercel"`           | Vercel AI SDK UI message stream                       |
+| `"openai-chat"`      | OpenAI Chat Completions-shaped requests and responses |
+| `"openai-responses"` | OpenAI Responses-shaped requests and responses        |
 
 The Vercel and OpenAI adapters send the latest user message and import earlier text messages from that request as context only when creating the conversation. After that, OpenGeni owns the history. These are text-chat adapters, not replacements for every feature of those APIs; execution and approval handling remain OpenGeni's. The history and `/respond` routes keep their native JSON and SSE contracts regardless of `format`.
 

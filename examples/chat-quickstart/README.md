@@ -1,25 +1,12 @@
-# Chat quickstart
+# Backend chat quickstart
 
-The smallest OpenGeni integration: one server file with `createChatHandler`
-from `@opengeni/sdk/chat`, one page with `OpenGeniChat` from
-`@opengeni/react/chat`. No OpenGeni routes are proxied and no SDK client runs in
-the browser.
-
-What you see: a chat box. Each message goes to `/api/chat`, the backend maps the
-demo tenant to one organization workspace (created on the first message) and
-the `conversation` query parameter, scoped to the signed-in user, to one
-session, and the reply streams back. Reload the page and the conversation comes
-back (`GET /api/chat`). Open `/?conversation=c_2` for a second, isolated chat.
-The demo user is the `x-demo-user` header the page sends; the backend treats it
-as the signed-in user, so the agent remembers that user across their chats
-(`memory: "user"`) while each chat stays isolated from every other chat
-(`agentAccess: "session"`), and a conversation id only ever reaches that
-user's own sessions.
+A server-only example of `createChatHandler` from `@opengeni/sdk/chat`.
+There is no bundled chat frontend. For the full React agent experience, use
+the existing `SessionConversation`, or compose `MessageTimeline` and
+`ChatComposer` with the normal session SDK and your authenticated backend.
+Those components do not consume this simplified chat-handler protocol.
 
 ## Run
-
-Requirements: Bun and an organization API key for your organization on
-[app.opengeni.ai](https://app.opengeni.ai) (Organization settings, API keys).
 
 ```bash
 cd examples/chat-quickstart
@@ -28,17 +15,27 @@ cp .env.example .env.local
 bun run server
 ```
 
-In a second terminal:
+Send a message with the demo-only identity header:
 
 ```bash
-bun run dev
+curl -N http://127.0.0.1:4200/api/chat \
+  -H 'Content-Type: application/json' \
+  -H 'x-demo-user: u_42' \
+  -H 'x-opengeni-conversation: c_1' \
+  -d '{"message":"Hello"}'
 ```
 
-Open http://127.0.0.1:3102.
+This executes an agent and may incur usage charges. `GET /api/chat` with the
+same headers restores history and pending decisions; `POST /api/chat/respond`
+answers a pending decision. Replace the spoofable demo identity header with
+real server-side authentication before exposing this server to other users.
 
-## Swap the wire format
+The backend's existing user-namespaced conversation addressing and memory
+settings are unchanged. It is not an example of shared-chat identity.
 
-`createChatHandler` streams native chunks by default. Pass `format: "vercel"`
-to serve an existing Vercel AI SDK `useChat` client unchanged, or
-`format: "openai-chat"` / `format: "openai-responses"` for an OpenAI-shaped
-client. See the [product integration guide](../../docs/product-integration.md).
+## Wire formats
+
+The handler streams native chat chunks by default. It also supports the
+existing `vercel`, `openai-chat`, and `openai-responses` adapters. These are
+partial chat-protocol adapters, not full SDK or tool-result parity. See the
+[product integration guide](../../docs/product-integration.md).

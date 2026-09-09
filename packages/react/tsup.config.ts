@@ -26,7 +26,6 @@ const external = [
 
 export default defineConfig({
   entry: [
-    "src/chat.tsx",
     "src/index.ts",
     "src/accounts.tsx",
     "src/composer.ts",

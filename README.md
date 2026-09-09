@@ -130,7 +130,7 @@ The capability catalog lets operators see and enable packs, MCP tools, APIs, ski
 For product integration, keep OpenGeni as a standalone service by default. The
 fastest path is `@opengeni/sdk/chat`: one organization API key on your server,
 `createChatHandler` behind your chat endpoint (or the Vercel AI SDK and OpenAI
-adapters), `<OpenGeniChat>` in the browser, and per-chat `agentAccess` and
+adapters), a custom or compatible frontend, and per-chat `agentAccess` and
 `memory` options that keep every customer's chats in one workspace. Start
 with the canonical [product integration guide](docs/product-integration.md): an
 external backend holds one organization API key, maps each product tenant to an
