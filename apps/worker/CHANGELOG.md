@@ -1,5 +1,35 @@
 # @opengeni/worker-bundle
 
+## 0.27.1
+
+### Patch Changes
+
+- 392c575: Retain Modal command handles, provider execution identities, output, and exact exit status across provider-client reconstruction. Persist stream pages before acknowledging their cursors, and treat unavailable historical locators as unknown rather than proof of process loss. Execution status is provider-owned and never read from sandbox-writable files.
+- f3bd0d0: Preserve unknown Modal command observations instead of falsely settling local SDK handle loss as physical process loss. Retain exact command holders with explicit deferred/quarantine diagnostics while allowing the original owner's terminal proof to settle normally.
+- f04243d: Preserve durable wake acknowledgment receipts through API and worker signalers. Report pending admission and unconfirmed legacy signal delivery separately from acknowledged revisions, so transport acceptance cannot be mistaken for agent execution progress. Existing wake retries and admission fences remain authoritative.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [befd389]
+- Updated dependencies [9827c25]
+- Updated dependencies [f3bd0d0]
+- Updated dependencies [c915b0f]
+- Updated dependencies [7e73418]
+- Updated dependencies [5904fd1]
+- Updated dependencies [29551cb]
+- Updated dependencies [14dd6fe]
+- Updated dependencies [f04243d]
+  - @opengeni/db@4.2.0
+  - @opengeni/contracts@2.15.0
+  - @opengeni/runtime@2.4.1
+  - @opengeni/core@2.8.1
+  - @opengeni/codemode@0.5.1
+  - @opengeni/documents@0.8.21
+  - @opengeni/events@0.4.19
+  - @opengeni/config@1.0.2
+  - @opengeni/github@0.7.5
+  - @opengeni/observability@0.8.21
+  - @opengeni/storage@0.2.122
+
 ## 0.27.0
 
 ### Minor Changes
