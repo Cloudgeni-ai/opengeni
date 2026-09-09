@@ -306,6 +306,7 @@ describe("usePersonalResourceAttachment", () => {
     await flush();
     expect(hook.result.current.intent?.mode).toBe("once");
     expect(acceptedIntent.mode).toBe("session");
+    expect(hook.result.current.notice).toBe("accepted_session");
     await actRun(() => hook.result.current.setMode("session"));
     await actRun(() =>
       hook.result.current.onAccepted({ personalResourceAttachment: acceptedIntent }),
