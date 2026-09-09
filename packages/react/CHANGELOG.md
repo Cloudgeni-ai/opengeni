@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 4.0.1
+
+### Patch Changes
+
+- 068be26: Complete a Skill save in the same transaction as its one verified human chat decision. Show the full immutable Skill folder, preserve exact scope and revision checks, and refuse delegated, stale, or mismatched approval. Autonomous saves activate directly; declining a proposal preserves existing active guidance.
+- d1cb266: Keep automatic history filling from evicting the latest reply or cycling between older and newer pages. Preserve explicit history navigation and stable jumps back to latest. Retain provider message identity so assistant chunks interleaved with tool activity remain one message without merging distinct replies.
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/sdk@4.0.1
+
 ## 4.0.0
 
 ### Major Changes

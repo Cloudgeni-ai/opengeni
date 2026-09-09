@@ -1,5 +1,32 @@
 # @opengeni/db
 
+## 4.2.1
+
+### Patch Changes
+
+- 068be26: Complete a Skill save in the same transaction as its one verified human chat decision. Show the full immutable Skill folder, preserve exact scope and revision checks, and refuse delegated, stale, or mismatched approval. Autonomous saves activate directly; declining a proposal preserves existing active guidance.
+- 69924e8: Preserve structured model-history ordering through PostgreSQL replay and pending-tool recovery. Retain authorized uploaded images across turns and compaction input, preserve images in retained messages, and include their projected token cost in compaction retention budgets. Migration requires draining writers.
+- 9233c88: Fix SuperGrok disconnect failing when sessions are pinned to the account. Clear
+  the credential pin and its source atomically, preserving stale-update fencing.
+- 2fa33e4: Unify installed and authored workspace Skills behind one versioned text-folder
+  store and shared editor. Derive names and descriptions from mandatory SKILL.md
+  frontmatter, provide eager sandbox-free reading with exact requested paths, and
+  expose lazy search, install, save, checkout, and publish tools under workspace
+  Learning policy. Preserve workspace customizations on source updates and let
+  embedding hosts narrow bundled guidance independently of lazy tool discovery.
+
+  Migration 0433 is a maintenance cutover: drain old runtimes and use the
+  parser-backed migration runner. Preserve historical snapshots and archive legacy
+  configuration before conversion; invalid or pinned headerless configuration
+  requires explicit repair before migration. See docs/skills-lifecycle.md for the
+  deployment procedure and compatibility boundaries.
+
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+  - @opengeni/config@1.0.3
+  - @opengeni/codemode@0.5.2
+
 ## 4.2.0
 
 ### Minor Changes
