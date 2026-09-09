@@ -348,7 +348,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("loads older sessions only when the project's pagination button is pressed", async () => {
+  test("loads older workspace sessions once without pagination on empty projects", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -369,6 +369,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         apiBaseUrl,
         workspaceId,
         `Pagination project B ${suffix}`,
+      );
+      const emptyProject = await createChannelThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        `Empty pagination project ${suffix}`,
       );
       for (let index = 0; index < 56; index += 1) {
         await createSession(dbClient.db, {
@@ -410,31 +416,38 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(initialProjectBCount).toBeGreaterThan(0);
       expect(initialProjectACount + initialProjectBCount).toBe(50);
 
-      const filteredRequests: URL[] = [];
+      const paginationRequests: URL[] = [];
       page.on("request", (request) => {
         const url = new URL(request.url());
         if (
           request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
-          url.searchParams.get("view") === "page" &&
-          url.searchParams.has("channelId")
+          url.searchParams.get("view") === "page"
         ) {
-          filteredRequests.push(url);
+          paginationRequests.push(url);
         }
       });
-      const loadProjectA = projectAGroup.getByRole("button", {
-        name: `Load older sessions in ${projectA.name}`,
+      expect(await projectAGroup.getByRole("button", { name: /Load older/ }).count()).toBe(0);
+      expect(await projectBGroup.getByRole("button", { name: /Load older/ }).count()).toBe(0);
+      expect(
+        await page
+          .getByRole("group", { name: emptyProject.name })
+          .getByRole("button", { name: /Load older/ })
+          .count(),
+      ).toBe(0);
+      const loadWorkspace = page.getByRole("button", {
+        name: "Load older sessions in this workspace",
       });
-      await loadProjectA.waitFor();
+      await loadWorkspace.waitFor();
       const footerBefore = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
-      await loadProjectA.scrollIntoViewIfNeeded();
+      await loadWorkspace.scrollIntoViewIfNeeded();
       // Scrolling through folders must not grow the rail and hide Archived.
       await page.waitForTimeout(500);
-      expect(filteredRequests).toHaveLength(0);
+      expect(paginationRequests).toHaveLength(0);
       expect(await projectARows.count()).toBe(initialProjectACount);
-      await loadProjectA.click();
+      await loadWorkspace.click();
       await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
         timeoutMs: 30_000,
       });
@@ -453,13 +466,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
       expect(footerAfter?.y).toBe(footerBefore?.y);
-      expect(await projectBRows.count()).toBe(initialProjectBCount);
-      expect(filteredRequests.length).toBeGreaterThan(0);
+      expect(await projectBRows.count()).toBeGreaterThan(initialProjectBCount);
+      expect(paginationRequests.length).toBeGreaterThan(0);
+      expect(paginationRequests.every((request) => !request.searchParams.has("channelId"))).toBe(
+        true,
+      );
       expect(
-        filteredRequests.every((request) => request.searchParams.get("channelId") === projectA.id),
-      ).toBe(true);
-      expect(
-        filteredRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
+        paginationRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
       ).toBe(false);
     } finally {
       await context.close();

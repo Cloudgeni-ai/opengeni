@@ -667,6 +667,9 @@ path.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
+Message-point forks copy canonical history through an unambiguous, uncompacted,
+protocol-complete boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
