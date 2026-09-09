@@ -1,3 +1,4 @@
+import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
@@ -1838,28 +1839,22 @@ function SessionChatPane(props: {
     "sessions:create",
   );
   useEffect(() => {
-    let current = true;
     setTurnRatings({});
     setForkEventId(null);
-    if (mayRate)
-      void context.client
-        .listOwnFeedback(props.session.workspaceId, {
-          sessionId: props.session.id,
-          includeTurns: true,
-        })
-        .then(({ feedback }) => {
-          if (!current) return;
-          const ratings: Record<string, "positive" | "negative"> = {};
-          for (const entry of feedback) {
-            if (entry.turnId && entry.sentiment && !ratings[entry.turnId])
-              ratings[entry.turnId] = entry.sentiment;
-          }
-          setTurnRatings((saved) => ({ ...ratings, ...saved }));
-        })
-        .catch(() => {});
-    return () => {
-      current = false;
-    };
+    if (!mayRate) return;
+    return loadSessionFeedback(
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      ({ feedback }) => {
+        const ratings: Record<string, "positive" | "negative"> = {};
+        for (const entry of feedback) {
+          if (entry.turnId && entry.sentiment && !ratings[entry.turnId])
+            ratings[entry.turnId] = entry.sentiment;
+        }
+        setTurnRatings((saved) => ({ ...ratings, ...saved }));
+      },
+    );
   }, [
     context.client,
     props.session.workspaceId,

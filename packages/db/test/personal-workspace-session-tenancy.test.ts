@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import type postgres from "postgres";
 import {
   addSessionSystemUpdate,
   claimSessionWorkForAttempt,
@@ -862,7 +863,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       }),
     ).rejects.toThrow();
     // Exercise persisted SDK identities, provider identities, and all supported tool pairs.
-    const completedPairs: [Record<string, unknown>, Record<string, unknown>][] = [
+    const completedPairs: [postgres.JSONValue, postgres.JSONValue][] = [
       [
         { type: "function_call", callId: "fn", name: "test", arguments: "{}" },
         { type: "function_call_result", callId: "fn", name: "test", output: "done" },
