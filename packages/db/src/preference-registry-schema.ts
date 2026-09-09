@@ -78,6 +78,8 @@ export const preferenceRegistryRevisions = pgTable(
     description: text("description").notNull(),
     content: text("content").notNull(),
     contentHash: text("content_hash").notNull(),
+    skillFiles: jsonb("skill_files").$type<Array<{ path: string; content: string }> | null>(),
+    skillActivationMode: text("skill_activation_mode"),
     precedenceRank: integer("precedence_rank").notNull().default(0),
     conflictStrategy: text("conflict_strategy").notNull(),
     conflictsWith: jsonb("conflicts_with").$type<string[]>().notNull().default([]),

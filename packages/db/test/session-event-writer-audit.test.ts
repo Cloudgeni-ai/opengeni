@@ -901,7 +901,7 @@ describe("session_events writer inventory", () => {
     );
   });
 
-  test("every production session-row writer requires the explicit activity gate", () => {
+  test("every production session-row writer has an activity gate or exact maintenance boundary", () => {
     const violations: string[] = [];
     const gateWrappers = [
       "withSessionActivityRlsContext",
@@ -936,6 +936,28 @@ describe("session_events writer inventory", () => {
         const key = `${file}#${enclosing.name}`;
         if (checked.has(key)) return;
         checked.add(key);
+        if (key === "packages/db/src/skill-config-migration.ts#migrateLegacySkillConfigurations") {
+          // The parser-backed maintenance migration cannot use the runtime
+          // Drizzle activity handle. Its only writer updates dormant Skill
+          // configuration inside the drained, table-locked owner transaction.
+          // Pin its explicit owner/window guard; do not exempt other writers.
+          const guards = callPositions(enclosing.node, "assertSkillConfigurationMaintenanceWindow");
+          expect(guards, key).toHaveLength(1);
+          expect(guards[0], key).toBeLessThan(nodeStart(node));
+          expect(source).toContain("pg_get_userbyid(c.relowner)=current_user");
+          expect(source).toContain("c.relrowsecurity AND NOT c.relforcerowsecurity");
+          expect(source).toContain("to_regclass('pg_temp.skill_metadata_0426') IS NOT NULL");
+          expect(source).toContain("IN SHARE ROW EXCLUSIVE MODE");
+          const callers = productionTypeScriptFiles()
+            .filter(
+              (candidate) =>
+                candidate !== path &&
+                readFileSync(candidate, "utf8").includes("migrateLegacySkillConfigurations("),
+            )
+            .map((candidate) => relative(repoRoot, candidate).replaceAll("\\", "/"));
+          expect(callers).toEqual(["packages/db/src/migrate.ts"]);
+          return;
+        }
         const body = enclosing.node.body;
         if (!body) {
           violations.push(`${key} has no function body`);

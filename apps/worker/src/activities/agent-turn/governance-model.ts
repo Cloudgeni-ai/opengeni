@@ -22,11 +22,7 @@ import {
 import { settingsWithResolvedModelContext, type Settings } from "@opengeni/config";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun } from "@opengeni/core";
-import {
-  resolveWorkspacePackRuntime,
-  resolveWorkspaceInstalledSkillRuntime,
-  settingsWithPackSandboxImage,
-} from "../packs";
+import { resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "../packs";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
   TurnActivityServices as ActivityServices,
@@ -88,7 +84,6 @@ export type GovernanceModelDeps = {
 export type GovernanceModelOk = {
   runtimePreparationStartedAt: number;
   packRuntime: Awaited<ReturnType<typeof resolveWorkspacePackRuntime>>;
-  installedSkillRuntime: Awaited<ReturnType<typeof resolveWorkspaceInstalledSkillRuntime>>;
   rigVersion:
     | NonNullable<Awaited<ReturnType<typeof materializeRigVersionForAttempt>>>["version"]
     | null;
@@ -99,9 +94,7 @@ export type GovernanceModelOk = {
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
-    skillActivations: Parameters<
-      typeof buildCompanyBrainContributionReceipt
-    >[0]["skillActivations"],
+    skillCatalogText: string,
   ) => ReturnType<typeof buildCompanyBrainContributionReceipt>;
   logicalSandboxSettings: Settings;
   verifiedRigProviderImageId: string | undefined;
@@ -201,13 +194,11 @@ export async function prepareGovernanceAndModel(
   // snapshots below so its receipt stays exact.
   const [
     packRuntime,
-    installedSkillRuntime,
     rigMaterialization,
     [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
     workspaceModelPolicy,
   ] = await Promise.all([
     resolveWorkspacePackRuntime(db, input.workspaceId),
-    resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
     session.rigId && session.rigVersionId
       ? (async () =>
           await materializeRigVersionForAttempt(db, {
@@ -254,16 +245,13 @@ export async function prepareGovernanceAndModel(
     },
     {
       includeCompanyProfile: companyProfileIncluded,
+      sharedSkillReader: true,
     },
   );
   const structuredWorkspacePolicyActive =
     hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
   const workspaceMemory = contextSelection.workspaceMemory;
-  const buildCompanyBrainContributionReceiptFor = (
-    skillActivations: Parameters<
-      typeof buildCompanyBrainContributionReceipt
-    >[0]["skillActivations"],
-  ) =>
+  const buildCompanyBrainContributionReceiptFor = (skillCatalogText: string) =>
     buildCompanyBrainContributionReceipt({
       contextSelectionReceiptId: contextSelection.receipt.id,
       attemptId: input.attemptId,
@@ -276,7 +264,8 @@ export async function prepareGovernanceAndModel(
       companyProfile: companyProfileSnapshot,
       companyProfileIncluded,
       workspaceMemory,
-      skillActivations,
+      skillActivations: [],
+      skillCatalogText,
     });
   try {
     // Portable operator compaction runs before tool/skill preparation, so its
@@ -284,7 +273,7 @@ export async function prepareGovernanceAndModel(
     // no runtime skill catalog. Later compaction paths replace this summary
     // after the complete skill activation set is resolved.
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor([]),
+      buildCompanyBrainContributionReceiptFor(""),
     );
   } catch {
     // Contribution telemetry must never change model execution semantics.
@@ -464,7 +453,6 @@ export async function prepareGovernanceAndModel(
     ok: {
       runtimePreparationStartedAt,
       packRuntime,
-      installedSkillRuntime,
       rigVersion,
       rigName,
       agentHumanInputEnabled,

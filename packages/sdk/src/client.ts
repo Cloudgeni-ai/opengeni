@@ -12,6 +12,13 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import type {
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
 import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
@@ -6922,6 +6929,61 @@ export class OpenGeniClient {
     return await this.requestJson<ListInstalledSkillsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/skills`,
+    );
+  }
+
+  /** Shared authored/installed catalog metadata. File bodies are read on demand. */
+  async listWorkspaceSkills(
+    workspaceId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<{ skills: SkillSummary[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content${suffix}`);
+  }
+
+  async readWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    revisionId?: string,
+  ): Promise<SkillRecord> {
+    const query = revisionId ? `?revisionId=${encodeURIComponent(revisionId)}` : "";
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}${query}`,
+    );
+  }
+
+  async saveWorkspaceSkill(
+    workspaceId: string,
+    request: SaveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  async approveWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/approve`,
+      request,
+    );
+  }
+
+  async restoreWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/restore`,
+      request,
     );
   }
 

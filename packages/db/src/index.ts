@@ -20,6 +20,23 @@ import {
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
+import { lockSkillPublication } from "./skill-publication";
+import {
+  StoredSessionSkills,
+  readSkillMetadata,
+  withBundledSkillSelectionMetadata,
+  bundledSkillSelectionFromMetadata,
+  type BundledSkillId,
+  type SkillRecord,
+} from "@opengeni/contracts";
+import {
+  applySkillLifecycle,
+  assertSkillReadAttempt,
+  listSkillRecords,
+  skillFilesContentHash,
+} from "./skills";
+import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
+import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
@@ -499,6 +516,9 @@ export * from "./workspace-learning-policy";
 export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
+export * from "./skills";
+export type { SkillSourceReleaseReceipt } from "./skill-source-release";
+export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
@@ -3691,6 +3711,20 @@ export async function deleteWorkspaceIfQuiescent(
             durationSeconds: workspaceDeletePhaseDuration(variableSetDetachStartedAt),
           });
           const cascadeStartedAt = performance.now();
+          // The activity gate flushes deferred checks with ALL IMMEDIATE.
+          // Workspace deletion owns both ends of these Skill history links;
+          // check them at commit after the complete cascade, not between rows.
+          // Keep all unrelated activity and retention constraints immediate.
+          await tx.execute(sql`
+            SET CONSTRAINTS
+              preference_registry_preferences_superseded_by_fk,
+              preference_registry_events_related_fk,
+              preference_registry_revisions_corrects_revision_id_fkey,
+              preference_registry_preferences_active_revision_fk,
+              preference_registry_events_old_revision_fk,
+              preference_registry_events_new_revision_fk
+            DEFERRED
+          `);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -6020,6 +6054,11 @@ export type InstallPortableSkillInput = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  /** Required at runtime after 0426; omission fails before distribution writes. */
+  skillActor?: SkillActor;
+  skillOperationId?: string;
+  /** Host-canonical original request, including source/options/owner/explicit CAS, before resolution. */
+  skillRequestIdentity?: Record<string, unknown>;
   capabilityId: string;
   pluginKey: string;
   source: "library" | "github" | "skills_sh" | "pack";
@@ -6049,6 +6088,7 @@ export type InstallPortableSkillInput = {
 };
 
 export type InstalledPortableSkill = {
+  skillReceipt: SkillWriteReceipt;
   created: boolean;
   capabilityId: string;
   pluginId: string;
@@ -6122,6 +6162,7 @@ export type UninstallPortableSkillResult = {
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: PortableSkillOwner[];
+  skillReleases?: SkillSourceReleaseReceipt[];
 };
 
 export class PortableSkillInstallationVersionConflictError extends Error {
@@ -6140,6 +6181,10 @@ export class PortableSkillInstallationVersionConflictError extends Error {
 
 export class PortableSkillInstallationVersionRequiredError extends Error {
   readonly name = "PortableSkillInstallationVersionRequiredError";
+}
+
+export class PortableSkillSourcePathConflictError extends Error {
+  readonly name = "PortableSkillSourcePathConflictError";
 }
 
 export type EnabledMcpCapabilityServer = {
@@ -8391,16 +8436,84 @@ function portableSkillManifestIdentity(manifest: Record<string, unknown>): strin
   return stableJson(identity);
 }
 
+/** Replay before remote resolution; callers must provide the same canonical original request used at install. */
+export async function replayPortableSkillInstall(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actor: SkillActor;
+    operationId: string;
+    requestIdentity: Record<string, unknown>;
+  },
+): Promise<InstalledPortableSkill | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    await lockSkillPublication(tx, input.workspaceId);
+    if (input.actor.kind === "agent")
+      await assertSkillReadAttempt(tx, { ...input, actor: input.actor });
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`skill-operation:${input.workspaceId}:${input.operationId}`},0))`,
+    );
+    const [prior] = await tx
+      .select()
+      .from(schema.skillWriteReceipts)
+      .where(
+        and(
+          eq(schema.skillWriteReceipts.workspaceId, input.workspaceId),
+          eq(schema.skillWriteReceipts.operationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    if (!prior) return null;
+    const envelope = (
+      prior.receipt as unknown as {
+        portableInstall?: {
+          requestHash: string;
+          result: Omit<InstalledPortableSkill, "skillReceipt">;
+        };
+      }
+    ).portableInstall;
+    if (
+      prior.accountId !== input.accountId ||
+      !envelope ||
+      envelope.requestHash !==
+        createHash("sha256").update(stableJson(input.requestIdentity)).digest("hex")
+    ) {
+      throw new Error(
+        "Skill operation key reused with different input or without a portable install receipt",
+      );
+    }
+    const skillReceipt = await applySkillLifecycle(tx, input, {
+      operation: "install",
+      operationId: input.operationId,
+      skillFacetId: envelope.result.facetId,
+      reason: "Install portable Skill through the unified registry head",
+      portableInstall: envelope,
+    });
+    return { ...envelope.result, skillReceipt };
+  });
+}
+
 /**
  * Install one immutable, already-validated Skill through the authoritative
- * Plugin/Skill-Facet ownership model. Repeating the same exact source is
- * idempotent; changing a commit's content fails instead of silently rewriting
- * immutable history.
+ * Plugin/Skill-Facet ownership model. Repeating an operation replays its original
+ * result; a new operation cannot rewrite an immutable commit's content.
  */
 export async function installPortableSkill(
   db: Database,
   input: InstallPortableSkillInput,
 ): Promise<InstalledPortableSkill> {
+  if (!input.skillActor)
+    throw new Error("Portable Skill installation requires a truthful unified Skill actor");
+  const skillActor = input.skillActor;
+  const skillOperationId = input.skillOperationId ?? randomUUID();
+  const {
+    skillActor: _actor,
+    skillOperationId: _operation,
+    skillRequestIdentity: originalIdentity,
+    ...resolvedIdentity
+  } = input;
+  const requestIdentity = originalIdentity ?? resolvedIdentity;
   return await withRlsContext(
     db,
     {
@@ -8409,6 +8522,15 @@ export async function installPortableSkill(
     },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await lockSkillPublication(tx as unknown as Database, input.workspaceId);
+        const replay = await replayPortableSkillInstall(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          actor: skillActor,
+          operationId: skillOperationId,
+          requestIdentity,
+        });
+        if (replay) return replay;
         const now = new Date();
         const version = input.version ?? input.sourceCommit;
         await lockCapabilityComponentIdentity(
@@ -8458,6 +8580,26 @@ export async function installPortableSkill(
             .returning();
         }
         if (!plugin) throw new Error("Failed to create portable Skill plugin");
+
+        // Legacy source IDs fold path case. Preserve those IDs for existing
+        // installations, but never let a distinct Git folder overwrite one.
+        if (input.source === "github" || input.source === "skills_sh") {
+          const [collision] = await tx
+            .select({ id: schema.capabilityPluginVersions.id })
+            .from(schema.capabilityPluginVersions)
+            .where(
+              and(
+                eq(schema.capabilityPluginVersions.pluginId, plugin.id),
+                sql`lower(${schema.capabilityPluginVersions.manifest}->>'sourcePath') = lower(${input.sourcePath})`,
+                sql`${schema.capabilityPluginVersions.manifest}->>'sourcePath' <> ${input.sourcePath}`,
+              ),
+            )
+            .limit(1);
+          if (collision)
+            throw new PortableSkillSourcePathConflictError(
+              "This repository folder differs only by case from an existing Skill source. Legacy source IDs cannot distinguish these folders; use a uniquely named source folder.",
+            );
+        }
 
         const manifest = {
           schemaVersion: 1,
@@ -8720,7 +8862,7 @@ export async function installPortableSkill(
           })
           .onConflictDoNothing();
 
-        return {
+        const result = {
           created: !existingOwner,
           capabilityId: input.capabilityId,
           pluginId: plugin.id,
@@ -8735,6 +8877,28 @@ export async function installPortableSkill(
           sourceCommit: input.sourceCommit,
           contentSha256: input.contentSha256,
           name: input.name,
+        };
+        const skillReceipt = await applySkillLifecycle(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: skillActor,
+          },
+          {
+            operation: "install",
+            operationId: skillOperationId,
+            skillFacetId: facet.id,
+            reason: "Install portable Skill through the unified registry head",
+            portableInstall: {
+              requestHash: createHash("sha256").update(stableJson(requestIdentity)).digest("hex"),
+              result,
+            },
+          },
+        );
+        return {
+          skillReceipt,
+          ...result,
         };
       }),
   );
@@ -8751,6 +8915,27 @@ export async function listInstalledPortableSkills(
   options: { includeSessionSelected?: boolean } = {},
 ): Promise<PortableSkillRuntime[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [workspace] = await scopedDb
+      .select({ accountId: schema.workspaces.accountId })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, workspaceId))
+      .limit(1);
+    if (!workspace) return [];
+    const currentSkills = new Map<string, SkillRecord>();
+    let after: { stableKey: string; id: string } | undefined;
+    for (;;) {
+      const page = await listSkillRecords(
+        scopedDb,
+        { accountId: workspace.accountId, workspaceId },
+        { limit: 1000, ...(after ? { after } : {}) },
+      );
+      for (const record of page) {
+        if (record.source) currentSkills.set(record.source.skillFacetId, record);
+      }
+      if (page.length < 1000) break;
+      const last = page[page.length - 1]!;
+      after = { stableKey: last.stableKey, id: last.id };
+    }
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
@@ -8810,12 +8995,14 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      const current = currentSkills.get(row.facetId);
+      if (!current || current.status !== "active" || !current.activeRevisionId) continue;
       if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
         throw new Error(
           `Installed Skill ${row.capabilityId} has invalid activation mode ${row.activationMode}`,
         );
       }
-      if (row.activationMode === "session_selected" && !options.includeSessionSelected) {
+      if (current.activationMode === "session_selected" && !options.includeSessionSelected) {
         continue;
       }
       const source = skillSourceFromManifest(row.manifest, row.capabilityId);
@@ -8830,7 +9017,7 @@ export async function listInstalledPortableSkills(
         version: row.version,
         name: row.name,
         description: row.description,
-        activationMode: row.activationMode,
+        activationMode: current.activationMode,
         sourceUrl: row.sourceUrl,
         sourceCommit: row.sourceCommit,
         sourcePath: row.sourcePath,
@@ -8838,7 +9025,24 @@ export async function listInstalledPortableSkills(
         files: [{ path: row.path, content: row.content }],
       });
     }
-    return [...skills.values()];
+    return [...skills.entries()].flatMap(([facetId, skill]) => {
+      const current = currentSkills.get(facetId);
+      if (!current || current.status !== "active" || !current.activeRevisionId) return [];
+      const metadata = readSkillMetadata(
+        current.files.find((file) => file.path === "SKILL.md")?.content ?? "",
+      );
+      return [
+        {
+          ...skill,
+          // The active folder owns descriptors even after an upstream Skill
+          // was renamed locally. Source labels remain provenance only.
+          name: metadata.name,
+          description: metadata.description,
+          contentSha256: skillFilesContentHash(current.files),
+          files: current.files,
+        },
+      ];
+    });
   });
 }
 
@@ -9013,6 +9217,7 @@ export async function uninstallPortableSkill(
     workspaceId: string;
     capabilityId: string;
     expectedInstallationVersion: number;
+    skillActor?: SkillActor;
   },
 ): Promise<UninstallPortableSkillResult> {
   return await withRlsContext(
@@ -9068,6 +9273,12 @@ export async function uninstallPortableSkill(
           };
         }
 
+        const skillReleases = await releaseOrphanedSkillHeads(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          facetInstallationIds: [context.facetInstallationId],
+          ...(input.skillActor ? { skillActor: input.skillActor } : {}),
+        });
+
         const now = new Date();
         await tx
           .delete(schema.capabilityFacetInstallations)
@@ -9094,6 +9305,7 @@ export async function uninstallPortableSkill(
           capabilityId: input.capabilityId,
           status: "uninstalled",
           remainingOwners: [],
+          ...(skillReleases.length ? { skillReleases } : {}),
         };
       }),
   );
@@ -9161,15 +9373,7 @@ async function portableSkillOwners(
       removable: schema.capabilityComponentOwners.removable,
     })
     .from(schema.capabilityComponentOwners)
-    .where(
-      and(
-        eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId),
-        effectiveCapabilityOwnerSql(
-          schema.capabilityComponentOwners.ownerKind,
-          schema.capabilityComponentOwners.ownerId,
-        ),
-      ),
-    )
+    .where(eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId))
     .orderBy(
       asc(schema.capabilityComponentOwners.ownerKind),
       asc(schema.capabilityComponentOwners.ownerId),
@@ -31253,6 +31457,7 @@ async function setScheduledTaskAuthorityRlsContext(
 }
 
 export type SessionCreateInput = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   accountId: string;
   workspaceId: string;
@@ -31578,6 +31783,7 @@ async function existingSessionForCreateKey(
 }
 
 type SessionCreateReplayIdentity = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
@@ -31620,6 +31826,12 @@ function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
   input: SessionCreateReplayIdentity,
 ): void {
+  if (
+    stableJson(bundledSkillSelectionFromMetadata(existing.metadata) ?? null) !==
+    stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
   if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
     throw new SessionIdConflictError(input.requestedSessionId);
   }
@@ -31745,7 +31957,7 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    input.metadata,
+    withBundledSkillSelectionMetadata(input.metadata, input.bundledSkillIds),
     selectedInstalledSkillIds,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
@@ -31795,6 +32007,7 @@ async function createSessionInTransaction(
       // before any first-turn repair so a retry cannot hide a requested-ID
       // conflict behind an apparently successful replay.
       assertSessionCreateReplayIdentity(existing, {
+        bundledSkillIds: input.bundledSkillIds,
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
@@ -32008,6 +32221,7 @@ async function createSessionInTransaction(
       );
       if (existing) {
         assertSessionCreateReplayIdentity(existing, {
+          bundledSkillIds: input.bundledSkillIds,
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
@@ -32197,6 +32411,7 @@ export type InitializedSessionCreateReplay =
 export async function getInitializedSessionCreateReplay(
   db: Database,
   input: {
+    bundledSkillIds?: BundledSkillId[] | undefined;
     accountId: string;
     workspaceId: string;
     subjectId: string;
@@ -76214,7 +76429,10 @@ function mapSession(
     endUser: sessionEndUserFromRow(row),
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
-    skills: (row.skills as SessionSkill[]) ?? [],
+    skills: StoredSessionSkills.parse(row.skills ?? []),
+    ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
+      ? { bundledSkillIds: bundledSkillSelectionFromMetadata(row.metadata) }
+      : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
@@ -76538,9 +76756,7 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     packId: row.packId,
     status: row.status as PackInstallationStatus,
     version: row.version,
-    manifestSnapshot: row.manifestSnapshot
-      ? (row.manifestSnapshot as unknown as CapabilityPack)
-      : null,
+    manifestSnapshot: row.manifestSnapshot,
     manifestDigest: row.manifestDigest,
     selectedRigId: row.selectedRigId,
     installedBySubjectId: row.installedBySubjectId,

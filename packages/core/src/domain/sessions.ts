@@ -22,6 +22,7 @@ import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
+  resolveBundledSkillSelection,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -747,6 +748,7 @@ export async function createAndStartSessionWithOutcome(input: {
   modelContext?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
+  bundledSkillIds?: import("@opengeni/contracts").BundledSkillId[] | undefined;
   tools: ToolRef[];
   // Public admission always supplies provenance; optional keeps internal
   // callers that predate durable tool-policy provenance source-compatible
@@ -995,6 +997,7 @@ export async function createAndStartSessionWithOutcome(input: {
       initialModelContext: input.modelContext ?? null,
       resources: input.resources,
       skills: input.skills ?? [],
+      bundledSkillIds: input.bundledSkillIds,
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
@@ -1088,6 +1091,7 @@ export async function createAndStartSessionWithOutcome(input: {
       initialModelContext: input.modelContext ?? null,
       resources: input.resources,
       skills: input.skills ?? [],
+      bundledSkillIds: input.bundledSkillIds,
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
@@ -2038,6 +2042,17 @@ export async function createSessionForRequestWithOutcome(
       message: error instanceof Error ? error.message : "invalid child visibility",
     });
   }
+  let bundledSkillIds: import("@opengeni/contracts").BundledSkillId[] | undefined;
+  try {
+    bundledSkillIds = resolveBundledSkillSelection(
+      payload.bundledSkillIds,
+      parentSession?.bundledSkillIds,
+    );
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
+    });
+  }
   // Agent-access/end-user/memory scope inherit and narrow exactly like
   // visibility: presence is read from the raw request because the Zod
   // defaults erase absent-vs-explicit, and the parent side comes from the
@@ -2092,6 +2107,7 @@ export async function createSessionForRequestWithOutcome(
   ) {
     try {
       const initializedReplay = await getInitializedSessionCreateReplay(db, {
+        bundledSkillIds,
         accountId: grant.accountId,
         workspaceId,
         subjectId: replayManagedHumanSubjectId ?? grant.subjectId,
@@ -2941,6 +2957,7 @@ export async function createSessionForRequestWithOutcome(
       modelContext: payload.modelContext ?? null,
       resources,
       skills,
+      bundledSkillIds,
       tools,
       toolPolicy,
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),

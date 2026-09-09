@@ -27,6 +27,8 @@ import { boundModelToolOutputItem } from "@opengeni/codex";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "../src/mcp-network";
 import { normalizeSdkEvent } from "../src/run-events";
 import { restoreInterruptedRunState } from "../src/index";
+import { formatSkillCatalog } from "../src/skill-catalog";
+import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
 
 const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
@@ -937,10 +939,8 @@ describe("generic lazy tool dispatch", () => {
     const image = firstPartyTool("view_image", "Return an image from a sandbox path");
     const patch = firstPartyTool("apply_patch", "Apply a create, update, or delete file patch");
     const skill = firstPartyTool("load_skill", "Load a lazily configured skill into the sandbox");
-    const builtinSkill = firstPartyTool(
-      "load_builtin_skill",
-      "Read a built-in skill from the worker",
-    );
+    const skillRead = firstPartyTool("skill_read", "Read Skill text without a sandbox");
+    const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
     const human = firstPartyTool(
       "request_human_input",
       "Pause this turn and request structured human input",
@@ -954,7 +954,7 @@ describe("generic lazy tool dispatch", () => {
       name: "lazy-test",
       instructions: "Use tools.",
       model: "scripted",
-      tools: [exec, stdin, image, patch, skill, builtinSkill, human, models, browser],
+      tools: [exec, stdin, image, patch, skill, skillRead, skillSave, human, models, browser],
     });
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
     const visible = await agent.getAllTools(undefined as never);
@@ -969,7 +969,7 @@ describe("generic lazy tool dispatch", () => {
       "view_image",
       "apply_patch",
       "load_skill",
-      "load_builtin_skill",
+      "skill_read",
       "request_human_input",
       "list_models",
       "tool_search",
@@ -982,7 +982,7 @@ describe("generic lazy tool dispatch", () => {
       "view_image",
       "apply_patch",
       "load_skill",
-      "load_builtin_skill",
+      "skill_read",
       "request_human_input",
       "list_models",
     ]) {
@@ -993,6 +993,9 @@ describe("generic lazy tool dispatch", () => {
     expect(
       runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
     ).toEqual(["interaction__browser_act"]);
+    expect(
+      runtime.search({ query: "Save workspace Skill file changes" }).map((entry) => entry.name),
+    ).toContain("skill_save");
   });
 
   test("searches, restores provider history, and executes the real tool pipeline", async () => {
@@ -1578,6 +1581,64 @@ describe("generic lazy tool dispatch", () => {
 });
 
 describe("OpenAI/Azure native client tool search", () => {
+  test("initial Skill index and eager reads do not wait for lazy tool preparation", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      let release!: () => void;
+      const preparation = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      const reader = tool({
+        name: "skill_read",
+        description: "Read selected Skill files",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        strict: false,
+        execute: () => {
+          reads++;
+          return JSON.stringify(readSkillFiles(loadSkillManagementSkill().files));
+        },
+      }) as unknown as Tool;
+      const agent = new Agent({
+        name: "sandbox-free-skills",
+        model: "scripted",
+        instructions: formatSkillCatalog([
+          { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
+        ]),
+        tools: [reader],
+      });
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set(["opengeni"]),
+        preparation,
+        new Set(["opengeni"]),
+        new Set(["skill_read"]),
+      );
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: `read-${transport}`,
+            name: "skill_read",
+            arguments: "{}",
+          },
+        ],
+        [finalMessage("Read the Skill")],
+      ]);
+      const running = runStreamed(agent, model, runtime);
+      const outcome = await Promise.race([
+        running.then(() => "completed"),
+        Bun.sleep(500).then(() => "blocked"),
+      ]);
+      release();
+      await running;
+      expect(outcome).toBe("completed");
+      expect(reads).toBe(1);
+      expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
+    }
+  });
+
   test("plain model output never waits for non-eager MCP preparation", async () => {
     for (const transport of ["openai_native", "generic_dispatch"] as const) {
       let releasePreparation!: () => void;

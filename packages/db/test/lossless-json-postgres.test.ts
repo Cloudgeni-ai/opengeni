@@ -48,6 +48,7 @@ import {
   withLosslessContentWriteVersion,
 } from "../src/lossless-json";
 import * as schema from "../src/schema";
+import { migrate } from "../src/migrate";
 import { closePendingSessionToolCallsInTransaction } from "../src/session-tool-call-settlement";
 
 const migrationUrl = new URL("../drizzle/0176_lossless_canonical_json.sql", import.meta.url);
@@ -254,22 +255,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       // migration boundary. Advance the populated database to the current
       // schema before opening current application connections so unrelated
       // future session columns cannot invalidate this compatibility test.
-      // This raw migration loop intentionally bypasses the canonical runner.
-      // Keep its exact application-role authority on the same max=1 admin
-      // session so maintenance migration 0257 retains its fail-closed contract.
-      await admin`select set_config(
-        'opengeni.migration_application_roles',
-        ${JSON.stringify(["opengeni_app"])},
-        false
-      )`;
-      for (const file of files.filter((entry) => entry.localeCompare(migrationFile) > 0)) {
-        await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
-        await admin`
-          insert into schema_migrations (name)
-          values (${file})
-          on conflict do nothing
-        `;
-      }
+      // Later migrations can require runner-owned parsing, transaction and
+      // backfill phases. Keep the historical boundary above exact, then use
+      // the production pipeline with the explicit drained application role.
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: ["opengeni_app"],
+      });
 
       const testValue = String.fromCharCode(97, 112, 112, 112, 119);
       const firstKey = String.fromCharCode(97, 112, 112, 80, 97, 115, 115, 119, 111, 114, 100);

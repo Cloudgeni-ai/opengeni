@@ -27,6 +27,7 @@ import {
   upsertKnowledgeSource,
   upsertKnowledgeSourceObject,
   withSessionRlsActorContext,
+  writeCompanyBrainGovernedProposal,
   type DbClient,
 } from "@opengeni/db";
 import { governedLearningEvidenceIsSlackDerived } from "../src/domain/governed-learning-slack-publication";
@@ -183,11 +184,11 @@ async function noteRequest(
 }
 
 describe("Company Brain learning-policy router (real PostgreSQL)", () => {
-  test("automatic evaluates and activates a preference through the destination lifecycle, with convergent replay", async () => {
+  test("automatic evaluates and activates instruction policy through the destination lifecycle, with convergent replay", async () => {
     if (!shared || !client) return;
     const f = await fixture("automatic");
     const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
-    const request = await noteRequest(f, "preference");
+    const request = await noteRequest(f, "instruction_policy");
     const first = await router.write({ attempt: f.attempt, request });
     expect(first.decision).toBe("activated");
     expect(first.learning).toMatchObject({ outcome: "automatic", automaticEligible: true });
@@ -196,7 +197,7 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
       requested: true,
       activated: true,
       boundary: "activated",
-      destination: "preference",
+      destination: "instruction_policy",
     });
     expect(first.activation.receiptId).not.toBeNull();
     expect(first.activation.destinationRevisionId).not.toBeNull();
@@ -215,7 +216,7 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
     expect(history.activations[0]).toMatchObject({
       decisionReceiptId: first.learning!.receiptId,
       initiatingHumanSubjectId: f.ownerSubjectId,
-      destination: "preference",
+      destination: "instruction_policy",
       destinationRevisionId: first.activation.destinationRevisionId,
     });
   }, 180_000);
@@ -226,7 +227,7 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
     const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
     const result = await router.write({
       attempt: f.attempt,
-      request: await noteRequest(f, "preference"),
+      request: await noteRequest(f, "instruction_policy"),
     });
     expect(result.decision).toBe("proposal_created");
     expect(result.learning).toMatchObject({
@@ -326,30 +327,69 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
     ).toBe("instruction_policy");
   }, 180_000);
 
-  test("a note longer than the destination budget cannot be promoted into a preference", async () => {
+  test("legacy preference promotion is retired for short and long notes without Knowledge materialization", async () => {
     if (!shared || !client) return;
     const f = await fixture("automatic");
     const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
     const essay = "y".repeat(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS + 1);
-    await expect(
-      router.write({ attempt: f.attempt, request: await noteRequest(f, "preference", essay) }),
-    ).rejects.toThrow(
-      agentAuthoredDurableTextTooLongMessage({ kind: "preference", actualChars: essay.length }),
-    );
-    // A note that would be too long for a rule is still fine as a preference,
-    // because the budgets follow the destination rather than the note.
+    for (const text of ["Use primary sources.", essay]) {
+      const request = await noteRequest(f, "preference", text);
+      await expect(router.write({ attempt: f.attempt, request })).rejects.toThrow(
+        "Knowledge-backed Skill proposals are retired",
+      );
+      const [note] = await shared.admin`SELECT text FROM task_notes WHERE id=${request.noteId}`;
+      expect(note!.text).toBe(text);
+    }
     expect(
-      (
-        await router.write({
-          attempt: f.attempt,
-          request: await noteRequest(
-            f,
-            "preference",
-            "z".repeat(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS + 1),
-          ),
-        })
-      ).write?.destination,
-    ).toBe("preference");
+      await shared.admin`SELECT id FROM knowledge_claims WHERE scope_workspace_id=${f.grant.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`SELECT id FROM preference_registry_preferences WHERE scope_workspace_id=${f.grant.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`SELECT id FROM knowledge_change_proposals WHERE scope_workspace_id=${f.grant.workspaceId}`,
+    ).toHaveLength(0);
+  }, 180_000);
+
+  test("legacy direct preference service and SQL writes fail before durable state", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("suggest");
+    await expect(
+      writeCompanyBrainGovernedProposal(client.db, {
+        attempt: f.attempt,
+        request: {
+          kind: "propose_preference",
+          operationId: crypto.randomUUID(),
+          claimId: crypto.randomUUID(),
+          evidenceId: crypto.randomUUID(),
+          stableKey: "retired-proposal",
+          title: "Retired proposal",
+          description: "Retired path",
+          content: "Use primary sources.",
+          precedenceRank: 0,
+          conflictStrategy: "override",
+          conflictsWith: [],
+          expiresAt: null,
+          reason: "Retirement regression",
+        },
+      }),
+    ).rejects.toThrow("Knowledge-backed Skill proposals are retired");
+    await expect(
+      shared.admin.begin(async (tx) => {
+        await tx`SET LOCAL ROLE opengeni_app`;
+        await tx`SELECT * FROM preference_registry_create_knowledge_proposal_for_attempt(
+        ${f.attempt.accountId}::uuid,${f.attempt.workspaceId}::uuid,${f.attempt.sessionId}::uuid,
+        ${f.attempt.turnId}::uuid,${f.attempt.attemptId}::uuid,1,${crypto.randomUUID()}::uuid,
+        ${"a".repeat(64)},${crypto.randomUUID()}::uuid,'retired-proposal','Retired','Retired',
+        'Use primary sources.',0,'override','[]'::jsonb,NULL::timestamptz,'Retirement regression')`;
+      }),
+    ).rejects.toThrow("Knowledge-backed Skill proposals are retired");
+    expect(
+      await shared.admin`SELECT id FROM preference_registry_preferences WHERE scope_workspace_id=${f.grant.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`SELECT id FROM knowledge_change_proposals WHERE scope_workspace_id=${f.grant.workspaceId}`,
+    ).toHaveLength(0);
   }, 180_000);
 
   test("Knowledge promotions are proposal-only even under automatic", async () => {
@@ -474,7 +514,7 @@ describe("governed-learning Slack publication (real PostgreSQL)", () => {
     const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
     const note = await router.write({
       attempt: f.attempt,
-      request: await noteRequest(f, "preference"),
+      request: await noteRequest(f, "knowledge"),
     });
     expect(
       await resolveGovernedLearningEvidenceOrigin(client.db, {
@@ -508,7 +548,7 @@ describe("governed-learning Slack publication (real PostgreSQL)", () => {
     ).toBeNull();
   }, 180_000);
 
-  test("an automatic preference activation enqueues one idempotent Slack publication end to end", async () => {
+  test("an automatic instruction-policy activation enqueues one idempotent Slack publication end to end", async () => {
     if (!shared || !client) return;
     const f = await fixture("automatic");
     await createMemorySlackPublicationConfiguration(client.db, {
@@ -525,7 +565,7 @@ describe("governed-learning Slack publication (real PostgreSQL)", () => {
       subjectId: f.ownerSubjectId,
     });
     const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
-    const request = await noteRequest(f, "preference");
+    const request = await noteRequest(f, "instruction_policy");
     const first = await router.write({ attempt: f.attempt, request });
     expect(first.decision).toBe("activated");
     await router.write({ attempt: f.attempt, request });
@@ -535,11 +575,11 @@ describe("governed-learning Slack publication (real PostgreSQL)", () => {
     expect(row).toMatchObject({
       sourceType: "durable_learning",
       sourceId: first.activation.receiptId,
-      importance: "normal",
+      importance: "major",
       deliveryMode: "auto",
       state: "queued",
     });
-    expect(row!.summary).toContain("Automatically activated a workspace preference");
+    expect(row!.summary).toContain("Automatically activated a workspace instruction policy");
     // Provenance stays on the outbox row; the Slack-bound summary is content-free.
     expect(row!.initiatingHumanSubjectId).toBe(f.ownerSubjectId);
     expect(row!.summary).not.toContain(f.ownerSubjectId.replace("user:", ""));

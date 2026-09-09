@@ -4,6 +4,7 @@ export type ModelContextInstructionLayerId =
   | "workspace_governance"
   | "session_instructions"
   | "workspace_memory"
+  | "skill_catalog"
   | "codemode"
   | "git_bindings"
   | "builtin_skills"

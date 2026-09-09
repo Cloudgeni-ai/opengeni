@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const PREFERENCE_REGISTRY_CONTENT_MAX_CHARS = 262_144;
-export const PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS = 240;
+export const PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS = 1024;
 export const PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT = 64;
 export const PREFERENCE_REGISTRY_DESCRIPTOR_MAX_UTF8_BYTES = 16_384;
 export const PREFERENCE_REGISTRY_REASON_MAX_CHARS = 4_096;
@@ -30,6 +30,8 @@ export const PreferenceRegistryProvenanceSource = z.enum([
   "slack",
   "meeting_transcript",
   "call_transcript",
+  "agent",
+  "portable_skill",
 ]);
 export type PreferenceRegistryProvenanceSource = z.infer<typeof PreferenceRegistryProvenanceSource>;
 

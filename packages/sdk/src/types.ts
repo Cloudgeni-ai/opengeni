@@ -1,5 +1,14 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
+export type BundledSkillId =
+  | "builtin:opengeni-skills"
+  | "builtin:opengeni-projects"
+  | "builtin:opengeni-documents"
+  | "builtin:opengeni-spreadsheets"
+  | "builtin:opengeni-presentations"
+  | "builtin:opengeni-sites"
+  | "builtin:opengeni-video-generation";
+
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
 // runtime; `test/contract-parity.test.ts` pins these types to the contracts
@@ -1333,6 +1342,7 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;
   accountId: string;
@@ -2752,6 +2762,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
@@ -2835,6 +2846,8 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
+  bundledSkillIds?: BundledSkillId[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -2854,7 +2867,7 @@ export type CreateSessionRequest = {
   policyRole?: string | undefined;
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
-  skills?: SessionSkill[] | undefined;
+  skills?: SessionSkillInput[] | undefined;
   /** Installed session-selected Skill identities to freeze onto this session at creation. */
   installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
@@ -6275,6 +6288,7 @@ export type CapabilityPackAutomationTemplate = {
   adapterId: string;
   eventTypes: string[];
   sessionTemplate: {
+    bundledSkillIds?: BundledSkillId[] | undefined;
     prompt: string;
     instructions: string | null;
     resources: ResourceRef[];
@@ -6306,6 +6320,12 @@ export type CapabilityPackSkill = {
 };
 
 export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
+/** SKILL.md owns metadata; supplied legacy fields must exactly match it. */
+export type CapabilityPackSkillInput = Omit<CapabilityPackSkill, "name" | "description"> & {
+  name?: string | undefined;
+  description?: string | undefined;
+};
+export type SessionSkillInput = Omit<CapabilityPackSkillInput, "activationMode">;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;
@@ -6397,7 +6417,7 @@ export type RegisterCapabilityPackRequest = {
     | undefined;
   skills?:
     | {
-        name: string;
+        name?: string | undefined;
         description?: string | undefined;
         activationMode?: "workspace_managed" | "session_selected" | undefined;
         files: CapabilityPackSkillFile[];
@@ -6490,6 +6510,7 @@ export type RegisterCapabilityPackRequest = {
         adapterId: string;
         eventTypes: string[];
         sessionTemplate: {
+          bundledSkillIds?: BundledSkillId[] | undefined;
           prompt: string;
           instructions?: string | null | undefined;
           resources?: ResourceRef[] | undefined;
@@ -6528,13 +6549,17 @@ export type WorkspaceRegisteredPack = {
 export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
+  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   id: string;
   accountId: string;
   workspaceId: string;
   packId: string;
   status: PackInstallationStatus;
   version: number;
-  manifestSnapshot: CapabilityPack | null;
+  /** Exact accepted manifest, not a normalized executable Pack. */
+  manifestSnapshot: Record<string, unknown> | null;
   manifestDigest: string | null;
   selectedRigId: string | null;
   installedBySubjectId: string | null;
@@ -6735,6 +6760,7 @@ export type UninstallPackRequest = {
 };
 
 export type UninstallPackResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   packId: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];
@@ -6958,6 +6984,7 @@ export type InstallLibrarySkillRequest = {
 };
 
 export type InstalledSkill = {
+  skillReceipt?: import("./skills").SkillWriteReceipt | undefined;
   capabilityId: string;
   pluginId: string;
   pluginVersionId: string;
@@ -7022,6 +7049,7 @@ export type UninstallSkillRequest = {
 };
 
 export type UninstallSkillResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: CapabilityComponentOwner[];
@@ -7361,6 +7389,9 @@ export type InstallPluginRequest = {
 };
 
 export type InstalledPlugin = {
+  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   version: string;
   pluginId: string;
@@ -7409,6 +7440,7 @@ export type UninstallPluginRequest = {
 };
 
 export type UninstallPluginResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];
