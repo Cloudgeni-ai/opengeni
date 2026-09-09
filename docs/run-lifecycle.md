@@ -1538,6 +1538,14 @@ non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
 and retry-disabled calls. Cancelling observation is not process-exit proof;
 the existing token/PGID cleanup fence still owns physical cancellation.
 
+SDK-internal setup/readiness commands still use their original live SDK observer
+and may yield. Their adapter-local aliases are above the admitted command range
+(1–2147483647), so a setup process cannot collide with a retained command. Only
+the same adapter can read those aliases; they cannot be bound as durable commands
+or adopted by another reader. A missing retained alias never falls back to an
+SDK process with a coincident numeric ID. Observation failure remains an error,
+not command replay or exit proof.
+
 For historical commands without that locator, the reaper reports
 `process_observation_unavailable`, retaining the exact process/admission/holder.
 After five probes it records `quarantined_process_observation_unavailable` and
