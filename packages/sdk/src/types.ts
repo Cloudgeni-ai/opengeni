@@ -1398,6 +1398,8 @@ export type Session = {
   queueHeadPosition: number;
   queueTailPosition: number;
   effectiveControl: EffectiveSessionControl;
+  /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
+  inputWait?: { deadlineAt: string; reason: string } | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -1432,6 +1434,7 @@ export type Session = {
         totalDescendants: number;
         runningDescendants: number;
         queuedDescendants: number;
+        waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
@@ -1452,6 +1455,12 @@ export type Session = {
    * list and lineage reads for `requires_action` sessions; null otherwise.
    */
   requiresActionSince?: string | null | undefined;
+  /** Agent access scope; absent on servers before the agent-access release. */
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label; null when the session carries none. */
+  endUser?: SessionEndUser | null | undefined;
+  /** Memory scope; absent on servers before the agent-access release. */
+  memoryScope?: SessionMemoryScope | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -1470,6 +1479,8 @@ export type SessionListResponse = {
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
   filtersApplied?: true;
+  /** Server-resolved Site origin filter, when requested. */
+  originSiteId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -2885,7 +2896,20 @@ export type CreateSessionRequest = {
   //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
   //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager fan-out).
   sandbox?: "shared" | "new" | { groupId: string } | undefined;
+  // --- Agent access scope, end-user label, memory scope ---------------------
+  // Mirror of the contracts additions that land with the session agent-access
+  // release. Which other sessions the agent may reach; defaults to "workspace"
+  // on the platform (the chat facade defaults to "session").
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label inside the workspace. Not a subject, not authority. */
+  endUser?: SessionEndUser | undefined;
+  /** Which Memory the agent reads and where it saves; "user" requires `endUser`. */
+  memoryScope?: SessionMemoryScope | undefined;
 };
+
+export type SessionAgentAccess = "session" | "user" | "workspace";
+export type SessionEndUser = { source: string; id: string };
+export type SessionMemoryScope = "workspace" | "user" | "session" | "off";
 
 // --- Access, workspaces, API keys -------------------------------------------
 
@@ -2989,6 +3013,13 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "project_list"
+  | "project_get"
+  | "project_create"
+  | "project_update"
+  | "project_reorder"
+  | "project_delete"
+  | "session_set_project"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -3589,11 +3620,12 @@ export type CodexConnectPoll =
     };
 
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
-export type SuperGrokAccountScope = "workspace" | "user";
+export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
   email?: string | null;
@@ -3624,6 +3656,8 @@ export type SuperGrokRotationSettings = {
 
 /** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
 export type SuperGrokAccountsResponse = {
+  source?: "workspace" | "user" | "organization";
+  organizationId?: string;
   accounts: SuperGrokAccount[];
   activeAccountId: string | null;
   settings: SuperGrokRotationSettings;
@@ -4379,8 +4413,8 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4437,7 +4471,9 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4481,6 +4517,13 @@ export type UpdateWorkspaceRequest = {
   agentInstructions?: string | null | undefined;
 };
 
+/**
+ * Organization API key access tier, derived by the server from the key's
+ * permissions: `full` administers the organization, `read` only inventories
+ * shared workspaces and reads their sessions, events, and files.
+ */
+export type OrganizationApiKeyAccess = "full" | "read";
+
 export type ApiKey = {
   id: string;
   accountId: string;
@@ -4489,6 +4532,8 @@ export type ApiKey = {
   description: string | null;
   prefix: string;
   permissions: Permission[];
+  /** Organization keys only; omitted for workspace-scoped keys. */
+  access?: OrganizationApiKeyAccess | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -4513,10 +4558,38 @@ export type CreateOrganizationApiKeyRequest = {
   name: string;
   description?: string | undefined;
   expiresAt?: string | undefined;
+  /** Omitted means `full`. */
+  access?: OrganizationApiKeyAccess | undefined;
 };
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// --- Organization-wide session list (org API key or organization owner) -----------------------
+
+export type ListOrganizationSessionsOptions = {
+  /** Page size, 1..200; the server default is 50. */
+  limit?: number | undefined;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | undefined;
+  /** Keep only sessions labelled with this exact end user. */
+  endUser?: { source: string; id: string } | undefined;
+  /** Keep only sessions in this exact lifecycle state. */
+  status?: SessionStatus | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+/**
+ * One page of `GET /v1/organizations/:organizationId/sessions`. Rows come from
+ * every shared workspace the caller may read, each carrying its
+ * `workspaceId`; personal workspaces are never included and private sessions
+ * stay invisible. A page may be shorter than `limit` while `nextCursor` is
+ * still set, so follow `nextCursor` until it is null.
+ */
+export type OrganizationSessionListResponse = {
+  sessions: Session[];
+  nextCursor: string | null;
 };
 
 // A person (or API key) with access to a workspace. `subjectId` is
@@ -8144,4 +8217,17 @@ export type EnrollTokenExchangeRequest = {
 /** POST /v1/enrollments/token/exchange response (wraps the credential shape). */
 export type EnrollTokenExchangeResponse = {
   credentials: EnrollmentCredentials;
+};
+
+export type ModelConnectionAccessPolicy = {
+  allowedModels: string[] | null;
+  allowedWorkspaces: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  version: number;
+};
+export type ModelConnectionAccessResponse = {
+  policy: ModelConnectionAccessPolicy;
+  models: Array<{ id: string; label: string }>;
+  workspaces: Array<{ id: string; name: string }>;
+  personalWorkspacesSupported: boolean;
 };

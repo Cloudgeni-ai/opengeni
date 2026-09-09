@@ -169,6 +169,7 @@ body {
    - the composer textarea (`.og-root textarea`) already shows a whole-composer
      focus affordance (focus-within border + soft glow), so a second outline
      bounded to the textarea box would double it;
+   - model search inputs use a whole-field focus outline including the icon;
    - shadcn buttons (`[data-slot="button"]`) carry their own offset ring in
      button.tsx — excluding them here avoids stacking two rings on one control;
    - `[tabindex="-1"]` is for programmatic focus only (timeline scroller, etc.).
@@ -181,7 +182,7 @@ body {
   textarea,
   [role="button"],
   [tabindex]:not([tabindex="-1"])
-):focus-visible:not(.og-root textarea):not([data-slot="button"]) {
+):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
@@ -299,6 +300,11 @@ body {
   .session-tools-label, .session-tools-chevron { display: none; }
 }
 @container og-composer (max-width: 39.999rem) {
+  /* A split desktop pane needs the same overflow menu as a phone. These
+     hooks also cover the compact variable-set picker, without duplicating
+     controls or changing their keyboard/menu behavior. */
+  .console-composer-wide-control { display: none; }
+  .console-composer-compact-control { display: inline-flex; }
   .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
   .session-tools-label, .session-tools-chevron { display: none; }
 }

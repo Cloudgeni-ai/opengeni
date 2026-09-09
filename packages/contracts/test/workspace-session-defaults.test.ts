@@ -8,6 +8,29 @@ import {
 } from "../src";
 
 describe("workspace session defaults", () => {
+  test("tool and plugin overrides inherit independently; reset is an explicit patch", () => {
+    expect(
+      WorkspaceSettingsSchema.parse({ sessionToolDefaults: { mcpServerIds: [] } })
+        .sessionToolDefaults,
+    ).toEqual({ mcpServerIds: [] });
+    expect(
+      WorkspaceSettingsSchema.parse({ sessionToolDefaults: { firstPartyMcpTools: [] } })
+        .sessionToolDefaults,
+    ).toEqual({ firstPartyMcpTools: [] });
+    expect(
+      UpdateWorkspaceSettingsRequest.parse({ sessionToolDefaults: { firstPartyMcpTools: null } })
+        .sessionToolDefaults,
+    ).toEqual({ firstPartyMcpTools: null });
+    expect(
+      WorkspaceSettingsSchema.safeParse({ sessionToolDefaults: { firstPartyMcpTools: null } })
+        .success,
+    ).toBe(false);
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({
+        sessionToolDefaults: { firstPartyMcpTools: ["not_a_tool"] },
+      }).success,
+    ).toBe(false);
+  });
   test("stores a model and reasoning policy for new chats and schedules", () => {
     const sessionDefaults = {
       model: "codex/gpt-5.6-sol",

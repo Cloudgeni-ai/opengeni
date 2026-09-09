@@ -143,14 +143,39 @@ import { SessionConversation } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const site = createOpenGeniSiteClient();
+// Match the theme to your chat panel; omit this wrapper for the dark default.
+<div data-og-theme="light" style={{ height: "100%", minHeight: 0 }}>
 <SessionConversation
   client={site.client}
   workspaceId={site.workspaceId}
   sessionId={sessionId}
 />
+</div>
 ```
 
 `sessionId` is the existing session or the id returned by `site.client.createSession`.
+For a normal chat app, offer a conversation selector and “New conversation”.
+Create on first Send rather than mounting the page; keep the selected id in React
+state and reopen existing conversations through the SDK.
+Keep first-send creation single-flight; reuse its `idempotencyKey` when retrying,
+then mount `SessionConversation` with the returned id. Do not send that first
+message a second time after creation. A useful default list is
+`site.client.listSessionPage(site.workspaceId, { originSiteId: "current" })`;
+render returned `pinned` and `sessions` (deduplicated by id) and use `nextCursor`
+for older results. Published calls automatically record their Site origin—do not
+write origin metadata yourself. The local preview has no published identity, so
+this filter returns no Site history there; test newly created/current conversations
+locally and the selector after publication.
+
+This is a default, not a restriction. For a project-focused app, use `channelId`
+on SDK creation/listing instead; its list may include conversations created
+elsewhere. Project management tools use `projectId` (see `opengeni-projects`
+when available). Do not automatically create a project just to group Site chats.
+Unfiled Site conversations group under their Site in the main sidebar; explicit
+projects and pins take precedence. Origin remains visible regardless of placement.
+The host Site page always provides its own Conversations panel independently of
+the navigation you build. Opening existing sessions never changes their origin.
+
 `SessionConversation` connects timeline/history, durable composer drafts,
 queue display/edit/delete/steer, pause/resume, and human-input forms. Prefer it
 for a normal embedded chat. `ChatComposer` alone is only the input surface;
@@ -158,6 +183,12 @@ pairing it with a timeline does not create the queue UI.
 Use the lower-level hooks/components only for intentionally custom behavior.
 
 The host owns the chat's available space; `SessionConversation` fills it.
+The SDK defaults to dark colors. On a light panel, set `data-og-theme="light"`
+on its wrapper; changing the Site's body background does not select the SDK
+theme, and the outer OpenGeni app's theme does not cross the iframe. Keep
+foreground and background on the same SDK tokens rather than overriding
+message/button colors individually. Check a real assistant reply, expanded
+steps, composer and menus for readable contrast in the chosen theme.
 For a full-height page, use a `height: 100dvh` flex-column layout with the
 chat panel `flex: 1; min-height: 0` below its header. Keep intervening
 flex/grid children shrinkable (`min-height: 0; min-width: 0`). The SDK owns

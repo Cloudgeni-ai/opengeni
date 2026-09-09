@@ -12,6 +12,11 @@ import { createRoot } from "react-dom/client";
 mock.module("@/routes/editable-artifact", () => ({
   EditableArtifactRoute: () => null,
 }));
+mock.module("@/routes/artifacts", () => ({
+  ArtifactDetailRoute: ({ artifactId, embedded }: { artifactId: string; embedded?: boolean }) => (
+    <div data-site-preview={artifactId}>{embedded ? "Embedded Site" : "Full Site"}</div>
+  ),
+}));
 
 const { SessionEditableArtifactsWorkspace } = await import("./editable-artifacts-workspace");
 
@@ -27,6 +32,42 @@ afterAll(() => {
 });
 
 describe("SessionEditableArtifactsWorkspace empty states", () => {
+  test("opens a session Site in the shared preview with a full-page link", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const id = "22222222-2222-4222-8222-222222222222";
+    const route = createRootRoute({
+      component: () => (
+        <SessionEditableArtifactsWorkspace
+          workspaceId="11111111-1111-4111-8111-111111111111"
+          artifacts={[{ id, title: "Dashboard", modality: "site" }]}
+          status="ready"
+          onRetry={() => undefined}
+        />
+      ),
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      expect(
+        container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
+      ).toBe(id);
+      expect(container.textContent).toContain("Embedded Site");
+      expect(container.querySelector("a")?.getAttribute("href")).toBe(
+        `/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${id}`,
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
   test("restores and reports the selected artifact", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -60,7 +101,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
         root.render(<RouterProvider router={router} />);
       });
       const select = container.querySelector<HTMLSelectElement>(
-        'select[aria-label="Choose editable artifact"]',
+        'select[aria-label="Choose artifact"]',
       );
       expect(select?.value).toBe(secondId);
 

@@ -37,6 +37,7 @@ import {
 } from "@/lib/session-restart-operation-controller";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
+import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 import type { Session, SessionEvent } from "@/types";
 
 export function SessionInspector(props: {
@@ -84,6 +85,7 @@ export function SessionInspector(props: {
     (variableSet) => !selectedVariableSetIds.includes(variableSet.id),
   );
   const saveVariableSets = async () => {
+    if (sessionHasVariableSetBlockingWork(props.session)) return;
     setSavingVariableSets(true);
     setRuntimeFailure(null);
     try {
@@ -199,20 +201,20 @@ export function SessionInspector(props: {
 
       <Tabs defaultValue="overview" className="min-h-0 min-w-0 flex-1 gap-0 overflow-hidden">
         <div className="min-w-0 border-b border-border px-2 py-2">
-          <TabsList className="grid h-8 w-full min-w-0 grid-cols-5 rounded-md bg-bg p-1">
-            <TabsTrigger value="overview" className="h-6 min-w-0 rounded px-1 text-2xs">
+          <TabsList className="flex !h-auto w-full min-w-0 flex-wrap justify-start gap-1 rounded-md bg-bg p-1">
+            <TabsTrigger value="overview" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Overview
             </TabsTrigger>
-            <TabsTrigger value="context" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="context" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Context
             </TabsTrigger>
-            <TabsTrigger value="events" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="events" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Events
             </TabsTrigger>
-            <TabsTrigger value="timeline" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="timeline" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Timeline
             </TabsTrigger>
-            <TabsTrigger value="raw" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="raw" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Raw
             </TabsTrigger>
           </TabsList>
@@ -359,12 +361,18 @@ export function SessionInspector(props: {
                     Later sets override earlier sets. Changes are allowed only between turns and
                     rotate the managed sandbox before reuse.
                   </p>
+                  {sessionHasVariableSetBlockingWork(props.session) ? (
+                    <p className="text-2xs text-fg-subtle">
+                      Variable Sets can be changed after the current and queued work finishes.
+                    </p>
+                  ) : null}
                   <Button
                     type="button"
                     size="sm"
                     variant="secondary"
                     disabled={
                       !selectedChanged ||
+                      sessionHasVariableSetBlockingWork(props.session) ||
                       savingVariableSets ||
                       restarting ||
                       Boolean(pendingRestartAttempt)
@@ -458,6 +466,7 @@ export function SessionInspector(props: {
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
             events={displayEvents}
+            isRunning={props.session.status === "running"}
           />
         </TabsContent>
 

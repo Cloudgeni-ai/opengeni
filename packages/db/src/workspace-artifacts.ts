@@ -15,6 +15,37 @@ import * as schema from "./schema";
 import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
+
+/** Validate a published Site identity without loading its HTML or version history. */
+export async function getWorkspaceSiteSessionOrigin(
+  db: Database,
+  workspaceId: string,
+  siteId: string,
+  versionId: string,
+): Promise<{ siteId: string; title: string }> {
+  return withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const [origin] = await scoped
+      .select({ siteId: schema.workspaceArtifacts.id, title: schema.workspaceArtifacts.title })
+      .from(schema.workspaceArtifacts)
+      .innerJoin(
+        schema.workspaceArtifactVersions,
+        and(
+          eq(schema.workspaceArtifactVersions.artifactId, schema.workspaceArtifacts.id),
+          eq(schema.workspaceArtifactVersions.workspaceId, workspaceId),
+          eq(schema.workspaceArtifactVersions.id, versionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+          eq(schema.workspaceArtifacts.id, siteId),
+        ),
+      )
+      .limit(1);
+    if (!origin) throw new WorkspaceArtifactNotFoundError("Site origin not found");
+    return origin;
+  });
+}
 export async function createWorkspaceArtifactUpload(
   db: Database,
   input: {
@@ -215,6 +246,7 @@ export async function listWorkspaceArtifacts(
     limit?: number;
     cursor?: string;
     status?: "active" | "archived";
+    sourceSessionId?: string;
   } = {},
 ): Promise<{
   artifacts: WorkspaceArtifact[];
@@ -226,6 +258,14 @@ export async function listWorkspaceArtifacts(
     const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
     const visibility = and(
       eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+      ...(options.sourceSessionId
+        ? [
+            sql`exists (select 1 from ${schema.workspaceArtifactVersions} as published_version
+              where published_version.artifact_id = ${schema.workspaceArtifacts.id}
+                and published_version.workspace_id = ${schema.workspaceArtifacts.workspaceId}
+                and published_version.source_session_id = ${options.sourceSessionId}::uuid)`,
+          ]
+        : []),
       ...(options.status ? [eq(schema.workspaceArtifacts.status, options.status)] : []),
       ...(cursor
         ? [

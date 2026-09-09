@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { withSiteSessionOrigin } from "@opengeni/core";
+import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
@@ -43,6 +45,7 @@ import {
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
+  resolveSessionMemoryAgentScope,
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
@@ -194,7 +197,20 @@ export async function prepareWorkspaceToolGatewayForGrant(
               grant.accountId,
               grant.workspaceId,
               routeDeps.getDocumentServices(),
-              { initiatingSubjectId: grant.subjectId },
+              {
+                initiatingSubjectId: grant.subjectId,
+                // A session-bound gateway caller reads Memory through that
+                // session's frozen selector; a sessionless caller keeps the
+                // workspace layer.
+                memory:
+                  typeof grant.metadata?.["sessionId"] === "string"
+                    ? ((await resolveSessionMemoryAgentScope(
+                        routeDeps.db,
+                        grant.workspaceId,
+                        grant.metadata["sessionId"],
+                      )) ?? { mode: "off" as const, endUserSubjectId: null, rootSessionId: null })
+                    : null,
+              },
             ),
           ),
         ]
@@ -394,6 +410,7 @@ export async function callWorkspaceToolGateway(
   consumeApproval: typeof consumeToolGatewayApproval = consumeToolGatewayApproval,
   observability?: Observability,
   authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
+  resolveOrigin: typeof resolveSiteSessionOrigin = resolveSiteSessionOrigin,
 ) {
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
@@ -452,7 +469,18 @@ export async function callWorkspaceToolGateway(
       throw new HTTPException(409, { message: "tool_gateway_approval_required" });
     }
     transportMeta.approvalConfirmed = approvalConfirmed;
-    const result = await preparedCall.execute();
+    const origin =
+      siteContext && db
+        ? await resolveOrigin(
+            db,
+            grant.workspaceId,
+            siteContext.siteArtifactId,
+            siteContext.siteVersionId,
+          )
+        : null;
+    const result = await (origin
+      ? withSiteSessionOrigin(origin, () => preparedCall.execute())
+      : preparedCall.execute());
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,

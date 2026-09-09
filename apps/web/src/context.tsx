@@ -1,3 +1,8 @@
+import {
+  beginSocialLoginAnalytics,
+  noteSuccessfulLogin,
+  observeSocialLoginResult,
+} from "@/lib/analytics-login";
 import { hasWorkspacePermission } from "@/lib/permissions";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
@@ -713,6 +718,7 @@ export function RootRouteComponent() {
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
+  const analyticsSearch = useRouterState({ select: (state) => state.location.searchStr });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
@@ -926,6 +932,7 @@ export function RootRouteComponent() {
           invalidatePrincipalWorkspaceState();
         }
         authPrincipalIdRef.current = nextPrincipalId;
+        observeSocialLoginResult(nextSession);
         setAuthSession(nextSession);
         setManagedAuthBootstrapComplete(true);
       })
@@ -2295,6 +2302,7 @@ export function RootRouteComponent() {
       throw new ManagedAuthSessionUnavailableError(mode);
     }
     authPrincipalIdRef.current = nextSession?.user.id ?? null;
+    if (mode === "signin" && nextSession) noteSuccessfulLogin(nextSession.user.id, "email");
     setAuthSession(nextSession);
     setAccessKeyVersion((version) => version + 1);
   }
@@ -2325,6 +2333,7 @@ export function RootRouteComponent() {
         slackLinkPrepareController.phase(),
       ),
     });
+    beginSocialLoginAnalytics(provider);
     await startManagedSocialSignIn(provider);
   }
 
@@ -2883,12 +2892,15 @@ export function RootRouteComponent() {
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager
-            analyticsAccountId={accessContext?.defaultAccountId ?? null}
+            analyticsAccountId={
+              routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
+            }
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}
             pathname={pathname}
+            search={analyticsSearch}
           />
         </Suspense>
       ) : null}

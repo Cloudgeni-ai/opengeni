@@ -352,8 +352,11 @@ The table describes credential and upstream-settlement identity, not the
 workspace-facing price. Deployment models—including anonymous and managed
 OpenRouter routes—default to `credits` unless
 `OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
-may still group such a route under External while the payment sentence and
-`list_models` output show its deployment-defined cost.
+groups all deployment-provided models under OpenGeni, regardless of upstream
+provider or settlement. Only explicitly free models receive a Free badge; paid
+rows omit repetitive credit labels. Subscription descriptions appear once per
+provider group; the Free badge stays explicit, and `list_models` retains the cost.
+Workspace/organization connections and connected subscriptions stay separate.
 
 ### OpenCode Zen temporary free contributor model
 
@@ -419,7 +422,7 @@ promise:
 ```
 
 Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
-inference. Anonymous routes are shown on the External rail. To make this
+inference. Anonymous deployment routes are shown under OpenGeni. To make this
 temporary preview free to the workspace, set
 `OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/muse-spark-1.3-contributor-free":"free"}'`;
 external settlement alone does not bypass credits. A free route still emits
@@ -564,14 +567,16 @@ On August 27, 2026, OpenRouter advertised that slug with a 262,144-token context
 window, a 235,929-token completion ceiling, text input/output, function tools,
 tool choice, structured outputs, and reasoning controls. A live forced-function
 probe completed with `finish_reason=tool_calls`. OpenGeni therefore marks
-function calling and structured output runnable, while reasoning effort remains
-non-runnable until a reviewed effort vocabulary is mapped.
+function calling and structured output runnable. On September 8, 2026, OpenRouter
+`GET /api/v1/models` explicitly advertised reasoning efforts `low` and `medium`,
+with `medium` as default. Both are runnable; the Chat Completions adapter sends
+the selected value as `reasoning_effort`. Higher levels are not exposed.
 
 OpenRouter membership is curated and production never mirrors `GET /models`.
 The v1 database schema accepts reviewed `:free` slugs only; a key does not make
 every upstream model visible, and workspace policy may hide the starter. The
-provider settles through the deployment's OpenRouter account and appears on the
-External picker rail, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
+provider settles through the deployment's OpenRouter account and appears in the
+OpenGeni picker group, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
 decides whether the workspace sees `free` or `credits`. The shipped default is
 `free`. If an operator changes it to `credits`, managed billing also requires a
 separate `OPENGENI_MODEL_PRICING_JSON` entry.

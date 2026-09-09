@@ -68,7 +68,7 @@ bun run test:e2e
 
 ## Keeping Docs True
 
-Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename files or packages, run `bun run check:docs-refs` and fix the current-tier references it reports. New packages need a package README plus an update to the [`docs/architecture.md`](docs/architecture.md) package table. New embed surfaces or ports belong in [`docs/embedding.md`](docs/embedding.md). New processes or commands belong in their canonical home from the docs map; link there instead of copying volatile details into multiple docs.
+Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename files or packages, run `bun run check:docs-refs` and fix the current-tier references it reports. New packages need a package README plus an update to the [`docs/architecture.md`](docs/architecture.md) package table. New embed surfaces or ports belong in [`docs/embedding.md`](docs/embedding.md). New processes or commands belong in their canonical home from the docs map; link there instead of copying volatile details into multiple docs. The public product docs at docs.opengeni.ai live in [`docs-site/`](docs-site/README.md) and are deployed by Mintlify from `main`; update them in the same change when user-facing behavior they describe moves.
 
 ## Release / Publishing
 

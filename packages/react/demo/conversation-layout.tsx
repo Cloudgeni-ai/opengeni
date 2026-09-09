@@ -26,6 +26,13 @@ const events: SessionEvent[] = Array.from({ length: 8 }, (_, i) => ({
   payload: { text: `Message ${i}\n` + "Expandable message content. ".repeat(120) },
   occurredAt: new Date().toISOString(),
 }));
+events.push({
+  ...events[0]!,
+  id: "assistant-reply",
+  sequence: 9,
+  type: "agent.message.completed",
+  payload: { text: "Readable assistant reply in the selected theme." },
+});
 let release: (() => void) | undefined;
 const pending: SessionEvent[] = [];
 const client = fakeClient({
@@ -68,7 +75,12 @@ function append() {
 function App() {
   const [height, setHeight] = useState(500);
   return (
-    <main style={{ width: "min(760px,100%)" }}>
+    <main
+      data-og-theme={
+        new URLSearchParams(location.search).get("theme") === "light" ? "light" : undefined
+      }
+      style={{ width: "min(760px,100%)", background: "#fffdf9", padding: 16 }}
+    >
       <button onClick={append}>Append live message</button>
       <button onClick={() => setHeight(height === 500 ? 350 : 500)}>Resize host</button>
       <section style={{ height, display: "flex", flexDirection: "column" }}>

@@ -1,0 +1,89 @@
+---
+title: "Self-host"
+description: "Deploy the OpenGeni control plane on your own infrastructure."
+icon: "server"
+---
+
+OpenGeni is Apache-2.0 all the way down: the API, web app, workers, Helm chart, and reference Terraform are open source, and the durable record is a Postgres database you operate.
+
+## What you run
+
+| Component                      | Role                                                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| API                            | Public HTTP contract: sessions, events, files, streaming                                                  |
+| Web                            | The React console                                                                                         |
+| Control worker and turn worker | Temporal workers. Both must run: the control queue handles lifecycle, the turn queue executes agent turns |
+| Postgres with pgvector         | Durable event store, history, and knowledge index                                                         |
+| Temporal                       | Orchestration of long-running turns and signals                                                           |
+| NATS                           | Realtime fanout between producers and API instances                                                       |
+| Object storage                 | Files and sandbox archives: Azure Blob, AWS S3, or GCS                                                    |
+| Sandbox backend                | Where sessions run: Docker, Modal, a cloud sandbox provider, or Connected Machines                        |
+
+Use managed services or official upstream charts for Postgres, Temporal, NATS, and object storage. The chart's built-in copies of those services are disposable fixtures for local and smoke verification only.
+
+## Install with Helm
+
+Released charts are published as OCI artifacts. Every release ships a BOM whose `chart.reference` is the authoritative chart location; the default public registry prefix is `ghcr.io/cloudgeni-ai`. Pin the chart version to the OpenGeni version you intend to run and keep runtime secrets in a Kubernetes Secret:
+
+```bash
+# From the release BOM of the version you are deploying.
+OPENGENI_VERSION="<published-version>"
+OPENGENI_CHART_OCI="oci://ghcr.io/cloudgeni-ai/charts/opengeni/opengeni"
+
+helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
+  --namespace opengeni \
+  --create-namespace \
+  --version "$OPENGENI_VERSION" \
+  --set secret.existingSecret=opengeni-runtime
+```
+
+The release BOM published with each version is the authority for the chart reference and image digests.
+
+## Reference infrastructure
+
+Terraform roots for Azure, AWS, and GCP live under `deploy/terraform`, with stack wrappers that manage platform dependencies. Deployment profiles describe each shape:
+
+```bash
+bun run deployment:profiles
+bun run deployment:stack -- --profile gcp-managed
+```
+
+The stack plan lists resource classes, external dependencies, required secret keys, and the deploy, verify, and destroy commands for that profile.
+
+## Access modes
+
+`OPENGENI_PRODUCT_ACCESS_MODE` selects how callers are identified:
+
+| Mode         | Use                                                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `local`      | Development bootstrap account and workspace with one `dev` user                                                       |
+| `configured` | Self-hosted or embedded deployments using delegated bearer tokens from your own product, or the deployment shared key |
+| `managed`    | OpenGeni-owned sign-up, organizations, API keys, prepaid credits, usage, and limits                                   |
+
+Outside local development, `configured` mode refuses to start unless you set either `OPENGENI_DELEGATION_SECRET` (for delegated tokens from your product) or `OPENGENI_AUTH_REQUIRED=true` together with `OPENGENI_ACCESS_KEY` (the deployment shared key). The [security boundary section of the deployment guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#security-boundary) covers both.
+
+The optional deployment shared key (`OPENGENI_AUTH_REQUIRED=true` with `OPENGENI_ACCESS_KEY`) is a coarse perimeter for smoke tests and simple self-hosting, sent as the `x-opengeni-access-key` header. It is not a tenant model.
+
+## Before you expose it
+
+Put a long-lived deployment behind a gateway that provides:
+
+- TLS termination with a managed certificate
+- Authentication and authorization for every user-facing route
+- Rate limits and request size limits sized for session, file, and SSE traffic
+- Long-lived SSE support with buffering disabled and read and send timeouts of at least 3600 seconds
+- Access logs with request id, tenant, route, status, and duration
+
+Review sandbox preparation profiles and environment allowlists before running live sessions: they decide which host credentials can reach an agent sandbox.
+
+<Warning>
+  Some database migrations are one-way maintenance cutovers. They require every old API and worker
+  to be stopped first, and a pre-cutover image must never be restarted afterward. Read the upgrade
+  notes in the repository's [deployment
+  guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md) before every
+  upgrade.
+</Warning>
+
+## Going deeper
+
+The [deployment guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md) in the repository is the canonical operator reference: profiles, Helm values, Terraform outputs, Connected Machine relay configuration, observability, and cloud-specific notes.

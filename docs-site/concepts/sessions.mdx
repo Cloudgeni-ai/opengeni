@@ -1,0 +1,79 @@
+---
+title: "Sessions and turns"
+description: "The durable unit of agent work, and how input, streaming, and control fit around it."
+icon: "comments"
+---
+
+A **session** is one durable conversation and workstream: its history, policy, visibility, and compute context. Sessions belong to a workspace. Operational session routes use that workspace; an organization-wide inventory can list readable sessions across shared workspaces.
+
+## Three identities
+
+| Identity | Meaning                                                                                                                         | Lifetime                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Session  | Durable conversation, workstream, policy, visibility, and compute context                                                       | Until archived or deleted                            |
+| Turn     | One accepted unit of input: a human or API prompt, a machine input, a goal continuation, a schedule, an approval, or a recovery | Until logically settled                              |
+| Attempt  | One physical worker execution of a turn                                                                                         | Until completion, interruption, loss, or replacement |
+
+A new attempt does not imply a new prompt. A new prompt does imply a new turn. This is what lets OpenGeni recover the same logical turn after a worker dies without duplicating external effects.
+
+## The event log
+
+Every session event is appended to a Postgres event log with a contiguous sequence number. Clients read it two ways:
+
+- **Replay**: fetch events after a sequence.
+- **Stream**: subscribe over Server-Sent Events. The SDK resumes by sequence after a drop, backfills gaps from the replay endpoint, and suppresses duplicates, so a browser reload, a new client, or an audit sees the same history.
+
+Postgres is the source of truth. The realtime bus only fans out what was already durably written.
+
+## Sending input
+
+- **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay visible, editable, and reorderable until the worker claims them.
+- **Steer** delivers now: it moves your message to the front and interrupts the running turn.
+- **Pause** and **Resume** hold and release the workstream without creating queue items.
+- **Cancel** is terminal. It drains queued work for the session and its children and fences the subtree.
+
+When a session is waiting on you (a tool approval or a structured question), a normal Send replaces that wait with your new prompt.
+
+## Attached context
+
+A session can carry repositories, uploaded files, workspace documents, selected tools, and Skills. Tool selection is durable session state: an explicit tool list is taken verbatim, and omitting it selects the workspace default.
+
+## Child sessions
+
+An agent can spawn child sessions for parallel or delegated work. Children run as ordinary sessions, and their terminal results are delivered back to the parent as durable input the parent's next turn sees.
+
+## Visibility
+
+Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
+
+## Agent access in product integrations
+
+`agentAccess` controls how an agent reaches other session trees within its workspace:
+
+| Scope       | Agent reach                                                                                    |
+| ----------- | ---------------------------------------------------------------------------------------------- |
+| `session`   | Its own conversation tree, including children                                                  |
+| `user`      | Other trees with the same non-null product/user label, when the target also permits access     |
+| `workspace` | Other trees in the workspace, subject to the target's scope and existing private-session rules |
+
+The more restrictive side wins across trees. Children inherit the parent's scope and can only narrow it. These rules do not make product-created chats invisible to authorized human workspace members or organization API keys. The product backend must still authorize each user's requests.
+
+The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Memory](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Integrate your product](/guides/integrate-your-product#choose-agent-access-and-memory).
+
+## Browsing and archiving
+
+The session sidebar loads older sessions only when you press **Load older** in a
+group. Scrolling to the bottom does not fetch more pages, so you can reach
+**Archived** without collapsing your folders.
+
+After you archive a chat, the bottom-right notification offers **Undo** for eight
+seconds. You can also restore it later from **Archived**, which lists the most
+recently archived sessions first, regardless of when they last had activity.
+
+## Model inheritance
+
+Follow-ups without an explicit selection, voice requests and voice-end handoffs
+use the model, reasoning effort and speed from the latest turn that started.
+Session labels and fresh message drafts use those settings too. Before any turn
+starts, the initial session settings apply. Existing drafts, queued messages and
+historical turns retain their own settings.

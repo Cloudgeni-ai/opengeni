@@ -251,6 +251,8 @@ pub enum CodemodeAction {
     Show(CodemodeShowArgs),
     /// Call one tool by generated path, model name, or `server.tool` identity.
     Call(CodemodeCallArgs),
+    /// Read an existing operation without executing or resubmitting its tool.
+    Read { operation_id: uuid::Uuid },
     /// Report whether the attempt-scoped client environment is usable. Secret
     /// values are never printed.
     Doctor,
@@ -595,6 +597,19 @@ mod tests {
 
     #[test]
     fn codemode_commands_parse() {
+        assert!(Cli::try_parse_from(["opengeni-agent", "codemode", "read", "../calls"]).is_err());
+        let read = Cli::parse_from([
+            "opengeni-agent",
+            "codemode",
+            "read",
+            "11111111-1111-4111-8111-111111111111",
+        ]);
+        assert!(matches!(
+            read.command,
+            Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::Read { .. }
+            }))
+        ));
         let list = Cli::parse_from(["opengeni-agent", "codemode", "list"]);
         assert!(matches!(
             list.command,

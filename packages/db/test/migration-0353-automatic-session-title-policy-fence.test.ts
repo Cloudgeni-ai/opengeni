@@ -987,13 +987,14 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's schema. A database frozen immediately after 0353 predates the
     // 0361 Memory materialization table/function and the 0380 company-profile
     // autonomy policy tables/functions, the 0400 model-context snapshot table,
-    // the 0401 setup-delivery transport routines, and the 0422 Codex inventory.
+    // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
+    // and the 0429 message-boundary fork overload.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
-      "runtime privilege tables are missing: session_attempt_model_context_snapshots, workspace_artifact_uploads",
-      "protected tables are missing: session_attempt_model_context_snapshots, workspace_artifact_uploads",
+      "runtime privilege tables are missing: feedback_submissions, session_attempt_model_context_snapshots, workspace_artifact_uploads",
+      "protected tables are missing: feedback_submissions, session_attempt_model_context_snapshots, workspace_artifact_uploads",
       "target-schema runtime capability propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
       "target-schema runtime capability propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text) is missing or ambiguous",
       "target-schema runtime capability confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
@@ -1004,6 +1005,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_codex_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",

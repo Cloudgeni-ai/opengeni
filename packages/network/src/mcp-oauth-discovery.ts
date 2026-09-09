@@ -290,33 +290,34 @@ export function protectedResourceMetadataCandidates(
   resourceUrl: string,
   advertisedUrl?: string,
 ): string[] {
+  const url = new URL(resourceUrl);
+  const path = url.pathname === "/" ? "" : url.pathname;
   return uniqueStrings([
     ...(advertisedUrl !== undefined ? [advertisedUrl] : []),
-    ...oauthWellKnownCandidates(resourceUrl, "oauth-protected-resource"),
+    // RFC 9728 inserts the well-known prefix before the resource path.
+    // Appending it instead can hit a protected API catch-all and fail with
+    // 401 before genuine metadata absence permits legacy discovery.
+    `${url.origin}/.well-known/oauth-protected-resource${path}${url.search}`,
+    `${url.origin}/.well-known/oauth-protected-resource`,
   ]);
 }
 
 export function authorizationServerMetadataCandidates(authorizationServer: string): string[] {
+  const url = new URL(authorizationServer);
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
+  // MCP specifies OAuth path insertion, then OpenID insertion/appending.
+  // Guessed OAuth suffixes and issuer-root fallbacks can hit protected routes
+  // before valid OpenID metadata, or discover a different tenant's metadata.
   return uniqueStrings([
-    ...oauthWellKnownCandidates(authorizationServer, "oauth-authorization-server"),
-    ...oauthWellKnownCandidates(authorizationServer, "openid-configuration"),
-    authorizationServer,
+    `${url.origin}/.well-known/oauth-authorization-server${path ? `/${path}` : ""}`,
+    `${url.origin}/.well-known/openid-configuration${path ? `/${path}` : ""}`,
+    `${url.origin}${path ? `/${path}` : ""}/.well-known/openid-configuration`,
   ]);
 }
 
 export function legacyAuthorizationServerMetadataCandidates(resourceUrl: string): string[] {
   const origin = new URL(resourceUrl).origin;
   return [`${origin}/.well-known/oauth-authorization-server`];
-}
-
-function oauthWellKnownCandidates(rawUrl: string, name: string): string[] {
-  const url = new URL(rawUrl);
-  const path = url.pathname.replace(/^\/+|\/+$/g, "");
-  return uniqueStrings([
-    `${url.origin}/.well-known/${name}${path ? `/${path}` : ""}`,
-    `${url.origin}${path ? `/${path}` : ""}/.well-known/${name}`,
-    `${url.origin}/.well-known/${name}`,
-  ]);
 }
 
 function parseProtectedResourceMetadata(

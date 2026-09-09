@@ -305,7 +305,9 @@ describe("catalog-backed ModelPicker", () => {
       expect(
         container.querySelector('[data-testid="model-picker-choice-codex/gpt-5.6-luna"]'),
       ).toBeTruthy();
-      expect(container.querySelector('select[aria-label="Thinking effort"]')).toBeTruthy();
+      expect(
+        container.querySelector('[role="radiogroup"][aria-label="Thinking effort"]'),
+      ).toBeTruthy();
       expect(container.querySelector('[data-testid="model-picker-back"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
@@ -414,11 +416,7 @@ describe("catalog-backed ModelPicker", () => {
       expect(selected).toBe("codex/gpt-5.6-luna");
       expect(selection.effort).toBe("low");
       await act(async () => {
-        const input = container.querySelector<HTMLSelectElement>(
-          'select[aria-label="Thinking effort"]',
-        )!;
-        input.value = "high";
-        input.dispatchEvent(new Event("change", { bubbles: true }));
+        container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click();
       });
       expect(selection.effort).toBe("high");
       await act(async () =>

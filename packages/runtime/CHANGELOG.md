@@ -1,5 +1,90 @@
 # @opengeni/runtime
 
+## 2.4.0
+
+### Minor Changes
+
+- fa12951: Separate command interaction from session history. Add bounded retained-output command reads and use the same operation for command waits. Terminal reads observe completion and suppress only still-pending completion notifications; running reads, claimed notifications, and historical tool results remain unchanged.
+
+  Make session history conversation-first with complete-message pagination and explicit results, tools, and debug views. Preserve cursor detail selection, provide oversized-message continuation, and keep queued prompts distinct from processed conversation. Update concise model guidance for the new surfaces.
+
+  `command_wait` now uses `waitSeconds`, an output cursor, and the same flat result as `command_read`; clients using the previous command wrapper must update. Apply the additive command-observation migration before starting the new readers.
+
+- 575af5b: Expose workspace project management through MCP, including shared pins/order, session filing, project-filtered discovery and project selection at session creation. Bundle concise, on-demand project organization guidance for every agent, independent of compute backend and retain existing session authorization checks.
+
+### Patch Changes
+
+- 7dac7e3: Clarify that default CLI discovery lists every authorized tool with compact per-tool summaries, without schemas or an output-size cutoff.
+- 22a6704: Correct oversized session-message continuation with bounded source slicing, preserve typed runner terminal failures during command observation, and keep retained command output readable when live refresh encounters a recognized temporary transport failure. Refresh fallback rechecks API authorization and explicitly marks unavailable freshness; it does not mask integrity or authorization errors.
+- c1dc59b: Guide agents through compact Codemode discovery followed by explicit single-tool schema inspection before calling an unfamiliar tool. Preserve the same authorized execution path for stock and Connected Machine CLIs.
+- 09de906: Open absolute file links outside a Connected Machine session's working directory, including sibling worktrees. Preserve route identity checks and managed sandbox confinement.
+- d8a70ec: Enforce the first-party MCP tool ceiling on current-human gateway and OAuth consent surfaces, propagate MCP OAuth deployment settings, and hide the undeliverable Sites Skill on Connected Machines.
+- d06450c: Capture final provider HTTP request bodies for the context inspector, including conversation input and provider-normalized tools/settings. Keep unsupported or oversized captures explicitly unavailable, label section/item token estimates, and preserve transport cancellation and streaming behavior.
+- c69ad5f: Preserve externally managed history across opaque compaction checkpoints and verify conversation persistence before continuation. Reject shifted history prefixes and conflicting saved items instead of silently losing completed work.
+- 1c4b707: Expose goal_resume so agents can resume any paused goal without a pause-reason restriction; include it for existing sessions with goal_pause.
+- 712967e: Recover typed Undici socket disconnections during safe first-party MCP initialization and tool discovery, while preserving terminal authentication failures and avoiding retries of tool invocations.
+- ccbf227: Pin the project-local Site CLI alongside SDK packages so sandbox image age cannot select an incompatible catalog client.
+- 66326b3: Compose Site package-version metadata in the skill manifest without writing into the worker application directory.
+- b272df2: Explain how to correct repository fetch failures, including abbreviated commit references, while preserving valid branch, tag, PR ref, and full SHA behavior.
+- eac6a61: End model execution after a successful trusted `wait_for_input` call, including
+  calls routed through native shell and Codemode. Preserve settled tool receipts
+  and normal worker completion without requiring a final assistant message.
+- 2fb17fd: Track published Site session origin automatically; add origin-filtered session
+  listing and skill defaults for reusable in-Site conversations. Site provenance
+  remains independent of project placement and session authorization.
+- 107aa14: Support standard SDK/React conversations in Sites and sandbox previews, direct
+  HTML/source uploads, exact deployment package pins, and embedded layout/queue
+  defaults. Refresh exhausted Grok capacity after external resets.
+- 9e412ef: Add bounded tool listing and exact-name schema disclosure as a recovery path for keyword-search misses across native and generic transports. Backfill search results after schema-budget exclusions without changing authorization, approvals, or eager-tool policy.
+
+  Prefer the connection-bound native Codemode client when available so an older installed CLI does not mask the supported Connected Machine path.
+
+  The native Connected Machine client now sends the compiled API contract acknowledgement, with a cross-language parity test, and reports flat contract-mismatch errors rather than hiding their explanation.
+
+  Native Codemode errors retain operation identity, observed outcome, and error details as JSON on stderr. A read-only journal command supports inspection without resubmitting tools. Packaged-client fixture verification covers JavaScript imports, CLI calls, and native recovery without probing customer tools.
+
+- d8a70ec: Unify first-party and integration tools behind one workspace gateway for MCP, model execution, Codemode, SDK, and browser clients; require host-confirmed SDK approval for human-gated model calls, keep Codemode claims live through gateway preparation, and deduplicate reclaimed tool-created events; add opt-in resource-bound MCP OAuth; ship governed self-contained HTML Sites with retained source, version rollback, an exact-version direct-call tool allowlist, and a native Site-authoring Skill; and default Modal self-hosts to OpenGeni's public digest-pinned desktop runtime image.
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [694c1ff]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [52cf486]
+- Updated dependencies [1fc0889]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [3db0b05]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [0c39126]
+- Updated dependencies [ba890d1]
+- Updated dependencies [0c39126]
+- Updated dependencies [4708cfb]
+- Updated dependencies [575af5b]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [92cdc31]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/contracts@2.14.0
+  - @opengeni/sdk@3.8.0
+  - @opengeni/codex@0.2.22
+  - @opengeni/config@1.0.1
+  - @opengeni/network@0.3.1
+  - @opengeni/codemode@0.5.0
+  - @opengeni/xai-subscription@0.1.4
+  - @opengeni/tool-gateway@0.1.1
+  - @opengeni/capabilities@0.3.3
+
 ## 2.3.0
 
 ### Minor Changes

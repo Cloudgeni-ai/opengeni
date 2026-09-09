@@ -148,6 +148,75 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("moves sessions using the context menu and folder drag targets", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const project = await createChannelThroughApi(page, apiBaseUrl, workspaceId, "Move target");
+      const session = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Movable session",
+      );
+      await page.reload();
+      const row = page.locator(`a[data-session-row="${session.id}"]`);
+      // macOS Control-click reaches the same native contextmenu event. Do not
+      // turn ordinary modified link clicks into synthetic menu gestures.
+      await row.dispatchEvent("contextmenu", { button: 0, ctrlKey: true });
+      const menu = page.locator(`[data-session-menu="${session.id}"]`);
+      await menu.getByText("Move to project", { exact: true }).waitFor();
+      expect(await menu.getByRole("menuitem", { name: "Default", exact: true }).isDisabled()).toBe(
+        true,
+      );
+      const persistedMove = (channelId: string | null) =>
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === "PUT" &&
+            response.url().endsWith(`/sessions/${session.id}/channel`) &&
+            response.request().postDataJSON()?.channelId === channelId &&
+            response.ok(),
+        );
+      const menuMove = persistedMove(project.id);
+      await menu.getByRole("menuitem", { name: project.name, exact: true }).click();
+      await menuMove;
+      // A PUT response precedes the rail's post-write verification and list
+      // refresh. Reload to prove persistence and avoid racing its in-flight
+      // duplicate-move guard with the next gesture.
+      await page.reload();
+      const projectGroup = page.getByRole("group", { name: project.name, exact: true });
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      // Even after the last unfiled session leaves, Default remains a target.
+      const defaultGroup = page.getByRole("group", { name: "Default", exact: true });
+      const dragToGroup = async (group: typeof defaultGroup) => {
+        await row.hover();
+        await page.mouse.down();
+        try {
+          const header = group.locator(":scope > div[draggable]").first();
+          // Deliver dragover after entering the target before releasing the
+          // mouse, including on browsers that need a second pointer move.
+          await header.hover();
+          await header.hover();
+        } finally {
+          await page.mouse.up();
+        }
+      };
+      await Promise.all([persistedMove(null), dragToGroup(defaultGroup)]);
+      await page.reload();
+      await defaultGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      await Promise.all([persistedMove(project.id), dragToGroup(projectGroup)]);
+      await page.reload();
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("renders goal landmarks through the production session chunk graph", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -322,7 +391,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("loads older sessions only in the project whose end enters the viewport", async () => {
+  test("loads older workspace sessions once without pagination on empty projects", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -343,6 +412,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         apiBaseUrl,
         workspaceId,
         `Pagination project B ${suffix}`,
+      );
+      const emptyProject = await createChannelThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        `Empty pagination project ${suffix}`,
       );
       for (let index = 0; index < 56; index += 1) {
         await createSession(dbClient.db, {
@@ -384,26 +459,38 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(initialProjectBCount).toBeGreaterThan(0);
       expect(initialProjectACount + initialProjectBCount).toBe(50);
 
-      const filteredRequests: URL[] = [];
+      const paginationRequests: URL[] = [];
       page.on("request", (request) => {
         const url = new URL(request.url());
         if (
           request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
-          url.searchParams.get("view") === "page" &&
-          url.searchParams.has("channelId")
+          url.searchParams.get("view") === "page"
         ) {
-          filteredRequests.push(url);
+          paginationRequests.push(url);
         }
       });
-      const loadProjectA = projectAGroup.getByRole("button", {
-        name: `Load older sessions in ${projectA.name}`,
+      expect(await projectAGroup.getByRole("button", { name: /Load older/ }).count()).toBe(0);
+      expect(await projectBGroup.getByRole("button", { name: /Load older/ }).count()).toBe(0);
+      expect(
+        await page
+          .getByRole("group", { name: emptyProject.name })
+          .getByRole("button", { name: /Load older/ })
+          .count(),
+      ).toBe(0);
+      const loadWorkspace = page.getByRole("button", {
+        name: "Load older sessions in this workspace",
       });
-      await loadProjectA.waitFor();
+      await loadWorkspace.waitFor();
       const footerBefore = await page
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
-      await loadProjectA.scrollIntoViewIfNeeded();
+      await loadWorkspace.scrollIntoViewIfNeeded();
+      // Scrolling through folders must not grow the rail and hide Archived.
+      await page.waitForTimeout(500);
+      expect(paginationRequests).toHaveLength(0);
+      expect(await projectARows.count()).toBe(initialProjectACount);
+      await loadWorkspace.click();
       await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
         timeoutMs: 30_000,
       });
@@ -422,13 +509,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
       expect(footerAfter?.y).toBe(footerBefore?.y);
-      expect(await projectBRows.count()).toBe(initialProjectBCount);
-      expect(filteredRequests.length).toBeGreaterThan(0);
+      expect(await projectBRows.count()).toBeGreaterThan(initialProjectBCount);
+      expect(paginationRequests.length).toBeGreaterThan(0);
+      expect(paginationRequests.every((request) => !request.searchParams.has("channelId"))).toBe(
+        true,
+      );
       expect(
-        filteredRequests.every((request) => request.searchParams.get("channelId") === projectA.id),
-      ).toBe(true);
-      expect(
-        filteredRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
+        paginationRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
       ).toBe(false);
     } finally {
       await context.close();
@@ -1249,6 +1336,181 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 
+  test("offers a bottom-right Undo notification after archiving a session", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Archive undo target",
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const row = page.locator(`a[data-session-row="${target.id}"]`).locator("xpath=..");
+      const archivePath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/archive`;
+      const archivedResponse = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === archivePath && response.ok(),
+      );
+      await row.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
+      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      await notification.waitFor();
+      const undoRequest = page.waitForRequest(
+        (request) => new URL(request.url()).pathname === archivePath,
+      );
+      // Click at the first opportunity: an intervening GET can conceal a busy-lock race.
+      await notification.getByRole("button", { name: "Undo", exact: true }).click();
+      const archived = await (await archivedResponse).json();
+      expect(archived.archived).toBe(true);
+      expect((await undoRequest).postDataJSON()).toMatchObject({
+        archived: false,
+        expectedVersion: archived.archiveVersion,
+      });
+      const toaster = page.locator("[data-sonner-toaster]");
+      expect(await toaster.getAttribute("data-x-position")).toBe("right");
+      expect(await toaster.getAttribute("data-y-position")).toBe("bottom");
+      await page.getByText("Chat restored", { exact: true }).waitFor();
+      await row.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+      const restored = await page.request.get(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`,
+      );
+      expect((await restored.json()).archived).toBe(false);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  for (const settlement of ["success", "failure"] as const) {
+    test(`ignores a delayed archive ${settlement} after switching workspaces`, async () => {
+      const context = await configuredContext(browser, {
+        viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      const page = await context.newPage();
+      let release = () => {};
+      try {
+        await page.goto(webBaseUrl);
+        const workspaceId = await workspaceFromPage(page);
+        const target = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          "Archive fence",
+        );
+        const alternateName = `Archive alternate ${settlement}`;
+        const alternate = await page.request.post(`${apiBaseUrl}/v1/workspaces`, {
+          data: { name: alternateName },
+        });
+        expect(alternate.status()).toBe(201);
+        const nextWorkspaceId = (await alternate.json()).id;
+        const archivePath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/archive`;
+        let markStarted = () => {};
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await page.route(`**${archivePath}`, async (route) => {
+          // Success is a real committed write whose response arrives late.
+          const response = settlement === "success" ? await route.fetch() : undefined;
+          markStarted();
+          await released;
+          if (response) await route.fulfill({ response });
+          else
+            await route.fulfill({
+              status: 503,
+              contentType: "application/json",
+              body: JSON.stringify({ message: "held archive failure" }),
+            });
+        });
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+        await page
+          .locator(`a[data-session-row="${target.id}"]`)
+          .locator("xpath=..")
+          .getByRole("button", { name: "Archive session", exact: true })
+          .press("Enter");
+        await started;
+        // Use the SPA switch so the old async callback and global toaster survive.
+        await page.getByRole("button", { name: /Switch workspace/ }).click();
+        await page.getByRole("menuitem", { name: alternateName, exact: true }).click();
+        await page.waitForURL(`**/workspaces/${nextWorkspaceId}/sessions`);
+        const settled = page.waitForResponse(
+          (response) => new URL(response.url()).pathname === archivePath,
+        );
+        release();
+        await settled;
+        await page.waitForTimeout(500);
+        expect(
+          await page
+            .locator("[data-sonner-toast]")
+            .filter({
+              hasText: /Chat archived|Couldn't archive the chat/,
+            })
+            .count(),
+        ).toBe(0);
+        expect(await page.locator(`a[data-session-row="${target.id}"]`).count()).toBe(0);
+      } finally {
+        release();
+        await context.close();
+      }
+    }, 90_000);
+  }
+
+  test("Undo does not overwrite a newer archive decision from another client", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Archive conflict",
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      await page
+        .locator(`a[data-session-row="${target.id}"]`)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Archive session", exact: true })
+        .press("Enter");
+      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      await notification.waitFor();
+      // Keep the notification alive while another device makes two real writes.
+      await notification.hover();
+      const sessionUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`;
+      let latest = await (await page.request.get(sessionUrl)).json();
+      for (const archived of [false, true]) {
+        const response = await page.request.put(`${sessionUrl}/archive`, {
+          data: { archived, expectedVersion: latest.archiveVersion },
+        });
+        expect(response.ok()).toBe(true);
+        latest = await response.json();
+      }
+      const conflict = page.waitForResponse(
+        (response) => response.url() === `${sessionUrl}/archive` && response.status() === 409,
+      );
+      await notification.getByRole("button", { name: "Undo", exact: true }).click();
+      await conflict;
+      await page.getByText("Couldn't restore the chat.", { exact: true }).waitFor();
+      const current = await (await page.request.get(sessionUrl)).json();
+      expect(current.archived).toBe(true);
+      expect(current.archiveVersion).toBe(latest.archiveVersion);
+      expect(await page.getByText("Chat restored", { exact: true }).count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
   test("retains group rows and leaves unrelated pagination failures retryable", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -1344,6 +1606,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         { timeout: 10_000 },
       );
       await loadOlder.scrollIntoViewIfNeeded();
+      await loadOlder.click();
       const filteredFirstPage = (await (
         await filteredFirstPageResponse
       ).json()) as BrowserSessionPage;
@@ -1380,6 +1643,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
       await loadOlder.scrollIntoViewIfNeeded();
+      await loadOlder.click();
       const retryOlder = todayGroup.getByRole("button", {
         name: "Retry older sessions in Today",
       });

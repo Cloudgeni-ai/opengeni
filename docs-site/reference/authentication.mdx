@@ -1,0 +1,67 @@
+---
+title: "Authentication"
+description: "How callers identify themselves to the OpenGeni API."
+icon: "key"
+---
+
+Session operations are workspace-scoped; organization routes manage shared workspaces, keys, and session inventory across them. Every request resolves to an access grant before route code touches protected data. Which credential you use depends on who is calling.
+
+## Choosing a credential
+
+| You are                                              | Use                                                                         |
+| ---------------------------------------------------- | --------------------------------------------------------------------------- |
+| A product backend integrating OpenGeni               | An **organization API key**                                                 |
+| A backend or automation constrained to one workspace | A **workspace API key**                                                     |
+| A host acting on behalf of its own signed-in users   | A **delegated access token** signed with the deployment's delegation secret |
+| A person in the web console                          | A managed web session (email and password)                                  |
+| A machine you enrolled                               | The enrollment credential the installer obtained; you never handle it       |
+
+## Credentials
+
+| Credential             | Transport                       | Lifetime                 | Notes                                                                                                                                                                                                        |
+| ---------------------- | ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Organization API key   | `Authorization: Bearer ogk_...` | Until revoked or expired | Created through organization settings or the organization API-key routes. Shown once, stored hashed. Full or read-only access to organization workspaces; Personal workspaces are excluded. Server-side only |
+| Workspace API key      | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant                                                                                                                       |
+| Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry   | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions                                                                                                       |
+| Deployment access key  | `x-opengeni-access-key` header  | Static                   | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity                                                                                                                          |
+| Managed web session    | Cookie                          | Session                  | Email and password sign-in in `managed` mode                                                                                                                                                                 |
+
+## Organization key access
+
+Read-only organization keys and organization-wide session inventory require a deployment containing the [chat integration changes](https://github.com/Cloudgeni-ai/opengeni/pull/2310). See the [package and deployment setup](/guides/integrate-your-product#connect-your-backend) for availability.
+
+Choose an access tier when creating an organization key:
+
+| `access`           | Use                                                                                           |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `"full"` (default) | Provision workspaces, create and control sessions, and administer keys                        |
+| `"read"`           | Inventory shared workspaces and read their sessions, events, and files for reporting or audit |
+
+Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for the chat handler, which creates tenant workspaces and sends messages.
+
+Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` to discover readable sessions across the organization's shared workspaces. Personal workspaces and Only me sessions are excluded. Agent access scopes and end-user filters do not restrict the organization key's authority.
+
+## Authenticate users of your chat
+
+`createChatHandler` uses your product's `resolve(request)` hook on sends, history reads, and approval/question responses. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
+
+The handler namespaces client conversation IDs to the resolved user. An opaque end-user label is not an OpenGeni account and does not grant authority. If you omit the user label, the host must resolve an authorized conversation itself.
+
+For the React component, bind `authKey` to your signed-in user and tenant when using cookie authentication, change it on identity switches, and unmount on sign-out. This clears the old transcript and pending requests in the browser. The key stays local and does not replace server-side authentication. See [Integrate your product](/guides/integrate-your-product).
+
+## Rules that hold everywhere
+
+- Organization keys stay on the product server. List, create, and revoke them through the organization control plane; never embed one in a client.
+- A delegated token cannot grant more than the host was configured to delegate, and it never receives a managed human's personal-workspace authority.
+- Every request is constrained by normal route authorization after authentication. A valid credential for one workspace does not reach another.
+- Secrets an agent uses at runtime (provider tokens, MCP headers, variable sets) are encrypted at rest, are read only by explicit permissioned operations, and never appear in audit rows.
+
+## Deployment access modes
+
+| `OPENGENI_PRODUCT_ACCESS_MODE` | Who can call                                                            |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `local`                        | The bootstrap `dev` user with broad permissions. Development only       |
+| `configured`                   | Delegated bearer tokens from your product, or the deployment shared key |
+| `managed`                      | Managed sign-up, organizations, API keys, prepaid credits, and limits   |
+
+The full credential taxonomy, including stream tokens, enrollment tokens, sandbox bearers, and signed storage URLs, is in the repository's [credentials document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/credentials.md).

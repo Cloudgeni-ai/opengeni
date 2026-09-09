@@ -1,0 +1,70 @@
+---
+title: "Run locally"
+description: "Start the full OpenGeni stack on your machine from a repository checkout."
+icon: "terminal"
+---
+
+Use this to develop against OpenGeni or to evaluate it before self-hosting. For a production deployment see [Self-host](/guides/self-host).
+
+## Prerequisites
+
+- [Bun](https://bun.sh)
+- Docker with a running daemon. The default sandbox backend and the local infrastructure use it.
+- Model credentials: an OpenAI API key, or another provider configured through the model provider settings.
+
+## Start the stack
+
+```bash
+git clone https://github.com/Cloudgeni-ai/opengeni.git
+cd opengeni
+cp .env.example .env
+bun run dev
+```
+
+`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage in Docker, runs migrations, builds the local sandbox image, and starts the API, both workers, and the web app.
+
+| Service    | URL                           |
+| ---------- | ----------------------------- |
+| Web app    | http://127.0.0.1:3000         |
+| API        | http://127.0.0.1:8000         |
+| API health | http://127.0.0.1:8000/healthz |
+
+The local stack runs in `local` access mode: a bootstrap account and workspace with a single `dev` user and broad permissions. It is for development only.
+
+<Note>
+  Ports are chosen per checkout. If a default port is busy, the launcher picks a nearby free one and
+  prints the URLs it actually used.
+</Note>
+
+## Configure
+
+`.env` is the single configuration file. The values you will most likely touch:
+
+| Variable                                | Purpose                                                                                   |
+| --------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `OPENGENI_OPENAI_API_KEY`               | OpenAI credentials for the default provider                                               |
+| `OPENGENI_OPENAI_MODEL`                 | Default model for new sessions                                                            |
+| `OPENGENI_MODEL_PROVIDERS_JSON`         | Additional OpenAI-compatible providers and their model catalogs                           |
+| `OPENGENI_SANDBOX_BACKEND`              | Where sessions run: `docker` (default), `modal`, `local`, `none`, or a cloud provider     |
+| `OPENGENI_SANDBOX_PREPARATION_PROFILES` | Opt-in profiles such as `azure` or `github` that pre-authenticate CLIs inside the sandbox |
+
+Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
+
+## Stop and clean up
+
+```bash
+bun run dev:down
+```
+
+`dev:down` stops this checkout's infrastructure. `bun run dev:clean -- --yes` also removes its data and generated runtime environment.
+
+## Verify a checkout
+
+Unit tests and typechecks need no running infrastructure:
+
+```bash
+bun run typecheck
+bun test
+```
+
+See [CONTRIBUTING.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/CONTRIBUTING.md) for the full development workflow and [AGENTS.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/AGENTS.md) for operating notes.

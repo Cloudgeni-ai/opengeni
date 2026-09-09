@@ -50,6 +50,39 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  test("conversation paints a matched surface on light hosts in both themes", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    try {
+      const colors: string[] = [];
+      for (const theme of ["light", "dark"]) {
+        await page.goto(`${baseUrl}/conversation-layout.html?theme=${theme}`);
+        const reply = page.getByText("Readable assistant reply in the selected theme.", {
+          exact: true,
+        });
+        await reply.waitFor();
+        const styles = await reply.evaluate((element) => {
+          const conversation = element.closest("[data-og-conversation]")!;
+          return {
+            foreground: getComputedStyle(element).color,
+            background: getComputedStyle(conversation).backgroundColor,
+          };
+        });
+        expect(styles.background).not.toBe("rgba(0, 0, 0, 0)");
+        expect(styles.foreground).not.toBe(styles.background);
+        colors.push(styles.foreground);
+        const accessibility = await new AxeBuilder({ page })
+          .include(".og-markdown-body")
+          .withRules(["color-contrast"])
+          .analyze();
+        expect(accessibility.violations).toEqual([]);
+      }
+      expect(colors[0]).not.toBe(colors[1]);
+    } finally {
+      await context.close();
+    }
+  });
+
   test("desktop measurement does not widen the document after a mobile resize", async () => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
@@ -161,8 +194,10 @@ describe("container-responsive public composer demo", () => {
     await search.fill("no-such-model");
     await page.getByText("No matching models. Try a model or provider name.").waitFor();
     await search.fill("codex");
-    await page.getByRole("combobox", { name: "Thinking effort" }).selectOption("high");
-    expect(await page.getByRole("combobox", { name: "Thinking effort" }).inputValue()).toBe("high");
+    await page.getByRole("radio", { name: "High", exact: true }).click();
+    expect(
+      await page.getByRole("radio", { name: "High", exact: true }).getAttribute("aria-checked"),
+    ).toBe("true");
     await search.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");

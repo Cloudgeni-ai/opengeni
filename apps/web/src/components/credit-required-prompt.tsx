@@ -1,3 +1,4 @@
+import { useCreditExposure } from "@/lib/use-analytics-exposure";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { CreditCardIcon, Loader2Icon, SparklesIcon } from "lucide-react";
@@ -169,6 +170,7 @@ export function EmptyCreditsNotice({
     };
   }, [accountId, canReadBilling, client]);
 
+  useCreditExposure(empty, workspaceId);
   if (!empty) return null;
   return (
     <Notice tone="waiting" title="This model uses OpenGeni credits">

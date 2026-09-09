@@ -1,3 +1,4 @@
+import type { CreateFeedbackRequest, Feedback, FeedbackSubmissionResponse } from "./feedback";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -127,6 +128,8 @@ import type {
   CodexConnectStart,
   CodexUsage,
   CodexUsageMap,
+  ModelConnectionAccessPolicy,
+  ModelConnectionAccessResponse,
   SuperGrokAccount,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
@@ -269,6 +272,7 @@ import type {
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
@@ -294,6 +298,7 @@ import type {
   OrganizationRecoveryMutationResponse,
   OrganizationRecoveryOperationCommandRequest,
   OrganizationRecoveryOverview,
+  OrganizationSessionListResponse,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
@@ -368,6 +373,7 @@ import type {
   UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
+  SessionEndUser,
   SessionEvent,
   SessionEventCompactResult,
   SessionEventCompactResultOptions,
@@ -577,19 +583,27 @@ import {
 } from "./types";
 
 function sessionListQuery(options: {
+  originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
+  endUser?: SessionEndUser;
 }): Record<string, string> {
-  const { limit, parentSessionId } = options;
+  const { limit, parentSessionId, endUser } = options;
   return {
+    ...(options.originSiteId ? { originSiteId: options.originSiteId } : {}),
     ...(limit === undefined ? {} : { limit: String(limit) }),
     ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
+    ...(endUser === undefined ? {} : { endUserSource: endUser.source, endUserId: endUser.id }),
   };
 }
 
 export type SessionListPageOptions = {
+  /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
+  originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
+  /** Only sessions carrying this exact opaque end-user label. */
+  endUser?: SessionEndUser;
   cursor?: string;
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
@@ -614,6 +628,7 @@ export type SessionListPageOptions = {
 
 function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
+    options.originSiteId !== undefined ||
     options.channelId !== undefined ||
     options.createdBy !== undefined ||
     options.updatedFrom !== undefined ||
@@ -1135,6 +1150,29 @@ export class OpenGeniClient {
     );
   }
 
+  /** Submit general feedback or a session/turn rating. Retain the key when retrying. */
+  async createFeedback(
+    workspaceId: string,
+    request: CreateFeedbackRequest,
+  ): Promise<FeedbackSubmissionResponse> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/feedback`, request);
+  }
+
+  /** Only this principal's submissions. No session filter means general feedback only. */
+  async listOwnFeedback(
+    workspaceId: string,
+    options: { sessionId?: string; limit?: number; includeTurns?: boolean } = {},
+  ): Promise<{ feedback: Feedback[] }> {
+    const query = new URLSearchParams();
+    if (options.sessionId) query.set("sessionId", options.sessionId);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.includeTurns !== undefined) query.set("includeTurns", String(options.includeTurns));
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/feedback${query.size ? `?${query}` : ""}`,
+    );
+  }
+
   async getSession(
     workspaceId: string,
     sessionId: string,
@@ -1254,18 +1292,21 @@ export class OpenGeniClient {
   async listSessions(
     workspaceId: string,
     options: {
+      originSiteId?: string;
       limit?: number;
       parentSessionId?: string | null;
       search?: string;
+      /** Only sessions carrying this exact opaque end-user label. */
+      endUser?: SessionEndUser;
     } = {},
   ): Promise<Session[]> {
-    // Search was added with the pin-aware page endpoint. An older API silently
+    // Search and Site filtering use the pin-aware page endpoint. An older API silently
     // ignores unknown query parameters on the historical array endpoint, which
     // would turn a search into a plausible-looking unfiltered result. Route
-    // searches through listSessionPage so its rolling-version shape check can
+    // these calls through listSessionPage so its rolling-version shape check can
     // fail explicitly on an older server; retain the array endpoint for every
     // pre-existing call shape.
-    if (options.search?.trim()) {
+    if (options.search?.trim() || options.originSiteId) {
       const page = await this.listSessionPage(workspaceId, options);
       return [...page.pinned, ...page.sessions];
     }
@@ -1375,6 +1416,13 @@ export class OpenGeniClient {
     }
     if (hasSessionPageFilters(options) && response.filtersApplied !== true) {
       throw new Error("The connected OpenGeni API does not support filtered session lists");
+    }
+    if (
+      options.originSiteId &&
+      (!response.originSiteId ||
+        (options.originSiteId !== "current" && response.originSiteId !== options.originSiteId))
+    ) {
+      throw new Error("The connected OpenGeni API does not support Site-filtered session lists");
     }
     return response;
   }
@@ -7344,6 +7392,58 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Organization-wide sessions ----------------------------------------------------------------
+
+  /**
+   * One page of sessions across every shared workspace of the organization the
+   * caller may read (an organization API key, `full` or `read`, or an
+   * organization owner). Each row carries its `workspaceId`; read events,
+   * history, and files through the ordinary workspace methods. Personal
+   * workspaces are never included and private sessions stay invisible.
+   */
+  async listOrganizationSessions(
+    organizationId: string,
+    options: ListOrganizationSessionsOptions = {},
+  ): Promise<OrganizationSessionListResponse> {
+    return await this.requestJson<OrganizationSessionListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/sessions`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+        ...(options.endUser
+          ? { endUserSource: options.endUser.source, endUserId: options.endUser.id }
+          : {}),
+        ...(options.status === undefined ? {} : { status: options.status }),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Every session `listOrganizationSessions` would return, following
+   * `nextCursor` page by page until the organization is exhausted. A page may
+   * be shorter than `limit` while more pages remain, so callers must not treat
+   * a short page as the end.
+   */
+  async *iterateOrganizationSessions(
+    organizationId: string,
+    options: Omit<ListOrganizationSessionsOptions, "cursor"> = {},
+  ): AsyncGenerator<Session, void, undefined> {
+    let cursor: string | undefined;
+    do {
+      const page: OrganizationSessionListResponse = await this.listOrganizationSessions(
+        organizationId,
+        { ...options, ...(cursor === undefined ? {} : { cursor }) },
+      );
+      for (const session of page.sessions) {
+        yield session;
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+  }
+
   // --- Billing (account-scoped) --------------------------------------------------------------------
 
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
@@ -7604,6 +7704,110 @@ export class OpenGeniClient {
 
   // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------
 
+  /** Organization subscription management requires an administrator browser session. */
+  async getModelConnectionAccess(target: {
+    scope: "organizations" | "workspaces";
+    scopeId: string;
+    kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+    connectionId: string;
+  }): Promise<ModelConnectionAccessResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
+    );
+  }
+
+  async updateModelConnectionAccess(
+    target: {
+      scope: "organizations" | "workspaces";
+      scopeId: string;
+      kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+      connectionId: string;
+    },
+    policy: ModelConnectionAccessPolicy,
+  ): Promise<ModelConnectionAccessPolicy> {
+    return await this.requestJson(
+      "PUT",
+      `/v1/${target.scope}/${encodeURIComponent(target.scopeId)}/model-connections/${target.kind}/${encodeURIComponent(target.connectionId)}/access`,
+      policy,
+    );
+  }
+
+  async listOrganizationSuperGrokAccounts(
+    organizationId: string,
+  ): Promise<SuperGrokAccountsResponse> {
+    return await this.requestJson("GET", `/v1/organizations/${organizationId}/supergrok/accounts`);
+  }
+  async organizationSupergrokConnectStart(organizationId: string): Promise<SuperGrokConnectStart> {
+    return await this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/supergrok/connect/start`,
+      {},
+    );
+  }
+  async organizationSupergrokConnectPoll(
+    organizationId: string,
+    state: string,
+  ): Promise<SuperGrokConnectPoll> {
+    return await this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/supergrok/connect/poll`,
+      { state },
+    );
+  }
+  async activateOrganizationSuperGrokAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<{ updated: boolean }> {
+    return await this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}/activate`,
+      {},
+    );
+  }
+  async setOrganizationSuperGrokRotationSettings(
+    organizationId: string,
+    patch: { rotationEnabled: boolean },
+  ): Promise<SuperGrokRotationSettings> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/supergrok/settings`,
+      patch,
+    );
+  }
+  async setOrganizationSuperGrokAccountAllocator(
+    organizationId: string,
+    accountId: string,
+    input: { enabled: boolean; expectedVersion: number },
+  ): Promise<{ updated: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}/allocator`,
+      input,
+    );
+  }
+  async renameOrganizationSuperGrokAccount(
+    organizationId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<{ updated: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}`,
+      { label },
+    );
+  }
+  async disconnectOrganizationSuperGrokAccount(
+    organizationId: string,
+    accountId: string,
+  ): Promise<{ disconnected: boolean }> {
+    return await this.requestJson(
+      "DELETE",
+      `/v1/organizations/${organizationId}/supergrok/accounts/${accountId}`,
+      {},
+    );
+  }
+
   async supergrokStatus(workspaceId: string): Promise<SuperGrokConnectionStatus> {
     return await this.requestJson<SuperGrokConnectionStatus>(
       "GET",
@@ -7613,7 +7817,7 @@ export class OpenGeniClient {
 
   async supergrokConnectStart(
     workspaceId: string,
-    scope: SuperGrokAccountScope = "workspace",
+    scope: Exclude<SuperGrokAccountScope, "organization"> = "workspace",
   ): Promise<SuperGrokConnectStart> {
     return await this.requestJson<SuperGrokConnectStart>(
       "POST",

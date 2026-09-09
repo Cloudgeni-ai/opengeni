@@ -3,6 +3,8 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { formatWaitingSince } from "@/lib/format";
+import { sessionInputWait } from "./session-rail";
+import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { Session, SessionStatus } from "@/types";
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
@@ -41,7 +43,10 @@ function hasActiveEffectiveControl(session: Session): boolean {
 
 function isEffectivelyRunning(session: Session): boolean {
   if (session.backgroundCommandActivity) return true;
-  return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+  return (
+    hasActiveEffectiveControl(session) &&
+    (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
+  );
 }
 
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
@@ -161,6 +166,8 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
    -------------------------------------------------------------------------- */
 
 export type SessionTreeNode = {
+  /** Presentation-only group; never persisted or used for session actions. */
+  siteGroup?: SessionSiteOrigin;
   session: Session;
   children: SessionTreeNode[];
   /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
@@ -229,7 +236,8 @@ function ownRailStatusCounts(
         (session.status === "running" ||
           session.status === "queued" ||
           session.status === "recovering" ||
-          session.status === "waiting_capacity"))
+          session.status === "waiting_capacity" ||
+          Boolean(sessionInputWait(session))))
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -252,6 +260,23 @@ function railStatusCounts(
   node: SessionTreeNode,
   localDeliveryAttention: ReadonlyMap<string, number>,
 ): RailStatusCounts {
+  if (node.siteGroup) {
+    const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
+    for (const key of [
+      "total",
+      "sendFailed",
+      "attention",
+      "failed",
+      "active",
+      "unread",
+      "activeWork",
+    ] as const)
+      counts[key] = 0;
+    counts.attentionSince = null;
+    for (const child of node.children)
+      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+    return counts;
+  }
   const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
   const stats = node.session.treeStats;
   if (stats) {
@@ -259,7 +284,8 @@ function railStatusCounts(
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
     counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
-    counts.active += stats.runningDescendants + stats.queuedDescendants;
+    counts.active +=
+      stats.runningDescendants + stats.queuedDescendants + (stats.waitingDescendants ?? 0);
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -656,7 +682,12 @@ export type PinnedRailSections = {
 export function nodeIsActive(node: SessionTreeNode): boolean {
   const stats = node.session.treeStats;
   const summarizedActive = Boolean(
-    stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
+    stats &&
+    stats.runningDescendants +
+      stats.queuedDescendants +
+      (stats.waitingDescendants ?? 0) +
+      stats.attentionDescendants >
+      0,
   );
   return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
@@ -727,6 +758,39 @@ export function groupScheduledRuns(roots: SessionTreeNode[]): SessionTreeNode[] 
     });
   }
   return grouped;
+}
+
+/** Explicit project placement wins; pins have already been split out. */
+export function groupSiteConversations(roots: SessionTreeNode[]): SessionTreeNode[] {
+  const groups = new Map<string, SessionTreeNode[]>();
+  for (const node of roots) {
+    const origin = sessionSiteOrigin(node.session);
+    if (!origin || node.session.channelId || node.session.parentSessionId) continue;
+    const members = groups.get(origin.siteId) ?? [];
+    members.push(node);
+    groups.set(origin.siteId, members);
+  }
+  const emitted = new Set<string>();
+  return roots.flatMap((node) => {
+    const origin = sessionSiteOrigin(node.session);
+    const members =
+      origin && !node.session.channelId && !node.session.parentSessionId
+        ? groups.get(origin.siteId)
+        : undefined;
+    if (!members || !origin) return [node];
+    if (emitted.has(origin.siteId)) return [];
+    emitted.add(origin.siteId);
+    members.sort((a, b) => compareSessionActivity(a.session, b.session));
+    const latest = members[0]!;
+    return [
+      {
+        siteGroup: origin,
+        session: { ...latest.session, id: `site:${origin.siteId}`, treeStats: undefined },
+        children: members,
+        hasActiveDescendant: members.some(nodeIsActive),
+      },
+    ];
+  });
 }
 
 export function categorizeRailRoots(
@@ -821,6 +885,7 @@ type RemovedCounts = {
   total: number;
   running: number;
   queued: number;
+  waiting: number;
   attention: number;
   paused: number;
   failed: number;
@@ -834,6 +899,7 @@ function emptyRemovedCounts(): RemovedCounts {
     total: 0,
     running: 0,
     queued: 0,
+    waiting: 0,
     attention: 0,
     paused: 0,
     failed: 0,
@@ -847,6 +913,7 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
   target.total += source.total;
   target.running += source.running;
   target.queued += source.queued;
+  target.waiting += source.waiting;
   target.attention += source.attention;
   target.paused += source.paused;
   target.failed += source.failed;
@@ -862,6 +929,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     total: 1,
     running: active && (status === "running" || status === "recovering") ? 1 : 0,
     queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
+    waiting: sessionInputWait(node.session) ? 1 : 0,
     attention: status === "requires_action" ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
@@ -874,6 +942,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     counts.total += stats.totalDescendants;
     counts.running += stats.runningDescendants;
     counts.queued += stats.queuedDescendants;
+    counts.waiting += stats.waitingDescendants ?? 0;
     counts.attention += stats.attentionDescendants;
     counts.paused += stats.pausedDescendants;
     counts.failed += stats.failedDescendants;
@@ -913,6 +982,9 @@ function prunePinnedSubtreesWithCounts(
           totalDescendants: Math.max(0, stats.totalDescendants - removed.total),
           runningDescendants: Math.max(0, stats.runningDescendants - removed.running),
           queuedDescendants: Math.max(0, stats.queuedDescendants - removed.queued),
+          ...(stats.waitingDescendants !== undefined
+            ? { waitingDescendants: Math.max(0, stats.waitingDescendants - removed.waiting) }
+            : {}),
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
@@ -991,6 +1063,7 @@ export function projectRailSessions(sessions: Session[], hierarchyMode: boolean)
 export function buildPinnedRailSections(
   sessions: Session[],
   now: Date = new Date(),
+  options: { groupSites?: boolean } = {},
 ): PinnedRailSections {
   const complete = buildRailForest(sessions, now);
   const roots = forestRoots(complete);
@@ -1020,7 +1093,12 @@ export function buildPinnedRailSections(
   return {
     complete,
     pinned,
-    ordinary: categorizeRailRoots(groupScheduledRuns(ordinaryRoots), now),
+    ordinary: categorizeRailRoots(
+      options.groupSites === false
+        ? groupScheduledRuns(ordinaryRoots)
+        : groupSiteConversations(groupScheduledRuns(ordinaryRoots)),
+      now,
+    ),
   };
 }
 
@@ -1049,7 +1127,7 @@ export function visibleTreeRows(
 ): { node: SessionTreeNode; depth: number }[] {
   const rows: { node: SessionTreeNode; depth: number }[] = [];
   const walk = (node: SessionTreeNode, depth: number): void => {
-    rows.push({ node, depth });
+    if (!node.siteGroup) rows.push({ node, depth });
     if (node.children.length > 0 && expanded.has(node.session.id)) {
       for (const child of node.children) {
         walk(child, depth + 1);

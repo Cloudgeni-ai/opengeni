@@ -275,6 +275,9 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
+  builtinSkillIndex,
+  builtinSkillLoader,
+  BUILTIN_PROJECT_SKILL_SELECTION,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
@@ -295,6 +298,7 @@ export {
 import {
   joinPersistentAgentInstructionLayers,
   buildModelContextSnapshotFromRequest,
+  buildProviderRequestSnapshot,
   type PersistentAgentInstructionInspection,
   type PersistentAgentInstructionLayerDraft,
 } from "./model-context-inspector";
@@ -302,6 +306,8 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   withModelRequestCapture,
+  type ModelRequestCapture,
+  nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
@@ -2051,6 +2057,7 @@ export function inspectPersistentAgentInstructions(
       content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
+    { id: "builtin_skills", title: "Built-in skills", content: builtinSkillIndex() },
   ];
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
@@ -2097,10 +2104,7 @@ export function inspectPersistentAgentInstructions(
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
   }
-  return {
-    layers,
-    composed: joinPersistentAgentInstructionLayers(layers),
-  };
+  return { layers, composed: joinPersistentAgentInstructionLayers(layers) };
 }
 
 /**
@@ -2424,6 +2428,7 @@ export function buildOpenGeniAgent(
           },
         });
   const agentTools = [
+    builtinSkillLoader(),
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
     ...(videoGenerationCapabilityTool ? [videoGenerationCapabilityTool] : []),
@@ -2491,6 +2496,7 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
+    agentSkillSelections.set(agent, [BUILTIN_PROJECT_SKILL_SELECTION]);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -7031,7 +7037,7 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // environments can use the exact pinned package hint.
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
-  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
+  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
@@ -7075,11 +7081,10 @@ function measuredModelInputFilter(
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
-): ((request: import("@openai/agents").ModelRequest) => Promise<void>) | undefined {
+): ModelRequestCapture | undefined {
   if (!onCapture) return undefined;
-  let requestIndex = 0;
-  return async (request) => {
-    requestIndex += 1;
+  const capture: ModelRequestCapture = async (request) => {
+    const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
       buildModelContextSnapshotFromRequest({
         request,
@@ -7091,6 +7096,18 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  capture.nextProviderRequestIndex = () => nextModelContextCaptureIndex(agent);
+  capture.onProviderRequest = async (provider, body, unavailableReason, index) => {
+    await onCapture(
+      buildProviderRequestSnapshot({
+        provider,
+        body,
+        ...(unavailableReason ? { unavailableReason } : {}),
+        requestIndex: index ?? nextModelContextCaptureIndex(agent),
+      }),
+    );
+  };
+  return capture;
 }
 
 function installNonLazyModelRequestCapture(agent: Agent<any, any>): void {
