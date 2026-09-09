@@ -486,10 +486,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           candidate?.kind === "agent-message" ? candidate : undefined;
         if (
           open &&
-          (open.streaming || !open.text || text === open.text || text.startsWith(open.text))
+          (messageKey ||
+            open.streaming ||
+            !open.text ||
+            text === open.text ||
+            text.startsWith(open.text))
         ) {
-          // The completed text is authoritative when it extends what streamed.
-          if (!open.text || (text && text.startsWith(open.text))) {
+          // Identity makes the final text authoritative even if it corrects the
+          // draft; legacy receipts still require an extension match.
+          if (!open.text || (text && (messageKey || text.startsWith(open.text)))) {
             open.text = text || open.text;
           }
           open.streaming = false;

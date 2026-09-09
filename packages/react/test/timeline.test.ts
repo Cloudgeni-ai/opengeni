@@ -1167,6 +1167,36 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("identified completion replaces a draft closed by intervening activity", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", {
+        text: "Draft calculation.",
+        messageId: "message-a",
+      }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "read_record",
+        arguments: {},
+      }),
+      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      event("agent.message.completed", {
+        text: "Corrected calculation.",
+        messageId: "message-a",
+      }),
+      event("agent.message.delta", {
+        text: "late draft",
+        messageId: "message-a",
+      }),
+    ]);
+    const messages = items.filter((item) => item.kind === "agent-message");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      text: "Corrected calculation.",
+      streaming: false,
+    });
+  });
+
   test("legacy pending tool creation does not split an unfinished word", () => {
     reset();
     const items = buildTimeline([
