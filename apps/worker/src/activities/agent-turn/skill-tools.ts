@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import type { SkillActor } from "@opengeni/contracts";
+import {
+  skillReviewHumanInput,
+  type SkillActor,
+  type SkillWriteReceipt,
+} from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
+  skillReviewResolution,
   installPortableSkill,
   replayPortableSkillInstall,
   listSkillDescriptors,
@@ -96,18 +101,32 @@ export function createWorkspaceSkillTools(input: {
       files: record.files,
     };
   };
+  const withConfirmation = async (receipt: SkillWriteReceipt) => {
+    const reviewResolution = receipt.skillReview
+      ? await skillReviewResolution(input.db, context, receipt.skillReview)
+      : undefined;
+    return {
+      ...receipt,
+      ...(reviewResolution ? { reviewResolution } : {}),
+      ...(receipt.skillReview && reviewResolution === "pending"
+        ? { humanInput: skillReviewHumanInput(receipt.skillReview) }
+        : {}),
+    };
+  };
   const save = async (request: SkillSaveRequest) => {
     const artifact = buildPortableSkillArtifact(request.files);
     const base = request.expectedRevisionId
       ? await readSkill(input.db, context, request.skillId, request.expectedRevisionId)
       : null;
-    return saveSkill(input.db, {
-      ...context,
-      ...request,
-      actor: input.actor,
-      files: [...artifact.files],
-      stableKey: base?.stableKey ?? `authored-${request.skillId.replaceAll("-", "")}`,
-    });
+    return withConfirmation(
+      await saveSkill(input.db, {
+        ...context,
+        ...request,
+        actor: input.actor,
+        files: [...artifact.files],
+        stableKey: base?.stableKey ?? `authored-${request.skillId.replaceAll("-", "")}`,
+      }),
+    );
   };
   return [
     createSkillReadAttemptToolDefinition({ authorize, load }),
@@ -162,7 +181,7 @@ export function createWorkspaceSkillTools(input: {
           operationId: request.operationId,
           requestIdentity,
         });
-        if (replay) return replay.skillReceipt;
+        if (replay) return withConfirmation(replay.skillReceipt);
         let source: Omit<InstallPortableSkillInput, "accountId" | "workspaceId" | "subjectId">;
         if (request.source.startsWith("library:")) {
           const loaded = loadSkillLibrarySkill(request.source.slice("library:".length));
@@ -223,7 +242,7 @@ export function createWorkspaceSkillTools(input: {
               }
             : {}),
         });
-        return installed.skillReceipt;
+        return withConfirmation(installed.skillReceipt);
       },
     }),
     createSkillCheckoutAttemptToolDefinition({

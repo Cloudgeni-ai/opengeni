@@ -1,3 +1,4 @@
+import { SkillReviewReference } from "./skills";
 export * from "./skills";
 export * from "./bundled-skills";
 import { BundledSkillSelection } from "./bundled-skills";
@@ -15083,6 +15084,7 @@ export const HumanInputQuestion = z
     prompt: z.string().min(1).max(4096),
     label: z.string().min(1).max(128).nullable().optional(),
     helpText: z.string().max(2048).nullable().optional(),
+    skillReview: SkillReviewReference.optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
     // Retained on the wire for older hosts. OpenGeni's stock runtime and

@@ -9,13 +9,14 @@ import { useComposer } from "../hooks/use-composer";
 import { useHumanInputRequests } from "../hooks/use-human-input";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import { QueueSurface } from "./queue-surface";
-import { HumanInputSurface } from "./human-input-surface";
+import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline } from "./message-timeline";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
 
 export type SessionConversationProps = ClientOverride & {
   sessionId: string;
+  loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
   className?: string;
   /** Defaults to filling the host. The host owns available height. */
   height?: CSSProperties["height"];
@@ -31,6 +32,7 @@ export function SessionConversation(props: SessionConversationProps) {
 
 function Conversation({
   sessionId,
+  loadSkillReview,
   client,
   workspaceId,
   className,
@@ -89,6 +91,7 @@ function Conversation({
       />
       <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">
         <HumanInputSurface
+          loadSkillReview={loadSkillReview}
           requests={human.requests}
           onSubmit={async (id, response) => {
             await human.respond(id, response);

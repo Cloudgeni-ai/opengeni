@@ -50,12 +50,43 @@ export type SkillInstallInput = SkillWriteContext & {
   skillFacetId: string;
   reason: string;
 };
+export const SkillReviewReference = z.object({
+  sourceOperationId: z.uuid(),
+  skillId: z.uuid(),
+  revisionId: z.uuid(),
+  expectedRevisionId: z.uuid().nullable(),
+  expectedScopeVersion: z.number().int().positive(),
+});
+export type SkillReviewReference = z.infer<typeof SkillReviewReference>;
+export function skillReviewHumanInput(skillReview: SkillReviewReference) {
+  return {
+    questions: [
+      {
+        id: `skill:${skillReview.revisionId}`,
+        kind: "single_select" as const,
+        label: "Save this Skill?",
+        prompt: "Save this exact Skill revision for this workspace?",
+        helpText:
+          "Review the complete files before saving. Saving activates this revision immediately.",
+        options: [
+          { id: "save", label: "Save" },
+          { id: "skip", label: "Don't save" },
+        ],
+        required: true,
+        allowOther: false,
+        skillReview,
+      },
+    ],
+  };
+}
 export const SkillWriteReceipt = z.object({
   operationId: z.uuid(),
   skillId: z.uuid(),
   revisionId: z.uuid(),
   outcome: z.enum(["applied", "pending", "preserved"]),
+  decision: z.literal("rejected").optional(),
   pendingReason: z.enum(["approval", "source_finalization"]).optional(),
+  skillReview: SkillReviewReference.optional(),
   replayed: z.boolean(),
 });
 export type SkillWriteReceipt = z.infer<typeof SkillWriteReceipt>;

@@ -77,3 +77,13 @@ content silently. Platform-owned built-in Skills are not workspace-editable.
 
 Do not encode binary files as text to bypass the text-only boundary. Unsupported
 files and size limits are explicit errors, not permission to drop files silently.
+## One chat approval
+
+When save, publish, or install returns `humanInput`, call
+`request_human_input` with that exact payload. The card displays the complete
+immutable Skill files. The initiating human's Save activates that exact revision
+in the response transaction, before the session resumes. No follow-up activation
+tool or second review is needed. Don't save and Other do not activate the Skill.
+If the Skill changes before Save, make a new proposal for a fresh decision.
+Autonomous saves return applied and need no confirmation. Off refuses durable
+agent changes.
