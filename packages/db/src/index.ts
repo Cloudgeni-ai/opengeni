@@ -32082,7 +32082,13 @@ async function createSessionInTransaction(
             instructions: input.instructions ?? null,
             policyRole: input.policyRole ?? null,
             agentAccess: input.agentAccess ?? "workspace",
-            scopeSubjectId: input.scopeSubjectId ?? null,
+            scopeSubjectId:
+              input.scopeSubjectId !== undefined
+                ? input.scopeSubjectId
+                : frozenCreator.initiator.kind === "subject" &&
+                    /^(?:user:|external_user:)/u.test(frozenCreator.initiator.subjectId)
+                  ? frozenCreator.initiator.subjectId
+                  : null,
             // Retained columns are historical only. Canonical scope is derived
             // from the creator resolved under the admission locks above.
             endUserSource: null,

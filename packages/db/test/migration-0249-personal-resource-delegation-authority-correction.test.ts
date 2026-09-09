@@ -211,6 +211,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       // during fixture setup, then remove them before the ordered replay.
       await sql`
         alter table sessions
+        add column scope_subject_id text,
         add column input_wait_turn_id uuid,
         add column input_wait_until timestamptz,
         add column input_wait_reason text,
@@ -267,6 +268,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
 
       await sql`
         alter table sessions
+        drop column scope_subject_id,
         drop column input_wait_turn_id,
         drop column input_wait_until,
         drop column input_wait_reason,

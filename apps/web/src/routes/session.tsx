@@ -67,7 +67,6 @@ import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionCommands } from "@/components/session/commands";
-import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import {
   SessionVariableSetPicker,
@@ -163,6 +162,10 @@ const MessageForkDialog = lazy(() =>
 );
 
 const MessageActions = lazy(() => import("@/components/session/message-actions"));
+
+const SubagentTree = lazy(() =>
+  import("@/components/session/subagents").then((module) => ({ default: module.SubagentTree })),
+);
 
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
@@ -2214,7 +2217,9 @@ function SessionChatPane(props: {
             agentsSignal={agentsSignal}
             agentsPanel={
               props.agentNodes.length > 0 ? (
-                <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+                <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                  <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+                </Suspense>
               ) : null
             }
           />

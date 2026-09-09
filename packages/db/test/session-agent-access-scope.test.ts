@@ -200,7 +200,7 @@ describe("session agent access scope (real PostgreSQL)", () => {
       sessionId: plain.id,
       rootSessionId: plain.id,
       agentAccess: "workspace",
-      scopeSubjectId: null,
+      scopeSubjectId: f.subjectId,
       memoryScope: "workspace",
     });
     expect(await getSessionAccessProjection(db, f.workspaceId, crypto.randomUUID())).toBeNull();
