@@ -143,16 +143,14 @@ export class ModalCommandControl {
       signal ? { signal } : undefined,
     );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    // Match the pinned SDK's default non-login /bin/sh and runAs behavior,
-    // including an already-matching non-root user and sudo-based transitions.
-    let script = args.cmd;
+    const login = args.shell ? (args.login ?? true) : false;
+    let command = [args.shell ?? "/bin/sh", login ? "-lc" : "-c", args.cmd];
     if (args.runAs) {
       const user = shellQuote(args.runAs);
-      const body = shellQuote(script);
-      script = `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then /bin/sh -lc ${body}; elif [ "$(id -u)" = 0 ]; then su -s /bin/sh ${user} -c ${body}; else sudo -n -u ${user} -- sh -lc ${body}; fi`;
+      const invocation = command.map(shellQuote).join(" ");
+      const script = `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then exec ${invocation}; elif [ "$(id -u)" = 0 ]; then exec su -s /bin/sh ${user} -c ${shellQuote(`exec ${invocation}`)}; else exec sudo -n -u ${user} -- ${invocation}; fi`;
+      command = ["/bin/sh", "-c", script];
     }
-    const login = args.shell ? (args.login ?? true) : false;
-    let command = [args.shell ?? "/bin/sh", login ? "-lc" : "-c", script];
     const environment =
       typeof this.environment === "function" ? this.environment() : this.environment;
     if (Object.keys(environment).length) {

@@ -249,3 +249,29 @@ test("stdin uses the protected monotonic sequence across fresh controllers", asy
     { request: { execId: "tp-test", input: { messageIndex: 20 } }, options: { retries: 0 } },
   ]);
 });
+
+test("runAs preserves explicit Bash and login mode for an already-matching user", async () => {
+  if (process.platform === "win32" || !process.getuid) return;
+  const commands: string[][] = [];
+  const control = controller({
+    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
+    containerExec: async (request: { command: string[] }) => {
+      commands.push(request.command);
+      return { execId: "tp-test" };
+    },
+  });
+  for (const login of [false, true]) {
+    await control.start({
+      cmd: `[[ -n "$BASH_VERSION" ]] && ${login ? "" : "! "}shopt -q login_shell`,
+      shell: "/bin/bash",
+      login,
+      runAs: String(process.getuid()),
+    });
+    const command = commands.at(-1)!;
+    expect(command.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
+    expect(command[2]).toContain("exec su -s /bin/sh");
+    expect(command[2]).toContain("exec sudo -n -u");
+    const result = Bun.spawnSync(command);
+    expect(result.exitCode).toBe(0);
+  }
+});
