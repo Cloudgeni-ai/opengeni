@@ -211,7 +211,15 @@ export function SessionHeader({
               paused, admission is the headline — hide lifecycle so we don't
               imply the session is still "Running"/"Idle" under a pause gate. */}
           {session.effectiveControl.state === "active" ? (
-            waiting ? null : (
+            waiting ? (
+              <span
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-1 px-2 py-0.5 text-control font-medium text-fg-muted"
+                data-session-wait-badge=""
+              >
+                <span aria-hidden className="size-1.5 rounded-full bg-current" />
+                Waiting
+              </span>
+            ) : (
               <SessionStatusBadge status={status} />
             )
           ) : (

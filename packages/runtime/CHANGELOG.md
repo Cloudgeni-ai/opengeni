@@ -1,5 +1,17 @@
 # @opengeni/runtime
 
+## 2.4.3
+
+### Patch Changes
+
+- 8a55774: Preserve the original Modal SDK observer when setup or readiness commands yield, without colliding with retained command handles or replaying commands.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/sdk@4.0.2
+  - @opengeni/codemode@0.5.3
+  - @opengeni/config@1.0.4
+  - @opengeni/tool-gateway@0.1.4
+
 ## 2.4.2
 
 ### Patch Changes

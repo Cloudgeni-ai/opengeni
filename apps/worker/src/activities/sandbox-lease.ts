@@ -502,12 +502,18 @@ export function createSandboxLeaseActivities(
     try {
       const { db, settings, observability } = await services();
       const timing = sandboxDrainTiming(settings);
+      const onUnobservableCommandDrainError = (error: unknown) => {
+        observability.warn("sandbox reaper: unobservable command drain inspection failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      };
       if (!settings.sandboxOwnershipEnabled) {
         // Turns skip leases when the flag is off, but Computer/Browser attach
         // still acquire them. Leaving drainable rows untouched strands Desktop
         // behind rotation_in_progress forever. Inventory and drain those rows;
         // do not request NEW deadline rotations or meter warm time.
         const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
+          onUnobservableCommandDrainError,
           viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
           turnHolderTtlMs: settings.sandboxLeaseTtlMs,
           interactionHolderTtlMs: settings.sandboxInteractionHolderTtlMs,
@@ -544,6 +550,7 @@ export function createSandboxLeaseActivities(
       // Billing, reconciliation, provider-orphan cleanup, artifact GC, and gauges
       // run only after every drainable box has its own durable child.
       const drainableInventory = await reapStaleLeaseHoldersGlobal(db, {
+        onUnobservableCommandDrainError,
         viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
         // Dead-worker turn holders: a live holder is touched every 10s from the
         // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
@@ -2439,7 +2446,7 @@ async function terminateDrainableBox(
   }
   if (
     lease.liveness !== "draining" ||
-    lease.refcount !== 0 ||
+    (lease.refcount !== 0 && !lease.unobservableCommandDrainIds?.length) ||
     lease.leaseEpoch !== row.leaseEpoch
   ) {
     // Re-armed (warm again) / a newer epoch / already drained by a concurrent

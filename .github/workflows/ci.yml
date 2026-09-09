@@ -1140,7 +1140,9 @@ jobs:
   deployment:
     name: Deployment artifacts
     needs: [automation-admission, plan]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    # Every image-producing source needs the deployment receipt, including a
+    # docs-only main push. Staging validates it before importing these images.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

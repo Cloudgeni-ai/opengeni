@@ -192,10 +192,82 @@ test("start disables ambiguous mutation retries and PTY idle-stdin termination",
   });
 });
 
+test("new starts follow hydration while old locators remain fenced", async () => {
+  let sandboxId = "sb-before";
+  const seen: string[] = [];
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: {
+        sandboxGetTaskId: async (request: { sandboxId: string }) => {
+          seen.push(request.sandboxId);
+          return { taskId: `ta-${request.sandboxId}` };
+        },
+        containerExec: async () => ({ execId: "tp-test" }),
+      },
+    } as never,
+    () => sandboxId,
+    "/workspace",
+  );
+  const old = await control.start({ cmd: "pwd" });
+  sandboxId = "sb-after";
+  const restored = await control.start({ cmd: "pwd" });
+  expect(seen).toEqual(["sb-before", "sb-after"]);
+  expect(restored.sandboxId).toBe("sb-after");
+  expect(restored.taskId).toBe("ta-sb-after");
+  await expect(control.read(old, 1)).rejects.toThrow("original sandbox");
+  await expect(control.write(old, "x", 1)).rejects.toThrow("original sandbox");
+});
+
 test("foreign sandbox locators never reach the provider", async () => {
   await expect(controller({}).read({ ...locator(), sandboxId: "sb-other" }, 1)).rejects.toThrow(
     "original sandbox",
   );
+});
+
+test("hydration during task lookup prevents command start", async () => {
+  let sandboxId = "sb-before";
+  let starts = 0;
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: {
+        sandboxGetTaskId: async () => {
+          sandboxId = "sb-after";
+          return { taskId: "ta-before" };
+        },
+        containerExec: async () => {
+          starts++;
+          return { execId: "tp-test" };
+        },
+      },
+    } as never,
+    () => sandboxId,
+    "/workspace",
+  );
+  await expect(control.start({ cmd: "pwd" })).rejects.toThrow("changed during command preparation");
+  expect(starts).toBe(0);
+});
+
+test("hydration during command start cannot relabel its original locator", async () => {
+  let sandboxId = "sb-before";
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: {
+        sandboxGetTaskId: async () => ({ taskId: "ta-before" }),
+        containerExec: async () => {
+          sandboxId = "sb-after";
+          return { execId: "tp-test" };
+        },
+      },
+    } as never,
+    () => sandboxId,
+    "/workspace",
+  );
+  const started = await control.start({ cmd: "pwd" });
+  expect(started).toMatchObject({ sandboxId: "sb-before", taskId: "ta-before", execId: "tp-test" });
+  await expect(control.read(started, 1)).rejects.toThrow("original sandbox");
 });
 
 test("PTY output keeps merged fidelity despite separate provider read endpoints", async () => {

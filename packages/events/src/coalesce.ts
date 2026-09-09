@@ -1,8 +1,4 @@
-import {
-  boundSessionEventPayload,
-  sessionEventPayloadTruncation,
-  type SessionEvent,
-} from "@opengeni/contracts";
+import { sessionEventPayloadTruncation, type SessionEvent } from "@opengeni/contracts";
 
 const COALESCIBLE_DELTA_TYPES = new Set([
   "agent.message.delta",
@@ -65,9 +61,7 @@ export function coalesceSessionEventDeltasWithCoverage(
     coalesced.push({
       ...run.first,
       coveredThrough: run.lastSequence,
-      payload: boundSessionEventPayload(payload, {
-        surface: "http_projection",
-      }),
+      payload,
     });
     coveredThroughBySequence.set(run.first.sequence, run.lastSequence);
     run = null;

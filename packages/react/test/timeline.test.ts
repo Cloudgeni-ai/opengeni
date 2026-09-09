@@ -1551,6 +1551,24 @@ describe("buildTimeline", () => {
     expect((items[0] as SandboxItem).status).toBe("cancelled");
   });
 
+  test("preserves the rotation wait reason in sandbox startup", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "sandbox.provision" }),
+      event("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        expectedTransition: true,
+        failureCode: "rotation_in_progress",
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "startup-phase",
+      status: "cancelled",
+      blockedReason: "rotation_in_progress",
+    });
+  });
+
   test("keeps every context compaction visible with its before and after size", () => {
     reset();
     const items = buildTimeline([

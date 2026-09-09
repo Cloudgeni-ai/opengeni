@@ -1,5 +1,20 @@
 # @opengeni/db
 
+## 4.2.2
+
+### Patch Changes
+
+- 87fbd92: Preserve full session messages and tool output through database paging, compact
+  event delivery, SSE, browser rendering, and copying. Remove browser per-event
+  preview truncation while retaining history pagination and backpressure. Events
+  larger than a page or loaded-window byte target are delivered intact on their own.
+- 5835c27: Reduce database round trips for large session-event history pages by fetching up to 256 rows per internal batch. Preserve the existing full-payload transfer byte budget, exact event content, pagination cursors, and tenant isolation.
+- eb21b93: Allow explicitly audited operator recovery from an exact historical sandbox checkpoint while preserving generation gaps and existing restore verification.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/codemode@0.5.3
+  - @opengeni/config@1.0.4
+
 ## 4.2.1
 
 ### Patch Changes

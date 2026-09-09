@@ -30,10 +30,21 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import {
+  backgroundCommandActivityForSessions,
+  getSessionBackgroundCommand,
+  listSessionBackgroundCommands,
+} from "../../../packages/db/src/session-background-commands";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  authorizeHistoricalSandboxCheckpointRecovery,
+  registerSandboxCheckpointArtifact,
+  enrollUnobservableCommandIdleDrain,
+  reapStaleLeaseHoldersGlobal,
   advanceWorkspaceGeneration,
+  advanceWorkspaceGenerationForRetainedProcess,
+  verifyRetainedProcessMutationSettlement,
   beginSandboxRematerialization,
   claimWorkspaceArchiveCapture,
   claimSessionWorkForAttempt,
@@ -211,7 +222,11 @@ async function freshWorkspace(): Promise<{
   return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
 }
 
-async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: string }): Promise<{
+async function freshWarmSnapshotAttempt(ids: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId?: string;
+}): Promise<{
   sessionId: string;
   turnId: string;
   executionGeneration: number;
@@ -229,6 +244,7 @@ async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: s
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
+    sandboxGroupId: ids.sandboxGroupId,
   });
   await initializeSessionStartAtomically(db, {
     accountId: ids.accountId,
@@ -257,6 +273,34 @@ async function freshWarmSnapshotAttempt(ids: { accountId: string; workspaceId: s
     sandboxGroupId: session.sandboxGroupId,
     holderId: sandboxLeaseHolderIdForAttempt(attemptId),
   };
+}
+
+async function verifyPendingQuiescenceBlocks(
+  ids: { accountId: string; workspaceId: string },
+  attempt: Awaited<ReturnType<typeof freshWarmSnapshotAttempt>>,
+  check: () => Promise<void>,
+): Promise<void> {
+  const [receipt] = await admin`insert into session_command_receipts (
+    account_id,workspace_id,actor_type,actor_subject_id,action,target_session_id,
+    target_turn_id,operation_key,canonical_request_hash) values (
+    ${ids.accountId},${ids.workspaceId},'human','quiescence-fixture','session.queue.steer',
+    ${attempt.sessionId},${attempt.turnId},${crypto.randomUUID()},'quiescence-fixture') returning id`;
+  const [interruption] = await admin`insert into session_attempt_interruptions (
+    account_id,workspace_id,session_id,operation_id,attempt_id,kind,control_revision,state)
+    values (${ids.accountId},${ids.workspaceId},${attempt.sessionId},${receipt!.id},
+      ${attempt.attemptId},'steer',1,'settled') returning id`;
+  await check();
+  await admin`delete from session_attempt_interruptions where id = ${interruption!.id}`;
+  await admin`delete from session_command_receipts where id = ${receipt!.id}`;
+  await admin`update session_turn_attempts set outcome = 'interrupted_recoverable' where id = ${attempt.attemptId}`;
+  const [event] = await admin`insert into session_events (
+    account_id,workspace_id,session_id,turn_id,turn_attempt_id,sequence,type)
+    select ${ids.accountId},${ids.workspaceId},${attempt.sessionId},${attempt.turnId},
+      ${attempt.attemptId},coalesce(max(sequence),0)+1,'turn.recovery.requested'
+    from session_events where session_id = ${attempt.sessionId} returning id`;
+  await check();
+  await admin`delete from session_events where id = ${event!.id}`;
+  await admin`update session_turn_attempts set outcome = 'completed' where id = ${attempt.attemptId}`;
 }
 
 type LeaseFixture = {
@@ -3138,6 +3182,266 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   }, 60_000);
 
+  for (const lateExit of [false, true]) {
+    test(`idle unobservable commands use the existing drain; late exit=${lateExit}`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required for idle drain regression");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const instanceId = "box-unknown-idle";
+      const leaseId = await insertLease(ids, {
+        liveness: "warm",
+        refcount: 1,
+        turnHolders: 1,
+        leaseEpoch: 12,
+        expiresInMs: 600_000,
+        instanceId,
+        backend: "modal",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: instanceId } },
+        },
+      });
+      await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        operation: "unknownIdleCommand",
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      });
+      const processId = crypto.randomUUID();
+      await retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 41,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation: "unknownIdleCommand",
+        providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "legacy background command" },
+        owner: {
+          kind: "turn",
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 12,
+          expectedInstanceId: instanceId,
+          routeKind: "home",
+          routeTargetId: null,
+          routeEpoch: 0,
+        },
+      });
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        idleGraceMs: 1,
+      };
+      await admin`update sandbox_retained_processes set
+        last_reconcile_outcome = 'quarantined_process_observation_unavailable',
+        started_at = now() - interval '2 minutes',
+      reconcile_after = now() + interval '24 hours' where id = ${processId}`;
+      const commandScope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+      };
+      expect((await listSessionBackgroundCommands(db, commandScope))[0]?.observationStatus).toBe(
+        "unavailable",
+      );
+      expect(
+        (await getSessionBackgroundCommand(db, { ...commandScope, commandId: processId }))
+          ?.observationStatus,
+      ).toBe("unavailable");
+      expect(
+        (
+          await backgroundCommandActivityForSessions(db, {
+            ...commandScope,
+            sessionIds: [attempt.sessionId],
+          })
+        ).get(attempt.sessionId),
+      ).toMatchObject({ count: 1, unavailableCount: 1 });
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
+      // A live attempt without a holder is still protected.
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
+      await insertHolder(ids, leaseId, "viewer", "viewer-idle-regression", 0, attempt.sessionId);
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'viewer'`;
+      await admin`update sandbox_leases set refcount = 1, turn_holders = 0, viewer_holders = 0 where id = ${leaseId}`;
+      const sibling = await freshWarmSnapshotAttempt({ ...ids, sandboxGroupId: ids.groupId });
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now(), quiesced_at = null where id = ${sibling.attemptId}`;
+      expect(
+        await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
+      ).toBeNull();
+      await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
+      where id in (${sibling.attemptId}, ${attempt.attemptId})`;
+      await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      });
+      const child = await advanceWorkspaceGenerationForRetainedProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        operation: "pollUnknownCommand",
+      });
+      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      await verifyRetainedProcessMutationSettlement(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        operation: "pollUnknownCommand",
+        admission: child,
+        outcome: "resolved",
+      });
+      if (!lateExit) {
+        const ordinaryIds = await freshWorkspace();
+        await insertLease(ordinaryIds, {
+          liveness: "draining",
+          refcount: 0,
+          leaseEpoch: 1,
+          expiresInMs: -60_000,
+          instanceId: "ordinary-drain",
+        });
+        const trigger = `idle_drain_failure_${crypto.randomUUID().replaceAll("-", "")}`;
+        await admin.unsafe(`create function ${trigger}() returns trigger language plpgsql as $$
+          begin if new.id = '${leaseId}'::uuid then raise exception 'injected enrollment failure'; end if; return new; end $$`);
+        await admin.unsafe(`create trigger ${trigger} before update of unobservable_command_checked_at
+          on sandbox_leases for each row execute function ${trigger}()`);
+        const failures: unknown[] = [];
+        try {
+          const inventory = await reapStaleLeaseHoldersGlobal(db, {
+            viewerHolderTtlMs: 60_000,
+            idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+            onUnobservableCommandDrainError: (error) => {
+              failures.push(error);
+            },
+          });
+          expect(inventory.some((row) => row.sandboxGroupId === ordinaryIds.groupId)).toBe(true);
+          expect(failures).toHaveLength(1);
+          expect(inventory.some((row) => row.sandboxGroupId === ids.groupId)).toBe(false);
+        } finally {
+          await admin.unsafe(`drop trigger ${trigger} on sandbox_leases`);
+          await admin.unsafe(`drop function ${trigger}()`);
+          await admin`delete from sandbox_leases where workspace_id = ${ordinaryIds.workspaceId}`;
+        }
+      }
+      const target = (
+        await reapStaleLeaseHoldersGlobal(db, {
+          viewerHolderTtlMs: 60_000,
+          idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+        })
+      ).find((row) => row.sandboxGroupId === ids.groupId);
+      expect(target).not.toBeNull();
+      expect(
+        (
+          await getRetainedProcess(db, {
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            processId,
+          })
+        )?.state,
+      ).toBe("active");
+      const failedCapture = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: async () => {
+          throw new Error("snapshot unavailable");
+        },
+      });
+      await expect(
+        failedCapture.drainSandboxLease({
+          target: target!,
+          timeoutClass: "fast",
+          snapshotTimeoutMs: 60_000,
+          captureTimeoutMs: 120_000,
+          operationId: crypto.randomUUID(),
+        }),
+      ).rejects.toThrow("snapshot unavailable");
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+      expect(
+        (
+          await getRetainedProcess(db, {
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            processId,
+          })
+        )?.state,
+      ).toBe("active");
+      const [held] = await admin<{ count: number }[]>`select count(*)::integer as count
+      from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'process'`;
+      expect(held?.count).toBe(1);
+      if (lateExit) {
+        const process = await getRetainedProcess(db, {
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        });
+        await settleRetainedProcess(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+          expected: retainedProcessSettlementIdentity(process!),
+          outcome: "exited",
+          exitCode: 17,
+          reason: "provider completion after enrollment",
+          idleGraceMs: 1,
+        });
+      }
+      const spy = makeTerminateSpy();
+      const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      });
+      const result = await drainSandboxLease({
+        target: target!,
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(result.status).toBe("terminated");
+      expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+      expect(
+        (await getSessionBackgroundCommand(db, { ...commandScope, commandId: processId }))
+          ?.observationStatus,
+      ).toBeUndefined();
+      expect(
+        (
+          await backgroundCommandActivityForSessions(db, {
+            ...commandScope,
+            sessionIds: [attempt.sessionId],
+          })
+        ).size,
+      ).toBe(0);
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+      expect(
+        (
+          await getRetainedProcess(db, {
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            processId,
+          })
+        )?.state,
+      ).toBe(lateExit ? "exited" : "lost");
+    }, 180_000);
+  }
+
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -5817,4 +6121,267 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       drainReason: "provider_deadline",
     });
   }, 60_000);
+
+  for (const native of [false, true]) {
+    test(`historical checkpoint recovery preserves the audited gap; native=${native}`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const archive = Buffer.from(
+        native
+          ? `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({ snapshot_id: "im-historical-recovery", workspace_persistence: "snapshot_filesystem" })}`
+          : "historical-archive",
+      ).toString("base64");
+      const tarDescriptor = archiveDescriptor(archive, 1_900_000_000_000);
+      const descriptor = native
+        ? {
+            version: 2 as const,
+            kind: "provider_snapshot" as const,
+            revision: `wa2:1900000000000:${tarDescriptor.archiveSha256}`,
+            archiveSha256: tarDescriptor.archiveSha256,
+            archiveBytes: tarDescriptor.archiveBytes,
+            capturedAt: tarDescriptor.capturedAt,
+            provider: "modal_snapshot_filesystem" as const,
+            snapshotId: "im-historical-recovery",
+            workspacePersistence: "snapshot_filesystem",
+          }
+        : tarDescriptor;
+      const leaseId = await insertLease(ids, {
+        liveness: "cold",
+        backend: "modal",
+        refcount: 0,
+        leaseEpoch: 1,
+        instanceId: null,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            workspaceArchive: archive,
+            workspaceArchiveMeta: descriptor,
+          },
+        },
+      });
+      if (native) {
+        const binding = {
+          version: 1,
+          serverUrl: "https://modal.test",
+          workspaceName: "historical-recovery",
+          environment: "main",
+        };
+        const artifact = await registerSandboxCheckpointArtifact(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          sourceLeaseId: leaseId,
+          sourceLeaseEpoch: 1,
+          sourceInstanceId: "gone-provider",
+          sourceWorkspaceGeneration: 0,
+          providerBinding: binding,
+          providerBindingKey: JSON.stringify(binding),
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        });
+        await admin.begin(async (tx) => {
+          await tx`update sandbox_leases set archive_generation = 0, current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
+          await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
+        });
+      }
+      await admin`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`;
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+      };
+      const authorization = {
+        ...scope,
+        expectedEpoch: 1,
+        expectedWorkspaceGeneration: 3,
+        expectedArchiveGeneration: 0,
+        selectedRevision: descriptor.revision,
+        operationId: crypto.randomUUID(),
+        subjectId: "operator@example.test",
+        reason: "Recover the preserved checkpoint; subsequent writes are unavailable",
+        acceptHistoricalCheckpoint: true as const,
+      };
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: false,
+      });
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now() - interval '2 minutes', quiesced_at = null where id = ${attempt.attemptId}`;
+      await verifyPendingQuiescenceBlocks(ids, attempt, async () => {
+        expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+          authorized: false,
+        });
+      });
+      expect(
+        await authorizeHistoricalSandboxCheckpointRecovery(db, {
+          ...authorization,
+          expectedWorkspaceGeneration: 4,
+        }),
+      ).toEqual({ authorized: false });
+      await admin`update sandbox_leases set liveness = 'warming' where id = ${leaseId}`;
+      expect(
+        await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: 1,
+          rematerializationId: crypto.randomUUID(),
+        }),
+      ).toMatchObject({
+        status: "blocked",
+        code: "archive_generation_mismatch",
+      });
+      await admin`update sandbox_leases set liveness = 'cold' where id = ${leaseId}`;
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: true,
+      });
+      for (const mutation of [
+        "epoch",
+        "generation",
+        "pointer",
+        "revision",
+        "receipt-group",
+      ] as const) {
+        // Native revision mismatch is rejected by the existing SQL artifact fence.
+        if (native && mutation === "revision") continue;
+        if (mutation === "epoch")
+          await admin`update sandbox_leases set lease_epoch = 2 where id = ${leaseId}`;
+        if (mutation === "generation")
+          await admin`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`;
+        if (mutation === "pointer")
+          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`;
+        if (mutation === "revision")
+          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`;
+        if (mutation === "receipt-group")
+          await admin`update audit_events set target_id = ${crypto.randomUUID()} where id = ${authorization.operationId}`;
+        expect(
+          await acquireLease(db, {
+            ...scope,
+            kind: "viewer",
+            holderId: "recovery-negative",
+            backend: "modal",
+            leaseTtlMs: 60_000,
+          }),
+        ).toMatchObject({ role: "blocked" });
+        await admin`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
+          resume_state = jsonb_set(resume_state, '{opengeniHistoricalArchiveRecoveryId}',
+          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`;
+        await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`;
+        await admin`update audit_events set target_id = ${ids.groupId} where id = ${authorization.operationId}`;
+      }
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: true,
+      });
+      const elected = await acquireLease(db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "recovery-verification",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      });
+      const rematerializationId = crypto.randomUUID();
+      const epoch = elected.lease.leaseEpoch;
+      if (native) {
+        // Even a fixture bypassing immutability cannot commit mismatched provenance.
+        await expect(
+          admin.begin(async (tx) => {
+            await tx`alter table sandbox_checkpoint_artifacts disable trigger sandbox_checkpoint_artifact_immutability_guard`;
+            await tx`update sandbox_checkpoint_artifacts set source_workspace_generation = 1
+            where id = (select current_checkpoint_artifact_id from sandbox_leases where id = ${leaseId})`;
+            await tx`update sandbox_leases set current_checkpoint_artifact_id = current_checkpoint_artifact_id where id = ${leaseId}`;
+            await tx`alter table sandbox_checkpoint_artifacts enable trigger sandbox_checkpoint_artifact_immutability_guard`;
+          }),
+        ).rejects.toThrow("current checkpoint artifact does not match its exact lease scope");
+      }
+      expect(
+        await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: epoch,
+          rematerializationId,
+        }),
+      ).toMatchObject({ status: "started" });
+      expect(
+        await recordWarmingSandboxCreated(db, {
+          ...scope,
+          expectedEpoch: epoch,
+          rematerializationId,
+          instanceId: "verified-recovery-box",
+          resumeBackendId: "modal",
+          resumeState: {
+            backendId: "modal",
+            sessionState: {
+              providerState: { sandboxId: "verified-recovery-box" },
+            },
+          },
+          leaseTtlMs: 60_000,
+        }),
+      ).toMatchObject({ recorded: true });
+      await markSandboxRestoreVerifying(db, {
+        ...scope,
+        expectedEpoch: epoch,
+        rematerializationId,
+      });
+      const committed = await commitWarmingToWarm(db, {
+        ...scope,
+        expectedEpoch: epoch,
+        instanceId: "verified-recovery-box",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            providerState: { sandboxId: "verified-recovery-box" },
+          },
+        },
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: descriptor.revision,
+        },
+        leaseTtlMs: 60_000,
+      });
+      expect(committed.committed).toBe(true);
+      expect(committed.lease).toMatchObject({
+        workspaceGeneration: 3,
+        archiveGeneration: 0,
+        archiveComplete: false,
+      });
+      const [receipt] =
+        await admin`select metadata from audit_events where id = ${authorization.operationId}`;
+      expect(receipt?.metadata).toMatchObject({
+        workspaceGeneration: 3,
+        archiveGeneration: 0,
+        selectedRevision: descriptor.revision,
+      });
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "recovery-verification",
+        idleGraceMs: 1,
+      });
+      await admin`update sandbox_leases set expires_at = now() - interval '1 second' where id = ${leaseId}`;
+      const draining = await readLease(db, ids.workspaceId, ids.groupId);
+      const spy = makeTerminateSpy();
+      const recoveryDrain = await createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      }).drainSandboxLease({
+        target: {
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          instanceId: "verified-recovery-box",
+          leaseEpoch: draining!.leaseEpoch,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(recoveryDrain).toMatchObject({ status: "terminated" });
+      expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+        archiveGeneration: 3,
+        archiveComplete: true,
+      });
+    }, 180_000);
+  }
 });

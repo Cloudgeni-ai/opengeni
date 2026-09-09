@@ -284,12 +284,10 @@ export function SessionRowContent({
   scheduled = false,
   relativeTime,
   creator,
-  waiting = false,
   quickActionSlots = 0,
 }: {
   title: string;
   stateLabel: string;
-  waiting?: boolean;
   depthLabel?: string | null;
   descendantLabel?: string | null;
   mobile: boolean;
@@ -309,14 +307,12 @@ export function SessionRowContent({
         <span data-session-row-title className="block min-w-0 truncate">
           {title}
         </span>
-        {mobile || waiting ? (
+        {mobile ? (
           <span
             data-session-row-state
             className="mt-0.5 truncate text-2xs font-normal text-fg-muted"
           >
-            {waiting
-              ? stateLabel
-              : [stateLabel, depthLabel, descendantLabel, relativeTime].filter(Boolean).join(" · ")}
+            {[stateLabel, depthLabel, descendantLabel, relativeTime].filter(Boolean).join(" · ")}
           </span>
         ) : null}
       </span>

@@ -210,6 +210,14 @@ describe("workflow timeout contract", () => {
           "",
         ].join("\n"),
       );
+      const aptRoot = join(dir, "apt");
+      await mkdir(aptRoot);
+      await writeFile(
+        join(aptRoot, "sources.list"),
+        "deb https://dl.google.com/linux/chrome-stable/deb stable main\n",
+      );
+      await writeFile(join(binDir, "sudo"), '#!/bin/bash\nexec "$@" "$TEST_APT_ROOT"\n');
+      await chmod(join(binDir, "sudo"), 0o755);
       await chmod(join(binDir, "timeout"), 0o755);
       await chmod(join(binDir, "bun"), 0o755);
       const proc = Bun.spawn(["bash", "--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
@@ -221,6 +229,9 @@ describe("workflow timeout contract", () => {
           ATTEMPT_TIMEOUT_SECONDS: "360",
           ATTEMPTS: "2",
           KILL_AFTER_SECONDS: "15",
+          PLAYWRIGHT_RUNNER_OS: "Linux",
+          PLAYWRIGHT_ACTION_PATH: resolve(root, ".github/actions/playwright-browsers"),
+          TEST_APT_ROOT: aptRoot,
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -228,6 +239,9 @@ describe("workflow timeout contract", () => {
       const stdout = await new Response(proc.stdout).text();
       expect(await proc.exited).toBe(1);
       expect(await readFile(counter, "utf8")).toBe("2\n");
+      expect(await readFile(join(aptRoot, "sources.list"), "utf8")).toStartWith(
+        "# Disabled for Playwright",
+      );
       expect(stdout).toContain("attempt 1/2");
       expect(stdout).toContain("attempt 2/2");
       expect(stdout).toContain("exceeded 360s and was killed");

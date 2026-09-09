@@ -3273,7 +3273,12 @@ function AgentMessageRow({
         )
       }
     >
-      <div data-og-annotation-source-key={item.annotationSource?.eventId}>{body}</div>
+      <div
+        data-og-wide-table-message=""
+        data-og-annotation-source-key={item.annotationSource?.eventId}
+      >
+        {body}
+      </div>
     </CopyHoverFrame>
   );
 }

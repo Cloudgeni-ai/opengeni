@@ -75,6 +75,7 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  crossTabReloadStartedAt?: number;
   acceptedRequestTerminals: Array<{
     observedAt: number;
     pathnameAndSearch: string;
@@ -313,6 +314,7 @@ type ActorMutationAcceptance = {
 };
 
 type BrowserRequestFailureInput = {
+  crossTabReloadStartedAt?: number | undefined;
   acceptedActorTransitions?: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
   dispatchPhase: string;
@@ -418,6 +420,31 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     allowedDispatchPhases?.has(input.dispatchPhase) === true;
   const startedAt = input.startedAt;
   const failedAt = input.failedAt;
+  const reloadStartedAt = input.crossTabReloadStartedAt;
+  const isExpectedNeutralRaceReloadCancellation =
+    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) &&
+    input.method === "GET" &&
+    pathname === "/v1/auth/session-set" &&
+    input.actorEpoch === null &&
+    input.sessionSetAuthorityHash !== null &&
+    input.dispatchPhase === "cross-tab-select-race" &&
+    input.responsePhase === "cross-tab-select-race" &&
+    typeof startedAt === "number" &&
+    typeof failedAt === "number" &&
+    typeof reloadStartedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    Number.isFinite(failedAt) &&
+    Number.isFinite(reloadStartedAt) &&
+    failedAt >= reloadStartedAt &&
+    failedAt - reloadStartedAt <= 10_000 &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/select" &&
+        transition.actorEpoch !== null &&
+        transition.sessionSetAuthorityHash === input.sessionSetAuthorityHash &&
+        startedAt <= transition.acceptedAt &&
+        transition.acceptedAt <= reloadStartedAt,
+    ) === true;
   const isAcceptedActorTransitionCancellation =
     isCancellation &&
     isActorOwnedRead &&
@@ -492,6 +519,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     /^\/assets\/realtime-[A-Za-z0-9_-]+\.js$/u.test(pathname);
   if (
     isExpectedScopedActorReadCancellation ||
+    isExpectedNeutralRaceReloadCancellation ||
     isAcceptedActorTransitionCancellation ||
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
@@ -993,6 +1021,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     const check = (async () => {
       const problem = requestFailureProblem({
+        crossTabReloadStartedAt: problems.crossTabReloadStartedAt,
         acceptedActorTransitions: actorMutationAcceptances,
         actorEpoch: dispatch?.actorEpoch ?? null,
         dispatchPhase: dispatch?.phase ?? "unknown",
@@ -2775,6 +2804,43 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("neutral race cancellations require the exact accepted select and explicit reload window", () => {
+    const input: BrowserRequestFailureInput = {
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      failure: "NS_BINDING_ABORTED",
+      method: "GET",
+      url: `${publicOrigin}/v1/auth/session-set`,
+      sessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      failedAt: 400,
+      crossTabReloadStartedAt: 300,
+      acceptedActorTransitions: [
+        {
+          path: "/v1/auth/session-set/select",
+          actorEpoch: "new",
+          sessionSetAuthorityHash: "a".repeat(64),
+          acceptedAt: 200,
+        },
+      ],
+    };
+    expect(requestFailureProblem(input)).toBeNull();
+    for (const changed of [
+      { failure: "NS_ERROR_NET_RESET" },
+      { method: "POST" },
+      { sessionSetAuthorityHash: null },
+      { crossTabReloadStartedAt: undefined },
+      { crossTabReloadStartedAt: 500 },
+      { startedAt: 250 },
+      { failedAt: 20_000 },
+      { acceptedActorTransitions: [] },
+      { responsePhase: "settled" },
+      { sessionSetAuthorityHash: "b".repeat(64) },
+    ])
+      expect(requestFailureProblem({ ...input, ...changed })).not.toBeNull();
+  });
+
   test("the strict browser ledger only permits scoped old-actor read cancellations", () => {
     const oldActorRead = {
       actorEpoch: "old-actor-epoch",
@@ -4066,6 +4132,8 @@ describe("provider-neutral browser account acceptance", () => {
         raceSelect(secondTab, tabProjection, betaSlot.id),
       ]);
       expect(raced.sort()).toEqual([200, 409]);
+      pageProblems.crossTabReloadStartedAt = performance.now();
+      secondTabProblems.crossTabReloadStartedAt = pageProblems.crossTabReloadStartedAt;
       await Promise.all([
         page.reload({ waitUntil: "domcontentloaded" }),
         secondTab.reload({ waitUntil: "domcontentloaded" }),
