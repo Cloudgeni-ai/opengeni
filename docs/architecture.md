@@ -35,12 +35,10 @@ Separate surfaces:
 - **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
   goals, approvals, structured human input, durable semantic titles, and
   durable history.
-- **Browser voice** has two separate boundaries: realtime conversation is a
-  coexisting transport for an ordinary session, while composer transcription
-  produces an editable draft that reaches session truth only through Send. Workspace
-  voice settings select the preferred transcription billing provider and fallback.
-  Only explicit rejection of an untouched recording permits a provider change;
-  successful or uncertain prior attempts keep their durable provider pin.
+- **Browser voice** supports realtime sessions and editable transcription drafts.
+  Drafts enter session history through Send. Workspace settings select billing
+  provider and fallback; successful or uncertain attempts pin the provider.
+  See [transcription](transcription.md) for recovery rules.
 - **Compute** supports provisioned sandbox providers and user-owned Connected
   Machines without changing the session model.
 - **Tools and integrations** combine first-party MCP, per-session MCP servers,
