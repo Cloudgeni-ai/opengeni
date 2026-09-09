@@ -13,6 +13,12 @@ type Session = ChannelASession & {
   hydrateWorkspace(archive: Uint8Array): Promise<void>;
 };
 
+async function deleteSnapshots(modal: ModalClient, snapshots: string[]): Promise<void> {
+  const cleanup = await Promise.allSettled(snapshots.map((id) => modal.images.delete(id)));
+  const errors = cleanup.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+  if (errors.length) throw new AggregateError(errors, "Modal snapshot cleanup failed");
+}
+
 // Real provider proof: setup and admitted commands must both survive hydration.
 // Isolated resources only; delete every sandbox and captured snapshot afterward.
 test.skipIf(process.env.OPENGENI_LIVE_MODAL_SETUP !== "1")(
@@ -95,11 +101,7 @@ test.skipIf(process.env.OPENGENI_LIVE_MODAL_SETUP !== "1")(
         if (session) await session.delete();
       } finally {
         try {
-          const cleanup = await Promise.allSettled(snapshots.map((id) => modal.images.delete(id)));
-          const errors = cleanup.flatMap((result) =>
-            result.status === "rejected" ? [result.reason] : [],
-          );
-          if (errors.length) throw new AggregateError(errors, "Modal snapshot cleanup failed");
+          await deleteSnapshots(modal, snapshots);
         } finally {
           modal.close();
         }
