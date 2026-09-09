@@ -38,6 +38,13 @@ describe("Modal retained-command observation", () => {
           "input",
         ),
       ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
+      const terminal = new SandboxChannelAService({ session: owner });
+      await expect(
+        terminal.ptyResize({ ptyId: "unsupported-pty", cols: 80, rows: 24 }, 1),
+      ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
+      await expect(terminal.ptyClose({ ptyId: "unsupported-pty" }, 1)).rejects.toBeInstanceOf(
+        ModalProcessObservationUnavailableError,
+      );
     },
   );
 
@@ -184,6 +191,13 @@ describe("Modal retained-command observation", () => {
           "do-not-replay",
         ),
       ).rejects.toBeInstanceOf(ChannelAConflictError);
+      const terminal = new SandboxChannelAService({ session: observer });
+      await expect(
+        terminal.ptyResize({ ptyId: "resumed-pty", cols: 80, rows: 24 }, 1),
+      ).rejects.toBeInstanceOf(ChannelAConflictError);
+      await expect(terminal.ptyClose({ ptyId: "resumed-pty" }, 1)).rejects.toBeInstanceOf(
+        ChannelAConflictError,
+      );
       expect(starts).toBe(1);
       expect(stdinWrites).toBe(0);
     } finally {

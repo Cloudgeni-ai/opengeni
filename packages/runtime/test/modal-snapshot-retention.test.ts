@@ -551,6 +551,15 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
         "input",
       ),
     ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
+    const terminal = new SandboxChannelAService({ session });
+    call = 0;
+    await expect(
+      terminal.ptyResize({ ptyId: "uncertain-pty", cols: 80, rows: 24 }, 11),
+    ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
+    call = 0;
+    await expect(terminal.ptyClose({ ptyId: "uncertain-pty" }, 11)).rejects.toBeInstanceOf(
+      ModalProcessObservationUnavailableError,
+    );
   });
 
   test("does not reinterpret other Modal or untyped stdin failures as terminal proof", async () => {

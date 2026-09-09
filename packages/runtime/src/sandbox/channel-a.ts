@@ -2391,22 +2391,9 @@ export class SandboxChannelAService {
     const typedHandleLoss =
       hasTypedExecHandleLoss(this.session) ||
       this.session.retainedProcessHasTypedHandleLoss?.(execSessionId) === true;
-    let out: string;
-    try {
-      out = await write({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 });
-    } catch (error) {
-      // Only the interactive terminal may reopen its missing handle. This does
-      // not settle a retained command as lost or authorize replay of its input.
-      if (
-        error instanceof ModalProcessObservationUnavailableError &&
-        error.reason === "missing_handle"
-      ) {
-        throw new ChannelAConflictError(
-          "pty handle unavailable; reopen the terminal without replaying input",
-        );
-      }
-      throw error;
-    }
+    const out = await this.withPtyHandleConflict("write", () =>
+      write({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 }),
+    );
     // The Modal exec surface reports a vanished exec-session as a NON-throwing
     // string ("write_stdin failed: session not found: N") that we used to stream
     // verbatim into the terminal. That happens when the persisted exec-session no
@@ -2429,11 +2416,13 @@ export class SandboxChannelAService {
       this.session.writeStdin?.bind(this.session);
     if (!write) return;
     // Send a stty in-band on the same pty session.
-    await write({
-      sessionId: execSessionId,
-      chars: `stty cols ${req.cols} rows ${req.rows}\n`,
-      yieldTimeMs: 50,
-    });
+    await this.withPtyHandleConflict("resize", () =>
+      write({
+        sessionId: execSessionId,
+        chars: `stty cols ${req.cols} rows ${req.rows}\n`,
+        yieldTimeMs: 50,
+      }),
+    );
   }
 
   /** Ask an open PTY to exit and return the exact provider banner. The routing
@@ -2444,7 +2433,33 @@ export class SandboxChannelAService {
       this.session.writeStdinForProcessControl?.bind(this.session) ??
       this.session.writeStdin?.bind(this.session);
     if (execSessionId === null || !write) return "";
-    return await write({ sessionId: execSessionId, chars: "", yieldTimeMs: 250 }); // EOF
+    return await this.withPtyHandleConflict(
+      "close",
+      () => write({ sessionId: execSessionId, chars: "\u0004", yieldTimeMs: 250 }), // EOF
+    );
+  }
+
+  private async withPtyHandleConflict<T>(
+    operation: "write" | "resize" | "close",
+    run: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      // A terminal handle conflict is not retained-command loss or exit proof.
+      // In particular, failed close must not mark metadata closed or reopen it.
+      if (
+        error instanceof ModalProcessObservationUnavailableError &&
+        error.reason === "missing_handle"
+      ) {
+        throw new ChannelAConflictError(
+          operation === "close"
+            ? "pty handle unavailable; close cannot be confirmed without provider exit proof"
+            : "pty handle unavailable; reopen the terminal without replaying input",
+        );
+      }
+      throw error;
+    }
   }
 
   // ──────────────────────────── helpers ──────────────────────────────────────
