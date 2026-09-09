@@ -17,6 +17,38 @@ try {
     viewport: { width: 1440, height: 1000 },
     reducedMotion: "reduce",
   });
+  // Wait for the rendered frame we inspect, not an assumed machine speed.
+  const waitForLayout = async (expectedWidth?: number) => {
+    await page.waitForFunction(
+      async (viewportWidth) => {
+        if (
+          document.fonts.status !== "loaded" ||
+          (viewportWidth !== undefined && innerWidth !== viewportWidth)
+        )
+          return false;
+        const footer = document.querySelector(".og-composer-footer");
+        if (!footer || footer.getBoundingClientRect().width === 0) return false;
+        const geometry = () =>
+          JSON.stringify([
+            document.documentElement.scrollWidth,
+            ...Array.from(
+              document.querySelectorAll(
+                '.og-composer-footer, .og-composer-footer button, [data-testid="model-picker-menu"]',
+              ),
+              (element) => {
+                const { x, y, width, height } = element.getBoundingClientRect();
+                return [x, y, width, height];
+              },
+            ),
+          ]);
+        const before = geometry();
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        return before === geometry();
+      },
+      expectedWidth,
+      { timeout: 5_000, polling: "raf" },
+    );
+  };
   const errors: string[] = [];
   const network: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -35,7 +67,7 @@ try {
   await page.goto(server.url.toString());
   const send = page.getByRole("button", { name: "Send message", exact: true });
   await send.waitFor();
-  await page.waitForTimeout(600);
+  await waitForLayout();
   assert.equal(await page.locator("[data-personal-resource-attachment]").count(), 0);
   assert.equal(await page.getByRole("radio").count(), 0);
   await page.screenshot({ path: path.join(output, "implemented-desktop.png"), fullPage: true });
@@ -48,7 +80,8 @@ try {
   assert.equal(await send.isDisabled(), true);
   assert.equal(await page.locator("[data-personal-resource-attachment]").count(), 0);
   await page.getByRole("button", { name: "Model and effort", exact: true }).click();
-  await page.waitForTimeout(600);
+  await page.getByTestId("model-picker-menu").waitFor({ state: "visible" });
+  await waitForLayout();
   await page.screenshot({ path: path.join(output, "model-picker.png"), fullPage: true });
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Session tools", exact: true }).click();
@@ -56,7 +89,7 @@ try {
   await page.keyboard.press("Escape");
   for (const width of [640, 375, 320]) {
     await page.setViewportSize({ width, height: 900 });
-    await page.waitForTimeout(600);
+    await waitForLayout(width);
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
       false,
@@ -79,7 +112,8 @@ try {
       await page.screenshot({ path: path.join(output, "implemented-mobile.png"), fullPage: true });
   }
   await page.getByRole("button", { name: "Theme", exact: true }).click();
-  await page.waitForTimeout(600);
+  await page.waitForFunction(() => document.documentElement.dataset.ogTheme === "dark");
+  await waitForLayout();
   await page.screenshot({ path: path.join(output, "implemented-mobile-dark.png"), fullPage: true });
   assert.deepEqual(errors, []);
   assert.deepEqual(network, []);
