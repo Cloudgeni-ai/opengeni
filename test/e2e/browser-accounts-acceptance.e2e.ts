@@ -1706,18 +1706,72 @@ function consumeAllowedPageErrors(
   allowed: readonly string[] | (() => string[]) | undefined,
 ): void {
   if (allowed === undefined) return;
-  const allowedMessages = new Set(typeof allowed === "function" ? allowed() : allowed);
-  problems.pageErrors = problems.pageErrors.filter((message) => !allowedMessages.has(message));
-  problems.pageErrorEvidence = problems.pageErrorEvidence.filter(
-    ({ message }) => !allowedMessages.has(message),
-  );
+  const allowedMessages = [...(typeof allowed === "function" ? allowed() : allowed)];
+  if (allowedMessages.length === 0) return;
+  // Identical abort strings are not a set: one allowlisted copy removes one
+  // ledger entry from each array independently. A second same-phase abort
+  // stays red unless the validated race produced a second expected count.
+  const remainingPageErrors = [...allowedMessages];
+  problems.pageErrors = problems.pageErrors.filter((message) => {
+    const index = remainingPageErrors.indexOf(message);
+    if (index === -1) return true;
+    remainingPageErrors.splice(index, 1);
+    return false;
+  });
+  const remainingEvidence = [...allowedMessages];
+  problems.pageErrorEvidence = problems.pageErrorEvidence.filter((evidence) => {
+    const index = remainingEvidence.indexOf(evidence.message);
+    if (index === -1) return true;
+    remainingEvidence.splice(index, 1);
+    return false;
+  });
 }
 
-function firefoxCrossTabLiveStreamAbortPageErrors(
-  problems: Pick<BrowserProblems, "pageErrors">,
-  phase: string,
+function firefoxLiveEventsAbortPageErrorsForValidatedRace(
+  problems: Pick<
+    BrowserProblems,
+    "acceptedRequestTerminals" | "actorTransitionResponses" | "pageErrorEvidence"
+  >,
+  input: {
+    acceptedAt: number;
+    pathname: string;
+    phase: string;
+    settledAt: number;
+  },
 ): string[] {
-  return problems.pageErrors.filter((message) => isFirefoxNativeAbortPageError(message, phase));
+  // Firefox's pageerror is the generic AbortError text with no URL. Correlate
+  // by the validated old-workspace live-events stream race (exact pathname 409
+  // or, if that 409 never landed, one same-phase request terminal) and consume
+  // only that many matching pageerrors inside the acceptance window.
+  const matchingResponses = problems.actorTransitionResponses.filter(
+    (response) => response.pathname === input.pathname,
+  );
+  const matchingTerminals = problems.acceptedRequestTerminals.filter(
+    (terminal) =>
+      terminal.responsePhase === input.phase &&
+      (terminal.pathnameAndSearch === input.pathname ||
+        terminal.pathnameAndSearch.startsWith(`${input.pathname}?`)),
+  );
+  const expectedCount =
+    matchingResponses.length > 0 ? matchingResponses.length : matchingTerminals.length > 0 ? 1 : 0;
+  if (expectedCount === 0) return [];
+  const windowStart = Math.min(
+    ...[
+      input.acceptedAt,
+      ...matchingResponses.map((response) => response.startedAt),
+      ...matchingTerminals.map((terminal) => terminal.observedAt),
+    ].filter((value) => Number.isFinite(value)),
+  );
+  const windowEnd = input.settledAt + 1_000;
+  return problems.pageErrorEvidence
+    .filter(
+      (evidence) =>
+        isFirefoxNativeAbortPageError(evidence.message, input.phase) &&
+        evidence.observedAt >= windowStart &&
+        evidence.observedAt <= windowEnd,
+    )
+    .slice(0, expectedCount)
+    .map((evidence) => evidence.message);
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -3616,6 +3670,7 @@ describe("provider-neutral browser account acceptance", () => {
 
   test("the strict browser ledger consumes Firefox's native live-events abort pageerror", () => {
     const phase = "cross-tab-select-race";
+    const liveEventsPath = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
     const trailingAbort = `[${phase}] The operation was aborted. `;
     const canonicalAbort = `[${phase}] The operation was aborted.`;
     const unrelated = `[${phase}] TypeError: unexpected`;
@@ -3624,21 +3679,117 @@ describe("provider-neutral browser account acceptance", () => {
     expect(isFirefoxNativeAbortPageError(canonicalAbort, phase)).toBe(true);
     expect(isFirefoxNativeAbortPageError(unrelated, phase)).toBe(false);
     expect(isFirefoxNativeAbortPageError(laterPhaseAbort, phase)).toBe(false);
+
+    const acceptedAt = 100;
+    const settledAt = 200;
+    const inWindow = 150;
+    const outsideWindow = settledAt + 1_000 + 1;
+    const matchingLiveEventsResponse = {
+      actorEpoch: "epoch-a",
+      dispatchPhase: phase,
+      endedAt: 180,
+      method: "GET",
+      pathname: liveEventsPath,
+      request: {},
+      responsePhase: phase,
+      startedAt: 90,
+      status: 409,
+    };
+    const matchingSessionsResponse = {
+      ...matchingLiveEventsResponse,
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
+    };
+
     const problems = {
-      pageErrors: [trailingAbort, unrelated, canonicalAbort, laterPhaseAbort],
+      acceptedRequestTerminals: [] as BrowserProblems["acceptedRequestTerminals"],
+      actorTransitionResponses: [matchingLiveEventsResponse, matchingSessionsResponse],
+      pageErrors: [trailingAbort, unrelated, canonicalAbort, laterPhaseAbort, trailingAbort],
       pageErrorEvidence: [
-        { message: trailingAbort, observedAt: 10 },
-        { message: unrelated, observedAt: 11 },
-        { message: laterPhaseAbort, observedAt: 12 },
+        { message: trailingAbort, observedAt: inWindow },
+        { message: unrelated, observedAt: inWindow + 1 },
+        { message: canonicalAbort, observedAt: inWindow + 2 },
+        { message: laterPhaseAbort, observedAt: inWindow + 3 },
+        { message: trailingAbort, observedAt: outsideWindow },
       ],
     };
     consumeAllowedPageErrors(problems, () =>
-      firefoxCrossTabLiveStreamAbortPageErrors(problems, phase),
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(problems, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
     );
-    expect(problems.pageErrors).toEqual([unrelated, laterPhaseAbort]);
+    expect(problems.pageErrors).toEqual([
+      unrelated,
+      canonicalAbort,
+      laterPhaseAbort,
+      trailingAbort,
+    ]);
     expect(problems.pageErrorEvidence).toEqual([
-      { message: unrelated, observedAt: 11 },
-      { message: laterPhaseAbort, observedAt: 12 },
+      { message: unrelated, observedAt: inWindow + 1 },
+      { message: canonicalAbort, observedAt: inWindow + 2 },
+      { message: laterPhaseAbort, observedAt: inWindow + 3 },
+      { message: trailingAbort, observedAt: outsideWindow },
+    ]);
+
+    const noRace = {
+      acceptedRequestTerminals: [] as BrowserProblems["acceptedRequestTerminals"],
+      actorTransitionResponses: [matchingSessionsResponse],
+      pageErrors: [trailingAbort],
+      pageErrorEvidence: [{ message: trailingAbort, observedAt: inWindow }],
+    };
+    consumeAllowedPageErrors(noRace, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(noRace, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(noRace.pageErrors).toEqual([trailingAbort]);
+    expect(noRace.pageErrorEvidence).toEqual([{ message: trailingAbort, observedAt: inWindow }]);
+
+    const terminalOnly = {
+      acceptedRequestTerminals: [
+        {
+          observedAt: inWindow,
+          pathnameAndSearch: `${liveEventsPath}?transport=http1`,
+          responsePhase: phase,
+          terminal: "failed" as const,
+        },
+      ],
+      actorTransitionResponses: [] as BrowserProblems["actorTransitionResponses"],
+      pageErrors: [trailingAbort, canonicalAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: canonicalAbort, observedAt: inWindow + 1 },
+      ],
+    };
+    consumeAllowedPageErrors(terminalOnly, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(terminalOnly, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(terminalOnly.pageErrors).toEqual([canonicalAbort]);
+    expect(terminalOnly.pageErrorEvidence).toEqual([
+      { message: canonicalAbort, observedAt: inWindow + 1 },
+    ]);
+
+    const duplicate = {
+      pageErrors: [trailingAbort, trailingAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: trailingAbort, observedAt: inWindow + 1 },
+      ],
+    };
+    consumeAllowedPageErrors(duplicate, [trailingAbort]);
+    expect(duplicate.pageErrors).toEqual([trailingAbort]);
+    expect(duplicate.pageErrorEvidence).toEqual([
+      { message: trailingAbort, observedAt: inWindow + 1 },
     ]);
   });
 
@@ -3961,10 +4112,12 @@ describe("provider-neutral browser account acceptance", () => {
           allowedPageErrors:
             engine === "firefox"
               ? () =>
-                  firefoxCrossTabLiveStreamAbortPageErrors(
-                    observedProblems,
-                    "cross-tab-select-race",
-                  )
+                  firefoxLiveEventsAbortPageErrorsForValidatedRace(observedProblems, {
+                    acceptedAt: racedSelectAcceptedAt,
+                    pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                    phase: "cross-tab-select-race",
+                    settledAt: racedSelectionSettledAt,
+                  })
               : undefined,
         });
       }
