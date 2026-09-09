@@ -30,31 +30,21 @@ Workers execute agents in provisioned sandboxes or Connected Machines.
 Postgres owns durable truth; Temporal coordinates work; NATS transports
 reconstructible live updates and Connected Machine traffic.
 
-Separate surfaces:
+Surfaces (canonical sources in §13):
 
-- **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
-  goals, approvals, structured human input, durable semantic titles, and
-  durable history.
-- **Browser voice** supports realtime sessions and editable transcription drafts.
-  Drafts enter session history through Send. Workspace settings select billing
-  provider and fallback; successful or uncertain attempts pin the provider.
-  See [transcription](transcription.md) for recovery rules.
-- **Compute** supports provisioned sandbox providers and user-owned Connected
-  Machines without changing the session model.
-- **Tools and integrations** combine first-party MCP, per-session MCP servers,
-  workspace capabilities, Codemode, connections, and provider-specific
-  adapters under explicit authority.
-- **Knowledge and governance** keep Documents/RAG, Agent Knowledge, typed
-  Memory, preferences, instructions, organization identity, and learning policy
-  as distinct authorities.
-- **Artifacts and interaction** support retained files, generated media,
-  editable documents/spreadsheets/presentations, browser control, managed
-  ComputerSession interaction, terminals, and published outputs.
-- **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
-  stock web console, and advanced in-process host seams.
-- **[Feedback](feedback.md)**.
-- **Operations** include usage metering, entitlement admission, billing,
-  deployment contracts, observability, and release evidence.
+- **Sessions:** turn control, queues, goals, approvals, human input, titles, history.
+- **Voice:** realtime sessions and editable drafts; Send persists transcription.
+  Workspace billing/fallback settings govern provider selection; successful or
+  uncertain attempts pin it. See [transcription](transcription.md).
+- **Compute:** provisioned sandboxes and user-owned Connected Machines.
+- **Tools:** MCP, capabilities, Codemode, connections, and authorized adapters.
+- **Knowledge:** Documents/RAG, Agent Knowledge, typed Memory, preferences,
+  instructions, organization identity, and learning policy retain distinct authority.
+- **Artifacts:** files, media, editable documents, browser/ComputerSession control,
+  terminals, and published outputs.
+- **Clients:** SDK, React, web console, in-process embedding.
+- **[Feedback](feedback.md)** and **operations:** metering, entitlements, billing,
+  deployment, observability, release evidence.
 
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
@@ -1640,20 +1630,10 @@ This index intentionally routes at subsystem granularity. Use
 
 ## 14. Keeping this current
 
-A stale architecture map is a defect because it sends maintainers to the wrong
-authority. Update this file in the same change when you:
-
-- add, remove, or rename an application, package, example workspace, sandbox
-  backend, or major process;
-- move a responsibility across package or process boundaries;
-- change a cross-cutting invariant in §3;
-- change the control/data-flow shape in §4 or the session/turn/attempt spine in
-  §5; or
-- change the canonical source or topic doc for a row in §13.
-
-Use [`README.md`](README.md) for the docs map. Put feature mechanics and rollout
-details in focused docs. Keep this orientation concise: state each invariant,
-its purpose, and its canonical source; remove stale material.
+Update this map in the same change as application, package, example, provider,
+process, ownership, invariant (§3), flow (§4), lifecycle (§5), or canonical-source
+(§13) changes. State invariants, purpose, and ownership here; put mechanics and
+rollout details in focused docs indexed by [`README.md`](README.md).
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
 
