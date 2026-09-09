@@ -112,12 +112,12 @@ Use separate workspaces when groups need different workspace resources or integr
 
 Set the handler's `format` when your product already has a text-chat client:
 
-| `format`             | Client protocol                                           |
-| -------------------- | --------------------------------------------------------- |
-| `"native"` (default) | A custom client consuming OpenGeni chat chunks |
-| `"vercel"`           | Vercel AI SDK UI message stream                           |
-| `"openai-chat"`      | OpenAI Chat Completions-shaped requests and responses     |
-| `"openai-responses"` | OpenAI Responses-shaped requests and responses            |
+| `format`             | Client protocol                                       |
+| -------------------- | ----------------------------------------------------- |
+| `"native"` (default) | A custom client consuming OpenGeni chat chunks        |
+| `"vercel"`           | Vercel AI SDK UI message stream                       |
+| `"openai-chat"`      | OpenAI Chat Completions-shaped requests and responses |
+| `"openai-responses"` | OpenAI Responses-shaped requests and responses        |
 
 The Vercel and OpenAI adapters send the latest user message and import earlier text messages from that request as context only when creating the conversation. After that, OpenGeni owns the history. These are text-chat adapters, not replacements for every feature of those APIs; execution and approval handling remain OpenGeni's. The history and `/respond` routes keep their native JSON and SSE contracts regardless of `format`.
 

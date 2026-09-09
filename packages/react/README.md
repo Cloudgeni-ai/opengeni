@@ -28,10 +28,8 @@ animation. Override the tokens to rebrand everything.
 
 Use `SessionConversation` for an existing session, or compose `MessageTimeline`
 and `ChatComposer` with the session hooks. These use the normal SDK through
-your authenticated host routes. They do not consume the simplified
-`createChatHandler` protocol. The separate `@opengeni/react/chat` export has
-been removed; the backend `@opengeni/sdk/chat` adapters remain available for
-custom or compatible frontends.
+your authenticated host routes. For custom or compatible frontends, the backend
+`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
 
 ## Editable Office artifacts
 
