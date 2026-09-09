@@ -1,40 +1,28 @@
 import type { TimelineAnnotationSource } from "@opengeni/sdk";
+import { XIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import type { TimelineAnnotationLike } from "./timeline-annotations";
+import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import {
+  AnnotationAccentRow,
+  AnnotationNoteField,
+  AnnotationNotePreview,
+  AnnotationQuoteSourceButton,
+  type TimelineAnnotationLike,
+} from "./timeline-annotation-chrome";
+import {
+  ANNOTATION_REVIEW_DIALOG_WIDTH_PX,
+  clampAnnotationDialogPlacement,
+  scrollAnnotationRowIntoList,
+} from "./timeline-annotation-layout";
+import { annotationDisplayOrdinal, cssEscapeAttribute } from "./timeline-annotation-shared";
 
-function cssEscapeAttribute(value: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function revealLoadedSource(source: TimelineAnnotationSource): boolean {
-  if (typeof document === "undefined") return false;
-  const element = document.querySelector(
-    `[data-og-annotation-source-key="${cssEscapeAttribute(source.eventId)}"]`,
-  );
-  if (!(element instanceof HTMLElement)) return false;
-  element.scrollIntoView({ block: "center", behavior: "smooth" });
-  element.animate?.(
-    [
-      { outline: "2px solid color-mix(in srgb, currentColor 55%, transparent)" },
-      { outline: "2px solid transparent" },
-    ],
-    { duration: 1600, easing: "ease-out" },
-  );
-  return true;
-}
-
-function sourceLabel(annotation: TimelineAnnotationLike): string {
-  if (annotation.source.label) return annotation.source.label;
-  switch (annotation.source.kind) {
-    case "user_message":
-      return "User message";
-    case "assistant_message":
-      return "Assistant message";
-    case "tool_output":
-      return "Tool output";
-  }
+function focusableElements(root: HTMLElement): HTMLElement[] {
+  return [
+    ...root.querySelectorAll<HTMLElement>(
+      'button:not([disabled]),textarea:not([disabled]),input:not([disabled]),[href],[tabindex]:not([tabindex="-1"])',
+    ),
+  ].filter((element) => element.tabIndex >= 0 && !element.closest("[inert]"));
 }
 
 export function TimelineAnnotationsDialog({
@@ -61,31 +49,90 @@ export function TimelineAnnotationsDialog({
   onDismiss: (restoreFocus: boolean) => void;
 }) {
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
-  const [position, setPosition] = useState({ left: 12, top: 12, above: false });
+  const [position, setPosition] = useState({ left: 12, top: 12, maxHeight: 0 });
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const noteRefs = useRef(new Map<string, HTMLTextAreaElement>());
+  const portalStyle = usePortalTokenStyle(triggerRef.current);
+  const revealNote = (id: string) => {
+    const row = listRef.current?.querySelector<HTMLElement>(
+      `[data-og-annotation-id="${cssEscapeAttribute(id)}"]`,
+    );
+    scrollAnnotationRowIntoList(listRef.current, row);
+    noteRefs.current.get(id)?.focus();
+  };
+
+  const commitNotes = (fromId: string) => {
+    const incomplete = annotations.filter((annotation) => {
+      const live = noteRefs.current.get(annotation.id);
+      return (live?.value ?? annotation.note).trim().length === 0;
+    });
+    if (incomplete.length === 0) {
+      onDismiss(true);
+      return;
+    }
+    const fromIndex = annotations.findIndex((annotation) => annotation.id === fromId);
+    const next =
+      incomplete.find(
+        (item) => annotations.findIndex((annotation) => annotation.id === item.id) > fromIndex,
+      ) ?? incomplete[0]!;
+    revealNote(next.id);
+  };
 
   useLayoutEffect(() => {
-    if (!focusAnnotationId) return;
-    const note = noteRefs.current.get(focusAnnotationId);
-    note?.focus();
-    if (note && document.activeElement === note) onFocusConsumed?.();
-  }, [focusAnnotationId, onFocusConsumed]);
-
-  useEffect(() => {
     const updatePosition = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const panelWidth = Math.min(400, window.innerWidth - 24);
-      const left = Math.min(
-        Math.max(12, rect.left),
-        Math.max(12, window.innerWidth - panelWidth - 12),
+      const contentHeight =
+        (headerRef.current?.offsetHeight ?? 44) + (listRef.current?.scrollHeight ?? 200);
+      setPosition(
+        clampAnnotationDialogPlacement({
+          triggerLeft: rect.left,
+          triggerTop: rect.top,
+          triggerBottom: rect.bottom,
+          contentHeight,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          panelWidth: ANNOTATION_REVIEW_DIALOG_WIDTH_PX,
+        }),
       );
-      const above = rect.top > Math.min(360, window.innerHeight * 0.55);
-      setPosition({ left, top: above ? rect.top - 8 : rect.bottom + 8, above });
     };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [annotations, triggerRef]);
+
+  useLayoutEffect(() => {
+    if (!focusAnnotationId || position.maxHeight <= 0) return;
+    revealNote(focusAnnotationId);
+    const note = noteRefs.current.get(focusAnnotationId);
+    if (note && document.activeElement === note) onFocusConsumed?.();
+  }, [focusAnnotationId, onFocusConsumed, annotations.length, position.maxHeight]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onDismiss(true);
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onDismiss(true);
+        return;
+      }
+      if (event.key !== "Tab" || !panelRef.current) return;
+      const focusable = focusableElements(panelRef.current);
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     const onPointerDown = (event: PointerEvent) => {
       if (!(event.target instanceof Node)) return;
@@ -94,9 +141,6 @@ export function TimelineAnnotationsDialog({
       }
       onDismiss(false);
     };
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("pointerdown", onPointerDown);
     if (!focusAnnotationId) {
@@ -105,8 +149,6 @@ export function TimelineAnnotationsDialog({
       }, 0);
     }
     return () => {
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("pointerdown", onPointerDown);
     };
@@ -118,92 +160,94 @@ export function TimelineAnnotationsDialog({
       ref={panelRef}
       role="dialog"
       tabIndex={-1}
+      data-og-annotation-review=""
       style={{
         left: position.left,
         top: position.top,
-        transform: position.above ? "translateY(-100%)" : undefined,
+        maxHeight: position.maxHeight,
+        ...portalStyle,
       }}
-      className="og-root fixed z-[75] box-border max-h-[min(32rem,70vh)] w-[min(25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-og-lg border border-og-border bg-og-surface-1 p-3 text-og-fg shadow-xl outline-hidden"
-      aria-label={editable ? "Review timeline annotations" : "Timeline annotations"}
+      className="og-root fixed z-[75] box-border flex w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg shadow-xl outline-hidden"
+      aria-label={editable ? "Edit quoted notes" : "Quoted notes"}
     >
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <p className="text-og-sm font-semibold">{countLabel}</p>
-          <p className="text-og-xs text-og-fg-subtle">
-            {editable ? "Add a note for each quoted source." : "Sent with this message."}
-          </p>
-        </div>
+      <div
+        ref={headerRef}
+        data-og-annotation-review-header=""
+        className="flex shrink-0 items-start justify-between gap-3 px-3 pt-3 pb-2"
+      >
+        <p className="min-w-0 pt-0.5 text-og-sm font-medium text-og-fg-muted">{countLabel}</p>
         <button
           type="button"
-          className="rounded-md border-0 bg-transparent px-2 py-1 text-og-xs text-og-fg outline-hidden hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
+          className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-muted outline-hidden hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
+          aria-label="Close"
           onClick={() => onDismiss(true)}
         >
-          Close
+          <XIcon className="size-3.5" aria-hidden="true" />
         </button>
       </div>
-      <div className="grid gap-2.5">
-        {annotations.map((annotation, index) => (
-          <section
-            key={annotation.id}
-            className="rounded-og-md border border-og-border bg-og-surface-2/60 p-2.5"
-            aria-label={`Annotation ${index + 1}`}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <button
-                type="button"
-                className="truncate rounded border-0 bg-transparent text-left text-og-xs font-medium text-og-fg-muted underline-offset-2 outline-hidden hover:text-og-fg hover:underline focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
-                onClick={() => {
-                  const revealed =
-                    onRevealSource?.(annotation.source) ?? revealLoadedSource(annotation.source);
-                  setUnavailableId(revealed ? null : annotation.id);
-                }}
-              >
-                {sourceLabel(annotation)} · view source
-              </button>
-              {editable && onRemove ? (
-                <button
-                  type="button"
-                  className="shrink-0 rounded border-0 bg-transparent p-1 text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-[44px]"
-                  aria-label={`Remove annotation ${index + 1}`}
-                  onClick={() => onRemove(annotation.id)}
-                >
-                  <span aria-hidden="true" className="text-og-md leading-none">
-                    ×
-                  </span>
-                </button>
-              ) : null}
-            </div>
-            {unavailableId === annotation.id ? (
-              <p role="status" className="mt-1 text-og-xs text-og-status-waiting">
-                Source is outside the loaded timeline window.
-              </p>
-            ) : null}
-            <blockquote className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap border-l-2 border-og-border pl-2 text-og-sm leading-5 text-og-fg-muted">
-              {annotation.quote}
-            </blockquote>
-            {editable && onUpdate ? (
-              <label className="mt-2 block text-og-xs font-medium text-og-fg-muted">
-                Note
-                <textarea
-                  ref={(node) => {
-                    if (node) noteRefs.current.set(annotation.id, node);
-                    else noteRefs.current.delete(annotation.id);
-                  }}
-                  value={annotation.note}
-                  rows={2}
-                  maxLength={2048}
-                  placeholder="What should the agent do with this?"
-                  className="mt-1 w-full resize-y rounded-og-sm border border-og-border bg-og-surface-1 px-2.5 py-2 text-og-sm leading-5 text-og-fg outline-hidden placeholder:text-og-fg-subtle focus:border-og-accent focus:ring-1 focus:ring-og-accent"
-                  onInput={(event) => onUpdate(annotation.id, event.currentTarget.value)}
-                />
-              </label>
-            ) : annotation.note ? (
-              <p className="mt-2 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
-                {annotation.note}
-              </p>
-            ) : null}
-          </section>
-        ))}
+      <div
+        ref={listRef}
+        data-og-annotation-review-list=""
+        className="grid min-h-0 flex-1 gap-2.5 overflow-x-hidden overflow-y-auto overscroll-contain px-3 pb-3"
+      >
+        {annotations.map((annotation, index) => {
+          const ordinal = annotationDisplayOrdinal(annotation, index);
+          return (
+            <section
+              key={annotation.id}
+              data-og-annotation-id={annotation.id}
+              aria-label={`Annotation ${ordinal}`}
+            >
+              <AnnotationAccentRow>
+                <div className="flex items-start gap-1">
+                  <div className="min-w-0 flex-1">
+                    <p className="mb-0.5 text-og-xs font-medium tabular-nums text-og-fg-subtle">
+                      Annotation {ordinal}
+                    </p>
+                    <AnnotationQuoteSourceButton
+                      annotation={annotation}
+                      lines={2}
+                      onRevealSource={onRevealSource}
+                      onUnavailable={setUnavailableId}
+                    />
+                  </div>
+                  {editable && onRemove ? (
+                    <button
+                      type="button"
+                      className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
+                      aria-label={`Remove annotation ${ordinal}`}
+                      onClick={() => onRemove(annotation.id)}
+                    >
+                      <XIcon className="size-3.5" aria-hidden="true" />
+                    </button>
+                  ) : null}
+                </div>
+                {unavailableId === annotation.id ? (
+                  <p role="status" className="text-og-xs text-og-status-waiting">
+                    Source is outside the loaded timeline window.
+                  </p>
+                ) : null}
+                {editable && onUpdate ? (
+                  <AnnotationNoteField
+                    annotation={annotation}
+                    inputRef={(node) => {
+                      if (node) noteRefs.current.set(annotation.id, node);
+                      else noteRefs.current.delete(annotation.id);
+                    }}
+                    onUpdate={onUpdate}
+                    onCommit={() => commitNotes(annotation.id)}
+                  />
+                ) : (
+                  <AnnotationNotePreview
+                    note={annotation.note}
+                    annotationId={annotation.id}
+                    ordinal={ordinal}
+                  />
+                )}
+              </AnnotationAccentRow>
+            </section>
+          );
+        })}
       </div>
     </div>,
     document.body,
