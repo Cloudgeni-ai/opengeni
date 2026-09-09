@@ -28,7 +28,7 @@ const catalog: AttemptToolCatalog = {
 };
 
 describe("local Site Codemode handler", () => {
-  test("rejects configuration and control session routes before they leave the preview host", async () => {
+  test("forwards configuration and control routes for normal API authorization", async () => {
     const forwarded: string[] = [];
     const client = new CodemodeClient({
       baseUrl: "http://upstream.test",
@@ -53,15 +53,15 @@ describe("local Site Codemode handler", () => {
           ...(method === "GET" ? {} : { body: "{}" }),
         }),
       );
-      expect(response.status).toBeGreaterThanOrEqual(400);
-      expect(await response.text()).toContain("Unsupported Site session API path");
+      expect(response.status).toBe(200);
+      expect(forwarded.at(-1)).toBe(`http://upstream.test/sdk${path}`);
     }
-    expect(forwarded).toEqual([]);
+    expect(forwarded).toHaveLength(6);
     const allowed = await handler(
       new Request("http://localhost/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions"),
     );
     expect(allowed.status).toBe(200);
-    expect(forwarded).toEqual(["http://upstream.test/sdk/v1/workspaces/site-host/sessions"]);
+    expect(forwarded.at(-1)).toBe("http://upstream.test/sdk/v1/workspaces/site-host/sessions");
   });
 
   test("SDK event streams deliver before completion and retain cancellation", async () => {

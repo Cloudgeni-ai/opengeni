@@ -414,8 +414,8 @@ export class CodemodeClient {
   }
 
   /** Server-side Site preview forwarding. The attempt bearer never enters the
-   * page. The API re-checks the same allowlist; rejecting here keeps a denied
-   * configuration/control route from ever leaving the preview host. */
+   * page. Validate tenant routing here; ordinary API handlers authorize the
+   * operation under the existing agent proxy permission ceiling. */
   async sessionRequest(path: string, init: RequestInit): Promise<Response> {
     siteSessionPath(path, "site-host", init.method ?? "GET");
     return this.request(`/sdk${path}`, init, false);

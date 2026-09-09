@@ -595,20 +595,19 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
     expect(create.status).toBe(403);
   });
 
-  test("configuration and control routes do not exist behind the proxy at all", async () => {
+  test("configuration and control routes retain normal permission checks behind the proxy", async () => {
     if (!available) return;
     const grant = await fixture();
     const app = fullApp();
-    const attempt = await seedRunningAttempt(grant, ["set_session_title", "sessions_list"]);
+    const attempt = await seedRunningAttempt(grant, ["sessions_list"]);
     const authorization = await codemodeBearer(grant, attempt);
     for (const [method, suffix] of [
       ["PUT", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/tool-policy`],
-      ["PUT", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/visibility`],
-      ["POST", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/forks`],
       ["POST", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/steer`],
       ["POST", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/control`],
-      ["GET", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/goal`],
+      ["PATCH", `/v1/workspaces/site-host/sessions/${attempt.sessionId}/goal`],
       ["GET", "/v1/workspaces/site-host/api-keys"],
+      ["DELETE", "/v1/workspaces/site-host"],
     ] as const) {
       const response = await app.request(
         `/v1/workspaces/${grant.workspaceId}/codemode/sdk${suffix}`,
@@ -618,8 +617,8 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
           ...(method === "GET" ? {} : { body: "{}" }),
         },
       );
-      expect(response.status).toBe(404);
-      expect(await response.text()).toContain("Unsupported Site session API path");
+      expect(response.status).toBe(403);
+      expect(await response.text()).not.toContain("Unsupported Site session API path");
     }
     const session = await getSession(client.db, grant.workspaceId, attempt.sessionId);
     expect(session?.toolPolicyVersion ?? 1).toBe(1);

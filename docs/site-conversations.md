@@ -43,7 +43,11 @@ gateway uses the same scope. Concurrent requests remain isolated, including
 the in-memory MCP transport. Caller-provided origin metadata is discarded.
 Historical versions remain valid provenance after publication/archive so normal
 response-loss retries are not broken by a mutable current-version check.
-Tool allowlists, authorization and ordinary approval rules are unchanged.
+The Site SDK has no workspace endpoint or HTTP-method allowlist. The host binds
+requests to its workspace and rejects unsafe URL paths; ordinary API handlers
+authorize operations as the viewer. Sandbox previews use the same routing with
+the agent's existing proxy permission ceiling, not viewer credentials.
+Integration-tool allowlists and ordinary approval rules remain separate and unchanged.
 
 ## Agent defaults
 

@@ -116,7 +116,13 @@ Last-owner direct, Pack, and plugin removal resolves the canonical head atomical
 with distribution cleanup through `skill-source-release.ts`. Source-managed
 workspace heads deactivate through the existing human registry lifecycle;
 customized or re-scoped heads remain active and return an explicit preservation
-warning. Immutable source bindings and history survive uninstall. Physical owners,
+warning. Immutable source bindings and history survive uninstall. Deleting the
+owning workspace instead removes its workspace-owned Skills, revisions/events,
+bindings, and write/conversion receipts through the parent cascade. Organization,
+personal, and other-workspace Skills are unaffected. Direct history deletion
+remains forbidden; corrupt cross-scope references cause atomic failure rather
+than removal of surviving history. Existing workspace-deletion eligibility and
+authorization checks still apply. Physical owners,
 including pending Pack owners, prevent cleanup even when not runtime-effective.
 The removal and upgrade-finalization APIs accept `skillActor`; removing a bound
 Skill requires a trusted `human_session` actor. Missing, service/API-key, and agent

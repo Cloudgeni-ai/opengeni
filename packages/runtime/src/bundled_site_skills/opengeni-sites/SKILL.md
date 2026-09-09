@@ -64,8 +64,9 @@ exception, use the image's `ogtool` directly: it is built from the same checkout
 
 For a tool-using local preview, add a small Bun host which serves the HTML and
 mounts `createCodemodeSiteRequestHandler()` at
-`/__opengeni/site-tools/*`. The handler reads the existing attempt Codemode
-environment and keeps its bearer server-side. Site code continues to call only
+`/__opengeni/site-tools/*`. Authentication is automatic: the Bun handler reads
+the existing Codemode environment. Do not copy credentials into Site code.
+Site code continues to call only
 `createOpenGeniSiteClient()`; it automatically uses this same-origin endpoint
 in a top-level preview and the parent `MessagePort` when published.
 
@@ -200,7 +201,8 @@ Session creation, history, live events,
 composer drafts, Send/Steer and queue/control use this client. The same local
 Bun handler above forwards them using the agent's current Codemode token;
 published Sites use the viewing user's host auth. Agent authority remains
-agent authority: testing cannot approve on a human's behalf. Test a real Send
+agent authority: testing cannot approve on a human's behalf. Where preview access
+permits, test a real Send
 and streamed reply, not just a successful page load. Also pause, queue two
 messages, edit/delete a queued message, and resume; verify pending messages
 remain visible and are not duplicated in the timeline.
@@ -215,6 +217,36 @@ The generated tool declarations make exact tool paths typed during authoring.
 The runtime proxy resolves those paths to opaque `{serverId, toolName}`
 identities. Friendly names are never authority.
 
+## Authoring, preview, and viewer access
+
+Your authoring session's tools let you build, inspect, and publish the Site;
+they do not define what a human viewer may do in the published app. A conversation
+started inside the Site is a separate agent session with its own tool access.
+
+There are two client surfaces:
+
+- `site.tools.*` calls workspace tools. Published direct calls must appear in
+  `requestedTools` and are checked against the viewer's live tool access.
+  Preview calls use your attempt's available tool catalog.
+- `site.client.*` calls the ordinary OpenGeni REST SDK, including the React
+  conversation components. These calls are not entries in `requestedTools`.
+  Published calls use the viewer's authorization; sandbox previews use your
+  agent proxy's narrower permissions. The preview currently supports workspace
+  read and session read/create/control only when your session's permissions and
+  enabled tools admit them. Other SDK operations can be valid for a viewer even
+  when you cannot execute them in the sandbox. Neither path grants an embedded
+  agent the viewer's unrestricted authority.
+
+When a requested feature cannot be live-tested because preview authority is
+insufficient, keep the feature and test its build, UI, request construction,
+and error handling where possible. Publish if you have publishing access;
+state which live operation remains unverified and how the user can test it in
+the published Site. Do not claim it works for the viewer until verified, remove
+it merely to satisfy preview restrictions, or substitute mock success for a
+live result. Distinguish permission failures from broken code, invalid requests,
+and service errors; fix actual defects rather than treating every failure as an
+access limitation. Missing publishing access itself still blocks publication.
+
 ## Request the smallest tool set
 
 1. Find relevant tools with `bun run ogtool list --query <keyword> --limit 10`, then
@@ -223,8 +255,9 @@ identities. Friendly names are never authority.
    `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
    identity in the Site's `requestedTools` publish field.
-3. Do not request tools the Site does not call. A Site with no direct workspace
-   operations should publish `requestedTools: []`.
+3. Do not request tools the Site does not call. A Site using only `site.client`
+   SDK operations, with no direct `site.tools` calls, should publish
+   `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
    no tool authority and requires no separate tool approval. Site calls do not open
    per-call approval dialogs.
@@ -277,10 +310,9 @@ immutable versions and retained source. There is no hard-delete workflow.
 - The compiled runtime is one self-contained HTML document within the published
   size limit.
 - Desktop and mobile interactions were exercised in the sandbox-local preview.
-- Exercise live workspace tools locally through `/__opengeni/site-tools/*` with
-  the attempt's existing Codemode authority. This validates the Site's actual
-  application logic and integration calls without knowing whether it runs in a
-  local preview or the hosted iframe.
+- Exercise live tools and SDK operations locally through `/__opengeni/site-tools/*`
+  wherever the attempt's Codemode authority permits. Report remaining
+  viewer-only checks explicitly; those do not by themselves block publication.
 - The authenticated parent-frame wrapper exists only in the hosted product.
   Do not build a synthetic parent-frame harness in the sandbox. After local
   validation and publication, use the returned Site link for the hosted check.

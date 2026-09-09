@@ -29,6 +29,10 @@ import {
   finalizePackInstallationOperation,
   preparePluginPackageInstall,
   finalizePluginPackageInstall,
+  deleteWorkspace,
+  deleteWorkspaceIfQuiescent,
+  createWorkspace,
+  withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -966,6 +970,305 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       saveSkill(client.db, { ...f.input, ...f.agent, operationId: crypto.randomUUID() }),
     ).rejects.toThrow();
   });
+  test("workspace deletion removes owned Skill history and preserves other scopes", async () => {
+    if (!client) return;
+    async function workspace() {
+      const key = crypto.randomUUID();
+      const subjectId = `user:cascade-${key}`;
+      const grant = (
+        await bootstrapWorkspace(client!.db, {
+          accountExternalSource: "test",
+          accountExternalId: key,
+          accountName: "Cascade test",
+          workspaceExternalSource: "test",
+          workspaceExternalId: key,
+          workspaceName: "Cascade test",
+          subjectId,
+        })
+      ).workspaceGrants[0]!;
+      return {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor: { kind: "human", subjectId, principalKind: "human_session" } as const,
+      };
+    }
+    const human = await workspace();
+    const other = await workspace();
+    const content = skillMarkdown("Portable deletion fixture");
+    const digest = createHash("sha256").update(content).digest("hex");
+    const installed = await installPortableSkill(client.db, {
+      ...human,
+      subjectId: human.actor.subjectId,
+      skillActor: human.actor,
+      capabilityId: `skill:${human.workspaceId}`,
+      pluginKey: `skill/test/${human.workspaceId}`,
+      source: "github",
+      sourceUrl: "https://example.test/skills",
+      repositoryUrl: "https://example.test/repo",
+      sourceCommit: "a".repeat(40),
+      sourcePath: "skill",
+      name: "test-skill",
+      description: "Test Skill folder",
+      contentSha256: digest,
+      totalBytes: Buffer.byteLength(content),
+      files: [
+        { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: digest },
+      ],
+    });
+    const customized = await saveSkill(client.db, {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: installed.skillReceipt.skillId,
+      expectedRevisionId: installed.skillReceipt.revisionId,
+      expectedScopeVersion: 1,
+      stableKey: `installed-${installed.skillReceipt.skillId.replaceAll("-", "")}`,
+      files: [{ path: "SKILL.md", content: skillMarkdown("Customized portable fixture") }],
+      reason: "Customize",
+    });
+    const restored = await restoreSkill(client.db, {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: customized.skillId,
+      revisionId: installed.skillReceipt.revisionId!,
+      expectedRevisionId: customized.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Restore original",
+    });
+    expect(restored.outcome).toBe("applied");
+    const authored = await saveSkill(client.db, {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      stableKey: "authored-deleted",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      files: [{ path: "SKILL.md", content }],
+      reason: "Authored workspace Skill",
+    });
+    const organization = await saveSkill(client.db, {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      stableKey: "org-retained",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      scope: "organization",
+      files: [{ path: "SKILL.md", content }],
+      reason: "Organization retention control",
+    });
+    const personal = await saveSkill(client.db, {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      stableKey: "user-retained",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      scope: "user",
+      files: [{ path: "SKILL.md", content }],
+      reason: "Personal retention control",
+    });
+    const sibling = await saveSkill(client.db, {
+      ...other,
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      stableKey: "other-workspace",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      files: [{ path: "SKILL.md", content }],
+      reason: "Other workspace retention control",
+    });
+    for (const table of [
+      "preference_registry_preferences",
+      "preference_registry_revisions",
+      "preference_registry_events",
+      "skill_write_receipts",
+    ]) {
+      await expect(
+        shared!.admin.begin(async (tx) => {
+          if (table === "preference_registry_preferences")
+            await tx`DELETE FROM preference_registry_preferences WHERE id=${restored.skillId}`;
+          else if (table === "skill_write_receipts")
+            await tx`DELETE FROM skill_write_receipts WHERE workspace_id=${human.workspaceId}`;
+          else await tx.unsafe(`DELETE FROM ${table} WHERE preference_id=$1`, [restored.skillId]);
+        }),
+      ).rejects.toThrow();
+    }
+    const runtime = postgres(shared!.appUrl, { max: 1 });
+    try {
+      const [access] =
+        await runtime`SELECT has_function_privilege(current_user, ${"opengeni_private.guard_workspace_owned_skill_head_delete()"}, 'EXECUTE') AS allowed`;
+      expect(access!.allowed).toBe(false);
+      await expect(runtime`DELETE FROM preference_registry_preferences`.execute()).rejects.toThrow(
+        "permission denied",
+      );
+    } finally {
+      await runtime.end();
+    }
+    const [instruction] = await shared!
+      .admin`SELECT pg_get_functiondef('workspace_instruction_policy_reject_mutation()'::regprocedure) AS definition`;
+    expect(instruction!.definition).toContain("workspace instruction-policy history is immutable");
+    await expect(
+      shared!.admin.begin(async (tx) => {
+        await tx`INSERT INTO preference_registry_events(
+          account_id, preference_id, type, version, old_revision_id, related_preference_id, actor_subject_id, reason)
+          VALUES (${human.accountId}, ${organization.skillId}, 'superseded', 3, ${organization.revisionId},
+            ${sibling.skillId}, ${human.actor.subjectId}, 'Cross-account related Skill')`;
+      }),
+    ).rejects.toThrow();
+    await expect(
+      shared!.admin.begin(async (tx) => {
+        const [orgHead] =
+          await tx`SELECT active_revision_id FROM preference_registry_preferences WHERE id=${organization.skillId}`;
+        await tx`SELECT set_config('opengeni.preference_lifecycle_head_id', ${organization.skillId}, true),
+          set_config('opengeni.preference_lifecycle_operation', 'supersede', true)`;
+        await tx`UPDATE preference_registry_preferences
+          SET status='superseded', superseded_by_preference_id=${restored.skillId}, updated_at=now()
+          WHERE id=${organization.skillId}`;
+        await tx`INSERT INTO preference_registry_events(
+          account_id, preference_id, type, version, old_revision_id, related_preference_id, actor_subject_id, reason)
+          VALUES (${human.accountId}, ${organization.skillId}, 'superseded', 3, ${orgHead!.active_revision_id},
+            ${restored.skillId}, ${human.actor.subjectId}, 'Retain workspace Skill through surviving org audit')`;
+        await tx`DELETE FROM workspaces WHERE id=${human.workspaceId}`;
+      }),
+    ).rejects.toThrow();
+    expect(
+      await shared!.admin`SELECT id FROM workspaces WHERE id=${human.workspaceId}`,
+    ).toHaveLength(1);
+    await expectDatabaseGuard(
+      withWorkspaceRls(client.db, other.workspaceId, (tx) =>
+        deleteWorkspace(tx, human.workspaceId),
+      ),
+      "tenant context mismatch",
+    );
+    expect((await readSkill(client.db, human, restored.skillId))?.revisionId).toBe(
+      restored.revisionId,
+    );
+    const [rejectHistory] = await shared!
+      .admin`SELECT pg_get_functiondef('preference_registry_reject_history_mutation()'::regprocedure) AS definition`;
+    expect(rejectHistory!.definition).toContain("preference registry history is immutable");
+    expect(rejectHistory!.definition).not.toContain("pg_trigger_depth");
+    const [historyGuard] = await shared!
+      .admin`SELECT pg_get_functiondef('opengeni_private.guard_workspace_owned_skill_history_delete()'::regprocedure) AS definition`;
+    expect(historyGuard!.definition).toContain("pg_trigger_depth");
+    const snapshotSessionId = crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const descriptors = "[]";
+    const descriptorHash = createHash("sha256").update(descriptors).digest("hex");
+    const configSourceId = crypto.randomUUID();
+    await shared!.admin.begin(async (sql) => {
+      await sql`select set_config('opengeni.session_inference_claim','1',true)`;
+      await sql`select set_config('opengeni.session_activity_gate_state','open',true)`;
+      await sql`select set_config('opengeni.session_activity_gate_workspace_id',${human.workspaceId},true)`;
+      await sql`ALTER TABLE sessions DISABLE TRIGGER USER`;
+      await sql`ALTER TABLE session_turns DISABLE TRIGGER USER`;
+      await sql`ALTER TABLE session_turn_attempts DISABLE TRIGGER USER`;
+      await sql`ALTER TABLE preference_registry_snapshots DISABLE TRIGGER USER`;
+      await sql`insert into sessions(id,account_id,workspace_id,status,initial_message,created_by_kind,created_by_subject_id,model,reasoning_effort,latency_mode,sandbox_backend,sandbox_group_id,tool_policy,root_session_id,nested_agent_depth,effective_max_nested_agent_depth,nested_agent_depth_policy_source)
+        values(${snapshotSessionId},${human.accountId},${human.workspaceId},'idle','snapshot retention','subject',${human.actor.subjectId},'test-model','medium','standard','none',${snapshotSessionId},${sql.json({ mode: "explicit", inheritedFromSessionId: null })},${snapshotSessionId},0,1,'default')`;
+      await sql`insert into session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
+        status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
+        initiator_kind,initiator_subject_id,initiator_context,initiating_human_subject_id)
+        values(${turnId},${human.accountId},${human.workspaceId},${snapshotSessionId},${crypto.randomUUID()},${turnId},
+          'running','user',1,'test','test-model','medium','none',1,'subject',${human.actor.subjectId},'{}',${human.actor.subjectId})`;
+      await sql`insert into session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
+        temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies,authority_epoch,authority_visibility)
+        values(${attemptId},${human.accountId},${human.workspaceId},${snapshotSessionId},${turnId},1,'running',
+          ${turnId},${attemptId},${attemptId},0,'{}',1,'workspace_shared')`;
+      await sql`INSERT INTO preference_registry_snapshots(
+        account_id,workspace_id,session_id,turn_id,attempt_id,execution_generation,initiating_human_subject_id,descriptors,descriptor_hash)
+        VALUES(${human.accountId},${human.workspaceId},${snapshotSessionId},${turnId},${attemptId},1,${human.actor.subjectId},${sql.json([])},${descriptorHash})`;
+      await sql`INSERT INTO skill_config_conversion_receipts(account_id,workspace_id,source_kind,source_id,original_configuration,original_hash,replacement_hash)
+        VALUES(${human.accountId},${human.workspaceId},'session',${configSourceId},'[]',${createHash("sha256").update("[]").digest("hex")},${createHash("sha256").update("[]").digest("hex")})`;
+    });
+    await shared!.admin`ALTER TABLE preference_registry_snapshots ENABLE TRIGGER USER`;
+    await shared!.admin`ALTER TABLE session_turn_attempts ENABLE TRIGGER USER`;
+    await shared!.admin`ALTER TABLE session_turns ENABLE TRIGGER USER`;
+    await shared!.admin`ALTER TABLE sessions ENABLE TRIGGER USER`;
+    await expect(
+      shared!
+        .admin`DELETE FROM preference_registry_snapshots WHERE workspace_id=${human.workspaceId}`.execute(),
+    ).rejects.toThrow("immutable");
+    await expect(
+      shared!
+        .admin`DELETE FROM skill_config_conversion_receipts WHERE workspace_id=${human.workspaceId}`.execute(),
+    ).rejects.toThrow("immutable");
+    await shared!
+      .admin`update sessions set status='idle', active_turn_id=null where id=${snapshotSessionId}`;
+    await shared!
+      .admin`update session_turn_attempts set state='closed', outcome='completed', closed_at=now() where id=${attemptId}`;
+    expect(
+      await deleteWorkspaceIfQuiescent(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+      }),
+    ).toEqual({ status: "only_workspace" });
+    const keeper = await createWorkspace(client.db, {
+      accountId: human.accountId,
+      name: "Skill deletion keeper",
+    });
+    const authorized = deleteWorkspaceIfQuiescent(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.workspaceId,
+    });
+    const raced = await Promise.allSettled([
+      authorized,
+      deleteWorkspaceIfQuiescent(client.db, {
+        accountId: human.accountId,
+        workspaceId: human.workspaceId,
+      }),
+    ]);
+    const authorizedResults = raced.map((result) =>
+      result.status === "fulfilled" ? result.value.status : result.reason,
+    );
+    expect(authorizedResults).toEqual(expect.arrayContaining(["deleted"]));
+    expect(
+      authorizedResults.every((status) => status === "deleted" || status === "not_found"),
+    ).toBe(true);
+    expect(
+      await shared!.admin`SELECT id FROM workspaces WHERE id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(await shared!.admin`SELECT id FROM workspaces WHERE id=${keeper.id}`).toHaveLength(1);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_preferences WHERE id IN (${restored.skillId}, ${authored.skillId})`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_revisions WHERE preference_id IN (${restored.skillId}, ${authored.skillId})`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_events WHERE preference_id IN (${restored.skillId}, ${authored.skillId})`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT operation_id FROM skill_write_receipts WHERE workspace_id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT preference_id FROM skill_source_bindings WHERE workspace_id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_snapshots WHERE workspace_id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT source_id FROM skill_config_conversion_receipts WHERE workspace_id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_preferences WHERE id=${sibling.skillId}`,
+    ).toHaveLength(1);
+    const surviving = await shared!
+      .admin`SELECT id, active_revision_id FROM preference_registry_preferences
+      WHERE id IN (${organization.skillId}, ${personal.skillId}) ORDER BY id`;
+    expect(surviving).toHaveLength(2);
+    expect(surviving.map((row) => row.active_revision_id).sort()).toEqual(
+      [organization.revisionId, personal.revisionId].sort(),
+    );
+  }, 30_000);
   test("concurrent writers have one CAS winner and runtime cannot directly mutate receipts", async () => {
     if (!client) return;
     const f = await fixture("automatic");
