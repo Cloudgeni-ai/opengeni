@@ -899,9 +899,12 @@ export function formatSse<T extends { sequence: number; type: string }>(
 ): string {
   const trustedId =
     Number.isSafeInteger(idSequence) && idSequence >= event.sequence ? idSequence : event.sequence;
+  // Legacy type strings may not be legal SSE field values. Keep the canonical
+  // event unchanged in JSON; only the transport dispatch name needs a fallback.
+  const dispatchType = /[\r\n]/u.test(event.type) ? "session.event.envelope_omitted" : event.type;
   return [
     `id: ${trustedId}`,
-    `event: ${event.type}`,
+    `event: ${dispatchType}`,
     `data: ${JSON.stringify(event)}`,
     "",
     "",
@@ -944,9 +947,6 @@ export function formatSessionEventSse(
 ): string {
   // Session content is not a diagnostic preview. Page replay and coalescing
   // bound accumulation without rewriting an individual durable event.
-  if (/[\r\n]/u.test(event.type)) {
-    throw new TypeError("Session event type cannot contain SSE line separators");
-  }
   return formatSse(event, coveredThrough);
 }
 

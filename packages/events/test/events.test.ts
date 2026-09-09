@@ -150,13 +150,22 @@ describe("SSE formatting", () => {
 });
 
 describe("session event transport envelopes", () => {
-  test("rejects invalid SSE event framing without rewriting message content", () => {
+  test("delivers malformed legacy types through safe SSE framing without rewriting content", () => {
     const invalid = {
       ...event(1, { text: "full message" }),
       type: "bad\nevent: forged",
     } as SessionEvent;
-    expect(() => formatSessionEventSse(invalid)).toThrow("line separators");
-    expect(invalid.payload).toEqual({ text: "full message" });
+    const frame = formatSessionEventSse(invalid);
+    expect(frame.split("\n")[1]).toBe("event: session.event.envelope_omitted");
+    expect(
+      JSON.parse(
+        frame
+          .split("\n")
+          .find((line) => line.startsWith("data: "))!
+          .slice(6),
+      ),
+    ).toEqual(invalid);
+    expect(formatSessionEventSse(event(2, { text: "next" }))).toStartWith("id: 2\n");
   });
   test("preserves a trusted retained receipt across bounded transports and content-free telemetry", async () => {
     const artifactId = "33333333-3333-4333-8333-333333333333";
