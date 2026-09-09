@@ -1,6 +1,6 @@
 # One Skill system
 
-Design specification · updated September 8, 2026.
+Design specification · updated September 9, 2026.
 
 Design-review baseline: `origin/main` at `d33ce73b54fb4656213790dc4b035e9bcafc9a41`.
 Implementation started from `cb97a3eb` on branch `feat/unified-skills`.
@@ -488,19 +488,21 @@ internal work tracking is maintained separately.
 Implementation is authorized by the subsequent user confirmation. UI convergence
 may land alongside writes; do not leave a second live editor until the end.
 
-## 8. Remaining decisions, not hidden assumptions
+## 8. Retention and remaining verification
 
-**Blocking retention decision:** a real PostgreSQL before/after probe confirms
-that migration 0429 prevents deletion of an installed-only workspace which was
-previously deletable (`23503`, registry workspace foreign key). The existing
-registry contract in `docs/preference-registry.md` intentionally retains history
-through restrictive deletion semantics. New source bindings and write receipts
-also retain workspace/source references, so changing one foreign key is not a
-fix. Proposed policy, awaiting user agreement: workspace deletion removes its
-workspace-owned Skills and history; organization/personal Skills are unaffected,
-and ordinary runtime history mutation remains forbidden. Do not relax retention
-or ship this migration before resolving that decision and testing the full
-deletion boundary.
+**Approved retention rule (September 9, 2026):** deleting a workspace deletes
+its workspace-owned Skills and their history. Organization/personal Skills and
+other workspaces' Skills remain untouched. History remains immutable while the
+workspace exists; approval of this rule does not authorize deletion of any live
+workspace or relax instruction-policy retention.
+
+The unified cutover must preserve workspace deletion for installed-only
+workspaces. Verification must cover authored and installed Skills, inactive
+proposals, revisions/events, source bindings, write and conversion receipts,
+and references from surviving scopes. Changing one foreign key is insufficient.
+Keep ordinary runtime history deletion forbidden and prove isolation through
+the real authorized workspace-deletion path. Implementation and verification
+of this boundary are required before shipping the migration.
 
 The shared schema, Learning write rules, text validation, save/publication
 concurrency, and source compatibility are specified above and implemented on the
