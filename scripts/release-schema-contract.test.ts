@@ -140,7 +140,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
     );
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0431_unified_skill_lifecycle.sql",
+      (migration) => migration.path === "0432_unified_skill_lifecycle.sql",
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -149,7 +149,7 @@ describe("release schema contract", () => {
         (sessionPersonalVariableSetContinuations ? 1 : 0) +
         (unifiedSkillLifecycle ? 1 : 0),
       latestMigration: unifiedSkillLifecycle
-        ? "0431_unified_skill_lifecycle.sql"
+        ? "0432_unified_skill_lifecycle.sql"
         : sessionPersonalVariableSetContinuations
           ? "0430_session_personal_variable_set_continuations.sql"
           : messageBoundarySessionForks
@@ -157,7 +157,7 @@ describe("release schema contract", () => {
             : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0431_unified_skill_lifecycle.sql",
+      path: "0432_unified_skill_lifecycle.sql",
       deploymentMode: "maintenance",
     });
     expect(
@@ -178,7 +178,7 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0431_unified_skill_lifecycle.sql",
+        (migration) => migration.path === "0432_unified_skill_lifecycle.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
@@ -278,7 +278,7 @@ describe("release schema contract", () => {
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0431_unified_skill_lifecycle.sql",
+      (migration) => migration.path === "0432_unified_skill_lifecycle.sql",
     );
     const scheduledInheritedToolAdmission = completeSourceContract.migrations.some(
       (migration) => migration.path === "0416_scheduled_inherited_tool_admission.sql",
@@ -775,7 +775,7 @@ describe("release schema contract", () => {
       "0425_feedback_submissions.sql",
       "0427_session_agent_access_scope.sql",
       "0428_scheduled_task_creator_policy.sql",
-      "0431_unified_skill_lifecycle.sql",
+      "0432_unified_skill_lifecycle.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -871,7 +871,7 @@ describe("release schema contract", () => {
     if (unifiedSkillLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0431_unified_skill_lifecycle.sql",
+        latestMigration: "0432_unified_skill_lifecycle.sql",
       };
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
@@ -961,7 +961,7 @@ describe("release schema contract", () => {
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
       latestMigration: unifiedSkillLifecycle
-        ? "0431_unified_skill_lifecycle.sql"
+        ? "0432_unified_skill_lifecycle.sql"
         : scheduledTaskCreatorPolicy
           ? "0428_scheduled_task_creator_policy.sql"
           : sessionAgentAccessScope
@@ -1181,7 +1181,7 @@ describe("release schema contract", () => {
       ...(scheduledTaskCreatorPolicy
         ? { latestMigration: "0428_scheduled_task_creator_policy.sql" }
         : {}),
-      ...(unifiedSkillLifecycle ? { latestMigration: "0431_unified_skill_lifecycle.sql" } : {}),
+      ...(unifiedSkillLifecycle ? { latestMigration: "0432_unified_skill_lifecycle.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
@@ -1243,7 +1243,7 @@ describe("release schema contract", () => {
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0431_unified_skill_lifecycle.sql",
+      (migration) => migration.path === "0432_unified_skill_lifecycle.sql",
     );
     const scheduledInheritedToolAdmission = completeSourceContract.migrations.some(
       (migration) => migration.path === "0416_scheduled_inherited_tool_admission.sql",
@@ -1619,7 +1619,7 @@ describe("release schema contract", () => {
       "0422_personal_workspace_organization_codex_inheritance.sql",
       "0429_message_boundary_session_forks.sql",
       "0430_session_personal_variable_set_continuations.sql",
-      "0431_unified_skill_lifecycle.sql",
+      "0432_unified_skill_lifecycle.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1951,7 +1951,7 @@ describe("release schema contract", () => {
     if (unifiedSkillLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0431_unified_skill_lifecycle.sql",
+        latestMigration: "0432_unified_skill_lifecycle.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -2043,7 +2043,7 @@ describe("release schema contract", () => {
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
       latestMigration: unifiedSkillLifecycle
-        ? "0431_unified_skill_lifecycle.sql"
+        ? "0432_unified_skill_lifecycle.sql"
         : scheduledTaskCreatorPolicy
           ? "0428_scheduled_task_creator_policy.sql"
           : sessionAgentAccessScope
@@ -2260,7 +2260,7 @@ describe("release schema contract", () => {
       ...(scheduledTaskCreatorPolicy
         ? { latestMigration: "0428_scheduled_task_creator_policy.sql" }
         : {}),
-      ...(unifiedSkillLifecycle ? { latestMigration: "0431_unified_skill_lifecycle.sql" } : {}),
+      ...(unifiedSkillLifecycle ? { latestMigration: "0432_unified_skill_lifecycle.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

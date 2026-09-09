@@ -192,7 +192,7 @@ regardless of Learning mode. MCP already redirects that lane to `skill_save`.
 The historical confirmation and receipt schemas remain readable; Knowledge and
 instruction-policy remember/confirm workflows retain their existing behavior.
 
-The exact 0431 runner stage executes inside an explicit migration transaction:
+The exact 0432 runner stage executes inside an explicit migration transaction:
 setup and owner window, TypeScript parsing into a temporary staging table, then
 SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
 fails closed. All existing active authored heads receive new canonical revisions;
@@ -211,7 +211,7 @@ foreign-key constraints are flushed before restoring FORCE RLS, all within the
 migration transaction. A seeded `NOSUPERUSER NOBYPASSRLS` owner test verifies
 cross-tenant identity preservation, folder content, and the restored posture.
 
-Migration `0431_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
+Migration `0432_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never
 restart a pre-0431 binary: its installed reads bypass the registry content head.
@@ -223,7 +223,7 @@ lifecycle capability.
 
 ### Stored execution configuration maintenance
 
-The same atomic 0431 runner calls `packages/db/src/skill-config-migration.ts`
+The same atomic 0432 runner calls `packages/db/src/skill-config-migration.ts`
 after staging registry metadata. It converts headerless Skills in current
 `sessions.skills` and `workspace_packs.manifest` (including inline automation
 template Skills). It uses historical name/description, preserves the complete
