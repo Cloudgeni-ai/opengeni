@@ -1,6 +1,6 @@
 ---
 title: "SDK"
-description: "Choose the chat handler and component or the full TypeScript session client."
+description: "Choose the backend chat handler or the full TypeScript session client and React surfaces."
 icon: "code"
 ---
 
@@ -14,14 +14,13 @@ icon: "code"
 | Import                 | Use it for                                                                              |
 | ---------------------- | --------------------------------------------------------------------------------------- |
 | `@opengeni/sdk/chat`   | Server-side chat, tenant mapping, conversation identity, and a host HTTP handler        |
-| `@opengeni/react/chat` | A chat component that talks to your handler and restores messages and pending decisions |
 | `@opengeni/sdk`        | The full session, workspace, file, tool, and event API                                  |
 
 For a product adding chat, start with [Integrate your product](/guides/integrate-your-product). Keep the organization API key on your backend.
 
 ## Chat API
 
-Use the repository workspace packages and a compatible server deployment for these examples. Stable `3.3.2` lacks `/chat`, and the React `3.8.0-canary.0` package cannot resolve its published `/chat` entry point. Follow the [source quickstart and deployment setup](/guides/integrate-your-product#connect-your-backend) before using them.
+Use the repository workspace packages and a compatible server deployment for these examples. Follow the [source quickstart and deployment setup](/guides/integrate-your-product#connect-your-backend) before using the backend chat handler. It has no dedicated React frontend.
 
 ```ts
 import { OpenGeni } from "@opengeni/sdk/chat";
@@ -113,14 +112,13 @@ Subpaths keep the root import lean:
 | Import                     | Contents                                                               |
 | -------------------------- | ---------------------------------------------------------------------- |
 | `@opengeni/react`          | Timeline, composer, hooks, and the sandbox workbench                   |
-| `@opengeni/react/chat`     | `OpenGeniChat`, using your host handler with no provider or SDK client |
 | `@opengeni/react/composer` | Advanced composer composition                                          |
 | `@opengeni/react/machines` | Connected Machines dashboard and enrollment flow                       |
 | `@opengeni/react/realtime` | Voice controls, lazily loadable                                        |
 
 Full reference: [packages/react/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/README.md).
 
-`OpenGeniChat` takes `handlerUrl`, a stable `conversation`, and optional authentication headers. With cookie authentication, also provide `authKey` from your authenticated user and tenant, update it on identity changes, and unmount on sign-out. Changed headers or `authKey` clear private UI state and abort old requests before restoring the new history. `authKey` is never sent to the server. Import `@opengeni/react/compiled.css` for the supplied styles. See the [React integration example](/guides/integrate-your-product#render-the-chat).
+Use `SessionConversation` with the normal SDK for an existing session, or compose the timeline and composer. These components do not consume the backend chat-handler protocol. Import `@opengeni/react/compiled.css` for the supplied styles. See the [React integration guide](/guides/integrate-your-product#render-the-chat).
 
 ## Compatibility
 

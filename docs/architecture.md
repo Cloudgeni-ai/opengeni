@@ -14,7 +14,7 @@
 
 ## 1. Scope
 
-Product shape, invariants, execution paths, and ownership; inventories live in code.
+Product shape, invariants, execution, and ownership.
 
 ---
 
@@ -1038,7 +1038,7 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Smallest integration example |
+| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
