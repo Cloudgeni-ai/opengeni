@@ -68,7 +68,9 @@ import {
   relativeConnectedMachinePath,
   resolveConnectedMachinePath,
 } from "./selfhosted/workspace-path";
+import { ModalProcessObservationUnavailableError } from "./errors";
 import {
+  hasTypedExecHandleLoss,
   isExecSessionLostBanner,
   parseExecBannerExitCode,
   parseExecBannerSessionId,
@@ -170,6 +172,7 @@ export type ChannelASession = {
   }): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
@@ -2382,11 +2385,13 @@ export class SandboxChannelAService {
     if (!write) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
-    const out = await write({
-      sessionId: execSessionId,
-      chars: data,
-      yieldTimeMs: 250,
-    });
+    // Capture the pinned source contract before the write settles and removes
+    // its retained route. Guarded adapters throw on handle loss; their returned
+    // output may legitimately contain the same text as a legacy loss banner.
+    const typedHandleLoss = hasTypedExecHandleLoss(this.session, execSessionId);
+    const out = await this.withPtyHandleConflict("write", () =>
+      write({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 }),
+    );
     // The Modal exec surface reports a vanished exec-session as a NON-throwing
     // string ("write_stdin failed: session not found: N") that we used to stream
     // verbatim into the terminal. That happens when the persisted exec-session no
@@ -2395,7 +2400,7 @@ export class SandboxChannelAService {
     // rollover after the PTY opened. Surface it as a typed CONFLICT so the route
     // returns 409 and the client cleanly RE-OPENS the PTY against the live box,
     // instead of writing a raw "session not found: 1" into the user's xterm.
-    if (isExecSessionLostBanner(out, execSessionId)) {
+    if (!typedHandleLoss && isExecSessionLostBanner(out, execSessionId)) {
       throw new ChannelAConflictError("pty session lost on the live box; reopen the terminal");
     }
     return stripExecBanner(out);
@@ -2409,11 +2414,13 @@ export class SandboxChannelAService {
       this.session.writeStdin?.bind(this.session);
     if (!write) return;
     // Send a stty in-band on the same pty session.
-    await write({
-      sessionId: execSessionId,
-      chars: `stty cols ${req.cols} rows ${req.rows}\n`,
-      yieldTimeMs: 50,
-    });
+    await this.withPtyHandleConflict("resize", () =>
+      write({
+        sessionId: execSessionId,
+        chars: `stty cols ${req.cols} rows ${req.rows}\n`,
+        yieldTimeMs: 50,
+      }),
+    );
   }
 
   /** Ask an open PTY to exit and return the exact provider banner. The routing
@@ -2424,7 +2431,33 @@ export class SandboxChannelAService {
       this.session.writeStdinForProcessControl?.bind(this.session) ??
       this.session.writeStdin?.bind(this.session);
     if (execSessionId === null || !write) return "";
-    return await write({ sessionId: execSessionId, chars: "", yieldTimeMs: 250 }); // EOF
+    return await this.withPtyHandleConflict(
+      "close",
+      () => write({ sessionId: execSessionId, chars: "\u0004", yieldTimeMs: 250 }), // EOF
+    );
+  }
+
+  private async withPtyHandleConflict<T>(
+    operation: "write" | "resize" | "close",
+    run: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      // A terminal handle conflict is not retained-command loss or exit proof.
+      // In particular, failed close must not mark metadata closed or reopen it.
+      if (
+        error instanceof ModalProcessObservationUnavailableError &&
+        error.reason === "missing_handle"
+      ) {
+        throw new ChannelAConflictError(
+          operation === "close"
+            ? "pty handle unavailable; close cannot be confirmed without provider exit proof"
+            : "pty handle unavailable; reopen the terminal without replaying input",
+        );
+      }
+      throw error;
+    }
   }
 
   // ──────────────────────────── helpers ──────────────────────────────────────

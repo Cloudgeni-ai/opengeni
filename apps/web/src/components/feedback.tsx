@@ -20,6 +20,7 @@ export function FeedbackDialog(props: {
   client: FeedbackClient;
   workspaceId: string;
   sessionId?: string;
+  turnId?: string;
   sentiment?: FeedbackSentiment;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -35,6 +36,7 @@ export function FeedbackDialog(props: {
     if (submitting.current) return;
     const payload = {
       sessionId: props.sessionId,
+      turnId: props.turnId,
       sentiment: props.sentiment,
       comment: comment || undefined,
     };
@@ -42,6 +44,7 @@ export function FeedbackDialog(props: {
     if (
       !previous ||
       previous.sessionId !== payload.sessionId ||
+      previous.turnId !== payload.turnId ||
       previous.sentiment !== payload.sentiment ||
       previous.comment !== payload.comment
     ) {
@@ -72,7 +75,13 @@ export function FeedbackDialog(props: {
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{props.sessionId ? "Rate this session" : "Send feedback"}</DialogTitle>
+          <DialogTitle>
+            {props.turnId
+              ? "Rate this reply"
+              : props.sessionId
+                ? "Rate this session"
+                : "Send feedback"}
+          </DialogTitle>
           <DialogDescription>
             {props.sessionId
               ? "Share what worked or what could be better."
@@ -117,6 +126,10 @@ export function SessionFeedback(props: {
   client: FeedbackClient;
   workspaceId: string;
   sessionId: string;
+  turnId?: string;
+  compact?: boolean;
+  savedSentiment?: FeedbackSentiment | null;
+  onRated?: (sentiment: FeedbackSentiment) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [choice, setChoice] = useState<FeedbackSentiment>();
@@ -124,15 +137,23 @@ export function SessionFeedback(props: {
   const [notice, setNotice] = useState("");
   const savedRevision = useRef(0);
   useEffect(() => {
+    if (props.savedSentiment !== undefined) {
+      setSaved(props.savedSentiment ?? undefined);
+      return;
+    }
     let current = true;
     const revision = savedRevision.current;
     void props.client
-      .listOwnFeedback(props.workspaceId, { sessionId: props.sessionId, includeTurns: false })
+      .listOwnFeedback(props.workspaceId, {
+        sessionId: props.sessionId,
+        includeTurns: Boolean(props.turnId),
+      })
       .then(({ feedback }) => {
         if (current && revision === savedRevision.current)
           setSaved(
-            feedback.find((item) => item.turnId === null && item.sentiment !== null)?.sentiment ??
-              undefined,
+            feedback.find(
+              (item) => item.turnId === (props.turnId ?? null) && item.sentiment !== null,
+            )?.sentiment ?? undefined,
           );
       })
       .catch(() => {
@@ -141,17 +162,25 @@ export function SessionFeedback(props: {
     return () => {
       current = false;
     };
-  }, [props.client, props.workspaceId, props.sessionId]);
+  }, [props.client, props.workspaceId, props.sessionId, props.turnId, props.savedSentiment]);
   return (
     <div
-      className="flex items-center gap-1 px-4 py-2 text-xs text-muted-foreground sm:px-6"
-      aria-label="Session feedback"
+      className={
+        props.compact
+          ? "inline-flex items-center gap-1.5"
+          : "flex items-center gap-1 text-xs text-fg-muted"
+      }
+      aria-label={props.turnId ? "Reply feedback" : "Session feedback"}
     >
-      <span className="mr-1">Was this helpful?</span>
       <Button
         variant="ghost"
         size="icon"
-        className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 aria-pressed:bg-accent aria-pressed:text-foreground"
+        className={
+          props.compact
+            ? "size-7 rounded-sm text-fg-subtle opacity-0 group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-70 aria-pressed:opacity-100 aria-pressed:bg-accent aria-pressed:text-foreground"
+            : "pointer-coarse:min-h-11 pointer-coarse:min-w-11 aria-pressed:bg-accent aria-pressed:text-foreground"
+        }
+        title="Thumbs up"
         aria-label="Thumbs up"
         aria-pressed={saved === "positive"}
         onClick={() => {
@@ -159,12 +188,17 @@ export function SessionFeedback(props: {
           setOpen(true);
         }}
       >
-        <ThumbsUpIcon className="size-4" />
+        <ThumbsUpIcon className={props.compact ? "size-3.5" : "size-4"} />
       </Button>
       <Button
         variant="ghost"
         size="icon"
-        className="pointer-coarse:min-h-11 pointer-coarse:min-w-11 aria-pressed:bg-accent aria-pressed:text-foreground"
+        className={
+          props.compact
+            ? "size-7 rounded-sm text-fg-subtle opacity-0 group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-70 aria-pressed:opacity-100 aria-pressed:bg-accent aria-pressed:text-foreground"
+            : "pointer-coarse:min-h-11 pointer-coarse:min-w-11 aria-pressed:bg-accent aria-pressed:text-foreground"
+        }
+        title="Thumbs down"
         aria-label="Thumbs down"
         aria-pressed={saved === "negative"}
         onClick={() => {
@@ -172,9 +206,11 @@ export function SessionFeedback(props: {
           setOpen(true);
         }}
       >
-        <ThumbsDownIcon className="size-4" />
+        <ThumbsDownIcon className={props.compact ? "size-3.5" : "size-4"} />
       </Button>
-      <span role="status">{notice}</span>
+      <span role="status" className={props.compact ? "sr-only" : undefined}>
+        {notice}
+      </span>
       <FeedbackDialog
         {...props}
         open={open}
@@ -183,6 +219,7 @@ export function SessionFeedback(props: {
         onSubmitted={(value) => {
           savedRevision.current += 1;
           setSaved(value);
+          if (value) props.onRated?.(value);
           setNotice("Thanks for your feedback");
         }}
       />

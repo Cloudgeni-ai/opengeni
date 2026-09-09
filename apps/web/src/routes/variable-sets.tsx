@@ -16,7 +16,6 @@ import {
   Loader2Icon,
   PencilIcon,
   PlusIcon,
-  RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -134,7 +133,6 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   const [createScope, setCreateScope] = useState<WorkspaceVariableSet["scope"]>("workspace");
-  const [revealEpoch, setRevealEpoch] = useState(0);
   // Honest list state: a failed load renders as an error with retry, never as
   // the "No variable sets yet…" empty state.
   const variableSetsView = listViewState({
@@ -174,35 +172,17 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
         title="Variable sets"
         description="Named secrets injected into managed sandboxes at session start. Values stay encrypted at rest; explicitly permissioned reads reveal one value on demand and are audited."
         actions={
-          <>
+          canWriteSet ? (
             <Button
               type="button"
-              variant="ghost"
               size="sm"
-              onClick={() => {
-                setRevealEpoch((current) => current + 1);
-                void variableSets.refresh();
-              }}
-              disabled={variableSets.loading}
+              onClick={() => setCreateOpen((open) => !open)}
               className="h-9 pointer-coarse:min-h-10"
             >
-              <RefreshCwIcon
-                className={variableSets.loading ? "size-3.5 animate-spin" : "size-3.5"}
-              />
-              Refresh
+              <PlusIcon className="size-3.5" />
+              New variable set
             </Button>
-            {canWriteSet ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => setCreateOpen((open) => !open)}
-                className="h-9 pointer-coarse:min-h-10"
-              >
-                <PlusIcon className="size-3.5" />
-                New variable set
-              </Button>
-            ) : null}
-          </>
+          ) : null
         }
       />
 
@@ -318,7 +298,6 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               canWriteSecrets={canWriteSecrets}
               canManageOrganization={canManageOrganization}
               canReadSecrets={canReadSecrets}
-              revealEpoch={revealEpoch}
               onUpdate={(patch) => variableSets.update(variableSet.id, patch)}
               onDelete={async () => {
                 const removed = await variableSets.remove(variableSet.id);
@@ -366,7 +345,6 @@ export function VariableSetCard(props: {
   canWriteSecrets: boolean;
   canManageOrganization?: boolean;
   canReadSecrets: boolean;
-  revealEpoch: number;
   onUpdate: (patch: {
     name?: string;
     description?: string | null;
@@ -419,7 +397,7 @@ export function VariableSetCard(props: {
 
   useEffect(() => {
     setRevealedValues({});
-  }, [props.revealEpoch, variableSet.updatedAt]);
+  }, [variableSet.updatedAt]);
 
   function clearRevealedValue(name: string) {
     setRevealedValues((current) => {

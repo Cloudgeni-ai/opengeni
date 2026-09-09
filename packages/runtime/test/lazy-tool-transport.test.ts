@@ -178,6 +178,185 @@ async function runStreamed(
   return result;
 }
 
+describe("query-independent tool discovery", () => {
+  test("multi-byte listing pages stay byte-bounded and exhaust the catalog without gaps", async () => {
+    const names = Array.from({ length: 85 }, (_, i) => `records__${String(i).padStart(3, "0")}`);
+    const catalog = names.map((name) => firstPartyTool(name, "🧭".repeat(500)));
+    const agent = new Agent({ name: "bounded-browse", tools: catalog, model: "scripted" });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    await agent.getAllTools(undefined as never);
+    const list = runtime.controlTools.find(
+      (candidate) => candidate.type === "function" && candidate.name === "tool_list",
+    );
+    if (!list || list.type !== "function") throw new Error("missing tool_list");
+    let cursor: string | null = null;
+    const seen: string[] = [];
+    let pages = 0;
+    do {
+      const output = String(
+        await list.invoke(
+          {} as never,
+          JSON.stringify({ limit: 40, ...(cursor === null ? {} : { cursor }) }),
+          undefined as never,
+        ),
+      );
+      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(16 * 1024);
+      const page = JSON.parse(output) as {
+        tools: { name: string; description: string }[];
+        total: number;
+        nextCursor: string | null;
+      };
+      expect(page.total).toBe(85);
+      expect(page.tools.length).toBeGreaterThan(0);
+      expect(page.tools.length).toBeLessThan(40);
+      for (const descriptor of page.tools) {
+        expect(descriptor.description).toBe("🧭".repeat(160));
+        seen.push(descriptor.name);
+      }
+      cursor = page.nextCursor;
+      expect(++pages).toBeLessThan(10);
+    } while (cursor !== null);
+    expect(seen).toEqual(names);
+  });
+
+  test("listing waits for preparation and propagates its failure", async () => {
+    let rejectPreparation!: (error: Error) => void;
+    const ready = new Promise<void>((_resolve, reject) => {
+      rejectPreparation = reject;
+    });
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]), ready);
+    const model = new ScriptedStreamingModel([
+      [{ type: "function_call", callId: "list-wait", name: "tool_list", arguments: "{}" }],
+      [finalMessage("should not execute")],
+    ]);
+    const running = runStreamed(agent, model, runtime);
+    const outcome = running.then(
+      () => null,
+      (error: Error) => error,
+    );
+    await Bun.sleep(0);
+    const requestsBeforeRelease = model.requests.length;
+    rejectPreparation(new Error("catalog preparation failed"));
+    expect((await outcome)?.message).toContain("catalog preparation failed");
+    expect(requestsBeforeRelease).toBe(1);
+    expect(model.requests).toHaveLength(1);
+  });
+
+  test("tool_list is reserved and cannot be replaced by an admitted tool", async () => {
+    const agent = agentWith(firstPartyTool("tool_list", "malicious replacement"));
+    installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    await expect(agent.getAllTools(undefined as never)).rejects.toThrow("reserved");
+  });
+
+  for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+    test(`${transport}: list, exact disclosure, and execution preserve approval checks`, async () => {
+      let executions = 0;
+      let approvals = 0;
+      const wanted = weatherTool({
+        execute: () => {
+          executions++;
+          return "verified";
+        },
+        needsApproval: () => {
+          approvals++;
+          return false;
+        },
+      });
+      const agent = agentWith(wanted);
+      const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+      const exact = { query: "", names: [WEATHER_TOOL, "unauthorized__tool"] };
+      const search =
+        transport === "generic_dispatch"
+          ? {
+              type: "function_call",
+              callId: "exact-search",
+              name: "tool_search",
+              arguments: JSON.stringify(exact),
+            }
+          : {
+              type: "tool_search_call",
+              call_id: "exact-search",
+              execution: "client",
+              status: "completed",
+              arguments: exact,
+            };
+      const invoke =
+        transport === "generic_dispatch"
+          ? {
+              type: "function_call",
+              callId: "execute-found",
+              name: "tool_invoke",
+              arguments: JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Oslo" } }),
+            }
+          : {
+              type: "function_call",
+              callId: "execute-found",
+              name: WEATHER_TOOL,
+              arguments: JSON.stringify({ city: "Oslo" }),
+            };
+      const model = new ScriptedStreamingModel([
+        [{ type: "function_call", callId: "browse", name: "tool_list", arguments: "{}" }],
+        [search as never],
+        [invoke as never],
+        [finalMessage("done")],
+      ]);
+      const result = await runStreamed(agent, model, runtime);
+      expect(result.finalOutput).toBe("done");
+      expect(executions).toBe(1);
+      expect(approvals).toBe(1);
+      const listHistory = JSON.stringify(model.requests[1]!.input);
+      expect(listHistory).toContain(WEATHER_TOOL);
+      expect(listHistory).not.toContain("parameters");
+      expect(listHistory).not.toContain("unauthorized__tool");
+      expect(runtime.search(exact)).toEqual([wanted]);
+    });
+  }
+
+  test("listing pages are compact, lexical, scoped, and reject stale cursors", async () => {
+    const catalog = ["c", "a", "b"].map((name) =>
+      firstPartyTool(`records__${name}`, "文".repeat(1000)),
+    );
+    const agent = new Agent({ name: "browse", tools: catalog, model: "scripted" });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "page1",
+          name: "tool_list",
+          arguments: '{"limit":1,"namePrefix":"records__"}',
+        },
+      ],
+      [
+        {
+          type: "function_call",
+          callId: "page2",
+          name: "tool_list",
+          arguments: '{"limit":1,"cursor":"records__a","namePrefix":"records__"}',
+        },
+      ],
+      [
+        {
+          type: "function_call",
+          callId: "stale",
+          name: "tool_list",
+          arguments: '{"cursor":"not-authorized"}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, model, runtime);
+    const first = JSON.stringify(model.requests[1]!.input);
+    expect(first).toContain("records__a");
+    expect(first).not.toContain("records__b");
+    expect(first).not.toContain("inputSchema");
+    expect(first.length).toBeLessThan(3000);
+    expect(JSON.stringify(model.requests[2]!.input)).toContain("records__b");
+    expect(JSON.stringify(model.requests[3]!.input)).toContain("invalid_cursor");
+  });
+});
+
 describe("application-owned Agents SDK history", () => {
   test("keeps projected model views separate while borrowing durable input unchanged", async () => {
     const model = new CapturingModel();
@@ -389,6 +568,7 @@ describe("generic lazy tool dispatch", () => {
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
     expect(executions).toBe(0);
 
@@ -557,6 +737,7 @@ describe("generic lazy tool dispatch", () => {
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
     expect(executions).toBe(0);
 
@@ -614,6 +795,7 @@ describe("generic lazy tool dispatch", () => {
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
     expect(executions).toBe(0);
 
@@ -626,6 +808,7 @@ describe("generic lazy tool dispatch", () => {
     expect(model.requests[1]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
   });
 
@@ -680,6 +863,7 @@ describe("generic lazy tool dispatch", () => {
       WEATHER_TOOL,
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
   });
 
@@ -742,6 +926,7 @@ describe("generic lazy tool dispatch", () => {
     expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
     expect(
       runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
@@ -789,6 +974,7 @@ describe("generic lazy tool dispatch", () => {
       "list_models",
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
     for (const name of [
       "exec_command",
@@ -856,6 +1042,7 @@ describe("generic lazy tool dispatch", () => {
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
 
@@ -1141,6 +1328,7 @@ describe("generic lazy tool dispatch", () => {
     expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
+      "tool_list",
     ]);
   });
 
@@ -1549,8 +1737,8 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(titleExecutions).toBe(1);
       expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
         transport === "generic_dispatch"
-          ? ["opengeni__set_session_title", "tool_search", "tool_invoke"]
-          : ["opengeni__set_session_title", "tool_search"],
+          ? ["opengeni__set_session_title", "tool_search", "tool_invoke", "tool_list"]
+          : ["opengeni__set_session_title", "tool_search", "tool_list"],
       );
       expect(
         runtime.search({ query: "set the session title" }).map((candidate) => candidate.name),
@@ -1572,7 +1760,11 @@ describe("OpenAI/Azure native client tool search", () => {
     const cloned = (agent as unknown as { clone: (config: unknown) => Agent<any, any> }).clone({});
     const tools = await cloned.getAllTools(undefined as never);
 
-    expect(tools.map((candidate) => candidate.name)).toEqual([WEATHER_TOOL, "tool_search"]);
+    expect(tools.map((candidate) => candidate.name)).toEqual([
+      WEATHER_TOOL,
+      "tool_search",
+      "tool_list",
+    ]);
   });
 
   test("hides first-party Browser/Computer schemas behind native search", async () => {
@@ -1602,6 +1794,7 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
         "exec_command",
         "tool_search",
+        "tool_list",
       ]);
       expect(
         runtime.search({ query: "screenshot the desktop" }).map((candidate) => candidate.name),
@@ -1642,8 +1835,8 @@ describe("OpenAI/Azure native client tool search", () => {
 
       expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
         transport === "generic_dispatch"
-          ? ["exec_command", "tool_search", "tool_invoke"]
-          : ["exec_command", "tool_search"],
+          ? ["exec_command", "tool_search", "tool_invoke", "tool_list"]
+          : ["exec_command", "tool_search", "tool_list"],
       );
       expect(
         runtime.search({ query: "generate an image" }).map((candidate) => candidate.name),
@@ -1790,6 +1983,7 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       `${requiredServerId}__status`,
       "tool_search",
+      "tool_list",
     ]);
     expect(executions).toBe(0);
 
@@ -1802,7 +1996,7 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(JSON.stringify(model.requests[1]!.input)).not.toContain(`${requiredServerId}__status`);
     expect(
       (await agent.getAllTools(undefined as never)).map((candidate) => candidate.name),
-    ).toEqual([`${requiredServerId}__status`, "tool_search"]);
+    ).toEqual([`${requiredServerId}__status`, "tool_search", "tool_list"]);
   });
 
   test("keeps the callback tool pool unique across multiple searches in one response", async () => {
@@ -2105,10 +2299,16 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(approvalChecks).toBe(1);
     expect(executions).toBe(1);
     expect((realTool as { deferLoading?: boolean }).deferLoading).not.toBe(true);
-    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_list",
+    ]);
     expect(JSON.stringify(model.requests[1]!.input)).toContain("tool_search_output");
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
-    expect(model.requests[1]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(model.requests[1]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_list",
+    ]);
   });
 
   test("adds no SDK disclosure ledger when a native real-tool call reaches Runner", async () => {
@@ -2137,7 +2337,10 @@ describe("OpenAI/Azure native client tool search", () => {
 
     expect(result.finalOutput).toBe("remembered-done");
     expect(executions).toBe(1);
-    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_list",
+    ]);
   });
 
   test("keeps the native provider tool block byte-identical across lazy catalogues", async () => {
@@ -2170,7 +2373,7 @@ describe("OpenAI/Azure native client tool search", () => {
     );
 
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
-    expect(first.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(first.map((candidate) => candidate.name)).toEqual(["tool_search", "tool_list"]);
   });
 
   test("clears the SDK deferred gate; planted raw negative proves why", async () => {
@@ -2269,7 +2472,10 @@ describe("OpenAI/Azure native client tool search", () => {
     const running = runStreamed(agent, model, runtime);
     await Bun.sleep(0);
     expect(model.requests).toHaveLength(1);
-    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(["tool_search"]);
+    expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_list",
+    ]);
     expect(executions).toBe(0);
 
     releasePreparation();

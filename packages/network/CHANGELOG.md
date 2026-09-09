@@ -1,5 +1,12 @@
 # @opengeni/network
 
+## 0.3.1
+
+### Patch Changes
+
+- 52cf486: Use protected-resource metadata prefix locations instead of guessing a metadata URL beneath the protected API route. Preserve explicitly advertised URLs and fail-closed metadata handling.
+- 92cdc31: Follow the standard MCP authorization-server metadata discovery order so protected guessed routes cannot prevent discovery of valid OpenID metadata.
+
 ## 0.3.0
 
 ### Minor Changes

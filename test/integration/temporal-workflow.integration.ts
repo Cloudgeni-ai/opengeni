@@ -2057,7 +2057,11 @@ describe("Temporal workflow integration", () => {
       let dispatches = 0;
       const expected = {
         claimed: 4,
-        delivered: 4,
+        signaled: 4,
+        delivered: 1,
+        pendingAdmission: 2,
+        unconfirmed: 1,
+        pendingAdmissionBlockers: { pending_prompt_turn: 2 },
         failed: 0,
         exhaustedBatchLimit: false,
       };

@@ -988,7 +988,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // 0361 Memory materialization table/function and the 0380 company-profile
     // autonomy policy tables/functions, the 0400 model-context snapshot table,
     // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
-    // and the 0429 unified Skill tables/lifecycle capability.
+    // the 0429 message-boundary fork overload,
+    // and the 0431 unified Skill tables/lifecycle capability.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
@@ -1006,6 +1007,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_codex_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",

@@ -157,8 +157,11 @@ export function ChatComposer({
             <RestoredResources />
             <Attachments />
             {header}
-            {composer.annotations && composer.annotations.length > 0 ? (
-              <div className="px-3 pt-2 sm:px-4">
+            {composer.annotations &&
+            composer.annotations.length > 0 &&
+            composer.updateAnnotation &&
+            composer.removeAnnotation ? (
+              <div className="px-3.5 pt-2 md:px-4">
                 <TimelineAnnotationsChip
                   annotations={composer.annotations}
                   editable

@@ -106,6 +106,10 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/index.ts#switchSessionCodexAccount": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#armCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
@@ -339,6 +343,8 @@ const expectedWriters: Record<string, ExpectedWriter> = {
 };
 
 const genericControlWriters = new Set([
+  // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
+  "packages/db/src/index.ts#switchSessionCodexAccount",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
   "packages/db/src/index.ts#appendSessionEvents",
@@ -905,6 +911,7 @@ describe("session_events writer inventory", () => {
       "retrySessionActivityRls",
       "withWorkspaceSessionEventActivityRls",
       "retryWorkspaceSessionEventActivityPersistence",
+      "withSessionCodexCapacityMutation",
     ];
 
     for (const path of productionTypeScriptFiles()) {

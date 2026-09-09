@@ -20,11 +20,24 @@ export const UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET = wholeKibEnvelope(
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
 );
 
+/**
+ * Timeline-annotation composer chip, numbered badges, and review dialog on the
+ * always-loaded session graph after merging current main (a7a60271a). The local
+ * Linux/x64 Bun 1.4 same-origin production graph measures 2,350,400 raw bytes.
+ * Bind 2,350,418 so a 5-digit loopback URL still fits the documented 18-byte
+ * configured-URL ceiling.
+ */
+export const TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT = 2_350_418;
+export const TIMELINE_ANNOTATION_UX_RAW_BUDGET = wholeKibEnvelope(
+  TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT,
+);
+
 export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   BASE_DIRECT_SESSION_RAW_BUDGET,
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
   // September 6, Bun 1.4 macOS/arm64: main 52ff56a94 measures 2,309,542
   // raw bytes; history anchoring and input handling measure 2,312,535.
+  wholeKibEnvelope(2_312_535),
   // September 7: idle queue-offer chrome lifts the graph to 2,315,348.
   wholeKibEnvelope(2_315_348),
   // September 8: organization subscription SDK methods and connection-policy
@@ -38,4 +51,5 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // 2,324,964 through shared chunk overhead, so retain synchronous rail UI.
   // Advance only the measured raw envelope; compressed and other caps stay fixed.
   wholeKibEnvelope(2_324_500),
+  TIMELINE_ANNOTATION_UX_RAW_BUDGET,
 );

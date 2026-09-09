@@ -14,7 +14,7 @@
 
 ## 1. Scope
 
-Product shape, invariants, execution paths, and ownership; inventories live in code.
+Product shape, invariants, execution, and ownership.
 
 ---
 
@@ -669,6 +669,9 @@ path.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
+Message-point forks preserve canonical history through an uncompacted protocol
+boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
@@ -916,6 +919,8 @@ Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 
 ### 5.7 Usage, limits, and billing
 
+Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
+
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
 telemetry, comparison pricing, and dashboards do not independently debit or
@@ -1037,7 +1042,7 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Smallest integration example |
+| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
