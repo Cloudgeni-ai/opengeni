@@ -756,82 +756,106 @@ describe("retained-process terminal-owner reconciliation", () => {
     ).toEqual([]);
   });
 
-  test("Pause before managed adoption fences session ownership but preserves exact cleanup authority", async () => {
-    if (!available) return;
-    const ids = await freshWorkspace();
-    const attempt = await freshTurn(ids);
-    const { instanceId } = await insertWarmLease(ids, {
-      sessionId: attempt.sessionId,
-      holderId: attempt.holderId,
-      holderKind: "turn",
-    });
-    const operation = `retainedProcessPaused-${crypto.randomUUID()}`;
-    const admission = await advanceWorkspaceGeneration(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: attempt.sessionId,
-      turnId: attempt.turnId,
-      executionGeneration: attempt.executionGeneration,
-      attemptId: attempt.attemptId,
-      holderId: attempt.holderId,
-      sandboxGroupId: ids.groupId,
-      expectedEpoch: 7,
-      expectedInstanceId: instanceId,
-      operation,
-    });
-    await withWorkspaceSessionActivityRls(
-      db,
-      ids.workspaceId,
-      async (scopedDb) =>
-        await mutateSessionControlInTransaction(scopedDb, {
+  test.each([false, true])(
+    "Pause before managed adoption preserves cleanup authority (provider locator: %s)",
+    async (withProviderCommand) => {
+      if (!available) return;
+      const ids = await freshWorkspace();
+      const attempt = await freshTurn(ids);
+      const { instanceId } = await insertWarmLease(ids, {
+        sessionId: attempt.sessionId,
+        holderId: attempt.holderId,
+        holderKind: "turn",
+      });
+      const operation = `retainedProcessPaused-${crypto.randomUUID()}`;
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 7,
+        expectedInstanceId: instanceId,
+        operation,
+      });
+      await withWorkspaceSessionActivityRls(
+        db,
+        ids.workspaceId,
+        async (scopedDb) =>
+          await mutateSessionControlInTransaction(scopedDb, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sessionId: attempt.sessionId,
+            actor: { type: "human", subjectId: "user:test-owner" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+      );
+
+      const processId = crypto.randomUUID();
+      let fenced: SandboxRetainedProcessPromotionFencedError | null = null;
+      const providerCommand: SandboxProviderCommand | null = withProviderCommand
+        ? {
+            kind: "modal-control-v1",
+            sandboxId: instanceId,
+            taskId: "ta-test",
+            execId: "tp-paused-test",
+            streams: {
+              stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+              stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            },
+          }
+        : null;
+      try {
+        await retainWorkspaceProviderCommand(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
           sessionId: attempt.sessionId,
-          actor: { type: "human", subjectId: "user:test-owner" },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
+          processId,
+          providerSessionId: 72,
+          providerCommand,
+          admissionId: admission.id,
+          admittedWorkspaceGeneration: admission.workspaceGeneration,
+          operation,
+          providerBinding: MODAL_PROVIDER_BINDING,
+          backgroundCommand: { commandId: processId, command: "sleep 60" },
+          owner: {
+            kind: "turn",
+            turnId: attempt.turnId,
+            executionGeneration: attempt.executionGeneration,
+            attemptId: attempt.attemptId,
+            holderId: attempt.holderId,
+            sandboxGroupId: ids.groupId,
+            expectedEpoch: 7,
+            expectedInstanceId: instanceId,
+          },
+        });
+      } catch (error) {
+        if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
+        fenced = error;
+      }
+
+      expect(fenced?.process).toMatchObject({ id: processId, state: "active" });
+      expect(
+        await getRetainedProviderCommand(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
         }),
-    );
-
-    const processId = crypto.randomUUID();
-    let fenced: SandboxRetainedProcessPromotionFencedError | null = null;
-    try {
-      await retainWorkspaceMutationProcess(db, {
-        accountId: ids.accountId,
-        workspaceId: ids.workspaceId,
-        sessionId: attempt.sessionId,
-        processId,
-        providerSessionId: 72,
-        admissionId: admission.id,
-        admittedWorkspaceGeneration: admission.workspaceGeneration,
-        operation,
-        providerBinding: MODAL_PROVIDER_BINDING,
-        backgroundCommand: { commandId: processId, command: "sleep 60" },
-        owner: {
-          kind: "turn",
-          turnId: attempt.turnId,
-          executionGeneration: attempt.executionGeneration,
-          attemptId: attempt.attemptId,
-          holderId: attempt.holderId,
-          sandboxGroupId: ids.groupId,
-          expectedEpoch: 7,
-          expectedInstanceId: instanceId,
-        },
-      });
-    } catch (error) {
-      if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
-      fenced = error;
-    }
-
-    expect(fenced?.process).toMatchObject({ id: processId, state: "active" });
-    expect(
-      await listSessionBackgroundCommands(db, {
-        accountId: ids.accountId,
-        workspaceId: ids.workspaceId,
-        sessionId: attempt.sessionId,
-      }),
-    ).toHaveLength(0);
-  });
+      ).toEqual(providerCommand);
+      expect(
+        await listSessionBackgroundCommands(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+        }),
+      ).toHaveLength(0);
+    },
+  );
 
   test("session-owned cancellation is interrupted and settled with the process", async () => {
     if (!available) return;
