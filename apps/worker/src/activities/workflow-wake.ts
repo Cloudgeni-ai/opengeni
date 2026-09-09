@@ -117,8 +117,19 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
       };
       if (claimed > 0) {
         service.observability.info("session workflow wake delivery reconciled", {
-          ...result,
-          pendingAdmissionBlockers: JSON.stringify(pendingAdmissionBlockers),
+          claimed,
+          signaled,
+          delivered,
+          pendingAdmission,
+          unconfirmed,
+          failed,
+          exhaustedBatchLimit,
+          ...Object.fromEntries(
+            Object.entries(pendingAdmissionBlockers).map(([blocker, count]) => [
+              `pendingAdmissionBlockers.${blocker}`,
+              count,
+            ]),
+          ),
         });
       }
       return result;

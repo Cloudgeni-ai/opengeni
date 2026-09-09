@@ -379,7 +379,9 @@ dispatcher's result and structured reconciliation log separate `signaled`,
 `unconfirmed` legacy signal-only responses. None is proof of a model turn:
 verify the durable attempt claim and `turn.started` before reporting execution.
 Pending revisions keep the existing outbox backoff and admission rules; these
-counters neither resume paused work nor authorize a new attempt.
+counters neither resume paused work nor authorize a new attempt. Logs emit each
+blocker count as a numeric `pendingAdmissionBlockers.<blocker>` attribute; the
+activity result retains the blocker object.
 
 Transport acceptance is reported before attempting the database acknowledgment.
 If that acknowledgment fails, a batch can report both `signaled` and `failed`
