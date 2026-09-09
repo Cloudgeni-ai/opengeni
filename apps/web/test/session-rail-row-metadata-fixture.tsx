@@ -1,3 +1,4 @@
+import { SessionWaitStatus } from "../src/components/session/session-wait-status";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -169,6 +170,7 @@ function SessionRailRowMetadataFixture() {
           onRename={async () => null}
           onPin={async () => null}
         />
+        <SessionWaitStatus session={waitSession} />
         <div data-testid="waiting-row" className="flex h-12 w-[244px] items-center px-3">
           <SessionRowContent
             title={waitSession.title!}
