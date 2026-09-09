@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { selectedAvailableCapabilityToolIds } from "./session-tools";
 
 /** Reconcile a draft against live providers without treating catalog changes as policy changes. */
@@ -13,6 +13,7 @@ export function useCapabilityToolDefaults(input: {
   setSelected: Dispatch<SetStateAction<Set<string>>>;
 }) {
   const { ready, workspaceId, configuredIds, appliedKey, seenIds, setSelected } = input;
+  const excludedIds = useRef(new Set<string>());
   const policyKey = JSON.stringify([
     workspaceId,
     configuredIds === undefined ? null : [...configuredIds].sort(),
@@ -25,15 +26,27 @@ export function useCapabilityToolDefaults(input: {
     const defaultIds: string[] = JSON.parse(defaultsKey);
     if (appliedKey.current !== policyKey) {
       appliedKey.current = policyKey;
+      excludedIds.current = new Set();
       setSelected(new Set(defaultIds));
       seenIds.current = new Set(availableIds);
       return;
     }
-    const previouslySeen = seenIds.current;
-    setSelected((current) =>
-      selectedAvailableCapabilityToolIds(current, availableIds, previouslySeen, defaultIds),
-    );
-    // Reconnection must not erase an explicit draft deselection.
-    seenIds.current = new Set([...previouslySeen, ...availableIds]);
+    const previouslyAvailable = seenIds.current;
+    const excluded = excludedIds.current;
+    setSelected((current) => {
+      // Only absence while a provider was available is a draft opt-out.
+      // Providers dropped by catalog revocation may return enabled by default.
+      for (const id of previouslyAvailable) {
+        if (!current.has(id)) excluded.add(id);
+        else excluded.delete(id);
+      }
+      return selectedAvailableCapabilityToolIds(
+        current,
+        availableIds,
+        previouslyAvailable,
+        defaultIds.filter((id) => !excluded.has(id)),
+      );
+    });
+    seenIds.current = new Set(availableIds);
   }, [ready, policyKey, availableKey, defaultsKey, appliedKey, seenIds, setSelected]);
 }

@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, useRef, useState } from "react";
+import { act, StrictMode, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useCapabilityToolDefaults } from "./use-capability-tool-defaults";
 
@@ -58,7 +58,13 @@ test("new connections default on without undoing draft choices, including revoca
     );
   }
   const render = async (props: Props) =>
-    act(async () => root.render(<Draft key={props.principal ?? "owner"} {...props} />));
+    act(async () =>
+      root.render(
+        <StrictMode>
+          <Draft key={props.principal ?? "owner"} {...props} />
+        </StrictMode>,
+      ),
+    );
   const checked = (id: string) =>
     (container.querySelector(`input[aria-label="${id}"]`) as HTMLInputElement | null)?.checked;
   const deselect = async (id: string) =>
@@ -70,6 +76,11 @@ test("new connections default on without undoing draft choices, including revoca
   await deselect("drive");
   await render({ workspaceId: "a", availableIds: ["drive", "calendar", "new"] });
   expect(checked("drive")).toBe(false);
+  expect(checked("new")).toBe(true);
+  await render({ workspaceId: "a", availableIds: [] });
+  await render({ workspaceId: "a", availableIds: ["drive", "calendar", "new"] });
+  expect(checked("drive")).toBe(false);
+  expect(checked("calendar")).toBe(true);
   expect(checked("new")).toBe(true);
   await render({ workspaceId: "a", availableIds: ["calendar", "new"] });
   expect(checked("drive")).toBeUndefined();
