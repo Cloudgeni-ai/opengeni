@@ -1250,11 +1250,20 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         reason: "Org cannot supersede a workspace Skill",
       }),
     ).rejects.toThrow("same scope tier");
-    // Same-workspace supersede is a valid lifecycle, but IfQuiescent finalizes
-    // session activity with SET CONSTRAINTS ALL IMMEDIATE, so deferred
-    // related_preference_id/superseded_by cannot outlive the statement. Do not
-    // plant that pair on the workspace under IfQuiescent; cross-tier remains
-    // rejected above and synthetic corruption still fail-closes below.
+    // Exercise a supported same-workspace history link through the normal API.
+    // Both ends must survive activity-gate finalization and then cascade together.
+    await supersedePreferenceRegistry(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.workspaceId,
+      actorSubjectId: human.actor.subjectId,
+      principalKind: "human_session",
+      preferenceId: restored.skillId,
+      replacementPreferenceId: authored.skillId,
+      expectedCurrentRevisionId: restored.revisionId,
+      expectedScopeVersion: 1,
+      authorizeScope: () => undefined,
+      reason: "Replace workspace Skill before deleting its workspace",
+    });
     await expect(
       shared!.admin.begin(async (tx) => {
         await tx`INSERT INTO preference_registry_events(

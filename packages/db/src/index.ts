@@ -3711,6 +3711,20 @@ export async function deleteWorkspaceIfQuiescent(
             durationSeconds: workspaceDeletePhaseDuration(variableSetDetachStartedAt),
           });
           const cascadeStartedAt = performance.now();
+          // The activity gate flushes deferred checks with ALL IMMEDIATE.
+          // Workspace deletion owns both ends of these Skill history links;
+          // check them at commit after the complete cascade, not between rows.
+          // Keep all unrelated activity and retention constraints immediate.
+          await tx.execute(sql`
+            SET CONSTRAINTS
+              preference_registry_preferences_superseded_by_fk,
+              preference_registry_events_related_fk,
+              preference_registry_revisions_corrects_revision_id_fkey,
+              preference_registry_preferences_active_revision_fk,
+              preference_registry_events_old_revision_fk,
+              preference_registry_events_new_revision_fk
+            DEFERRED
+          `);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
