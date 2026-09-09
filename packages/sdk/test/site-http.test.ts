@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { sitePortFetch, serveSiteHttp, siteSessionPath } from "../src/site-http";
 import { createOpenGeniSiteClient } from "../src/site";
 
-test("Site session routing cannot change workspace or escape the session API", () => {
+test("Site SDK routing cannot change workspace or escape the host API", () => {
   expect(siteSessionPath("/v1/workspaces/site-host/sessions/one/events?after=4", "ws")).toBe(
     "/v1/workspaces/ws/sessions/one/events?after=4",
   );
@@ -72,7 +72,7 @@ test("MessagePort fetch delivers SSE before completion and cancels upstream", as
   channel.port2.close();
 });
 
-test("MessagePort fetch preserves HTTP errors for the normal SDK", async () => {
+test("newly reachable goal routes preserve API authorization errors", async () => {
   const channel = new MessageChannel();
   channel.port2.onmessage = (event) => {
     void serveSiteHttp(
@@ -84,7 +84,8 @@ test("MessagePort fetch preserves HTTP errors for the normal SDK", async () => {
   };
   const response = await sitePortFetch(
     channel.port1,
-    "https://site.test/v1/workspaces/site-host/sessions/one",
+    "https://site.test/v1/workspaces/site-host/sessions/one/goal",
+    { method: "PATCH", body: JSON.stringify({ status: "paused" }) },
   );
   expect(response.status).toBe(403);
   expect(await response.json()).toEqual({ error: { message: "No access" } });
