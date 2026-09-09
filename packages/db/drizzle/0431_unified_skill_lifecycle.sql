@@ -343,7 +343,7 @@ BEGIN
       IF head.active_revision_id IS NOT NULL AND (rev.provenance_source <> 'portable_skill' OR rev.provenance_source_id=source_id) THEN
         revision_id := head.active_revision_id; outcome := 'preserved';
       END IF;
-    ELSIF (operation <> 'reject' AND head.active_revision_id IS DISTINCT FROM (p_request->>'expectedRevisionId')::uuid)
+    ELSIF head.active_revision_id IS DISTINCT FROM (p_request->>'expectedRevisionId')::uuid
       OR head.scope_version IS DISTINCT FROM (p_request->>'expectedScopeVersion')::integer THEN
       RAISE EXCEPTION 'Skill head changed' USING ERRCODE='40001';
     END IF;
@@ -362,7 +362,7 @@ BEGIN
       SELECT * INTO rev FROM preference_registry_revisions r WHERE r.id=(p_request->>'revisionId')::uuid
         AND r.account_id=p_account_id AND r.preference_id=skill_id;
       IF NOT FOUND THEN RAISE EXCEPTION 'Skill revision unavailable' USING ERRCODE='42501'; END IF;
-      IF original_operation='confirm_response' AND operation='approve' AND EXISTS(SELECT 1 FROM preference_registry_revisions newer
+      IF original_operation='confirm_response' AND EXISTS(SELECT 1 FROM preference_registry_revisions newer
         WHERE newer.preference_id=skill_id AND newer.revision>rev.revision) THEN
         RAISE EXCEPTION 'Skill changed after chat proposal' USING ERRCODE='40001';
       END IF;

@@ -1430,6 +1430,57 @@ describe("one chat Skill confirmation", () => {
     expect(replay.events).toEqual([]);
   }, 180000);
 
+  test("stale Save and Don't save roll back the human response after newer proposed or active edits", async () => {
+    if (!client || !shared) return;
+    for (const choice of ["save", "skip"]) {
+      for (const actor of ["agent", "human"] as const) {
+        const f = await fixture("suggest");
+        const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+        const requestId = await answeredSkillInput(
+          f,
+          pending.skillReview!,
+          [choice],
+          f.human.actor.subjectId,
+          { pending: true },
+        );
+        const [trigger] = await appendSessionEvents(
+          client.db,
+          f.context.workspaceId,
+          f.agent.actor.sessionId,
+          [{ type: "user.message", payload: { text: "Create Skill" } }],
+        );
+        await saveSkill(client.db, {
+          ...f.input,
+          ...f[actor],
+          operationId: crypto.randomUUID(),
+          files: [{ path: "SKILL.md", content: skillMarkdown("Newer edit") }],
+        });
+        await shared.admin`update session_turns set trigger_event_id=${trigger!.id},status='requires_action' where id=${f.agent.actor.turnId}`;
+        await shared.admin`update sessions set status='requires_action' where id=${f.agent.actor.sessionId}`;
+        await shared.admin`update session_turn_attempts set state='closed',outcome='requires_action',closed_at=now() where id=${f.agent.actor.attemptId}`;
+        await expect(
+          acceptSessionHumanInputResponse(client.db, {
+            ...f.context,
+            sessionId: f.agent.actor.sessionId,
+            requestId,
+            respondedBy: f.human.actor.subjectId,
+            canonicalHumanSession: true,
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: `skill:${pending.revisionId}`, values: [choice] }],
+            },
+          }),
+        ).rejects.toThrow();
+        const [stored] =
+          await shared.admin`select status,skill_review_human_authorized from session_human_input_requests where id=${requestId}`;
+        expect(stored).toMatchObject({ status: "pending", skill_review_human_authorized: false });
+        const [rejected] =
+          await shared.admin`select count(*)::int as count from preference_registry_events where new_revision_id=${pending.revisionId} and type='rejected'`;
+        expect(rejected?.count).toBe(0);
+      }
+    }
+  }, 180000);
+
   test("Don't save settles only the pending revision and preserves the active Skill", async () => {
     if (!client || !shared) return;
     const f = await fixture("suggest");
