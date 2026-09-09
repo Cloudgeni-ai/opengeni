@@ -1611,6 +1611,7 @@ async function expectAndConsumeActorTransitionResponse(
     status: number;
     statusLabel: string;
     allowedConsoleErrors?: readonly string[];
+    allowedPageErrors?: readonly string[] | (() => string[]);
     workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
@@ -1685,7 +1686,38 @@ async function expectAndConsumeActorTransitionResponse(
     [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
+  consumeAllowedPageErrors(problems, input.allowedPageErrors);
   problems.actorTransitionResponses.splice(0);
+}
+
+function isFirefoxNativeAbortPageError(message: string, phase: string): boolean {
+  // Firefox reports the native AbortError as a pageerror when the live-events
+  // stream is torn down by a raced actor change. Chromium reports the same
+  // expected abort as `net::ERR_CONNECTION_RESET` on that stream. Gecko's
+  // DOMException message includes a trailing space in some versions.
+  return (
+    message === `[${phase}] The operation was aborted.` ||
+    message === `[${phase}] The operation was aborted. `
+  );
+}
+
+function consumeAllowedPageErrors(
+  problems: Pick<BrowserProblems, "pageErrors" | "pageErrorEvidence">,
+  allowed: readonly string[] | (() => string[]) | undefined,
+): void {
+  if (allowed === undefined) return;
+  const allowedMessages = new Set(typeof allowed === "function" ? allowed() : allowed);
+  problems.pageErrors = problems.pageErrors.filter((message) => !allowedMessages.has(message));
+  problems.pageErrorEvidence = problems.pageErrorEvidence.filter(
+    ({ message }) => !allowedMessages.has(message),
+  );
+}
+
+function firefoxCrossTabLiveStreamAbortPageErrors(
+  problems: Pick<BrowserProblems, "pageErrors">,
+  phase: string,
+): string[] {
+  return problems.pageErrors.filter((message) => isFirefoxNativeAbortPageError(message, phase));
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -3582,6 +3614,34 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(false);
   });
 
+  test("the strict browser ledger consumes Firefox's native live-events abort pageerror", () => {
+    const phase = "cross-tab-select-race";
+    const trailingAbort = `[${phase}] The operation was aborted. `;
+    const canonicalAbort = `[${phase}] The operation was aborted.`;
+    const unrelated = `[${phase}] TypeError: unexpected`;
+    const laterPhaseAbort = `[late-old-epoch-setup-beta-to-alpha] The operation was aborted. `;
+    expect(isFirefoxNativeAbortPageError(trailingAbort, phase)).toBe(true);
+    expect(isFirefoxNativeAbortPageError(canonicalAbort, phase)).toBe(true);
+    expect(isFirefoxNativeAbortPageError(unrelated, phase)).toBe(false);
+    expect(isFirefoxNativeAbortPageError(laterPhaseAbort, phase)).toBe(false);
+    const problems = {
+      pageErrors: [trailingAbort, unrelated, canonicalAbort, laterPhaseAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: 10 },
+        { message: unrelated, observedAt: 11 },
+        { message: laterPhaseAbort, observedAt: 12 },
+      ],
+    };
+    consumeAllowedPageErrors(problems, () =>
+      firefoxCrossTabLiveStreamAbortPageErrors(problems, phase),
+    );
+    expect(problems.pageErrors).toEqual([unrelated, laterPhaseAbort]);
+    expect(problems.pageErrorEvidence).toEqual([
+      { message: unrelated, observedAt: 11 },
+      { message: laterPhaseAbort, observedAt: 12 },
+    ]);
+  });
+
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
     expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
@@ -3898,6 +3958,14 @@ describe("provider-neutral browser account acceptance", () => {
                   `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
                 ]
               : [],
+          allowedPageErrors:
+            engine === "firefox"
+              ? () =>
+                  firefoxCrossTabLiveStreamAbortPageErrors(
+                    observedProblems,
+                    "cross-tab-select-race",
+                  )
+              : undefined,
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
