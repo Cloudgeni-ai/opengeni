@@ -1175,6 +1175,7 @@ export type {
   WorkspaceSettings,
   WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
+  VoiceInputProviderId,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,
