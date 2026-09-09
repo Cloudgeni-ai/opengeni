@@ -14,6 +14,7 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
+import { isExecSessionLostBanner } from "../exec-banner";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -396,12 +397,31 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
   modalDirectoryRetentionWrappedSandboxes.add(sandbox);
 }
 
+/** A numeric SDK session id names an adapter-local map entry, not a durable
+ * Modal process. Its absence proves neither process exit nor provider loss. */
+export class ModalProcessObservationUnavailableError extends Error {
+  readonly name = "ModalProcessObservationUnavailableError";
+  constructor(providerSessionId: number, options?: ErrorOptions) {
+    super(
+      `Modal command ${providerSessionId} observation unavailable; its SDK handle is missing or terminal output could not be recovered. Do not replay the command or treat it as exited.`,
+      options,
+    );
+  }
+}
+
 function installModalExecCompletionRecovery(session: MutableModalSandboxSession): void {
   const writeStdin = session.writeStdin;
   if (typeof writeStdin !== "function") return;
+  const observe = async (args: Parameters<typeof writeStdin>[0]) => {
+    const result = await writeStdin.call(session, args);
+    if (isExecSessionLostBanner(result, args.sessionId)) {
+      throw new ModalProcessObservationUnavailableError(args.sessionId);
+    }
+    return result;
+  };
   session.writeStdin = async (args) => {
     try {
-      return await writeStdin.call(session, args);
+      return await observe(args);
     } catch (error) {
       if (
         !isModalExecAlreadyCompletedError(error) ||
@@ -410,19 +430,13 @@ function installModalExecCompletionRecovery(session: MutableModalSandboxSession)
       ) {
         throw error;
       }
-      // Agents Extensions checks its local active-process map before writing,
-      // but the process can finish before Modal receives TaskExecStdinWrite.
-      // An empty retry performs no side effect: it lets the adapter observe the
-      // already-terminal process, delete its stale map entry, and return the
-      // ordinary exact exit banner consumed by OpenGeni's durable settlement.
-      // If that cleanup poll itself loses transport, the original typed
-      // completion is still authoritative and the canonical lost-session
-      // result lets OpenGeni close the exact retained process without failing
-      // the turn or replaying stdin.
+      // The process can finish between the SDK lookup and the provider stdin
+      // write. An empty poll may recover its exact terminal result; never replay
+      // stdin, and never turn failure to observe that result into loss proof.
       try {
-        return await writeStdin.call(session, { ...args, chars: "" });
-      } catch {
-        return `write_stdin failed: session not found: ${args.sessionId}`;
+        return await observe({ ...args, chars: "" });
+      } catch (cause) {
+        throw new ModalProcessObservationUnavailableError(args.sessionId, { cause });
       }
     }
   };

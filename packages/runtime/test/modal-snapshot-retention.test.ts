@@ -514,7 +514,7 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     expect(replacementDetach).not.toHaveBeenCalled();
   });
 
-  test("falls back to the exact lost-session result after typed completion cleanup fails", async () => {
+  test("preserves unknown terminal observation after typed completion cleanup fails", async () => {
     let call = 0;
     const writeStdin = mock(async () => {
       call += 1;
@@ -532,8 +532,8 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
 
     installOpenGeniModalSnapshotPolicy(session);
 
-    await expect(session.writeStdin({ sessionId: 11, chars: "input" })).resolves.toBe(
-      "write_stdin failed: session not found: 11",
+    await expect(session.writeStdin({ sessionId: 11, chars: "input" })).rejects.toThrow(
+      "observation unavailable",
     );
   });
 

@@ -1490,6 +1490,25 @@ stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
 
+### Modal retained-command observation
+
+A resumed Modal SDK session restores the sandbox but not the adapter-local
+numeric process handles. The reaper reports `process_observation_unavailable`
+for that observation boundary, retaining the exact process/admission/holder.
+After five probes it records `quarantined_process_observation_unavailable` and
+rechecks after 24 hours through the existing reconciliation diagnostics/metrics.
+A current owner's exact exit proof still settles immediately; independently
+verified loss of the bound provider instance remains authoritative. Neither a
+missing SDK map entry nor failure to recover terminal output proves command loss,
+including when a completed entry aged out in its original adapter.
+
+This is safe containment, not cross-worker command reattachment. A command whose
+owner cannot recover its terminal receipt remains a visible capture blocker;
+operators must reconcile the exact command/provider identity rather than replay
+unknown side effects or clear holders by age. Durable provider execution IDs and
+output reattachment remain separate work. No new process is launched by probing.
+
+
 Migration 0419 records the exact launch turn, attempt, and execution generation
 when either provider adopts a background command under the existing attempt
 fence. Terminal results resolve that immutable receipt, copy only eligible
