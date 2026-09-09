@@ -433,6 +433,9 @@ describe("credential allocator atomic Codex credential allocation", () => {
         true,
       );
       expect(switched.result.events[0]?.type).toBe("codex.account.selection.changed");
+      const [cursor] =
+        await admin`select last_sequence from sessions where id = ${fence.sessionId}`;
+      expect(cursor!.last_sequence).toBe(switched.result.events[0]!.sequence);
       const [afterSwitch] = await admin`select metadata from session_turns where id = ${turnId}`;
       for (const [key, value] of Object.entries(metadataBefore)) {
         if (key !== "codexCredentialPolicySnapshotV1")

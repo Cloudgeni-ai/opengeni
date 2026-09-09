@@ -29203,15 +29203,12 @@ export async function switchSessionCodexAccount(
       const events: SessionEvent[] = [];
       let appliedTo: "waiting_turn" | "next_turn" = "next_turn";
       if (!changed) return { result: { changed, appliedTo, events }, changed };
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        );
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "none",
+        sessionIds: [input.sessionId],
+      });
+      const session = locks.sessions[0];
       if (!session) throw new Error("Codex account switch lost its locked session");
       if (session.status === "waiting_capacity" && session.activeTurnId) {
         const [turn] = await tx
@@ -29304,6 +29301,15 @@ export async function switchSessionCodexAccount(
           ),
         )
         .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1 })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        );
       events.push(...inserted.map(mapEvent));
       return { result: { changed, appliedTo, events }, changed };
     },

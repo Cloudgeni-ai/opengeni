@@ -915,13 +915,7 @@ Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 
 ### 5.7 Usage, limits, and billing
 
-Explicit session Codex account switches can override a capacity-blocked turn's
-accepted account selection through `switchSessionCodexAccount` in `packages/db`.
-The allocator lock serializes the closed-attempt override with reconciliation
-and lease claim; source/authority, turn identity, and history are preserved.
-Background policy changes and running attempts retain their accepted settings.
-Session detail exposes current-turn selection separately from future preference
-so account controls do not display available future capacity as current capacity.
+Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
