@@ -5,11 +5,11 @@ DO $drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' OR jsonb_array_length(roles) NOT BETWEEN 1 AND 16 THEN
-    RAISE EXCEPTION '0449 requires application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0450 requires application database roles' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0449 requires stopped application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0450 requires stopped application sessions' USING ERRCODE = '55000';
   END IF;
 END
 $drain$;

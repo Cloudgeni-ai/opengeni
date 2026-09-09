@@ -1,3 +1,4 @@
+import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "../site-session-origin";
@@ -403,8 +404,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "pty retained-process identity is stale; reopen the terminal",
       });
     }
+    const providerCommand = await getRetainedProviderCommand(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      processId: process.id,
+    });
     handle.routingSession.adoptRetainedProcess({
-      process: { id: process.id, providerSessionId: process.providerSessionId },
+      process: {
+        id: process.id,
+        providerSessionId: process.providerSessionId,
+        ...(providerCommand ? { providerCommand } : {}),
+      },
       backend: {
         sandboxId: null,
         leaseEpoch: process.leaseEpoch,

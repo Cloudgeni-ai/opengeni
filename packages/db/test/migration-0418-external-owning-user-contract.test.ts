@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 test("external owning-user database consistency checks require a persisted live mapping", async () => {
   const source = await readFile(
-    new URL("../drizzle/0436_external_owning_user_authority.sql", import.meta.url),
+    new URL("../drizzle/0437_external_owning_user_authority.sql", import.meta.url),
     "utf8",
   );
   expect(source).toStartWith("-- deployment-mode: rolling\n");

@@ -35,12 +35,10 @@ Separate surfaces:
 - **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
   goals, approvals, structured human input, durable semantic titles, and
   durable history.
-- **Browser voice** has two separate boundaries: realtime conversation is a
-  coexisting transport for an ordinary session, while composer transcription
-  produces an editable draft that reaches session truth only through Send. Workspace
-  voice settings select the preferred transcription billing provider and fallback.
-  Only explicit rejection of an untouched recording permits a provider change;
-  successful or uncertain prior attempts keep their durable provider pin.
+- **Browser voice** supports realtime sessions and editable transcription drafts.
+  Drafts enter session history through Send. Workspace settings select billing
+  provider and fallback; successful or uncertain attempts pin the provider.
+  See [transcription](transcription.md) for recovery rules.
 - **Compute** supports provisioned sandbox providers and user-owned Connected
   Machines without changing the session model.
 - **Tools and integrations** combine first-party MCP, per-session MCP servers,
@@ -1417,11 +1415,11 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Repeated retained-process Modal binding-missing or binding-mismatch observations
-may be quarantined for a 24-hour recheck after five claimed probes, but the
-process, admission, PTY, and holder remain capture blockers. Quarantine never
-becomes exit/loss proof and never authorizes capture, rotation, provider
-termination, or replay.
+After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
+recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
+never authorizes exit/loss, capture, rotation, termination, or replay.
+
+Modal command retention: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and

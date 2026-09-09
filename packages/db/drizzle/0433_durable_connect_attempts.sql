@@ -9,21 +9,21 @@ DECLARE
   roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0432 requires an explicit application database role list' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0433 requires an explicit application database role list' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item
     WHERE jsonb_typeof(item) <> 'string' OR btrim(item #>> '{}') = ''
       OR item #>> '{}' <> btrim(item #>> '{}') OR octet_length(item #>> '{}') > 63
   ) THEN
-    RAISE EXCEPTION '0432 received invalid application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0433 received invalid application database roles' USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_stat_activity activity
     JOIN jsonb_array_elements_text(roles) role_name ON role_name = activity.usename
     WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid()
   ) THEN
-    RAISE EXCEPTION '0432 requires all application database sessions stopped' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0433 requires all application database sessions stopped' USING ERRCODE = '55000';
   END IF;
 END
 $drain$;
@@ -89,7 +89,7 @@ BEGIN
       ON role_name = activity.usename
     WHERE activity.datname = current_database() AND activity.pid <> pg_backend_pid()
   ) THEN
-    RAISE EXCEPTION '0432 requires all application database sessions stopped' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0433 requires all application database sessions stopped' USING ERRCODE = '55000';
   END IF;
 END
 $acl$;

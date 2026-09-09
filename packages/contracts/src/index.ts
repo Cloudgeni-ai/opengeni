@@ -1,4 +1,5 @@
 export * from "./model-connection-access";
+export * from "./sandbox-provider-command";
 import { z } from "zod";
 export const HostMcpCreateSelections = z
   .array(

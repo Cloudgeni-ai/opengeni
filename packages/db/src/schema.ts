@@ -1,4 +1,5 @@
 import type {
+  SandboxProviderCommand,
   AutomationAcceptedExecution,
   AutomationSessionTemplate,
   AttemptToolCatalog,
@@ -9743,6 +9744,10 @@ export const sandboxRetainedProcesses = pgTable(
     routeTargetId: uuid("route_target_id"),
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
+    providerCommand: jsonb("provider_command").$type<SandboxProviderCommand>(),
+    providerCommandInputIndex: bigint("provider_command_input_index", { mode: "number" })
+      .notNull()
+      .default(0),
     // Authority frozen when the process was retained (migration 0277). A
     // `legacy_unattributed` process keeps running; only its next workspace
     // mutation is refused, because nothing may invent an owner for it.
@@ -9834,6 +9839,21 @@ export const sandboxRetainedProcesses = pgTable(
         table.providerSessionId,
       )
       .where(sql`${table.state} = 'active'`),
+    providerCommandValid: check(
+      "sandbox_retained_processes_provider_command_chk",
+      sql`${table.providerCommand} IS NULL OR ((
+        ${table.providerBackend} = 'modal'
+        AND jsonb_typeof(${table.providerCommand}) = 'object'
+        AND ${table.providerCommand}->>'kind' = 'modal-control-v1'
+        AND ${table.providerCommand}->>'sandboxId' = ${table.providerInstanceId}
+        AND length(${table.providerCommand}->>'taskId') > 0
+        AND length(${table.providerCommand}->>'execId') > 0
+      ) IS TRUE)`,
+    ),
+    providerInputIndexValid: check(
+      "sandbox_retained_processes_provider_input_index_chk",
+      sql`${table.providerCommandInputIndex} BETWEEN 0 AND 9007199254740991`,
+    ),
     holder: uniqueIndex("sandbox_retained_processes_holder_uq").on(table.leaseId, table.holderId),
     active: index("sandbox_retained_processes_active_idx")
       .on(table.workspaceId, table.sessionId, table.startedAt)

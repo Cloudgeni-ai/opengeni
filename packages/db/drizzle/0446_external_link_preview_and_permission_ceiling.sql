@@ -5,16 +5,16 @@ DO $drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0445 requires application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0446 requires application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR btrim(item #>> '{}') = '' OR item #>> '{}' <> btrim(item #>> '{}')
       OR octet_length(item #>> '{}') > 63
-  ) THEN RAISE EXCEPTION '0445 invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0446 invalid application roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0445 requires stopped application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0446 requires stopped application sessions' USING ERRCODE = '55000';
   END IF;
 END
 $drain$;
@@ -34,7 +34,7 @@ DECLARE
     ) THEN$clause$;
 BEGIN
   IF length(definition) - length(replace(definition, prior, '')) <> length(prior) THEN
-    RAISE EXCEPTION '0445 expected exactly one 0426 permission clause' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0446 expected exactly one 0426 permission clause' USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, prior, replacement);
 END
@@ -76,7 +76,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_stat_activity a
     JOIN jsonb_array_elements_text(current_setting('opengeni.migration_application_roles')::jsonb) r ON r = a.usename
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0445 requires stopped application sessions' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0446 requires stopped application sessions' USING ERRCODE = '55000';
   END IF;
 END
 $drain$;
