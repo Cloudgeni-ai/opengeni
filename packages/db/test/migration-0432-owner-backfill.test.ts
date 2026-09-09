@@ -514,7 +514,7 @@ describe("0432 owner-only Skill backfill", () => {
           'company_brain_pref_receipts_workspace_fk',
           'skill_write_receipts_workspace_id_fkey'
         ) ORDER BY c.conname`;
-      expect(fkActions).toEqual([
+      expect([...fkActions]).toEqual([
         {
           conname: "company_brain_pref_receipts_workspace_fk",
           confdeltype: "c",
