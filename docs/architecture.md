@@ -1371,11 +1371,8 @@ holders, workspace mutation generation, archive/recovery state, and teardown
 authority. The active session pointer selects an effective target without
 rewriting the session's durable home policy.
 
-Repository skill discovery skips only definite filesystem path misses. Provider,
-authority, cancellation, and lifecycle failures propagate to turn settlement;
-rotation waits are not internally retried or cleared from the turn's provision
-memo. The durable lifecycle wake owns resumption rather than another skill root
-starting a fresh provisioning loop.
+Repository skill discovery skips definite path misses. Other failures reach
+turn settlement; rotation resumes through the durable lifecycle wake.
 
 Immutable rig setup is single-flight at the lease boundary. The exact lease
 epoch, provider instance, and non-secret setup specification hash own one
@@ -1428,18 +1425,10 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Command observation backoff does not suppress provider-lifecycle checks during
-rotation. An idle Modal lease held only by positively unobservable commands may
-enroll those exact command identities for the existing drain. Enrollment checks
-the whole sandbox group for live or unquiesced attempts, excludes other holders
-and in-flight child mutations, and observes idle grace. It fences new admission;
-the records and process holders remain until provider termination. Capture may
-exclude only enrolled parent admissions and holders. The existing checkpoint
-publication, termination, cold commit, and durable wake own recovery. Unknown
-commands settle as lost, never successful. Filesystem snapshots do not preserve
-running processes or establish application-level transaction consistency.
-
-Modal command retention: `docs/run-lifecycle.md`.
+Idle, unobservable Modal commands use the existing drain after group-wide agent,
+holder, mutation, and idle-grace checks. Records remain until termination;
+unobserved outcomes become lost. Command backoff never suppresses rotation's
+provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
