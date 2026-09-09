@@ -237,6 +237,55 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(spy.sends).toEqual(["send"]);
   });
 
+  test("Enter explains missing annotation notes instead of failing silently", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    let reviewRequests = 0;
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={{
+          ...composer(spy),
+          canSend: false,
+          annotations: [
+            {
+              id: "00000000-0000-4000-8000-000000000701",
+              quote: "beta",
+              note: "",
+              source: {
+                kind: "assistant_message",
+                eventId: "00000000-0000-4000-8000-000000000702",
+                eventType: "agent.message.completed",
+                sequence: 4,
+                turnId: "00000000-0000-4000-8000-000000000703",
+                startOffset: 0,
+                endOffset: 4,
+                contextBefore: "",
+                contextAfter: "",
+              },
+            },
+          ],
+          updateAnnotation: () => {},
+          removeAnnotation: () => {},
+          requestAnnotationReview: () => {
+            reviewRequests += 1;
+          },
+        }}
+      />,
+    );
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Send message"]',
+    );
+    expect(send?.disabled).toBe(true);
+    expect(send?.getAttribute("data-og-tip")).toBe("Add a note to each quote before sending.");
+    const textarea = mounted.container.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Message the agent"]',
+    );
+    expect(textarea).not.toBeNull();
+    await press(textarea!, { key: "Enter" });
+    expect(spy.sends).toEqual([]);
+    expect(reviewRequests).toBe(1);
+    expect(mounted.container.textContent).toContain("Add a note to each quote before sending.");
+  });
+
   test("a disabled send button can explain the exact route-level blocker", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     const sendTitle =

@@ -19,7 +19,7 @@ import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
 import { usePacks, useVariableSets } from "@opengeni/react";
-import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import { PlugIcon, PlusIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
@@ -126,7 +126,6 @@ import {
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { cn } from "@/lib/utils";
 import { request } from "@/api";
 
 // Custom API creation is a fundamentally different "define a new connector
@@ -550,11 +549,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // still matching the live query so an old search never renders against a new
   // one (invalidation without a clearing effect that flashes stale tiles first).
   const visibleRegistry = registryResultsForQuery(query, registrySearched, registryResults);
-
-  function refreshAll() {
-    void refresh();
-    void packs.refresh();
-  }
 
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
   // snapshot until persisted); the add-custom flow passes it explicitly for a
@@ -1710,23 +1704,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           title="Plugins"
           description="Connect apps, MCP servers, skills, and packs for agents in this workspace."
           actions={
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-fg-muted transition-none disabled:opacity-100"
-                onClick={refreshAll}
-                disabled={loading || packs.loading}
-              >
-                <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
-                Refresh
-              </Button>
-              <Button type="button" onClick={() => setAddOpen(true)}>
-                <PlusIcon />
-                Add MCP server
-              </Button>
-            </>
+            <Button type="button" onClick={() => setAddOpen(true)}>
+              <PlusIcon />
+              Add MCP server
+            </Button>
           }
         />
 

@@ -1,14 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "jsx": "react-jsx",
     "noEmit": true,
-    "types": ["bun", "vite/client"]
+    "types": ["bun"]
   },
-  "include": [
-    "server.ts",
-    "main.tsx",
-    "vite.config.ts",
-    "../../packages/react/src/types/external.d.ts"
-  ]
+  "include": ["server.ts"]
 }

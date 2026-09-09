@@ -109,13 +109,15 @@ The managed web console exposes that exact command for a new session and its
 existing-session Send/Steer composer. It discovers only the current managed
 human's active Variable Set/Rig/Connected Machine authorities through the bounded owner list,
 joins names from target-workspace metadata-only catalogs, and preserves the
-explicit selected-resource boundary. Shared sessions default to message-only
-authorization; the human may choose session-scoped ongoing work for the next
-submission, with the version-1 shared-output warning. Authority-epoch, principal,
-organization, workspace, session, or selected-source changes reset that local
-choice; the current authority closure must settle before submission. The choice
-does not revoke existing grants. Exact current grant metadata supplies a separate
-ongoing-authorization cue, never execution authority. The UI does not project an
+explicit selected-resource boundary. Explicit attachment is consent for the
+owner's work in this session: private and shared sessions submit session-scoped
+authorization without a duration selector or a second approval prompt. Shared
+resource pickers explain that results are visible to people with chat access and
+include the version-1 shared-output acknowledgement. Authority-epoch, principal,
+organization, workspace, session, or selected-source changes still require the
+current authority closure to settle before submission. The browser never requests
+`always`; existing public API `once`/`session`/`always` semantics are unchanged.
+Healthy attachments add no composer-top status or acceptance notice. The UI does not project an
 attachment as accepted before the Create/Send/Steer command commits. Continue
 uses that same human Send path. Cross-workspace grant/fork UX, standalone management of `once`,
 Documents/Connections without an exact runtime adapter, and
@@ -1376,6 +1378,30 @@ membership stay ownerless.
 Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
+
+## Forking at a message
+
+The managed-human fork request accepts an optional `sourceEventId`. The stock
+message action row supplies the selected durable user message or completed
+assistant message. Omission keeps the whole-session fork contract. The event id
+is included in the idempotency hash and resolved under the existing quiescent
+source locks to a unique canonical history boundary. Only history through that
+boundary is copied; events are never converted into model input. Runtime setup
+replacement cannot be combined with a message boundary.
+
+The first boundary implementation rejects compacted histories, ambiguous or
+missing message/history matches, and boundaries splitting a tool exchange.
+Those cases remain eligible for the ordinary whole-session fork; there is no
+silent fallback. A committed message fork still replays after compaction or a
+source authorization change. The same actor, visibility, acknowledgement,
+workspace, and grant rules apply to both fork forms.
+
+Migration `0429_message_boundary_session_forks.sql` adds an overload to the exact
+runtime routine contract. Drain API/control/turn workers, migrate, provision the
+runtime role, and start the message-boundary-aware binary. Do not restart an
+older binary after activation. The SQL overload clones the current lifecycle
+body with checked anchors, preserving its authority, locks, receipt ordering,
+and fresh-session configuration while narrowing the history spool.
 
 ## Session-visibility and fork public activation
 

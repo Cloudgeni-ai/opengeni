@@ -72,6 +72,48 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
   test("refreshes only after the durable post-selection event", () => {
     expect(isCodexAccountEvent({ type: "turn.started" })).toBe(false);
     expect(isCodexAccountEvent({ type: "codex.account.switched" })).toBe(true);
+    expect(isCodexAccountEvent({ type: "codex.account.selection.changed" })).toBe(true);
+    expect(isCodexAccountEvent({ type: "codex.capacity.waiting" })).toBe(true);
+  });
+
+  test("keeps blocked selection separate from future preference and exposes override acknowledgement", async () => {
+    let selected: string | null = null;
+    let blocked = "a";
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => ({
+        ...response([account("a"), account("b")]),
+        activeAccountId: "b",
+      }),
+      getSession: async () => ({
+        codexPinnedCredentialId: selected,
+        codexCurrentSelection: { credentialId: blocked, waiting: true },
+      }),
+      pinSessionCodexAccount: async (_workspaceId, _sessionId, target) => {
+        selected = target;
+        blocked = target;
+        return { pinned: target, appliedTo: "waiting_turn" };
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "test-session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.effectiveAccountId).toBe("b");
+    expect(hook.result.current.currentSelection).toEqual({ credentialId: "a", waiting: true });
+    await actRun(() => hook.result.current.pin("b"));
+    await flush();
+    expect(hook.result.current.currentSelection).toEqual({ credentialId: "b", waiting: true });
+    expect(hook.result.current.switchAppliedTo).toBe("waiting_turn");
+    await hook.unmount();
   });
 
   test("an empty shared feed never opens a fallback session stream", async () => {

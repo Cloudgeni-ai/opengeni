@@ -1,5 +1,16 @@
 # @opengeni/xai-subscription
 
+## 0.1.4
+
+### Patch Changes
+
+- 107aa14: Support standard SDK/React conversations in Sites and sandbox previews, direct
+  HTML/source uploads, exact deployment package pins, and embedded layout/queue
+  defaults. Refresh exhausted Grok capacity after external resets.
+- Updated dependencies [52cf486]
+- Updated dependencies [92cdc31]
+  - @opengeni/network@0.3.1
+
 ## 0.1.3
 
 ### Patch Changes

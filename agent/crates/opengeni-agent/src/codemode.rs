@@ -21,6 +21,10 @@ use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
 const TOKEN_ENV: &str = "OPENGENI_CODEMODE_TOKEN";
 const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
+// Client-compiled protocol acknowledgement, not a value echoed from a server.
+// packages/codemode/test/native-api-contract.test.ts pins this mirror to contracts.
+const API_CONTRACT_HEADER: &str = "x-opengeni-api-contract";
+const API_CONTRACT_REVISION: &str = "2026-08-organization-recovery-custody-v1";
 /// Absolute installed binary path exposed only to an attempt-scoped child that
 /// already carries Codemode authority. This avoids every PATH/runtime guess.
 pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";
@@ -100,10 +104,57 @@ pub enum CodemodeError {
     InvalidResponse(String),
     #[error("Codemode operation {operation_id} did not settle before the client deadline")]
     Deadline { operation_id: String },
-    #[error("Codemode operation outcome is unknown: {0}")]
-    OutcomeUnknown(String),
-    #[error("Codemode operation failed: {0}")]
-    Operation(String),
+    #[error("Codemode operation {operation_id} ({state}): {message}")]
+    Operation {
+        operation_id: String,
+        state: String,
+        code: Option<String>,
+        message: String,
+    },
+    #[error("Codemode operation {operation_id}: {source}")]
+    Observation {
+        operation_id: String,
+        #[source]
+        source: Box<CodemodeError>,
+    },
+}
+
+impl CodemodeError {
+    /// A recovery receipt, not permission to retry. Missing state means that
+    /// this client could not observe the journal, not that execution failed.
+    pub fn receipt(&self) -> Value {
+        let (operation_id, state, code) = match self {
+            Self::Operation {
+                operation_id,
+                state,
+                code,
+                ..
+            } => (
+                Some(operation_id.as_str()),
+                Some(state.as_str()),
+                code.as_deref(),
+            ),
+            Self::Observation { operation_id, .. } => (
+                Some(operation_id.as_str()),
+                None,
+                Some("operation_observation_failed"),
+            ),
+            Self::Deadline { operation_id } => {
+                (Some(operation_id.as_str()), None, Some("client_deadline"))
+            }
+            _ => (None, None, Some("client_error")),
+        };
+        json!({ "error": { "operationId": operation_id, "state": state,
+            "code": code, "message": self.to_string(),
+            "recovery": operation_id.map(|_| "Read the existing operation under current authority. Do not automatically start another call.") } })
+    }
+
+    fn observing(self, operation_id: &str) -> Self {
+        Self::Observation {
+            operation_id: operation_id.to_string(),
+            source: Box::new(self),
+        }
+    }
 }
 
 /// Run one native Codemode command. Discovery is compact text by default;
@@ -121,7 +172,10 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         };
     }
 
-    let client = CodemodeClient::from_environment()?;
+    let client = CodemodeClient::from_environment().map_err(|error| match &args.action {
+        CodemodeAction::Read { operation_id } => error.observing(&operation_id.to_string()),
+        _ => error,
+    })?;
     match args.action {
         CodemodeAction::List(args) => {
             let catalog = client.catalog().await?;
@@ -140,6 +194,19 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         CodemodeAction::Call(args) => {
             let result = client.call(args).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        CodemodeAction::Read { operation_id } => {
+            // A GET only. Neither catalog discovery nor submission is needed.
+            let operation = client
+                .read(&operation_id.to_string())
+                .await
+                .map_err(|error| error.observing(&operation_id.to_string()))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "operationId": operation_id.to_string(), "operation": operation
+                }))?
+            );
         }
         CodemodeAction::Doctor => unreachable!("doctor returned before client construction"),
     }
@@ -182,6 +249,10 @@ impl CodemodeClient {
             )));
         }
         let http = Client::builder()
+            .default_headers(reqwest::header::HeaderMap::from_iter([(
+                reqwest::header::HeaderName::from_static(API_CONTRACT_HEADER),
+                reqwest::header::HeaderValue::from_static(API_CONTRACT_REVISION),
+            )]))
             .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("opengeni-agent/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -238,11 +309,13 @@ impl CodemodeClient {
                     Ok(value) => value,
                     Err(submit_error) => match self.read(&operation_id).await {
                         Ok(value) => value,
-                        Err(_) => return Err(submit_error),
+                        Err(_) => return Err(submit_error.observing(&operation_id)),
                     },
                 }
             } else {
-                self.read(&operation_id).await?
+                self.read(&operation_id)
+                    .await
+                    .map_err(|error| error.observing(&operation_id))?
             };
 
             match next.state {
@@ -251,13 +324,21 @@ impl CodemodeClient {
                         CodemodeError::InvalidResponse(
                             "completed operation omitted its result".to_string(),
                         )
+                        .observing(&operation_id)
                     });
                 }
-                OperationState::Failed | OperationState::Cancelled => {
-                    return Err(CodemodeError::Operation(next.error_summary()));
-                }
-                OperationState::OutcomeUnknown => {
-                    return Err(CodemodeError::OutcomeUnknown(next.error_summary()));
+                OperationState::Failed
+                | OperationState::Cancelled
+                | OperationState::OutcomeUnknown => {
+                    return Err(CodemodeError::Operation {
+                        operation_id: operation_id.clone(),
+                        state: serde_json::to_value(next.state)?
+                            .as_str()
+                            .expect("state string")
+                            .to_string(),
+                        message: next.error_summary(),
+                        code: next.error_code,
+                    });
                 }
                 OperationState::Queued | OperationState::Running => operation = Some(next),
             }
@@ -367,6 +448,7 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
             .and_then(|value| {
                 value
                     .pointer("/error/message")
+                    .or_else(|| value.get("message"))
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
             })
@@ -604,7 +686,7 @@ struct Submission {
     operation: Operation,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum OperationState {
     Queued,
@@ -615,7 +697,7 @@ enum OperationState {
     Cancelled,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Operation {
     state: OperationState,
@@ -1249,6 +1331,7 @@ mod tests {
         assert!(requests[1].starts_with("POST /v1/workspaces/ws/codemode/calls "));
         for request in &requests {
             assert!(request.contains("authorization: Bearer attempt-bearer"));
+            assert!(request.contains(&format!("{API_CONTRACT_HEADER}: {API_CONTRACT_REVISION}")));
         }
         let body = requests[1].split("\r\n\r\n").nth(1).expect("request body");
         let body: Value = serde_json::from_str(body).expect("json request");
@@ -1256,6 +1339,31 @@ mod tests {
         assert_eq!(body["identity"]["serverId"], "demo");
         assert_eq!(body["arguments"]["query"], "hello");
         assert!(Uuid::parse_str(body["operationId"].as_str().expect("operation id")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn native_client_explains_a_contract_mismatch_without_retrying() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            read_request(&mut stream).await;
+            let body = r#"{"code":"API_CONTRACT_CHANGED","message":"Reload this client before changing state."}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ).as_bytes()).await.expect("response");
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/v1/workspaces/ws/codemode"),
+            "attempt-bearer".to_string(),
+        )
+        .expect("client");
+        let error = client.catalog().await.expect_err("contract mismatch");
+        assert!(error
+            .to_string()
+            .contains("Reload this client before changing state."));
+        server.await.expect("server");
     }
 
     #[tokio::test]
@@ -1329,6 +1437,70 @@ mod tests {
         assert!(requests[2].starts_with(&format!(
             "GET /v1/workspaces/ws/codemode/calls/{operation_id} "
         )));
+    }
+
+    #[tokio::test]
+    async fn native_terminal_receipts_keep_identity_without_resubmission() {
+        for state in ["outcome_unknown", "failed", "cancelled"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+            let address = listener.local_addr().expect("address");
+            let state_owned = state.to_string();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("catalog");
+                read_request(&mut stream).await;
+                write_response(
+                    &mut stream,
+                    &json!({
+                        "attemptId": "11111111-1111-4111-8111-111111111111",
+                        "digest": "c".repeat(64), "entries": [{
+                            "identity": {"serverId":"demo","toolName":"write"},
+                            "modelName":"demo__write", "codemodePath":["demo","write"],
+                            "inputSchema":{"type":"object"}, "source":"mcp", "approval":"none"
+                        }]
+                    }),
+                )
+                .await;
+                let (mut stream, _) = listener.accept().await.expect("post");
+                let request = read_request(&mut stream).await;
+                let body: Value =
+                    serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                write_response(&mut stream, &json!({"operation": {
+                    "state":state_owned,"errorCode":"fixture_failure","errorMessage":"inspect actual state"
+                }})).await;
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err(),
+                    "must not resubmit"
+                );
+                body["operationId"].clone()
+            });
+            let client =
+                CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into())
+                    .unwrap();
+            let error = client
+                .call(CodemodeCallArgs {
+                    tool: "demo.write".into(),
+                    arguments: "{}".into(),
+                })
+                .await
+                .unwrap_err();
+            let receipt = error.receipt();
+            assert_eq!(receipt["error"]["operationId"], server.await.unwrap());
+            assert_eq!(receipt["error"]["state"], state);
+            assert_eq!(receipt["error"]["code"], "fixture_failure");
+        }
+    }
+
+    #[test]
+    fn observation_failures_do_not_invent_a_terminal_state() {
+        let error = CodemodeError::Transport("connection closed".into()).observing("operation-123");
+        assert_eq!(error.receipt()["error"]["operationId"], "operation-123");
+        assert!(error.receipt()["error"]["state"].is_null());
+        assert!(error.receipt()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection closed"));
     }
 
     async fn read_request(stream: &mut TcpStream) -> String {

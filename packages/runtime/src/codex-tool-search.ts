@@ -262,8 +262,8 @@ export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool
   return hits.slice(0, limit).map((s) => s.tool); // no hits ⇒ [] (codex-rs parity; see doc)
 }
 
-/** Parse `{query, limit}` from a tool_search_call's arguments (string or object). */
-function parseSearchArgs(raw: unknown): { query: string; limit: number } {
+/** Parse ranked or exact-name discovery arguments (string or object). */
+function parseSearchArgs(raw: unknown): { query: string; limit: number; names?: string[] } {
   let obj: Record<string, unknown> = {};
   try {
     obj =
@@ -280,7 +280,16 @@ function parseSearchArgs(raw: unknown): { query: string; limit: number } {
   const query = typeof obj.query === "string" ? obj.query : "";
   const limitRaw =
     typeof obj.limit === "number" && Number.isFinite(obj.limit) ? obj.limit : DEFAULT_SEARCH_LIMIT;
-  return { query, limit: Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.round(limitRaw))) };
+  const names = Array.isArray(obj.names)
+    ? obj.names
+        .filter((name): name is string => typeof name === "string")
+        .slice(0, MAX_SEARCH_LIMIT)
+    : undefined;
+  return {
+    query,
+    limit: Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.round(limitRaw))),
+    ...(names === undefined ? {} : { names }),
+  };
 }
 
 /**
@@ -382,8 +391,12 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
       tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
   );
   if (searchable.length === 0) return [];
-  const { query, limit } = parseSearchArgs(rawArguments);
-  const ranked = bm25RankTools(searchable, query, limit);
+  const { query, limit, names } = parseSearchArgs(rawArguments);
+  // Exact disclosure is a lookup in this already-authorized pool, not a fuzzy
+  // search or another executor registry. Keep the SDK's original references.
+  const ranked = names
+    ? searchable.filter((tool) => names.includes(tool.name))
+    : bm25RankTools(searchable, query, searchable.length);
   const bounded: Tool[] = [];
   let disclosedBytes = 0;
   for (const tool of ranked) {
@@ -392,10 +405,11 @@ export function searchToolPool(availableTools: Tool[], rawArguments: unknown): T
       continue;
     }
     if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) {
-      break;
+      continue;
     }
     disclosedBytes += toolBytes;
     bounded.push(tool);
+    if (bounded.length >= limit) break;
   }
   return bounded;
 }

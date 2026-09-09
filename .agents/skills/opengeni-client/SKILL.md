@@ -57,7 +57,7 @@ should sit behind it. Install, keep the organization API key on the server, and
 put one handler behind the chat endpoint:
 
 ```bash
-bun add @opengeni/sdk @opengeni/react
+bun add @opengeni/sdk
 ```
 
 ```ts
@@ -75,7 +75,7 @@ export const POST = createChatHandler(og, {
     return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
   },
   // format: "vercel" keeps an existing useChat client; "openai-chat" / "openai-responses"
-  // keep an OpenAI-shaped client. The default streams native chunks for <OpenGeniChat>.
+  // keep an OpenAI-shaped client. The default streams native chunks for custom clients.
 });
 
 // Server-side use without an endpoint:
@@ -83,13 +83,11 @@ const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" }
 const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
 ```
 
-Browser: `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
-`@opengeni/react/chat` (no provider, no SDK client); it sends the
-`x-opengeni-conversation` header and restores history on reload with `GET` on
-the same handler. Supply `authKey={JSON.stringify([tenantId, userId])}` for
-cookie authentication and change it on sign-in, sign-out and tenant switches.
-Changed `headers` values also reset the chat; header callbacks are resolved on
-each host render, so re-render when their credentials change. Every customer gets one workspace (`tenant`), every
+Browser: use a custom or compatible frontend for the backend chat handler.
+For native OpenGeni React UI, install `@opengeni/react` and use
+`SessionConversation` or compose `MessageTimeline` and `ChatComposer` with
+the normal SDK and authenticated session routes. Reset private UI state and cancel old
+requests when the authenticated user or tenant changes. Every customer gets one workspace (`tenant`), every
 conversation one deterministic session, and each session picks its own
 isolation. Conversation ids are namespaced per `user`: the handler scopes a
 client conversation id to the user `resolve` returned, and without a `user`,
@@ -110,8 +108,7 @@ label for memory scope and list filtering, never a login. Humans and the
 organization key still see every session. Graduate to `og.client`
 (`OpenGeniClient`) on the same `chat.sessionId` when the product needs files,
 tools, approval policies, forks, or realtime voice. The
-`examples/chat-quickstart` directory is this path as one server file and one
-page.
+`examples/chat-quickstart` directory provides a backend-only server example.
 
 ## Choose The Integration Shape First
 
