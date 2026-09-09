@@ -11,9 +11,17 @@ test("ordered history survives PostgreSQL, nested schemas and legacy updates wit
     await sql.unsafe(`CREATE TABLE session_history_items (id integer PRIMARY KEY, item jsonb NOT NULL, active boolean DEFAULT true);
       CREATE TABLE session_pending_tool_calls (id integer PRIMARY KEY, call_item jsonb NOT NULL, result_item jsonb, tied_reasoning_items jsonb NOT NULL DEFAULT '[]');
       INSERT INTO session_history_items(id,item) VALUES (1,'{"query":"old","names":[],"limit":5}');`);
-    await sql.unsafe(
-      await Bun.file(new URL("../drizzle/0434_ordered_model_history.sql", import.meta.url)).text(),
-    );
+    await sql.unsafe(`CREATE FUNCTION deferred_history_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+      CREATE CONSTRAINT TRIGGER deferred_history_probe AFTER UPDATE ON session_pending_tool_calls DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION deferred_history_probe();
+      INSERT INTO session_pending_tool_calls(id,call_item) VALUES(9,'{"type":"function_call"}');`);
+    const migration = await Bun.file(
+      new URL("../drizzle/0434_ordered_model_history.sql", import.meta.url),
+    ).text();
+    await expect(sql.unsafe(migration)).rejects.toThrow("pending trigger events");
+    const runner = await Bun.file(new URL("../src/migrate.ts", import.meta.url)).text();
+    expect(runner).toContain('file === "0434_ordered_model_history.sql"');
+    expect(runner).toContain("SET CONSTRAINTS ALL IMMEDIATE;");
+    await sql.unsafe(`SET CONSTRAINTS ALL IMMEDIATE;\n${migration}`);
     const live = {
       type: "tool_search_call",
       arguments: { query: "x\u0000", names: ["tool"], limit: 5 },
