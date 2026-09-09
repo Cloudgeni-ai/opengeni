@@ -3,7 +3,7 @@
 > Whole-system orientation; code and focused docs own exact behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
-## How to use this document
+## Navigation
 
 1. **New here?** Read §2–4; skim §6.
 2. **Changing a subsystem?** Start with §13 and its canonical sources.
@@ -37,7 +37,10 @@ Separate surfaces:
   durable history.
 - **Browser voice** has two separate boundaries: realtime conversation is a
   coexisting transport for an ordinary session, while composer transcription
-  produces an editable draft that reaches session truth only through Send.
+  produces an editable draft that reaches session truth only through Send. Workspace
+  voice settings select the preferred transcription billing provider and fallback.
+  Only explicit rejection of an untouched recording permits a provider change;
+  successful or uncertain prior attempts keep their durable provider pin.
 - **Compute** supports provisioned sandbox providers and user-owned Connected
   Machines without changing the session model.
 - **Tools and integrations** combine first-party MCP, per-session MCP servers,
@@ -73,14 +76,12 @@ Canonical introductions: [`../README.md`](../README.md),
 
 ## 3. Core invariants
 
-Cross-package invariants; focused docs own complete contracts and edge cases.
+Cross-package invariants; focused docs own details.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
-Authoritative state is committed to Postgres before any live notification is
-published. NATS carries session-event fanout, invalidations, request/reply, and
-Connected Machine streams, but it is not the event store and is never evidence
-that a mutation committed.
+Postgres commits precede notifications. NATS carries fanout, invalidations,
+request/reply and Connected Machine streams, never durable commit evidence.
 
 Session events have a monotonic per-session sequence. The narrow
 `session_event_cursors` row transactionally verifies every append and is the
@@ -102,34 +103,28 @@ The raw isolation route has an operational rollback switch:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
 validation active while restoring wide-session locking and compatibility writes.
 
-Interactive commands acknowledge their durable transaction. NATS publication
-and immediate Temporal signalling are replayable follow-up work. Never make a
-committed command depend on a successful best-effort fanout.
+Commands acknowledge durable transactions; NATS/Temporal notifications are
+replayable follow-ups, never prerequisites for committed-command success.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
-Temporal owns orchestration: the long-lived session workflow, activity
-dispatch, signals, timers where appropriate, and `continueAsNew`. It does not
-own conversation truth, goals, queue state, token streams, tool output, or
-provider transcripts.
-
-The workflow reads durable obligations through activities. Postgres remains
-authoritative when a signal is duplicated, delayed, lost, or delivered to a
-workflow run that is closing. Token and tool streams travel through the normal
-event path rather than inflating workflow history.
+Temporal orchestrates workflows, activities, signals, timers and `continueAsNew`.
+Activities read Postgres obligations; duplicate, delayed, lost or closing-run
+signals never replace that truth. Conversation, goals, queues, tokens, tool
+output and provider transcripts stay outside workflow history. Streams use
+the ordinary event path.
 
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is one accepted unit of work. An **attempt** is one physical worker
-execution of that turn. Worker death, recovery, interruption, or capacity
-waiting may create another attempt without creating another logical turn or
-replaying an already-completed side effect.
+A **turn** is accepted work; an **attempt** is its physical execution. Recovery,
+interruption or capacity waiting may replace an attempt without duplicating
+the turn or completed effects.
 
 Internal-update delivery is atomic per batch, not unique per logical turn:
 resumed attempts may append a new batch while retaining earlier receipts.
@@ -1198,10 +1193,10 @@ injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
 Multiple SDK clients in the same document retain independent ports; connecting
-one must not cancel another. The same Site client exposes the ordinary session
-SDK for React providers, timelines, and composers. Published requests use the
-viewer-authenticated parent; sandbox previews use the existing attempt-bound
-Codemode HTTP handler, including incremental, cancellable event streams.
+one must not cancel another. Workspace SDK requests have no endpoint allowlist:
+the host binds routing; API handlers authorize. Published calls use viewer auth;
+previews retain the Codemode permission ceiling and cancellable streaming.
+Build/edit shortcuts send ordinary user prompts without authority overrides.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a

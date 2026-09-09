@@ -80,10 +80,10 @@ for await (const chunk of chat.stream("And the next step?")) {
 `tenant` becomes one organization workspace, created idempotently on first use
 through `ensureWorkspace`; `conversation` becomes one deterministic session; and
 `send` or `stream` creates that session on the first message. Conversation ids
-are namespaced per `user`: the handler reads the client's conversation id (the
-`x-opengeni-conversation` header, else the wire format's own field) and scopes
-it to the user `resolve` returned, so one user cannot continue another user's
-chat by guessing its id. Without a `user`, the host must name the
+are independent of the acting user: the handler reads the client's conversation
+ID (`x-opengeni-conversation`, else the wire format's field), and ordinary API
+authorization decides whether the resolved user can use that session. Use private
+visibility when other members must not read it. Without a `user`, the host must name the
 `conversation` from `resolve`. A custom browser client can restore
 history and unresolved approvals/questions with `GET` on the same endpoint.
 There is no dedicated React component for this simplified protocol. If the product already uses the

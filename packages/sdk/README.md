@@ -83,10 +83,10 @@ const og = new OpenGeni({
 
 const chat = await og.chat({
   tenant: "acme", // one workspace per customer, created on first use
-  user: "u_42", // opaque end-user label (required for memory: "user")
-  conversation: "c_9", // stable id, namespaced to user; the session id is derived from both
+  user: "u_42", // authenticated product user; onboard workspace membership first
+  conversation: "c_9", // stable conversation id, independent of the acting user
   agentAccess: "session", // "session" (default) | "user" | "workspace"
-  memory: "user", // "session" | "user" | "workspace" | false; default follows agentAccess
+  memory: "user", // "user" | "workspace" | false; session-only agent reach defaults to false
   create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
 });
 
@@ -101,7 +101,7 @@ for await (const chunk of chat.stream("and then?")) {
 // Your endpoint. `resolve` is your auth hook: identity comes from the request
 // you authenticated, never from the body. The handler reads the client's
 // conversation id itself (x-opengeni-conversation header, or the wire format's
-// own field) and scopes it to `user`; return `conversation` from resolve only
+// own field) and authorizes as `user`; return `conversation` from resolve only
 // when the host names it, which is required when there is no `user`.
 export const handler = createChatHandler(og, {
   resolve: async (request) => {
@@ -116,9 +116,11 @@ export const GET = handler; // conversation history, for restoring the chat on r
 export const POST = handler; // send a message, or answer a pending request at .../respond
 ```
 
-Conversation ids are namespaced per user: the same `conversation` for two
-`user` labels reaches two sessions, so a client cannot continue another user's
-chat by guessing its id. Without a `user`, the host must name the conversation
+Conversation IDs do not change with the acting user. Authorized collaborators
+can use the same session; private visibility prevents access by other users.
+Use `chatBySessionId` for existing and legacy user-namespaced conversations.
+User mode requires explicit workspace membership and never restores removed
+membership automatically. Without a `user`, the host must name the conversation
 from `resolve`. The Vercel and OpenAI adapters send only the latest user
 message; the earlier messages in that request are imported once, as context on
 the first message of a conversation, after which OpenGeni owns the history.
@@ -129,7 +131,7 @@ shares the customer's documents, instructions, and integrations:
 
 | Scenario                                          | `agentAccess` | `memory`      |
 | ------------------------------------------------- | ------------- | ------------- |
-| Every chat isolated (support desk)                | `"session"`   | `"session"`   |
+| Agent confined to its chat tree (support desk)    | `"session"`   | `false`       |
 | One user's chats see each other, not other users' | `"user"`      | `"user"`      |
 | Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
 | Shared agent access, no memory                    | any           | `false`       |

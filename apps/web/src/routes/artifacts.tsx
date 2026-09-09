@@ -31,17 +31,6 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import {
-  ARTIFACT_CREATE_PERMISSIONS,
-  ARTIFACT_CREATE_TOOLS,
-  ARTIFACT_EDIT_PERMISSIONS,
-  ARTIFACT_EDIT_TOOLS,
-  applyNewSessionModelPreference,
-  artifactCreateInstructions,
-  artifactCreateOpeningMessage,
-  artifactEditInstructions,
-  artifactEditOpeningMessage,
-} from "@/lib/artifact-authoring";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 import { hasWorkspacePermission } from "@/lib/permissions";
 
@@ -93,26 +82,9 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const { data, error, load } = useArtifacts(workspaceId, context.client);
-  const createWithGeni = async () => {
-    const submission = await context.client
-      .getNewSessionDraft(workspaceId)
-      .then((draft) =>
-        applyNewSessionModelPreference(
-          {
-            text: artifactCreateOpeningMessage(),
-            firstPartyMcpPermissions: [...ARTIFACT_CREATE_PERMISSIONS],
-            firstPartyMcpTools: [...ARTIFACT_CREATE_TOOLS],
-          },
-          draft,
-        ),
-      )
-      .catch(() => ({
-        text: artifactCreateOpeningMessage(),
-        firstPartyMcpPermissions: [...ARTIFACT_CREATE_PERMISSIONS],
-        firstPartyMcpTools: [...ARTIFACT_CREATE_TOOLS],
-      }));
-    const created = await context.startSession(workspaceId, submission, {
-      instructions: artifactCreateInstructions(),
+  const startSession = async () => {
+    const created = await context.startSession(workspaceId, {
+      text: "Help me build a workspace Site.",
     });
     if (created)
       await navigate({
@@ -127,7 +99,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         title="Sites"
         description="Interactive pages, dashboards, and tools built for this workspace."
         actions={
-          <Button onClick={() => void createWithGeni()} disabled={context.busy}>
+          <Button onClick={() => void startSession()} disabled={context.busy}>
             <SparklesIcon className="mr-2 size-4" />
             Build a Site
           </Button>
@@ -255,34 +227,11 @@ export function ArtifactDetailRoute({
       requestedTools,
     });
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
-  const editWithGeni = async () => {
-    const currentVersion = detail?.artifact.currentVersion;
-    if (!detail || !currentVersion || detail.artifact.status === "archived") return;
+  const startEditSession = async () => {
+    if (!detail || detail.artifact.status === "archived") return;
     const artifact = detail.artifact;
-    const currentVersionId = currentVersion.id;
-    const submission = await context.client
-      .getNewSessionDraft(workspaceId)
-      .then((draft) =>
-        applyNewSessionModelPreference(
-          {
-            text: artifactEditOpeningMessage(artifact.title),
-            firstPartyMcpPermissions: [...ARTIFACT_EDIT_PERMISSIONS],
-            firstPartyMcpTools: [...ARTIFACT_EDIT_TOOLS],
-          },
-          draft,
-        ),
-      )
-      .catch(() => ({
-        text: artifactEditOpeningMessage(artifact.title),
-        firstPartyMcpPermissions: [...ARTIFACT_EDIT_PERMISSIONS],
-        firstPartyMcpTools: [...ARTIFACT_EDIT_TOOLS],
-      }));
-    const created = await context.startSession(workspaceId, submission, {
-      instructions: artifactEditInstructions({
-        artifactId: artifact.id,
-        title: artifact.title,
-        currentVersionId,
-      }),
+    const created = await context.startSession(workspaceId, {
+      text: `Help me edit the Site “${artifact.title}”: /workspaces/${workspaceId}/artifacts/${artifact.id}`,
     });
     if (created)
       await navigate({
@@ -436,8 +385,8 @@ export function ArtifactDetailRoute({
             )}
             <Button
               size="sm"
-              onClick={() => void editWithGeni()}
-              disabled={!canPublish || !detail || context.busy || archived}
+              onClick={() => void startEditSession()}
+              disabled={!detail || context.busy || archived}
             >
               <SparklesIcon className="mr-2 size-4" />
               Edit with Geni
@@ -476,8 +425,8 @@ export function ArtifactDetailRoute({
                 ? `v${detail.artifact.currentVersion.revision}`
                 : undefined
             }
-            editDisabled={!canPublish || context.busy || archived}
-            onEdit={() => void editWithGeni()}
+            editDisabled={context.busy || archived}
+            onEdit={() => void startEditSession()}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
           />

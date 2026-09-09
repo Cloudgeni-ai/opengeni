@@ -156,9 +156,6 @@ const NativeConnectSetup = lazy(() =>
     default: module.NativeConnectSetup,
   })),
 );
-const SessionFeedback = lazy(() =>
-  import("@/components/feedback").then((module) => ({ default: module.SessionFeedback })),
-);
 const MessageForkDialog = lazy(() =>
   import("@/components/session/session-tenancy-control").then((module) => ({
     default: module.SessionTenancyRouteControl,

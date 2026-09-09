@@ -22,7 +22,6 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
 }
 
 const resolveTenant: ChatResolve = async () => ({ tenant: "acme", user: "u_42" });
-const U_42 = { source: "app", id: "u_42" };
 
 function responsesClient(server: ReturnType<typeof fakeServer>): OpenAI {
   return new OpenAI({

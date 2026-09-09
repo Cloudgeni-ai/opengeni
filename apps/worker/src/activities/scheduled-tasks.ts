@@ -8,7 +8,6 @@ import {
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
-  SessionScopeSubjectId,
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,

@@ -115,7 +115,6 @@ describe("session agent access scope (real PostgreSQL)", () => {
   test("private agents cannot correct, archive, or replace shared memory", async () => {
     if (!available) return;
     const f = await fixture();
-    const root = await session(f, "private memory test");
     const base = { accountId: f.accountId, workspaceId: f.workspaceId, origin: "agent" as const };
     const fact = await saveWorkspaceMemory(db, {
       ...base,

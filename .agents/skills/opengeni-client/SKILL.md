@@ -97,15 +97,15 @@ For native OpenGeni React UI, install `@opengeni/react` and use
 the normal SDK and authenticated session routes. Reset private UI state and cancel old
 requests when the authenticated user or tenant changes. Every customer gets one workspace (`tenant`), every
 conversation one deterministic session, and each session picks its own
-isolation. Conversation ids are namespaced per `user`: the handler scopes a
-client conversation id to the user `resolve` returned, and without a `user`,
+isolation. Conversation IDs are independent of the acting user; ordinary API
+authorization decides who can use the same shared conversation. Without a `user`,
 `resolve` must return the `conversation` itself. The Vercel and OpenAI adapters
 send only the latest user message and import earlier messages once as context
 on the first message; afterwards OpenGeni owns the history.
 
 | Scenario | `agentAccess` | `memory` |
 | --- | --- | --- |
-| Support desk: every chat isolated | `"session"` (default) | `"session"` (default) |
+| Support desk: agent confined to its chat tree | `"session"` (default) | `false` (default) |
 | One customer, several users, private from each other | `"user"` with a `user` label | `"user"` |
 | A team collaborating across chats | `"workspace"` | `"workspace"` |
 | Any of the above without Memory tools | any | `false` |

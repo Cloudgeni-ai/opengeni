@@ -1,52 +1,45 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { siteSessionPath } from "../src/site-session-http";
 
-const WORKSPACE = "11111111-2222-4333-8444-555555555555";
-
-describe("Site host-owned destination routing", () => {
-  test("leaves operation authorization to the API for every workspace resource", () => {
-    for (const suffix of [
-      "",
-      "/sessions",
-      "/sessions/one/events?after=4",
-      "/sessions/one/control",
-      "/sessions/one/visibility",
-      "/sessions/one/goal",
-      "/sessions/one/tool-policy",
-      "/sessions/one/terminal/exec",
-      "/scheduled-tasks",
-      "/api-keys",
-      "/new-session-draft",
-    ]) {
-      for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
-        expect(siteSessionPath(`/v1/workspaces/site-host${suffix}`, WORKSPACE, method)).toBe(
-          `/v1/workspaces/${WORKSPACE}${suffix}`,
-        );
-      }
+test("workspace endpoints and methods are authorized by the API, not the bridge", () => {
+  for (const suffix of [
+    "",
+    "/sessions",
+    "/projects",
+    "/settings",
+    "/api-keys",
+    "/scheduled-tasks",
+    "/sessions/one/tool-policy",
+    "/sessions/one/goal",
+    "/sessions/one/control",
+    "/sessions/one/fs/read",
+    "/future-endpoint",
+  ]) {
+    for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+      expect(
+        siteSessionPath(`/v1/workspaces/site-host${suffix}?limit=5`, "ws", method, "site-1"),
+      ).toBe(`/v1/workspaces/ws${suffix}?limit=5`);
     }
-    // Forwarding a path is deliberately not a promise that the API permits it.
-    expect(siteSessionPath("/v1/config/client", WORKSPACE)).toBe("/v1/config/client");
-    expect(() => siteSessionPath("/v1/config/client", WORKSPACE, "POST")).toThrow();
-  });
+  }
+  expect(siteSessionPath("/v1/config/client", "ws")).toBe("/v1/config/client");
+});
 
-  test("rejects destination escapes independently of the HTTP operation", () => {
-    for (const path of [
-      "https://evil.test/",
-      "//evil.test/v1/workspaces/site-host",
-      "/v1/workspaces/other/sessions",
-      `/v1/workspaces/${WORKSPACE}/sessions`,
-      "/v1/workspaces/site-host-other/sessions",
-      "/v1/organizations/one/api-keys",
-      "/v1/workspaces/site-host/sessions/../billing",
-      "/v1/workspaces/site-host/sessions/%2e%2e/billing",
-      "/v1/workspaces/site-host/sessions/./events",
-      "/v1/workspaces/site-host/sessions\\other",
-      "/v1/workspaces/site-host/sessions#fragment",
-    ]) {
-      for (const method of ["GET", "POST", "DELETE"]) {
-        expect(() => siteSessionPath(path, WORKSPACE, method)).toThrow();
-        expect(() => siteSessionPath(path, WORKSPACE, method, "published-site")).toThrow();
-      }
-    }
-  });
+test("foreign workspaces and unsafe paths remain rejected", () => {
+  for (const path of [
+    "https://evil.test/v1/workspaces/site-host/sessions",
+    "//evil.test/v1/workspaces/site-host/sessions",
+    "/v1/workspaces/other/sessions",
+    "/v1/workspaces/ws/sessions",
+    "/v1/workspaces/site-host-evil/sessions",
+    "/v1/workspaces/site-host/../other",
+    "/v1/workspaces/site-host/./sessions",
+    "/v1/workspaces/site-host/%2e%2e/other",
+    "/v1/workspaces/site-host/%252e%252e/other",
+    "/v1/workspaces/site-host/\\../other",
+    "/v1/workspaces/site-host/sessions#fragment",
+    "/v1/workspaces/site-host/\n../other",
+  ]) {
+    expect(() => siteSessionPath(path, "ws")).toThrow();
+    expect(() => siteSessionPath(path, "ws", "POST", "site-1")).toThrow();
+  }
 });

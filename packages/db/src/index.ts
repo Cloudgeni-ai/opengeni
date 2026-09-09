@@ -502,7 +502,6 @@ import {
   renderWorkspaceMemoryBlock,
   memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
-  endUserMemorySubjectId,
   memoryReadScopesForAgentScope,
   memoryWriteScopeForAgentScope,
   normalizeMemoryScope,
