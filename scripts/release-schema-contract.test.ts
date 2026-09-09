@@ -28,6 +28,7 @@ async function buildSchemaContract(directory?: string) {
         "0403_codex_unconditional_credential_leasing.sql",
         "0429_message_boundary_session_forks.sql",
         "0430_session_personal_variable_set_continuations.sql",
+        "0431_retained_provider_commands.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -136,6 +137,9 @@ describe("release schema contract", () => {
     const messageBoundarySessionForks = completeSourceContract.migrations.some(
       (migration) => migration.path === "0429_message_boundary_session_forks.sql",
     );
+    const retainedProviderCommands = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0431_retained_provider_commands.sql",
+    );
     const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
     );
@@ -147,18 +151,29 @@ describe("release schema contract", () => {
         437 +
         (messageBoundarySessionForks ? 1 : 0) +
         (sessionPersonalVariableSetContinuations ? 1 : 0) +
+        (retainedProviderCommands ? 1 : 0) +
         (unifiedSkillLifecycle ? 1 : 0),
       latestMigration: unifiedSkillLifecycle
         ? "0432_unified_skill_lifecycle.sql"
-        : sessionPersonalVariableSetContinuations
-          ? "0430_session_personal_variable_set_continuations.sql"
-          : messageBoundarySessionForks
-            ? "0429_message_boundary_session_forks.sql"
-            : "0428_scheduled_task_creator_policy.sql",
+        : retainedProviderCommands
+          ? "0431_retained_provider_commands.sql"
+          : sessionPersonalVariableSetContinuations
+            ? "0430_session_personal_variable_set_continuations.sql"
+            : messageBoundarySessionForks
+              ? "0429_message_boundary_session_forks.sql"
+              : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: "0432_unified_skill_lifecycle.sql",
       deploymentMode: "maintenance",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0431_retained_provider_commands.sql",
+      ),
+    ).toMatchObject({
+      path: "0431_retained_provider_commands.sql",
+      deploymentMode: "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1619,6 +1634,7 @@ describe("release schema contract", () => {
       "0422_personal_workspace_organization_codex_inheritance.sql",
       "0429_message_boundary_session_forks.sql",
       "0430_session_personal_variable_set_continuations.sql",
+      "0431_retained_provider_commands.sql",
       "0432_unified_skill_lifecycle.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
@@ -4382,6 +4398,7 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
     "0397_sandbox_deadline_rotation_preemption.sql",
     "0429_message_boundary_session_forks.sql",
     "0430_session_personal_variable_set_continuations.sql",
+    "0431_retained_provider_commands.sql",
   ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;

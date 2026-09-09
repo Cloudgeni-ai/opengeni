@@ -77,14 +77,20 @@ export async function buildXaiSubscriptionAuthorization(input: {
       userId: credential.providerAccountId,
     };
   };
-  return {
+  const authorization: XaiSubscriptionAuthorization = {
     credentialId,
     authoritySnapshot,
     rotationEnabled: selected.rotationEnabled,
     context: {
       clientVersion: XAI_CLIENT_VERSION,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      getToken: async () => tokenSnapshot(),
+      getToken: async () => {
+        const expiresAt = xaiAccessTokenExpiry(credential.secret.accessToken ?? "");
+        if (expiresAt && expiresAt.getTime() <= Date.now() + 60_000) {
+          return await authorization.context.refresh();
+        }
+        return tokenSnapshot();
+      },
       refresh: async () => {
         const observedAccessToken = credential.secret.accessToken;
         const observedRefreshToken = credential.secret.refreshToken;
@@ -129,4 +135,5 @@ export async function buildXaiSubscriptionAuthorization(input: {
       },
     },
   };
+  return authorization;
 }

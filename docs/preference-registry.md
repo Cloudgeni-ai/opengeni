@@ -111,7 +111,7 @@ Supersession locks both heads and rejects a replacement whose active immutable
 revision is expired at transaction time, leaving the source and event history
 unchanged.
 Workspace-owned Skill heads, revisions, and lifecycle events follow deletion
-of their owning workspace after the unified Skill cutover (0431). Dedicated
+of their owning workspace after the unified Skill cutover (0432). Dedicated
 private guards allow only the nested parent cascade; ordinary history deletion
 remains forbidden. Organization/personal Skills retain restrictive deletion
 semantics and are not removed by another workspace's deletion. Supersession
