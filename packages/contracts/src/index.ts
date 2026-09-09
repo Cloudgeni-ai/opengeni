@@ -1514,6 +1514,7 @@ export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibi
 
 export const ForkSessionRequest = z
   .object({
+    sourceEventId: z.string().uuid().optional(),
     idempotencyKey: SessionTenancyIdempotencyKey,
     visibility: SessionVisibility,
     workspaceSharedAcknowledged: z.boolean(),
@@ -1524,6 +1525,13 @@ export const ForkSessionRequest = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.sourceEventId && (value.rigId !== undefined || value.variableSetIds !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["sourceEventId"],
+        message: "Message forks cannot replace runtime setup",
+      });
+    }
     if (value.visibility === "private" && value.workspaceSharedAcknowledged) {
       context.addIssue({
         code: "custom",
@@ -12282,6 +12290,14 @@ export const Session = z.object({
   // "Running on:" indicator's source). Both are credential-row ids, null until set.
   codexPinnedCredentialId: z.string().uuid().nullable(),
   codexLastCredentialId: z.string().uuid().nullable(),
+  /** Detail-read projection of the accepted current turn; never a future-account prediction. */
+  codexCurrentSelection: z
+    .object({
+      credentialId: z.string().nullable(),
+      waiting: z.boolean(),
+    })
+    .nullable()
+    .optional(),
   // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
   // model admission for the life of the session; portable ⇒ plaintext compaction
   // and free mid-session provider switching (today's behavior).
@@ -12566,6 +12582,7 @@ export const SessionEventType = z.enum([
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
+  "codex.account.selection.changed",
   // credential allocator per-turn selection audit. Payload is metadata only: credential row
   // id, bounded strategy/reason, and pool counts — never token material.
   "codex.credential.selected",
@@ -12790,6 +12807,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   provider_account: [
     "agent.model.usage",
     "codex.account.switched",
+    "codex.account.selection.changed",
     "codex.credential.selected",
     "codex.capacity.waiting",
     "codex.capacity.resumed",

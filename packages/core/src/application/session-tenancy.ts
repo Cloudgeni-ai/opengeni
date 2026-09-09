@@ -287,6 +287,7 @@ export async function forkManagedHumanSession(
   const forkInput = {
     sourceWorkspaceId: workspaceId,
     sourceSessionId,
+    ...(request.sourceEventId ? { sourceEventId: request.sourceEventId } : {}),
     actorSubjectId: authorization.grant.subjectId,
     destinationWorkspaceId: workspaceId,
     destinationVisibility:

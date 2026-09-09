@@ -1377,6 +1377,30 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
+## Forking at a message
+
+The managed-human fork request accepts an optional `sourceEventId`. The stock
+message action row supplies the selected durable user message or completed
+assistant message. Omission keeps the whole-session fork contract. The event id
+is included in the idempotency hash and resolved under the existing quiescent
+source locks to a unique canonical history boundary. Only history through that
+boundary is copied; events are never converted into model input. Runtime setup
+replacement cannot be combined with a message boundary.
+
+The first boundary implementation rejects compacted histories, ambiguous or
+missing message/history matches, and boundaries splitting a tool exchange.
+Those cases remain eligible for the ordinary whole-session fork; there is no
+silent fallback. A committed message fork still replays after compaction or a
+source authorization change. The same actor, visibility, acknowledgement,
+workspace, and grant rules apply to both fork forms.
+
+Migration `0429_message_boundary_session_forks.sql` adds an overload to the exact
+runtime routine contract. Drain API/control/turn workers, migrate, provision the
+runtime role, and start the message-boundary-aware binary. Do not restart an
+older binary after activation. The SQL overload clones the current lifecycle
+body with checked anchors, preserving its authority, locks, receipt ordering,
+and fresh-session configuration while narrowing the history spool.
+
 ## Session-visibility and fork public activation
 
 `0225_session_visibility_fork_activation.sql` shipped the first database

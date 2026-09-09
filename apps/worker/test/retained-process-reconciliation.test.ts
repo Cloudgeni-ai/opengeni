@@ -1228,6 +1228,46 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
   }, 60_000);
 
+  test("unavailable Modal process observation remains visible and cannot release its holder", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
+    await admin`
+      update sandbox_retained_processes set
+        reconcile_attempts = ${RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS - 1},
+        reconcile_after = now()
+      where id = ${fixture.process.id}`;
+    const before = await settlementProjection(fixture);
+    const observability = await runReaper(async () => ({
+      status: "deferred",
+      reason: "process_observation_unavailable",
+    }));
+    expect(await durableProcess(fixture)).toMatchObject({
+      state: "active",
+      lastReconcileOutcome: "quarantined_process_observation_unavailable",
+      reconcileProofOutcome: null,
+      reconcileClaimId: null,
+    });
+    expect(await settlementProjection(fixture)).toEqual(before);
+    expect(await observability.prometheusMetrics()).toContain(
+      'outcome="quarantined_process_observation_unavailable"',
+    );
+    // Quarantine is only a probe schedule: exact owner exit proof still wins now.
+    const current = await durableProcess(fixture);
+    const settled = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(current),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(settled.process.state).toBe("exited");
+    expect(settled.process.exitCode).toBe(0);
+  }, 60_000);
+
   test("repeated missing Modal binding is quarantined without releasing its blocker", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed" });

@@ -113,8 +113,23 @@ export function CodexAccountIndicator({
     return null;
   }
 
+  const current = codex.currentSelection;
   const effective =
-    codex.accounts.find((account) => account.id === codex.effectiveAccountId) ?? null;
+    codex.accounts.find(
+      (account) => account.id === (current ? current.credentialId : codex.pinnedAccountId),
+    ) ?? null;
+  const selectionLabel = current
+    ? current.waiting
+      ? "Waiting for capacity"
+      : "Current account"
+    : "Account selection";
+  const displayName = effective
+    ? accountLabel(effective)
+    : current?.credentialId
+      ? "Account unavailable"
+      : current && !current.waiting
+        ? "Selecting account"
+        : "Automatic selection";
   const accountsPending = codex.loading && !effective;
   if (accountsPending) {
     return (
@@ -124,9 +139,7 @@ export function CodexAccountIndicator({
 
   const tone = statusTone(effective);
   const hasAccounts = codex.accounts.length > 0;
-  const ariaLabel = effective
-    ? `Switch Codex account · ${accountLabel(effective)}${effective.plan ? ` · ${effective.plan}` : ""}`
-    : "Switch Codex account";
+  const ariaLabel = `Switch Codex account · ${selectionLabel} · ${displayName}`;
 
   return (
     <DropdownMenu>
@@ -177,7 +190,8 @@ export function CodexAccountIndicator({
               <ChatGptMark className="size-4" />
             </span>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-fg">{accountLabel(effective)}</p>
+              <p className="text-2xs text-fg-subtle">{selectionLabel}</p>
+              <p className="truncate text-sm font-medium text-fg">{displayName}</p>
               <p className="truncate text-2xs text-fg-subtle">
                 {[effective?.plan, effective?.status === "active" ? null : effective?.status]
                   .filter(Boolean)
@@ -196,7 +210,7 @@ export function CodexAccountIndicator({
         <DropdownMenuSeparator className="shrink-0" />
 
         <DropdownMenuLabel className="shrink-0 px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
-          Run next turn on
+          {current?.waiting ? "Retry with" : "Use for next turn"}
         </DropdownMenuLabel>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -204,7 +218,7 @@ export function CodexAccountIndicator({
             disabled={codex.pinning}
             onSelect={(event) => {
               event.preventDefault();
-              if (codex.pinnedAccountId === null) return;
+              if (codex.pinnedAccountId === null && !current?.waiting) return;
               void codex.pin(AUTO);
             }}
             className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
@@ -218,7 +232,7 @@ export function CodexAccountIndicator({
           </DropdownMenuItem>
 
           {codex.accounts.map((account) => {
-            const isEffective = account.id === codex.effectiveAccountId;
+            const isSelected = account.id === codex.pinnedAccountId;
             const isPinning = codex.pinningTarget === account.id;
             return (
               <DropdownMenuItem
@@ -226,7 +240,7 @@ export function CodexAccountIndicator({
                 disabled={codex.pinning}
                 onSelect={(event) => {
                   event.preventDefault();
-                  if (codex.pinnedAccountId === account.id) return;
+                  if (codex.pinnedAccountId === account.id && !current?.waiting) return;
                   void codex.pin(account.id);
                 }}
                 className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
@@ -243,7 +257,7 @@ export function CodexAccountIndicator({
                 ) : null}
                 {isPinning ? (
                   <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
-                ) : isEffective ? (
+                ) : isSelected ? (
                   <CheckIcon className="ml-1 size-4 shrink-0" />
                 ) : null}
               </DropdownMenuItem>
@@ -258,7 +272,15 @@ export function CodexAccountIndicator({
               Switch failed: {codex.mutationError.message}
             </p>
           ) : (
-            <p className="px-2 pt-1 text-2xs text-fg-subtle">Applies next turn.</p>
+            <p className="px-2 pt-1 text-2xs text-fg-subtle">
+              {codex.switchAppliedTo === "waiting_turn"
+                ? "Selection saved. Capacity is being rechecked."
+                : codex.switchAppliedTo === "next_turn"
+                  ? "Selection saved for the next turn."
+                  : current?.waiting
+                    ? "Changing accounts retries the waiting turn."
+                    : "Applies next turn. The current turn keeps its account."}
+            </p>
           )}
         </div>
       </DropdownMenuContent>

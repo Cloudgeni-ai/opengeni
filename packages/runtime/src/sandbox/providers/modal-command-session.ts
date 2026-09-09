@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
+import { markTypedExecHandleLoss } from "../exec-banner";
+import { ModalProcessObservationUnavailableError } from "../errors";
 import {
   admittedProviderCommandHandle,
   type ProviderCommandOutput,
@@ -28,6 +30,7 @@ export function installModalCommandSession(
   },
   control: ModalCommandControl,
 ): void {
+  markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
   const entries = new Map<number, Entry>();
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
@@ -119,7 +122,9 @@ export function installModalCommandSession(
   session.writeStdin = async (args) => {
     const entry = entries.get(args.sessionId);
     if (!entry?.persistence)
-      throw new Error("Original Modal command locator is unavailable; outcome is unknown");
+      throw new ModalProcessObservationUnavailableError(args.sessionId, {
+        reason: "missing_handle",
+      });
     if (args.chars) {
       const retained = await entry.persistence.load();
       if (!retained || !sameExecution(entry.command, retained))

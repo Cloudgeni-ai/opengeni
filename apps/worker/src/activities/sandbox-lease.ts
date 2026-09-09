@@ -297,7 +297,8 @@ export type RetainedProcessProbeResult =
         | "provider_timeout"
         | "provider_error"
         | "provider_binding_missing"
-        | "provider_binding_mismatch";
+        | "provider_binding_mismatch"
+        | "process_observation_unavailable";
     };
 
 export type RetainedProcessProbeFn = (
@@ -1662,14 +1663,18 @@ export function retainedProcessReconciliationDeferral(
 } {
   const bindingQuarantine =
     process.reconcileAttempts >= RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS &&
-    (outcome === "provider_binding_missing" || outcome === "provider_binding_mismatch");
+    (outcome === "provider_binding_missing" ||
+      outcome === "provider_binding_mismatch" ||
+      outcome === "process_observation_unavailable");
   if (bindingQuarantine) {
     return {
       durableOutcome: `quarantined_${outcome}`,
       metricOutcome:
         outcome === "provider_binding_missing"
           ? "quarantined_binding_missing"
-          : "quarantined_binding_mismatch",
+          : outcome === "provider_binding_mismatch"
+            ? "quarantined_binding_mismatch"
+            : "quarantined_process_observation_unavailable",
       retryAfterMs: RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
       quarantined: true,
     };
@@ -1881,12 +1886,11 @@ export async function probeRetainedProcessAtProvider(
     ) {
       return { status: "deferred", reason: "provider_binding_mismatch" };
     }
-  }
-
-  if (process.providerBackend === "modal") {
+    // Legacy SDK-local handles cannot be reconstructed. New commands carry
+    // an opaque provider locator retained outside the sandbox's authority.
     const command = await providerPersistence?.load();
     if (!command || !providerPersistence || !session.bindProviderCommand)
-      return { status: "deferred", reason: "provider_error" };
+      return { status: "deferred", reason: "process_observation_unavailable" };
     session.bindProviderCommand(process.providerSessionId, command, providerPersistence);
   }
   const capturePage = async (value: unknown): Promise<void> => {
@@ -1935,7 +1939,7 @@ export async function probeRetainedProcessAtProvider(
     return { status: "deferred", reason: "provider_error" };
   }
   await capturePage(result);
-  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId);
+  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId, session);
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
@@ -1954,7 +1958,7 @@ export async function probeRetainedProcessAtProvider(
         }),
       );
       await capturePage(interrupted);
-      return classifyRetainedProcessPollResult(interrupted, process.providerSessionId);
+      return classifyRetainedProcessPollResult(interrupted, process.providerSessionId, session);
     } catch (error) {
       if (isProviderSandboxGoneDuringRoutedOperation(client.backendId, error)) {
         if (process.providerBackend === "modal" && !process.providerBindingKey) {
@@ -1983,11 +1987,12 @@ export async function probeRetainedProcessAtProvider(
 export function classifyRetainedProcessPollResult(
   result: unknown,
   providerSessionId: number,
+  source?: object,
 ): RetainedProcessProbeResult {
   if (typeof result !== "string") {
     return { status: "deferred", reason: "provider_unknown" };
   }
-  if (isExecSessionLostBanner(result, providerSessionId)) {
+  if (isExecSessionLostBanner(result, providerSessionId, source)) {
     return {
       status: "proved",
       proof: {

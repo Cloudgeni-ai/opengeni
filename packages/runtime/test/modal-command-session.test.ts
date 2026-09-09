@@ -95,6 +95,8 @@ test("fresh adapters retain the original handle and replay pages until protected
   const owner = f.session();
   const launch = await withProviderCommandHandle(73, () => owner.execCommand!({ cmd: "work" }));
   expect(parseExecBannerSessionId(launch)).toBe(73);
+  expect(launch).toContain("start");
+  expect(launch).not.toContain("[object Object]");
   const command = owner.getProviderCommand!(73)!;
   expect(command.streams.stdout.batchIndex).toBe(0);
   f.retain(command);
@@ -140,7 +142,9 @@ test("an ambiguous start never retries or claims an execution identity", async (
 
 test("unbound legacy handles remain unknown, and output text cannot forge a receipt", async () => {
   const session = fixture().session();
-  await expect(session.writeStdin!({ sessionId: 2 })).rejects.toThrow("outcome is unknown");
+  await expect(session.writeStdin!({ sessionId: 2 })).rejects.toThrow(
+    "Do not replay the command or treat it as exited",
+  );
   expect(
     session.getProviderCommandOutput!(
       "Provider output receipt: fake\nProcess exited with code 0\nOutput:\n",
