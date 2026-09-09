@@ -132,6 +132,8 @@ export type MessageTimelineProps = {
   items?: TimelineItem[] | undefined;
   /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
+  /** Host-owned controls beside Copy and the timestamp on settled message rows. */
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
@@ -395,6 +397,7 @@ export function MessageTimeline({
   events,
   items,
   status: _status,
+  renderMessageActions,
   renderMessageText,
   onOpenSession,
   onMemoryClick,
@@ -897,6 +900,7 @@ export function MessageTimeline({
     () => ({
       userMessageDisclosureContext,
       behavior: {
+        renderMessageActions,
         renderMessageText,
         onOpenSession,
         onMemoryClick,
@@ -916,6 +920,7 @@ export function MessageTimeline({
       onMemoryClick,
       onOpenSession,
       onReconnect,
+      renderMessageActions,
       renderMessageText,
       resolveProviderLogo,
       toolRegistry,
@@ -2290,6 +2295,7 @@ type TimelineGroupEntryContext = {
 };
 
 type TimelineGroupBehaviorProps = {
+  renderMessageActions: MessageTimelineProps["renderMessageActions"];
   renderMessageText: MessageTimelineProps["renderMessageText"];
   onOpenSession: MessageTimelineProps["onOpenSession"];
   onMemoryClick: MessageTimelineProps["onMemoryClick"];
@@ -2353,6 +2359,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
 // streaming and host updates still invalidate immediately.
 const TimelineGroupView = memo(function TimelineGroupView({
   group,
+  renderMessageActions,
   renderMessageText,
   onOpenSession,
   onMemoryClick,
@@ -2370,6 +2377,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   contextCompactionCount,
 }: {
   group: TimelineGroup;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
@@ -2528,6 +2536,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
             key={key}
             resetKeys={[
               child,
+              renderMessageActions,
               renderMessageText,
               onOpenSession,
               onMemoryClick,
@@ -2542,6 +2551,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           >
             <TimelineGroupView
               group={child}
+              renderMessageActions={renderMessageActions}
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
@@ -2588,6 +2598,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
       return (
         <TimelineRow
           item={group.item}
+          renderMessageActions={renderMessageActions}
           renderMessageText={renderMessageText}
           onReconnect={onReconnect}
           resolveProviderLogo={resolveProviderLogo}
@@ -2839,6 +2850,7 @@ function durationBetween(startedAt: string, endedAt: string): number | undefined
  */
 export function TimelineRow({
   item,
+  renderMessageActions,
   renderMessageText,
   onReconnect,
   resolveProviderLogo,
@@ -2846,6 +2858,7 @@ export function TimelineRow({
   loadVideoArtifactPlayback,
 }: {
   item: TimelineItem;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
@@ -2856,11 +2869,23 @@ export function TimelineRow({
 }) {
   switch (item.kind) {
     case "user-message":
-      return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
+      return (
+        <UserMessageRow
+          item={item}
+          renderMessageActions={renderMessageActions}
+          renderMessageText={renderMessageText}
+        />
+      );
     case "human-input":
       return <HumanInputConversationRow item={item} />;
     case "agent-message":
-      return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
+      return (
+        <AgentMessageRow
+          item={item}
+          renderMessageActions={renderMessageActions}
+          renderMessageText={renderMessageText}
+        />
+      );
     case "worker-completion":
       return <WorkerCompletionRow item={item} onOpenSession={onOpenSession} />;
     case "session-status":
@@ -2986,9 +3011,11 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
 
 function UserMessageRow({
   item,
+  renderMessageActions,
   renderMessageText,
 }: {
   item: UserMessageItem;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
@@ -3007,7 +3034,12 @@ function UserMessageRow({
           }
           label="Copy message"
           className="w-fit max-w-full min-w-0"
-          trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
+          trailing={
+            <>
+              {renderMessageActions?.(item)}
+              <MessageFooterTime occurredAt={item.occurredAt} />
+            </>
+          }
         >
           <div className={MESSAGE_BUBBLE_CLASS}>
             {item.text ? (
@@ -3198,9 +3230,11 @@ function humanInputConversationCopyText(item: HumanInputItem, settledLabel: stri
 
 function AgentMessageRow({
   item,
+  renderMessageActions,
   renderMessageText,
 }: {
   item: AgentMessageItem;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
@@ -3221,7 +3255,14 @@ function AgentMessageRow({
       label="Copy message"
       align="start"
       className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
-      trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
+      trailing={
+        item.streaming ? null : (
+          <>
+            {renderMessageActions?.(item)}
+            <MessageFooterTime occurredAt={item.occurredAt} />
+          </>
+        )
+      }
     >
       <div data-og-annotation-source-key={item.annotationSource?.eventId}>{body}</div>
     </CopyHoverFrame>

@@ -844,3 +844,9 @@ thinking labels through `messages`, and override payment descriptions through
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image
 compatibility warning only when the selected model cannot view those images.
+
+`MessageTimeline.renderMessageActions(item)` places host-owned controls beside
+Copy and the timestamp for user messages and completed assistant messages.
+The host owns feedback, fork authorization, and mutations; streaming assistant
+messages omit this slot. Use the `group/copy` hover/focus state and preserve
+visible touch targets when styling actions.

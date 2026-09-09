@@ -1513,6 +1513,7 @@ export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibi
 
 export const ForkSessionRequest = z
   .object({
+    sourceEventId: z.string().uuid().optional(),
     idempotencyKey: SessionTenancyIdempotencyKey,
     visibility: SessionVisibility,
     workspaceSharedAcknowledged: z.boolean(),
@@ -1523,6 +1524,13 @@ export const ForkSessionRequest = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.sourceEventId && (value.rigId !== undefined || value.variableSetIds !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["sourceEventId"],
+        message: "Message forks cannot replace runtime setup",
+      });
+    }
     if (value.visibility === "private" && value.workspaceSharedAcknowledged) {
       context.addIssue({
         code: "custom",
