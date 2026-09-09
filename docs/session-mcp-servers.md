@@ -86,6 +86,33 @@ restarts, or reinterprets current work. A small
 `session.mcp.approval_policy.updated` event tells other clients to reload the
 authoritative session metadata.
 
+## Deterministic approval regression fixture
+
+Run the real worker approval fixture without a model subscription:
+
+```bash
+bun test --timeout 300000 ./test/integration/worker-activity.integration.ts -t 'a requireApproval session MCP tool'
+```
+
+The existing `@opengeni/testing` local MCP server records harmless search calls
+in memory, and `ScriptedModel` deterministically requests that tool. The test
+uses real Postgres, NATS, production runtime preparation, durable interruption
+state, and the human decision acceptance lifecycle. It covers both Approve and
+Reject, a root/parent/child lineage, parent request/resolution notices, a stale
+call id, decision replay before and after settlement, a separate human Pause,
+and resuming with a fresh runtime. Approval executes one call; rejection executes
+none. Accepting approval while paused must not admit an execution attempt.
+
+The driver submits the human actor's decision directly to the storage acceptance
+lifecycle, outside the scripted agent. This is a worker integration regression,
+not proof of browser/API authorization, Temporal delivery, or live staging UX.
+Those boundaries have separate coverage in `packages/db/test/child-lifecycle-notices.test.ts`,
+`test/integration/temporal-workflow.integration.ts`, and the API/UI approval
+suites. A live browser run must still use a human-authorized decision and verify
+the actual approval card; asking an agent to write "approval needed" is not a
+tool-approval test. The fixture is loopback-only and is not a deployed staging
+endpoint.
+
 ## Storage and rotation
 
 Credential headers are encrypted in `session_mcp_servers.headers_encrypted` with

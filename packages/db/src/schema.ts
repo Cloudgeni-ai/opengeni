@@ -8573,6 +8573,7 @@ export const sessionHumanInputRequests = pgTable(
     allowSkip: boolean("allow_skip").notNull().default(false),
     response: jsonb("response").$type<HumanInputResponse>(),
     respondedBy: text("responded_by"),
+    skillReviewHumanAuthorized: boolean("skill_review_human_authorized").notNull().default(false),
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

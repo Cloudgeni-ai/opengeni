@@ -31,6 +31,7 @@ import {
 } from "@opengeni/contracts";
 import {
   applySkillLifecycle,
+  confirmSkillHumanResponse,
   assertSkillReadAttempt,
   listSkillRecords,
   skillFilesContentHash,
@@ -38535,7 +38536,7 @@ export class HumanInputResponseValidationError extends Error {
   readonly name = "HumanInputResponseValidationError";
 
   constructor(
-    readonly code: "INVALID_RESPONSE" | "SKIP_NOT_ALLOWED",
+    readonly code: "INVALID_RESPONSE" | "SKIP_NOT_ALLOWED" | "HUMAN_AUTH_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -38875,6 +38876,8 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
+    /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
+    canonicalHumanSession?: boolean;
     /** Bounded responder kind for the parent's resolution notice; derived from `respondedBy` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
@@ -38886,6 +38889,31 @@ export async function acceptSessionHumanInputResponse(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Skill activation shares the response transaction. Acquire its canonical
+        // organization/workspace/publication prefix before any session row lock.
+        // Questions are immutable after request creation; recheck below anyway.
+        const [requestPreview] = await tx
+          .select({ questions: schema.sessionHumanInputRequests.questions })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.id, input.requestId),
+            ),
+          )
+          .limit(1);
+        const skillScopeLocked =
+          requestPreview?.questions.some((question) => question.skillReview !== undefined) ?? false;
+        if (skillScopeLocked) {
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+          );
+          await tx.execute(
+            sql`SELECT id FROM workspaces WHERE id=${input.workspaceId}::uuid AND account_id=${input.accountId}::uuid FOR KEY SHARE`,
+          );
+          await lockSkillPublication(tx as unknown as Database, input.workspaceId);
+        }
         // The parent (when notices are enabled) joins the same UUID-ordered
         // session lock so the resolution notice can be enqueued for it here.
         const sessionIds = await sessionIdsWithParentTx(
@@ -38913,6 +38941,21 @@ export async function acceptSessionHumanInputResponse(
           .for("update")
           .limit(1);
         if (!request) return { action: "not_found" } as const;
+        const hasSkillReview = request.questions.some(
+          (question) => question.skillReview !== undefined,
+        );
+        if (hasSkillReview && !skillScopeLocked) {
+          throw new HumanInputResponseValidationError(
+            "INVALID_RESPONSE",
+            "The review request changed. Reload before responding.",
+          );
+        }
+        if (hasSkillReview && !input.expireOnly && input.canonicalHumanSession !== true) {
+          throw new HumanInputResponseValidationError(
+            "HUMAN_AUTH_REQUIRED",
+            "Skill approval requires a verified human browser session.",
+          );
+        }
         if (input.clientEventId) {
           const [existing] = await tx
             .select()
@@ -39060,6 +39103,19 @@ export async function acceptSessionHumanInputResponse(
               })
             ).turns[0]
           : undefined;
+        if (
+          hasSkillReview &&
+          !input.expireOnly &&
+          turn &&
+          input.respondedBy !==
+            (turn.initiatingHumanSubjectId ??
+              (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null))
+        ) {
+          throw new HumanInputResponseValidationError(
+            "HUMAN_AUTH_REQUIRED",
+            "Only the human who started this work can answer its Skill review.",
+          );
+        }
         const boundaryOwnsRequest =
           session.status === "requires_action" &&
           turn?.status === "requires_action" &&
@@ -39102,12 +39158,28 @@ export async function acceptSessionHumanInputResponse(
         const response: HumanInputResponse = expired
           ? { outcome: "expired" }
           : validateHumanInputResponse(mapSessionHumanInputRequest(request), input.response);
+        if (
+          hasSkillReview &&
+          !expired &&
+          (response.outcome !== "answered" ||
+            response.answers.length !== 1 ||
+            response.answers[0]!.values.length !== 1 ||
+            !["save", "skip"].includes(response.answers[0]!.values[0]!) ||
+            Boolean(response.answers[0]!.other?.trim()))
+        ) {
+          throw new HumanInputResponseValidationError(
+            "INVALID_RESPONSE",
+            "Choose Save or Don't save for this Skill review.",
+          );
+        }
         const [updated] = await tx
           .update(schema.sessionHumanInputRequests)
           .set({
             status: response.outcome,
             response,
             respondedBy: expired ? "system:expired" : input.respondedBy,
+            skillReviewHumanAuthorized:
+              !expired && hasSkillReview && input.canonicalHumanSession === true,
             respondedAt: now,
             updatedAt: now,
           })
@@ -39126,6 +39198,14 @@ export async function acceptSessionHumanInputResponse(
             events: [],
             workflowWakeRevision: null,
           } as const;
+        }
+        if (!expired && hasSkillReview) {
+          await confirmSkillHumanResponse(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.respondedBy,
+            requestId: request.id,
+          });
         }
         const [event] = await tx
           .insert(schema.sessionEvents)

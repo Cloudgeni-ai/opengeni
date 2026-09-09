@@ -168,7 +168,7 @@ export function parseBatchedBackfillMigration(
   };
 }
 
-async function executeMigrationFile(
+export async function executeMigrationFile(
   sql: postgres.Sql,
   file: string,
   sqlText: string,
@@ -237,7 +237,7 @@ async function executeMigrationFile(
     await sql.unsafe(
       `SELECT
   pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
-  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${sqlText}`,
+  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${file === "0434_ordered_model_history.sql" ? "SET CONSTRAINTS ALL IMMEDIATE;\n" : ""}${sqlText}`,
     );
     return;
   }

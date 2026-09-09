@@ -25,6 +25,8 @@ export type SkillWriteReceipt = {
   outcome: "applied" | "pending" | "preserved";
   pendingReason?: "approval" | "source_finalization" | undefined;
   replayed: boolean;
+  decision?: "rejected" | undefined;
+  skillReview?: import("./types").SkillReviewReference | undefined;
 };
 export type SkillPublicationReceipt = SkillWriteReceipt & {
   sourceOperationId: string;

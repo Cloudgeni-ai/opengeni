@@ -695,7 +695,7 @@ export function serializeHumanInputRequests(
         input: {
           ...input,
           questions: input.questions.map((question) =>
-            question.kind === "text" || question.allowOther
+            question.kind === "text" || question.allowOther || question.skillReview
               ? question
               : { ...question, allowOther: true },
           ),

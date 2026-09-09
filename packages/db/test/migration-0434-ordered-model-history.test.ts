@@ -1,19 +1,31 @@
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { executeMigrationFile } from "../src/migrate";
 import { fromPostgresLosslessJson, toPostgresLosslessJson } from "../src/lossless-json";
 
+let database: Awaited<ReturnType<typeof acquireBlankTestDatabase>>;
+beforeAll(async () => {
+  database = await acquireBlankTestDatabase("ordered-model-history");
+}, 600_000);
+
 test("ordered history survives PostgreSQL, nested schemas and legacy updates without read-time repair", async () => {
-  const database = await acquireBlankTestDatabase("ordered-model-history");
   if (!database) throw new Error("PostgreSQL is required for ordered-history verification");
   const sql = postgres(database.databaseUrl, { max: 1 });
   try {
     await sql.unsafe(`CREATE TABLE session_history_items (id integer PRIMARY KEY, item jsonb NOT NULL, active boolean DEFAULT true);
       CREATE TABLE session_pending_tool_calls (id integer PRIMARY KEY, call_item jsonb NOT NULL, result_item jsonb, tied_reasoning_items jsonb NOT NULL DEFAULT '[]');
       INSERT INTO session_history_items(id,item) VALUES (1,'{"query":"old","names":[],"limit":5}');`);
-    await sql.unsafe(
-      await Bun.file(new URL("../drizzle/0434_ordered_model_history.sql", import.meta.url)).text(),
+    await sql.unsafe(`CREATE FUNCTION deferred_history_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+      CREATE CONSTRAINT TRIGGER deferred_history_probe AFTER UPDATE ON session_pending_tool_calls DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION deferred_history_probe();
+      INSERT INTO session_pending_tool_calls(id,call_item) VALUES(9,'{"type":"function_call"}');`);
+    const migration = await Bun.file(
+      new URL("../drizzle/0434_ordered_model_history.sql", import.meta.url),
+    ).text();
+    await expect((async () => await sql.unsafe(migration))()).rejects.toThrow(
+      "pending trigger events",
     );
+    await executeMigrationFile(sql, "0434_ordered_model_history.sql", migration);
     const live = {
       type: "tool_search_call",
       arguments: { query: "x\u0000", names: ["tool"], limit: 5 },

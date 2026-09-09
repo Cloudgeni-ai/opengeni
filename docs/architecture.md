@@ -1485,6 +1485,10 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 
 ---
 
+Skill approval atomically settles a verified managed/local human response and
+activates the exact folder under scope/head checks. Agents and delegated
+subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
+
 ## 10. Security and access model
 
 - **Authenticate, authorize, then query.** API middleware establishes the
@@ -1653,20 +1657,9 @@ authority. Update this file in the same change when you:
   §5; or
 - change the canonical source or topic doc for a row in §13.
 
-Use [`README.md`](README.md) as the complete docs map. Update the focused topic
-doc—not this file—with feature mechanics, migration histories, rollout
-instructions, exact settings, provider-specific behavior, route inventories,
-or schema detail.
-
-Keep additions concise:
-
-1. State the stable architectural rule.
-2. Explain why the boundary exists.
-3. Link to the code and focused document that own exact behavior.
-4. Prefer deletion over retaining a stale enumeration.
-
-This file should remain an orientation document that can be read in one sitting,
-not an append-only ledger of everything the repository has ever learned.
+Use [`README.md`](README.md) for the docs map. Put feature mechanics and rollout
+details in focused docs. Keep this orientation concise: state each invariant,
+its purpose, and its canonical source; remove stale material.
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
 
