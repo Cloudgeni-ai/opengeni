@@ -60,6 +60,7 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import type { ProviderCommandSession } from "./provider-command-session";
 import {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
@@ -109,7 +110,7 @@ export type ChannelAEditor = {
   updateFile?(op: unknown): Promise<unknown>;
   deleteFile?(op: unknown): Promise<unknown>;
 };
-export type ChannelASession = {
+export type ChannelASession = ProviderCommandSession & {
   /** Commit a provider output page only after durable capture succeeds. */
   acknowledgeCommandOutput?(result: string): Promise<void>;
   exec?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;

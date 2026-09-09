@@ -1412,9 +1412,9 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Modal's `providers/modal-command-runner.ts` retains pipe/PTY output and status
-outside `/workspace`. Readers acknowledge stable pages after durable capture.
-Custom images require Python3; missing journals never prove exit.
+Modal uses provider execution IDs and control-plane-persisted stream cursors.
+Readers capture stable pages before acknowledgment; sandbox files never prove exit.
+Missing legacy locators remain unknown, not completed.
 
 After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
 recheck only. Process/admission/PTY/holder capture blockers remain; quarantine

@@ -28,7 +28,12 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
-import { modalCommandReceipt } from "../providers/modal-command-journal";
+import {
+  withProviderCommandHandle,
+  type ProviderCommandPersistence,
+  type ProviderCommandSession,
+} from "../provider-command-session";
+import type { SandboxProviderCommand } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import {
@@ -77,7 +82,7 @@ export interface ActivePointer {
  * AND the `SelfhostedSession`): each method is optional because a heterogeneous
  * target may or may not implement it, and the proxy reflects that at call-time.
  */
-export interface RoutableBackendSession {
+export interface RoutableBackendSession extends ProviderCommandSession {
   acknowledgeCommandOutput?(result: string): Promise<void>;
   refreshOwnedCommand?(commandId: string): Promise<boolean>;
   state?: unknown;
@@ -130,6 +135,7 @@ export interface ResolvedActiveBackend {
 export type RoutingRetainedProcess = {
   id: string;
   providerSessionId: number;
+  providerCommand?: SandboxProviderCommand;
 };
 
 /** A yielded process was durably promoted, but the mutable authority checked
@@ -161,6 +167,8 @@ export type RoutingRetainedProcessTerminalProof =
   | { outcome: "lost"; exitCode: null; reason: "provider_session_lost_banner" };
 
 export interface RoutingSandboxSessionDeps {
+  providerCommandHandle?: (admission: unknown) => number | undefined;
+  providerCommandPersistence?: (process: RoutingRetainedProcess) => ProviderCommandPersistence;
   /**
    * The DEFAULT backend resolved at construction time (the same shape `resolve()`
    * caches as `lastResolved`). This seeds `session.state` BEFORE the first op so a
@@ -479,6 +487,7 @@ type RetainedProcessRecord = {
   } | null;
   settlement: Promise<void> | null;
   backgroundAdoption: Promise<void> | null;
+  pendingProviderReceipt?: string;
   pendingOutput?: Array<{
     chunkId: string;
     chunk: string;
@@ -872,6 +881,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         `Provider session ${process.providerSessionId} was yielded while that locator was already retained; neither process was rebound`,
       );
     }
+    this.bindRetainedProviderCommand(process, backend);
     const record: RetainedProcessRecord = {
       process,
       backend,
@@ -884,6 +894,24 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     };
     this.retainedProcesses.set(process.providerSessionId, record);
     return record;
+  }
+
+  private bindRetainedProviderCommand(
+    process: RoutingRetainedProcess,
+    backend: ResolvedActiveBackend,
+  ): void {
+    if (!process.providerCommand) return;
+    const persistence = this.deps.providerCommandPersistence?.(process);
+    if (!persistence || !backend.session.bindProviderCommand)
+      throw new RoutingMutationOutcomeUnknownError(
+        "retainProcess",
+        "Provider command has no protected retention adapter; its mutation was not replayed",
+      );
+    backend.session.bindProviderCommand(
+      process.providerSessionId,
+      process.providerCommand,
+      persistence,
+    );
   }
 
   private retainedProcess(providerSessionId: number): RetainedProcessRecord {
@@ -932,6 +960,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         `Provider session ${providerSessionId} is already bound to a different retained process identity`,
       );
     }
+    this.bindRetainedProviderCommand(input.process, seed);
     this.retainedProcesses.set(providerSessionId, {
       process: { ...input.process },
       backend: {
@@ -1238,11 +1267,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     result?: unknown,
   ): Promise<void> {
     if (!this.deps.captureProcessOutput) return;
+    const providerPage = record.backend.session.getProviderCommandOutput?.(result);
     const structured =
       result && typeof result === "object"
         ? (result as { stdout?: unknown; stderr?: unknown })
         : null;
-    if (
+    if (providerPage) {
+      if (typeof result === "string") record.pendingProviderReceipt = result;
+      for (const page of providerPage.chunks) {
+        if (page.text)
+          (record.pendingOutput ??= []).push({
+            chunkId: page.chunkId,
+            chunk: page.text,
+            stream: page.stream,
+            streamFidelity: "separate",
+          });
+      }
+    } else if (
       structured &&
       (typeof structured.stdout === "string" || typeof structured.stderr === "string")
     ) {
@@ -1263,7 +1304,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         : stripExecBanner(banner);
       if (chunk)
         (record.pendingOutput ??= []).push({
-          chunkId: modalCommandReceipt(banner)?.chunkId ?? crypto.randomUUID(),
+          chunkId: crypto.randomUUID(),
           chunk,
           stream: "stdout",
           streamFidelity: "merged",
@@ -1286,7 +1327,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       record.pendingOutput.shift();
     }
-    if (typeof result === "string") await record.backend.session.acknowledgeCommandOutput?.(result);
+    const receipt =
+      record.pendingProviderReceipt ?? (typeof result === "string" ? result : undefined);
+    if (receipt !== undefined) {
+      await record.backend.session.acknowledgeCommandOutput?.(receipt);
+      delete record.pendingProviderReceipt;
+    }
   }
 
   /**
@@ -1399,7 +1445,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           result = await this.invokeProviderOperation(
             op,
             backend,
-            () => fn(backend.session, backend),
+            () =>
+              withProviderCommandHandle(this.deps.providerCommandHandle?.(admission), () =>
+                fn(backend.session, backend),
+              ),
             firstOperationTiming
               ? (observation) => {
                   providerWaitMs += Math.max(0, observation.durationMs);
@@ -1498,10 +1547,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         mutatesWorkspace && (op === "exec" || op === "execCommand")
           ? providerSessionIdFromResult(result)
           : null;
+      const providerCommand =
+        yieldedSessionId === null ? null : backend.session.getProviderCommand?.(yieldedSessionId);
       const retainedProcess =
         yieldedSessionId === null
           ? undefined
-          : { id: crypto.randomUUID(), providerSessionId: yieldedSessionId };
+          : {
+              id: crypto.randomUUID(),
+              providerSessionId: yieldedSessionId,
+              ...(providerCommand ? { providerCommand } : {}),
+            };
       const retainedRecord = retainedProcess
         ? this.registerRetainedProcess(retainedProcess, backend)
         : null;

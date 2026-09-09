@@ -14,7 +14,9 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
-import { installModalCommandJournal } from "./modal-command-journal";
+import { installModalCommandSession } from "./modal-command-session";
+import { ModalCommandControl } from "./modal-command-control";
+import type { ModalClient } from "modal";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -95,6 +97,7 @@ type ModalWorkspaceCaptureOptions = {
 
 type MutableModalSandboxSession = {
   modal?: {
+    cpClient?: ModalClient["cpClient"];
     version?: () => string;
     sandboxes?: {
       fromId?: (sandboxId: string) => Promise<MutableModalSnapshotSandbox>;
@@ -103,6 +106,7 @@ type MutableModalSandboxSession = {
   sandbox?: MutableModalSnapshotSandbox;
   state?: {
     sandboxId?: string;
+    environment?: Record<string, string>;
     manifest?: { root?: string };
     workspacePersistence?: string;
     snapshotFilesystemTimeoutMs?: number;
@@ -521,9 +525,22 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
-  installModalCommandJournal(
-    mutable as unknown as Parameters<typeof installModalCommandJournal>[0],
-  );
+  if (
+    mutable.modal?.cpClient &&
+    mutable.modal.version &&
+    mutable.state?.sandboxId &&
+    mutable.state.manifest?.root
+  ) {
+    installModalCommandSession(
+      mutable,
+      ModalCommandControl.forSandbox(
+        { cpClient: mutable.modal.cpClient, version: mutable.modal.version.bind(mutable.modal) },
+        mutable.state.sandboxId,
+        mutable.state.manifest.root,
+        mutable.state.environment,
+      ),
+    );
+  }
   installModalPendingExecCancellation(mutable);
 
   const persistWorkspace = mutable.persistWorkspace.bind(session);
@@ -719,10 +736,6 @@ export const modalProvider: ProviderRegistration = {
     const imageSelector = resolveModalImageSelector(settings);
     if (imageSelector) {
       options.image = imageSelector;
-    } else {
-      // Durable exec uses the standard-library runner shipped by stock images.
-      // The SDK's bare Debian fallback does not contain Python.
-      options.image = ModalImageSelector.fromTag("python:3.12-slim");
     }
     if (settings.modalTokenId) {
       options.tokenId = settings.modalTokenId;

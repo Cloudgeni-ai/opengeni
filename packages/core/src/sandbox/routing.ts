@@ -12,6 +12,11 @@
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
+import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
+import {
+  retainWorkspaceProviderCommand,
+  retainedProviderCommandPersistence,
+} from "@opengeni/db/retained-provider-commands";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
@@ -20,7 +25,6 @@ import {
   getSandbox,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
-  retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
   settleRetainedProcess,
   verifyDirectWorkspaceMutationSettlement,
@@ -310,12 +314,15 @@ export function wrapChannelABoxWithRouting(
           throw new Error("API-direct workspace mutation settlement lacked its bound admission");
         }
         if (outcome === "resolved" && retainedProcess) {
-          await retainWorkspaceMutationProcess(db, {
+          await retainWorkspaceProviderCommand(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
             sessionId: ids.sessionId,
             processId: retainedProcess.id,
             providerSessionId: retainedProcess.providerSessionId,
+            ...(retainedProcess.providerCommand
+              ? { providerCommand: retainedProcess.providerCommand }
+              : {}),
             admissionId: exactAdmission.id,
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
@@ -516,6 +523,31 @@ export function wrapChannelABoxWithRouting(
   });
 
   const proxy = new RoutingSandboxSession({
+    providerCommandHandle: (value) =>
+      value && typeof value === "object"
+        ? (value as PersistableMutationAdmission).admission?.workspaceGeneration
+        : undefined,
+    providerCommandPersistence: (process) =>
+      retainedProviderCommandPersistence(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+      }),
+    captureProcessOutput: async ({ process, chunkId, chunk, stream, streamFidelity }) => {
+      const events = await appendSessionCommandOutput(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        commandId: process.id,
+        chunkId,
+        chunk,
+        stream,
+        streamFidelity,
+      });
+      if (events.length && bus)
+        await bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
+    },
     bindActiveRouteOnFirstResolve: true,
     defaultResolved: {
       session: established.session as RoutableBackendSession,

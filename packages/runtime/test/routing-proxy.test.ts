@@ -1218,7 +1218,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(new Set(chunkIds).size).toBe(1);
   });
 
-  test("journal output is acknowledged only after durable capture, including a failed capture retry", async () => {
+  test("provider pages are acknowledged only after durable capture, including a failed capture retry", async () => {
     const events: string[] = [];
     let fail = true;
     const initial = "Command journal: 179:0:5\nProcess running with session ID 179\nOutput:\nstart";
@@ -1231,6 +1231,20 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
         session: {
           execCommand: async () => initial,
           writeStdin: async () => terminal,
+          getProviderCommandOutput: (result) =>
+            result === initial || result === terminal
+              ? {
+                  command: {} as never,
+                  chunks: [
+                    {
+                      stream: "stdout",
+                      chunkId: result === initial ? "modal:179:0:5" : "modal:179:5:8",
+                      text: result === initial ? "start" : "end",
+                    },
+                  ],
+                  exitCode: result === initial ? null : 7,
+                }
+              : null,
           acknowledgeCommandOutput: async (result) => {
             events.push(result === initial ? "ack:start" : "ack:end");
           },
@@ -1255,9 +1269,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     // A terminal retry can finish from the already-read, durably captured page;
     // it must never acknowledge before that capture succeeds.
     const acknowledgment = events.indexOf("ack:end");
-    expect(
-      acknowledgment === -1 || acknowledgment > events.lastIndexOf("capture:modal:179:5:8"),
-    ).toBe(true);
+    expect(acknowledgment).toBeGreaterThan(events.lastIndexOf("capture:modal:179:5:8"));
   });
 
   test("owner refresh captures exact adopted command without pointer lookup or observation", async () => {

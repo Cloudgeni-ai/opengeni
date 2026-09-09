@@ -1,5 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import type { SandboxProviderCommand } from "@opengeni/contracts";
+import {
+  retainWorkspaceProviderCommand,
+  getRetainedProviderCommand,
+  acknowledgeRetainedProviderOutput,
+  reserveRetainedProviderInput,
+} from "@opengeni/db/retained-provider-commands";
 import {
   testSettings,
   acquireSharedTestDatabase,
@@ -69,7 +76,7 @@ const SETTINGS = testSettings({
   sandboxLeaseReaperPeriodMs: 30_000,
 });
 
-test("Modal journal capture uses the same page identity across fresh reconciler reads", async () => {
+test("legacy capture retries preserve pending chunk identity without trusting output text", async () => {
   const processId = crypto.randomUUID();
   const result = "Command journal: 123:0:5\nProcess running with session ID 123\nOutput:\nhello";
   const ids: string[] = [];
@@ -85,7 +92,9 @@ test("Modal journal capture uses the same page identity across fresh reconciler 
   await captureRetainedProbeOutput(processId, result, async (_value, id) => {
     ids.push(id);
   });
-  expect(ids).toEqual(["modal:123:0:5", "modal:123:0:5", "modal:123:0:5"]);
+  expect(ids[0]).toBe(ids[1]);
+  expect(ids[2]).not.toBe(ids[0]);
+  expect(ids).not.toContain("modal:123:0:5");
 });
 const MODAL_PROVIDER_BINDING = {
   key: '{"version":1,"serverUrl":"https://modal.test","workspaceName":"opengeni-test","environment":"test"}',
@@ -259,6 +268,8 @@ async function promoteTurnProcess(
     outcome?: ClosedAttemptOutcome;
     providerSessionId?: number;
     backgroundCommand?: string;
+    providerCommand?: boolean;
+    providerCommandSandboxId?: string;
   } = {},
 ): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
@@ -284,7 +295,19 @@ async function promoteTurnProcess(
   });
   const processId = crypto.randomUUID();
   const providerSessionId = input.providerSessionId ?? 71;
-  const process = await retainWorkspaceMutationProcess(db, {
+  const command: SandboxProviderCommand | null = input.providerCommand
+    ? {
+        kind: "modal-control-v1",
+        sandboxId: input.providerCommandSandboxId ?? instanceId,
+        taskId: "ta-test",
+        execId: `tp-${crypto.randomUUID()}`,
+        streams: {
+          stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+        },
+      }
+    : null;
+  const process = await retainWorkspaceProviderCommand(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
     sessionId: attempt.sessionId,
@@ -293,6 +316,7 @@ async function promoteTurnProcess(
     admissionId: admission.id,
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
+    providerCommand: command,
     providerBinding: MODAL_PROVIDER_BINDING,
     ...(input.backgroundCommand
       ? {
@@ -515,6 +539,47 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("provider identity and cursors survive fresh database reads without accepting a rebind", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ providerCommand: true });
+    const scope = { ...fixture, processId: fixture.process.id };
+    const original = (await getRetainedProviderCommand(db, scope))!;
+    expect(original.sandboxId).toBe(fixture.process.providerInstanceId);
+    const next = structuredClone(original);
+    next.streams.stdout.batchIndex = 2;
+    next.streams.stderr.batchIndex = 3;
+    await acknowledgeRetainedProviderOutput(db, scope, next);
+    expect(await acknowledgeRetainedProviderOutput(db, scope, original)).toEqual(next);
+    expect(await getRetainedProviderCommand(db, scope)).toEqual(next);
+    await expect(
+      acknowledgeRetainedProviderOutput(db, scope, { ...next, execId: "tp-foreign" }),
+    ).rejects.toThrow("identity");
+    const conflicting = structuredClone(next);
+    conflicting.streams.stdout.exitCode = 0;
+    await expect(acknowledgeRetainedProviderOutput(db, scope, conflicting)).rejects.toThrow(
+      "conflicts",
+    );
+    expect(
+      (
+        await Promise.all(Array.from({ length: 5 }, () => reserveRetainedProviderInput(db, scope)))
+      ).sort(),
+    ).toEqual([1, 2, 3, 4, 5]);
+    expect(
+      await getRetainedProviderCommand(db, { ...scope, sessionId: crypto.randomUUID() }),
+    ).toBeNull();
+  });
+
+  test("provider locator mismatch rolls back retention instead of leaving an unbound holder", async () => {
+    if (!available) return;
+    await expect(
+      promoteTurnProcess({ providerCommand: true, providerCommandSandboxId: "sb-foreign" }),
+    ).rejects.toThrow("retained sandbox");
+    const ids = cleanupRows[cleanupRows.length - 1]!;
+    const [row] =
+      await admin`select count(*)::int as count from sandbox_retained_processes where workspace_id = ${ids.workspaceId}`;
+    expect(row!.count).toBe(0);
+  });
+
   test("failed destructive probe capture retries the same receipt before touching the provider", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed" });
