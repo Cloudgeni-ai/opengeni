@@ -3,7 +3,7 @@
 > Whole-system orientation; code and focused docs own exact behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
-## How to use this document
+## Navigation
 
 1. **New here?** Read §2–4; skim §6.
 2. **Changing a subsystem?** Start with §13 and its canonical sources.
