@@ -1929,13 +1929,22 @@ export const WorkspaceTranscriptionPolicy = z
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
 /**
- * Workspace toggle for native browser voice input. Provider/model/credentials
- * stay server-private; this only records whether the workspace allows the
- * deployment-configured transcription path.
+ * Workspace voice-input preferences. Public provider identifiers express the
+ * preferred billing route; credentials and model configuration remain private.
  */
+export const VoiceInputProviderId = z.enum([
+  "supergrok-subscription",
+  "codex-subscription",
+  "openai",
+  "azure-openai",
+]);
+export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
+
 export const WorkspaceVoiceInputSettings = z
   .object({
     enabled: z.boolean(),
+    preferredProvider: VoiceInputProviderId.nullable().optional(),
+    fallbackEnabled: z.boolean().optional(),
   })
   .strict();
 export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
@@ -1985,6 +1994,7 @@ export const WorkspaceSessionToolDefaultsPatch = z
 export const ClientVoiceInputConfig = z
   .object({
     available: z.boolean(),
+    providers: z.array(VoiceInputProviderId).optional(),
     maxDurationSeconds: z.number().int().positive().max(600),
     maxSizeBytes: z
       .number()

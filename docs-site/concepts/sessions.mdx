@@ -77,3 +77,17 @@ use the model, reasoning effort and speed from the latest turn that started.
 Session labels and fresh message drafts use those settings too. Before any turn
 starts, the initial session settings apply. Existing drafts, queued messages and
 historical turns retain their own settings.
+
+## Voice input
+
+In workspace settings, **Voice input** lets you select the default transcription
+provider alongside its payment source. **Automatic** follows the deployment
+priority. This choice is separate from the chat model.
+
+**Automatic transcription fallback** tries another configured provider when the
+preferred one is unavailable or rejects access; that provider’s billing applies.
+Timeouts and recordings already partly transcribed stay with their original
+provider. Turn fallback off to use only your selected provider.
+
+Your recording remains saved while transcription retries. A recovered transcript
+appears as **Insert saved transcript**, so you can review it before sending.

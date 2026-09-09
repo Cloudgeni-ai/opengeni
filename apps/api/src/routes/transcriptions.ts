@@ -1,5 +1,6 @@
 import {
   resolveWorkspaceVoiceInputEnabled,
+  WorkspaceVoiceInputSettings,
   type TranscribeAudioResponse,
 } from "@opengeni/contracts";
 import { type ApiRouteDeps, requireAccessGrant, TranscriptionServiceError } from "@opengeni/core";
@@ -17,6 +18,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
     if (resolveWorkspaceVoiceInputEnabled(workspace.settings) === false) {
       return c.json({ code: "policy_blocked" }, 403);
     }
+    const preferences = WorkspaceVoiceInputSettings.safeParse(workspace.settings.voiceInput).data;
     const service = deps.transcription;
     if (!service || !(await service.available({ workspaceId, subjectId: grant.subjectId }))) {
       return c.json({ code: "unavailable" }, 503);
@@ -24,6 +26,8 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
     try {
       const body = await audioRequest(c.req.raw, service.limits().maxSizeBytes);
       const result = await service.transcribe({
+        preferredProvider: preferences?.preferredProvider,
+        fallbackEnabled: preferences?.fallbackEnabled,
         workspaceId,
         accountId: grant.accountId,
         subjectId: grant.subjectId,

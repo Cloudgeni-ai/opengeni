@@ -8,6 +8,7 @@ import {
   configuredAllowedReasoningEfforts,
   configuredModels,
   resolveFirstPartyMcpToolPolicy,
+  resolveVoiceInputProviderRegistry,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
@@ -879,6 +880,9 @@ export function createAppComposition(deps: AppDependencies): {
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
+          providers: resolveVoiceInputProviderRegistry(deps.settings).map(
+            (provider) => provider.id,
+          ),
           available: (await transcription?.available()) ?? false,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
@@ -2564,6 +2568,20 @@ const routeLabelPatterns: Array<{
 ];
 
 export function routeLabel(pathname: string): string {
+  if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
+    return "/v1/workspaces/:workspaceId/transcriptions";
+  const transcription = pathname.match(
+    /^\/v1\/workspaces\/[^/]+\/transcription-recordings(?:\/[^/]+(\/(?:finalize|process-next)|\/chunks\/\d+)?)?$/,
+  );
+  if (transcription) {
+    const base = "/v1/workspaces/:workspaceId/transcription-recordings";
+    if (pathname.split("/").length === 5) return base;
+    return (
+      base +
+      "/:recordingId" +
+      (transcription[1]?.startsWith("/chunks/") ? "/chunks/:chunkNumber" : (transcription[1] ?? ""))
+    );
+  }
   for (const candidate of routeLabelPatterns) {
     const match = pathname.match(candidate.pattern);
     if (match) {
