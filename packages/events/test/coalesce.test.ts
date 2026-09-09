@@ -34,6 +34,17 @@ function event(
 }
 
 describe("coalesceSessionEventDeltas", () => {
+  test("preserves message identities and never coalesces across their boundary", () => {
+    const result = coalesceSessionEventDeltas([
+      event(1, "agent.message.delta", { text: "calc", messageId: "message-a" }),
+      event(2, "agent.message.delta", { text: "ulation", messageId: "message-a" }),
+      event(3, "agent.message.delta", { text: "next", messageId: "message-b" }),
+    ]);
+    expect(result.map((item) => item.payload)).toEqual([
+      { text: "calculation", messageId: "message-a", coalescedUntil: 2 },
+      { text: "next", messageId: "message-b", coalescedUntil: 3 },
+    ]);
+  });
   test("leaves empty and no-delta inputs untouched", () => {
     expect(coalesceSessionEventDeltas([])).toEqual([]);
     const events = [

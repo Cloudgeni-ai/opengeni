@@ -6,9 +6,9 @@
 ## Navigation
 
 1. **New here?** Read §2–4; skim §6.
-2. **Changing a subsystem?** Start with §13 and its canonical sources.
-3. **Exact behavior?** Follow source links, not this summary.
-4. **Stale boundary?** Update this map; see §14.
+2. **Subsystem changes:** §13 links canonical sources.
+3. **Exact behavior:** follow source links.
+4. **Stale boundaries:** update per §14.
 
 ---
 
@@ -58,6 +58,8 @@ Separate surfaces:
 
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
+
+Skills: [`content, authority, and migration`](skills-lifecycle.md).
 
 ---
 
@@ -231,8 +233,8 @@ rest and exposed only through explicit permissioned operations with
 metadata-only audit.
 
 Generated media and editable artifacts are durable workspace artifacts, not
-conversation blobs. Model-facing history retains compact receipts and resolves
-bytes through the file or artifact authority when needed.
+conversation blobs. Active image history resolves authorized references, including
+compaction input. History preserves JSON key order; JSONB serves queries.
 
 Canonical: [`run-lifecycle.md`](run-lifecycle.md),
 [`hierarchical-memory.md`](hierarchical-memory.md),
@@ -864,11 +866,13 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `load_skill`,
+`write_stdin`, `apply_patch`, `view_image`, `load_skill`, `skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
+
+Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no
@@ -1129,7 +1133,7 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects: always-indexed, worker-loaded `opengeni-projects` skill.
+Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
 
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
@@ -1186,7 +1190,7 @@ Multiple SDK clients in the same document retain independent ports; connecting
 one must not cancel another. Workspace SDK requests have no endpoint allowlist:
 the host binds routing; API handlers authorize. Published calls use viewer auth;
 previews retain the Codemode permission ceiling and cancellable streaming.
-Build/edit shortcuts send ordinary user prompts without authority overrides.
+Build/edit shortcuts send user prompts without authority overrides.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
@@ -1297,17 +1301,17 @@ Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased archives at
 `/opt/opengeni/site-packages`; deployed images do not.
 
-Timeline history ownership stays in `packages/react`: `use-session-events.ts`
-fences history navigation by session/client lifetime, independently of SSE
-reconnects. The web route supplies source events alongside projected rows;
-it keys the timeline by session so pagination ownership and reading state cannot
-survive navigation to another session.
-Retained event identity determines window overlap because partial-message row
-IDs can change on prepend. `timeline-anchor.tsx` captures the reading position
-immediately before React mutates the DOM; `message-timeline.tsx` applies only
-the residual correction after browser anchoring. Corrections cannot resume
-tip-follow, and continued upward input permits bounded sequential older-page
-loads even when collapsed content adds no scroll range.
+Timeline history belongs to `packages/react`. `use-session-events.ts` fences
+navigation by session/client lifetime, independently of SSE reconnects. The web
+route supplies source events and keys the timeline by session. Retained event
+identity determines overlap; partial-message row IDs can change on prepend.
+`timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx`
+corrects only residual browser-anchor movement, without resuming tip-follow.
+Continued upward input permits bounded older-page loads despite collapsed rows.
+Automatic underfill preserves the tail and offers explicit earlier navigation
+at the window limit. Underfilled history never auto-pages forward; Jump to latest
+restores the live tail. Provider message identity survives normalization and
+coalescing, joining interleaved chunks without merging distinct messages.
 
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
@@ -1467,6 +1471,10 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
 
 ---
+
+Skill approval atomically settles a verified managed/local human response and
+activates the exact folder under scope/head checks. Agents and delegated
+subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
 
 ## 10. Security and access model
 
@@ -1636,20 +1644,9 @@ authority. Update this file in the same change when you:
   §5; or
 - change the canonical source or topic doc for a row in §13.
 
-Use [`README.md`](README.md) as the complete docs map. Update the focused topic
-doc—not this file—with feature mechanics, migration histories, rollout
-instructions, exact settings, provider-specific behavior, route inventories,
-or schema detail.
-
-Keep additions concise:
-
-1. State the stable architectural rule.
-2. Explain why the boundary exists.
-3. Link to the code and focused document that own exact behavior.
-4. Prefer deletion over retaining a stale enumeration.
-
-This file should remain an orientation document that can be read in one sitting,
-not an append-only ledger of everything the repository has ever learned.
+Use [`README.md`](README.md) for the docs map. Put feature mechanics and rollout
+details in focused docs. Keep this orientation concise: state each invariant,
+its purpose, and its canonical source; remove stale material.
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
 

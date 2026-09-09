@@ -47,7 +47,12 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
+import {
+  losslessCodecVersion,
+  losslessJsonb,
+  losslessOrderedJson,
+  losslessText,
+} from "./lossless-columns";
 
 export * from "./editable-artifacts-schema";
 export * from "./managed-auth-session-set-schema";
@@ -8568,6 +8573,7 @@ export const sessionHumanInputRequests = pgTable(
     allowSkip: boolean("allow_skip").notNull().default(false),
     response: jsonb("response").$type<HumanInputResponse>(),
     respondedBy: text("responded_by"),
+    skillReviewHumanAuthorized: boolean("skill_review_human_authorized").notNull().default(false),
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8656,7 +8662,7 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
-    item: losslessJsonb("item").$type<Record<string, unknown>>().notNull(),
+    item: losslessOrderedJson("item_ordered").$type<Record<string, unknown>>().notNull(),
     itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
@@ -8713,16 +8719,16 @@ export const sessionPendingToolCalls = pgTable(
     attemptId: uuid("attempt_id").notNull(),
     callId: text("call_id").notNull(),
     callType: text("call_type").notNull(),
-    callItem: losslessJsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    callItem: losslessOrderedJson("call_item_ordered").$type<Record<string, unknown>>().notNull(),
     callItemCodecVersion: losslessCodecVersion("call_item_codec_version"),
     interruptionKind: text("interruption_kind"),
-    tiedReasoningItems: losslessJsonb("tied_reasoning_items")
+    tiedReasoningItems: losslessOrderedJson("tied_reasoning_items_ordered")
       .$type<Array<Record<string, unknown>>>()
       .notNull()
       .default([]),
     tiedReasoningItemsCodecVersion: losslessCodecVersion("tied_reasoning_items_codec_version"),
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
-    resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
+    resultItem: losslessOrderedJson("result_item_ordered").$type<Record<string, unknown>>(),
     resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
     eventOutput: losslessJsonb("event_output").$type<{ value: unknown }>(),
     eventOutputCodecVersion: losslessCodecVersion("event_output_codec_version"),
@@ -13433,6 +13439,7 @@ export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";
 export * from "./slack-task-policy-schema";
 export * from "./preference-registry-schema";
+export * from "./skills-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./task-notes-schema";

@@ -150,6 +150,12 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
+const LazySessionWaitStatus = lazy(() =>
+  import("@/components/session/session-wait-status").then((module) => ({
+    default: module.SessionWaitStatus,
+  })),
+);
+
 const MessageForkDialog = lazy(() =>
   import("@/components/session/session-tenancy-control").then((module) => ({
     default: module.SessionTenancyRouteControl,
@@ -1498,6 +1504,18 @@ function SessionChatPane(props: {
   const composerPolicyValidRef = useRef(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const loadSkillReview = useCallback(
+    (reference: NonNullable<import("@opengeni/sdk").HumanInputQuestion["skillReview"]>) =>
+      context.client.readWorkspaceSkill(
+        props.session.workspaceId,
+        reference.skillId,
+        reference.revisionId,
+      ),
+    // A browser-account switch must discard the previous actor's loaded preview
+    // even when the SDK client instance and workspace remain unchanged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [context.client, props.session.workspaceId, context.accessContext.subjectId],
+  );
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
   const sessionVariableSetIds =
     props.session.variableSetIds ??
@@ -2025,6 +2043,7 @@ function SessionChatPane(props: {
                 props.session.status === "requires_action" ? (
                   <div className="pb-1" data-human-input-timeline-surface="">
                     <HumanInputSurface
+                      loadSkillReview={loadSkillReview}
                       requests={props.humanInput.requests}
                       respondingRequestId={props.humanInput.respondingRequestId}
                       error={props.humanInput.mutationError?.message}
@@ -2140,6 +2159,14 @@ function SessionChatPane(props: {
             })}
           </div>
         </div>
+      ) : null}
+
+      {props.session.inputWait &&
+      props.session.status === "idle" &&
+      props.session.effectiveControl.state === "active" ? (
+        <Suspense fallback={null}>
+          <LazySessionWaitStatus session={props.session} />
+        </Suspense>
       ) : null}
 
       {/* Compact session chrome above the composer — incoming, queue, goal,

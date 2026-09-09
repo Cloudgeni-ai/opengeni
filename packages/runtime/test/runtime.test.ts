@@ -1,4 +1,3 @@
-import { builtinSkillIndex } from "../src/runtime-skills";
 import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -39,6 +38,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
+  skillReviewHumanInput,
   type ToolAuthNeededPayload,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
@@ -502,6 +502,30 @@ describe("structured human-input runtime boundary", () => {
     ]);
   });
 
+  test("preserves the exact Skill review envelope through interruption serialization", () => {
+    const input = skillReviewHumanInput({
+      sourceOperationId: "00000000-0000-4000-8000-000000000001",
+      skillId: "00000000-0000-4000-8000-000000000002",
+      revisionId: "00000000-0000-4000-8000-000000000003",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    });
+    const serialized = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "skill-review-call",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify(input),
+        },
+      },
+    ]);
+    expect(serialized).toEqual([
+      { toolCallId: "skill-review-call", input: { ...input, allowSkip: false } },
+    ]);
+    expect(serialized[0]!.input.questions[0]!.allowOther).toBe(false);
+  });
+
   test("partitions typed interaction waits while preserving their exact SDK approval", () => {
     const interaction = {
       name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
@@ -796,6 +820,22 @@ describe("runtime event normalization", () => {
       type: "agent.message.completed",
       payload: { text: "All checks passed.", phase: "final_answer" },
     });
+  });
+
+  test("preserves provider message identity across text deltas and completion", () => {
+    const [delta] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "output_text_delta",
+        delta: "partial",
+        itemId: "message-a",
+      } as any),
+    );
+    const [completed] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: { type: "message_output_item", text: "partial answer", rawItem: { id: "message-a" } },
+    } as any);
+    expect(delta?.payload).toEqual({ text: "partial", messageId: "message-a" });
+    expect(completed?.payload).toEqual({ text: "partial answer", messageId: "message-a" });
   });
 
   test("extracts streamed usage without manufacturing a durable event", () => {
@@ -3971,19 +4011,17 @@ describe("runtime event normalization", () => {
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
-    "Installed and selected Skills are indexed under .agents/ and may include role-specific guidance.",
+    "Installed and selected Skills appear in the session Skill index; follow its reading instructions and any role-specific guidance.",
     "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
     "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
     "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
     "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Use remember lane=preference for reusable conditional guidance (a Skill), lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
+    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Reusable conditional guidance belongs in Skills. Skill changes use the shared file lifecycle governed by Learning mode, not Knowledge evidence or confidence. Follow Skill management guidance only when it is present in the Skill index. Use remember lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
   ].join(" ");
-  // These assertions pin the existing persona/layer order; the built-in index
-  // is verified independently across compute backends in project-skill.test.ts.
-  const withoutBuiltinSkills = (instructions: unknown): string => {
+  const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
-    return instructions.replace(` ${builtinSkillIndex()}`, "");
+    return instructions;
   };
   const withOperationalInstructions = (instructions: string) =>
     `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions}`;
@@ -3998,7 +4036,7 @@ describe("runtime event normalization", () => {
     );
     // End-to-end through the agent builder with the default settings template.
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(agent.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("default template with an attached environment appends the env block exactly as before", () => {
@@ -4017,7 +4055,7 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       workspaceEnvironment: env,
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(withOperationalInstructions(expected));
+    expect(staticInstructions(agent.instructions)).toBe(withOperationalInstructions(expected));
   });
 
   test("a white-label persona override is substituted at {{core}} but keeps the non-bypassable CORE", () => {
@@ -4025,17 +4063,15 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       instructionsTemplate: template,
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toContain(
-      "You are ACME's deployment co-pilot.",
-    );
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain(
+    expect(staticInstructions(agent.instructions)).toContain("You are ACME's deployment co-pilot.");
+    expect(staticInstructions(agent.instructions)).not.toContain(
       "You are an OpenGeni workspace agent.",
     );
     // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
-    expect(withoutBuiltinSkills(agent.instructions)).toContain(
+    expect(staticInstructions(agent.instructions)).toContain(
       "you call opengeni__goal_complete with concrete evidence",
     );
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
         `You are ACME's deployment co-pilot. ${coreInstructions().join(" ")} Stay on brand.`,
       ),
@@ -4047,10 +4083,10 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       instructionsTemplate: template,
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(`${template} ${coreInstructions().join(" ")}`),
     );
-    expect(withoutBuiltinSkills(agent.instructions)).toContain("opengeni__goal_complete");
+    expect(staticInstructions(agent.instructions)).toContain("opengeni__goal_complete");
   });
 
   test("the per-call override beats the deployment-default template", () => {
@@ -4060,19 +4096,19 @@ describe("runtime event normalization", () => {
     });
     const withoutOverride = buildOpenGeniAgent(settings, []);
     expect(
-      withoutBuiltinSkills(withoutOverride.instructions).startsWith(
+      staticInstructions(withoutOverride.instructions).startsWith(
         OPENGENI_OPERATIONAL_INSTRUCTIONS,
       ),
     ).toBe(true);
-    expect(withoutBuiltinSkills(withoutOverride.instructions)).toContain("DEPLOY DEFAULT ");
+    expect(staticInstructions(withoutOverride.instructions)).toContain("DEPLOY DEFAULT ");
     const withOverride = buildOpenGeniAgent(settings, [], {
       instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`,
     });
     expect(
-      withoutBuiltinSkills(withOverride.instructions).startsWith(OPENGENI_OPERATIONAL_INSTRUCTIONS),
+      staticInstructions(withOverride.instructions).startsWith(OPENGENI_OPERATIONAL_INSTRUCTIONS),
     ).toBe(true);
-    expect(withoutBuiltinSkills(withOverride.instructions)).toContain("WORKSPACE OVERRIDE ");
-    expect(withoutBuiltinSkills(withOverride.instructions)).not.toContain("DEPLOY DEFAULT");
+    expect(staticInstructions(withOverride.instructions)).toContain("WORKSPACE OVERRIDE ");
+    expect(staticInstructions(withOverride.instructions)).not.toContain("DEPLOY DEFAULT");
   });
 
   test("per-session instructions compose AFTER the workspace persona + CORE (session-specific last)", () => {
@@ -4082,14 +4118,14 @@ describe("runtime event normalization", () => {
       sessionInstructions: "SESSION RULE: always answer in French.",
     });
     // Exact ordering: workspace persona + CORE first, session instructions last.
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
         `WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`,
       ),
     );
     // And it rides the same application-owned instructions string, never a message.
     expect(
-      withoutBuiltinSkills(agent.instructions).endsWith("SESSION RULE: always answer in French."),
+      staticInstructions(agent.instructions).endsWith("SESSION RULE: always answer in French."),
     ).toBe(true);
   });
 
@@ -4097,7 +4133,7 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Be terse.",
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       `${EXPECTED_DEFAULT_INSTRUCTIONS} Be terse.`,
     );
   });
@@ -4111,13 +4147,11 @@ describe("runtime event normalization", () => {
     const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "   ",
     });
-    expect(withoutBuiltinSkills(withUndefined.instructions)).toBe(
-      withoutBuiltinSkills(base.instructions),
+    expect(staticInstructions(withUndefined.instructions)).toBe(
+      staticInstructions(base.instructions),
     );
-    expect(withoutBuiltinSkills(withBlank.instructions)).toBe(
-      withoutBuiltinSkills(base.instructions),
-    );
-    expect(withoutBuiltinSkills(base.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(withBlank.instructions)).toBe(staticInstructions(base.instructions));
+    expect(staticInstructions(base.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("absent workspace memory is byte-identical to today's composition", () => {
@@ -4131,13 +4165,11 @@ describe("runtime event normalization", () => {
     const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       workspaceMemory: "   ",
     });
-    expect(withoutBuiltinSkills(withUndefined.instructions)).toBe(
-      withoutBuiltinSkills(base.instructions),
+    expect(staticInstructions(withUndefined.instructions)).toBe(
+      staticInstructions(base.instructions),
     );
-    expect(withoutBuiltinSkills(withBlank.instructions)).toBe(
-      withoutBuiltinSkills(base.instructions),
-    );
-    expect(withoutBuiltinSkills(base.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(withBlank.instructions)).toBe(staticInstructions(base.instructions));
+    expect(staticInstructions(base.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("workspace memory composes after workspace persona + CORE and before per-session instructions", () => {
@@ -4149,13 +4181,13 @@ describe("runtime event normalization", () => {
       sessionInstructions: "SESSION RULE: always answer in French.",
     });
 
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
         `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
       ),
     );
-    expect(withoutBuiltinSkills(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
-      withoutBuiltinSkills(agent.instructions).indexOf("SESSION RULE"),
+    expect(staticInstructions(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
+      staticInstructions(agent.instructions).indexOf("SESSION RULE"),
     );
   });
 
@@ -4164,27 +4196,25 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Session-scoped rule.",
       missingSessionTitleHint: true,
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toContain("Session-scoped rule.");
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain(GENESIS_TITLE_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toContain("Session-scoped rule.");
+    expect(staticInstructions(agent.instructions)).not.toContain(GENESIS_TITLE_DIRECTIVE);
     expect(GENESIS_TITLE_DIRECTIVE).toContain("topic label");
     expect(GENESIS_TITLE_DIRECTIVE).toContain("not a quote or prefix");
     expect(GENESIS_TITLE_DIRECTIVE).toContain("credentials");
 
     const filter = oneShotGenesisTitleInputFilter();
     const first = await filter({
-      modelData: { input: [], instructions: withoutBuiltinSkills(agent.instructions) },
+      modelData: { input: [], instructions: staticInstructions(agent.instructions) },
       agent,
       context: undefined,
     });
     const followUp = await filter({
-      modelData: { input: [], instructions: withoutBuiltinSkills(agent.instructions) },
+      modelData: { input: [], instructions: staticInstructions(agent.instructions) },
       agent,
       context: undefined,
     });
-    expect(withoutBuiltinSkills(first.instructions)?.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
-    expect(withoutBuiltinSkills(followUp.instructions)).toBe(
-      withoutBuiltinSkills(agent.instructions),
-    );
+    expect(staticInstructions(first.instructions)?.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
+    expect(staticInstructions(followUp.instructions)).toBe(staticInstructions(agent.instructions));
   });
 
   test("the auxiliary title request is bounded, tool-less, and normalized", async () => {
@@ -4246,10 +4276,10 @@ describe("runtime event normalization", () => {
       missingSessionTitleHint: true,
     });
 
-    expect(withoutBuiltinSkills(agent.instructions)).toContain("Session-scoped rule.");
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain("Persistent session settings");
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain("display title");
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain(GENESIS_TITLE_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toContain("Session-scoped rule.");
+    expect(staticInstructions(agent.instructions)).not.toContain("Persistent session settings");
+    expect(staticInstructions(agent.instructions)).not.toContain("display title");
+    expect(staticInstructions(agent.instructions)).not.toContain(GENESIS_TITLE_DIRECTIVE);
   });
 
   test("standing goal renderer stays outside persistent instructions", () => {
@@ -4276,9 +4306,7 @@ describe("runtime event normalization", () => {
     expect(appendSessionGoal("base", snapshot)).toBe(`base ${goalContext}`);
 
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain(
-      "Ship the durable goal boundary",
-    );
+    expect(staticInstructions(agent.instructions)).not.toContain("Ship the durable goal boundary");
 
     const completedContext = renderSessionGoalContext({
       state: "completed",
@@ -4319,17 +4347,17 @@ describe("runtime event normalization", () => {
       codemodeTokenSeed: "ogd_seed",
       codemodeTokenSessionId: "session-instructions",
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     // No exact-attempt authority means no advertised programmatic surface.
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(withoutBuiltinSkills(off.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
-    expect(withoutBuiltinSkills(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(staticInstructions(off.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
   });
 
   test("no token minted for the turn omits the directive", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
-    expect(withoutBuiltinSkills(agent.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
+    expect(staticInstructions(agent.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toBe(EXPECTED_DEFAULT_INSTRUCTIONS);
   });
 
   test("a Connected Machine advertises Codemode without installing a token file", () => {
@@ -4338,7 +4366,7 @@ describe("runtime event normalization", () => {
       sandboxWorkspaceRoot: "/srv/project",
       codemodeAvailable: true,
     });
-    expect(withoutBuiltinSkills(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(staticInstructions(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(() =>
       buildOpenGeniAgent(testSettings(codemodeOn), [], {
         codemodeAvailable: false,
@@ -4366,14 +4394,14 @@ describe("runtime event normalization", () => {
     });
     // Exact ordering: workspace persona + CORE, then the codemode directive,
     // then the session slice last (host/session specificity wins).
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
         `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
       ),
     );
     expect(
-      withoutBuiltinSkills(agent.instructions).indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
-    ).toBeLessThan(withoutBuiltinSkills(agent.instructions).indexOf("SESSION RULE"));
+      staticInstructions(agent.instructions).indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
+    ).toBeLessThan(staticInstructions(agent.instructions).indexOf("SESSION RULE"));
   });
 
   test("workspace memory composes after the codemode directive and before the per-session slice", () => {
@@ -4387,16 +4415,16 @@ describe("runtime event normalization", () => {
       codemodeTokenSessionId: "session-instructions",
     });
 
-    expect(withoutBuiltinSkills(agent.instructions)).toBe(
+    expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
         `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
       ),
     );
     expect(
-      withoutBuiltinSkills(agent.instructions).indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
-    ).toBeLessThan(withoutBuiltinSkills(agent.instructions).indexOf(workspaceMemory));
-    expect(withoutBuiltinSkills(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
-      withoutBuiltinSkills(agent.instructions).indexOf("SESSION RULE"),
+      staticInstructions(agent.instructions).indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE),
+    ).toBeLessThan(staticInstructions(agent.instructions).indexOf(workspaceMemory));
+    expect(staticInstructions(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
+      staticInstructions(agent.instructions).indexOf("SESSION RULE"),
     );
   });
 
@@ -11361,14 +11389,12 @@ describe("runtime Skill activation", () => {
     expect(infra?.path).toBe("infra-ops");
   });
 
-  test("an explicit pack skill description wins over SKILL.md frontmatter", () => {
-    const source = composeRuntimeSkills([
-      packActivation({ ...infraSkill, description: "Explicit description." }),
-    ]).lazySource;
-    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
-    expect(index.find((entry) => entry.name === "infra-ops")?.description).toBe(
-      "Explicit description.",
-    );
+  test("an explicit pack description cannot override SKILL.md frontmatter", () => {
+    expect(() =>
+      composeRuntimeSkills([
+        packActivation({ ...infraSkill, description: "Explicit description." }),
+      ]),
+    ).toThrow("must match SKILL.md frontmatter");
   });
 
   test("a Pack may explicitly contribute Checkov like any other Skill", () => {
@@ -11378,7 +11404,7 @@ describe("runtime Skill activation", () => {
         files: [
           {
             path: "SKILL.md",
-            content: "---\ndescription: Pack-provided checkov.\n---\n",
+            content: "---\nname: checkov\ndescription: Pack-provided checkov.\n---\n",
           },
         ],
       }),
@@ -11428,7 +11454,12 @@ describe("runtime Skill activation", () => {
         packActivation({
           name: loaded.skill.name,
           description: "Divergent Pack override.",
-          files: [{ path: "SKILL.md", content: "# Divergent Pack override\n" }],
+          files: [
+            {
+              path: "SKILL.md",
+              content: `---\nname: ${loaded.skill.name}\ndescription: Divergent Pack override.\n---\n# Divergent Pack override\n`,
+            },
+          ],
         }),
       ]),
     ).toThrow(`Conflicting Skill definitions for "${loaded.skill.name}"`);
@@ -11458,11 +11489,15 @@ describe("runtime Skill activation", () => {
       composeRuntimeSkills([
         packActivation({
           name: "dup",
-          files: [{ path: "SKILL.md", content: "a" }],
+          files: [
+            { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\na" },
+          ],
         }),
         packActivation({
           name: "dup",
-          files: [{ path: "SKILL.md", content: "b" }],
+          files: [
+            { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\nb" },
+          ],
         }),
       ]),
     ).toThrow('Conflicting Skill definitions for "dup"');

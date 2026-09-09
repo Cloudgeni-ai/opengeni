@@ -1321,6 +1321,9 @@ describe("MessageTimeline — settled turn folding", () => {
       r.container.querySelectorAll('[data-og-recorded-outcome="wait"]'),
     ).find((element) => element.textContent?.includes(`Waiting: ${reason}`));
     expect(visibleOutcome).not.toBeUndefined();
+    expect(visibleOutcome?.tagName).toBe("DETAILS");
+    expect(visibleOutcome?.hasAttribute("open")).toBe(false);
+    expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
     expect(visibleOutcome?.getAttribute("role")).toBe("note");
     expect(visibleOutcome?.textContent).toContain("Wait recorded");
     expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
