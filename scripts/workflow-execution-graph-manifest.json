@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "9bbb2a039087284319c8b9635376ae62830eb767e5d70051cd5f45eb0b74e4b0"
+      "sha256": "84cd2aced9944adeda5227da96db6d1b3036cef87fc939d9319458a875678dfe"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -92,7 +92,7 @@
   "actions": [
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "1d1865cf748e6cfa686eb69216057d6aa02037549f4728ae05a63828397942c7"
+      "sha256": "546880d5a15d618687b04dbd34c2ce8e4fee1c3af4b332296507502f823404eb"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",

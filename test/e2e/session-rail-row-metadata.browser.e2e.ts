@@ -56,7 +56,11 @@ describe("Session rail row metadata in Chromium", () => {
       expect(await preview.locator("header").innerText()).not.toContain("recheck");
       expect(await preview.locator("header [data-session-wait-badge]").innerText()).toBe("Waiting");
       expect(await preview.locator("[data-session-wait-status]").count()).toBe(1);
-      expect(await page.getByTestId("waiting-row").innerText()).toContain("Waiting · ");
+      const row = page.getByTestId("waiting-row");
+      expect(await row.locator("[data-session-row-state]").count()).toBe(0);
+      expect((await row.boundingBox())?.height).toBe(32);
+      expect(await row.locator(".animate-spin").count()).toBe(1);
+      expect(await row.locator(".sr-only").textContent()).toContain("Waiting · ");
       expect(await preview.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
       await page.screenshot({ path: `/tmp/opengeni-wait-status-${width}.png`, fullPage: true });
       await page.getByRole("button", { name: "Recheck due", exact: true }).click();
@@ -65,12 +69,17 @@ describe("Session rail row metadata in Chromium", () => {
           .querySelector('[data-testid="wait-preview"]')
           ?.textContent?.includes("Recheck due · waiting to resume"),
       );
-      expect(await page.getByTestId("waiting-row").innerText()).toContain("Recheck due");
+      expect(await row.locator("[data-session-row-state]").count()).toBe(0);
+      expect((await row.boundingBox())?.height).toBe(32);
+      expect(await row.locator(".animate-spin").count()).toBe(1);
+      expect(await row.locator(".sr-only").textContent()).toContain("Recheck due");
       await page.getByRole("button", { name: "Complete work", exact: true }).click();
       expect(await preview.innerText()).not.toContain("Waiting ·");
       expect(await preview.innerText()).not.toContain("Checks again at");
       expect(await preview.locator("[data-session-wait-status]").count()).toBe(0);
       expect(await preview.locator("[data-session-wait-badge]").count()).toBe(0);
+      expect((await row.boundingBox())?.height).toBe(32);
+      expect(await row.locator(".animate-spin").count()).toBe(0);
     }
     await page.setViewportSize({ width: 1280, height: 800 });
   });
