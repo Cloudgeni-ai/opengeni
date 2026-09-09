@@ -33,6 +33,12 @@ describe("unified Skill migration boundary", () => {
     expect(migration).toContain("Skill head changed");
     expect(migration).toContain("Learning is Off");
     expect(migration).toContain("skill_guard_legacy_revision");
+    expect(migration).toContain("guard_workspace_owned_skill_head_delete");
+    expect(migration).toContain("guard_workspace_owned_skill_history_delete");
+    expect(migration).toContain("company_brain_pref_receipts_workspace_fk");
+    expect(migration).not.toMatch(
+      /CREATE OR REPLACE FUNCTION preference_registry_reject_history_mutation/u,
+    );
   });
   test("registers read-only tables and exact runtime capability", () => {
     for (const table of ["skill_source_bindings", "skill_write_receipts"]) {
