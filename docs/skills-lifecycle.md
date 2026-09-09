@@ -220,7 +220,7 @@ cross-tenant identity preservation, folder content, and the restored posture.
 Migration `0432_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never
-restart a pre-0431 binary: its installed reads bypass the registry content head.
+restart a pre-0432 binary: its installed reads bypass the registry content head.
 The migration preserves existing source ownership, backfills installed Skills
 by portable identity, and rejects invalid existing folders for repair rather
 than silently truncating them. New binding/write-receipt tables are FORCE-RLS and
