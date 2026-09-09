@@ -389,20 +389,18 @@ export function personalResourceSelectionIdentityKey(input: {
 }
 
 /**
- * Selecting a personal resource is the explicit user action. Private sessions
- * retain that authority for the session; workspace-visible sessions receive
- * message-only authority by default, unless the human explicitly chooses ongoing work.
+ * Selecting a personal resource is consent for the owner's work in this session,
+ * including its continuations. Visibility does not change the duration of access.
  */
 export function newSessionPersonalResourceAttachment(input: {
   personalResourceCount: number;
   visibility: "private" | "workspace";
-  mode?: PersonalAttachmentMode;
 }): {
   intent: PersonalResourceAttachmentIntent | undefined;
 } {
   return {
     intent: buildPersonalResourceAttachmentIntent({
-      mode: input.visibility === "private" ? "session" : (input.mode ?? "once"),
+      mode: "session",
       visibility: input.visibility,
       // Choosing the Only-me resource in the setup is the acknowledgement;
       // the adjacent copy explains that shared-session outputs remain visible.
