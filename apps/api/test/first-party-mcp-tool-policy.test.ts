@@ -306,7 +306,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(descriptions.get("session_send_message")).toContain("Acceptance is not execution");
       expect(descriptions.get("session_send_message")).toContain("match that ID in payload.updateIds");
       expect(descriptions.get("session_send_message")).toContain("retain the event turnId");
-      expect(descriptions.get("session_send_message")).toContain("an unrelated in-flight turn completing does not prove delivery");
+      expect(descriptions.get("session_send_message")).toContain("An unrelated in-flight turn completing does not prove delivery");
       expect(registeredToolInputSchema(server, "session_events").safeParse({
         sessionId,
         view: "debug",
@@ -333,7 +333,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(declarations).toContain("pausing an ancestor also stops this caller");
       expect(declarations).toContain("Acceptance is not execution");
       expect(declarations).toContain("match that ID in payload.updateIds");
-      expect(declarations).toContain("an unrelated in-flight turn completing does not prove delivery");
+      expect(declarations).toContain("An unrelated in-flight turn completing does not prove delivery");
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

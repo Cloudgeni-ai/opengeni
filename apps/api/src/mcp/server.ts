@@ -5241,7 +5241,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Send information to another session. From an OpenGeni worker this becomes a canonical coalescible machine input: it appears in the target's compact incoming queue group, is durably added to model history when claimed, and remains visible in the timeline. A sessionless operator call appends one human/API prompt. Acceptance is not execution. Keep resource.id: for session_system_update, read session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full from your last consumed sequence; match that ID in payload.updateIds and retain the event turnId. For session_turn, resource.id is already the target turn ID. Read that turn’s result and verify it incorporates the requested work; an unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers and report stalled delivery instead.",
+          "Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
