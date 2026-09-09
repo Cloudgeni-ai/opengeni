@@ -8,14 +8,22 @@ import {
 import { sql as drizzleSql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  applySessionTurnSettlement,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   type Database,
   getVariableSetValuesForRun,
   initializeSessionStartAtomically,
+  materializeGoalContinuation,
   nestedPostgresSqlState,
   readVariableSetSecretAtomically,
+  recoverSessionDispatch,
+  resolveSessionAttemptPersonalResources,
+  revokeSelfUserResourceGrant,
   SessionCreateIdempotencyConflictError,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -387,42 +395,54 @@ describe("migration 0306 atomic personal-resource attachments", () => {
     }
   }, 900_000);
 
-  test("materializes a non-final personal Variable Set for session attach and retry", async () => {
-    if (!blank || !admin) return;
-    const accountId = crypto.randomUUID();
-    const personalWorkspaceId = crypto.randomUUID();
-    const workspaceId = crypto.randomUUID();
-    const subjectId = `user:${crypto.randomUUID()}`;
-    const sessionId = crypto.randomUUID();
+  test.each([
+    "legacy selection regression",
+    "revocation",
+    "authority revocation",
+    "authority generation",
+    "grant generation",
+    "grant epoch",
+    "membership revision",
+    "unrelated human",
+    "different session",
+  ] as const)(
+    "session attachment survives owner recovery and goal continuation, then checks %s",
+    async (invalidation) => {
+      if (!blank || !admin) return;
+      const accountId = crypto.randomUUID();
+      const personalWorkspaceId = crypto.randomUUID();
+      const workspaceId = crypto.randomUUID();
+      const subjectId = `user:${crypto.randomUUID()}`;
+      const sessionId = crypto.randomUUID();
 
-    await admin`
+      await admin`
       insert into managed_accounts (id, name)
       values (${accountId}, 'personal session attach')`;
-    await admin`
+      await admin`
       insert into workspaces (id, account_id, name) values
         (${personalWorkspaceId}, ${accountId}, 'personal'),
         (${workspaceId}, ${accountId}, 'shared')`;
-    await admin`
+      await admin`
       insert into workspace_inference_controls (workspace_id, account_id) values
         (${personalWorkspaceId}, ${accountId}), (${workspaceId}, ${accountId})`;
-    const [membership] = await admin<Array<{ id: string }>>`
+      const [membership] = await admin<Array<{ id: string }>>`
       insert into organization_memberships (
         account_id, subject_id, status, personal_workspace_id, authorization_revision
       ) values (${accountId}, ${subjectId}, 'active', ${personalWorkspaceId}, 3)
       returning id`;
-    await admin`
+      await admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id)
       values (${accountId}, ${workspaceId}, ${subjectId})`;
-    await admin`
+      await admin`
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
       ) values (${accountId}, 1, ${"c".repeat(64)}, ${"d".repeat(64)}, 'migration-0372')`;
 
-    const [personalSet] = await admin<Array<{ id: string }>>`
+      const [personalSet] = await admin<Array<{ id: string }>>`
       insert into workspace_variable_sets (account_id, workspace_id, name)
       values (${accountId}, ${personalWorkspaceId}, 'personal non-final variables')
       returning id`;
-    const [authority] = await admin<Array<{ id: string }>>`
+      const [authority] = await admin<Array<{ id: string }>>`
       insert into organization_user_resource_authorities (
         account_id, organization_membership_id, resource_kind, resource_id,
         origin_workspace_id, generation, status
@@ -430,96 +450,276 @@ describe("migration 0306 atomic personal-resource attachments", () => {
         ${accountId}, ${membership!.id}, 'variable_set', ${personalSet!.id},
         ${personalWorkspaceId}, 1, 'active'
       ) returning id`;
-    await admin`
+      await admin`
       update workspace_variable_sets
       set authority_scope = 'user', authority_id = ${authority!.id},
         owner_organization_membership_id = ${membership!.id},
         origin_workspace_id = ${personalWorkspaceId}
       where id = ${personalSet!.id}`;
-    await admin`
+      await admin`
       insert into workspace_variable_set_variables (
         account_id, workspace_id, variable_set_id, name, value_encrypted
       ) values (
         ${accountId}, ${personalWorkspaceId}, ${personalSet!.id},
         'PERSONAL_ATTACH_TOKEN', 'ciphertext:personal-attach'
       )`;
-    const [finalWorkspaceSet] = await admin<Array<{ id: string }>>`
+      const [finalWorkspaceSet] = await admin<Array<{ id: string }>>`
       insert into workspace_variable_sets (
         account_id, workspace_id, name, origin_workspace_id
       ) values (${accountId}, ${workspaceId}, 'final workspace variables', ${workspaceId})
       returning id`;
 
-    const client = createDb(blank.databaseUrl, { max: 1 });
-    try {
-      await createSession(client.db, {
-        requestedSessionId: sessionId,
-        accountId,
-        workspaceId,
-        initialMessage: "attach personal variables",
-        resources: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId },
-        subjectId,
-        model: "test-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "modal",
-        variableSetIds: [personalSet!.id, finalWorkspaceSet!.id],
-        variableSetId: finalWorkspaceSet!.id,
-        firstPartyMcpTools: [],
-        createIdempotencyKey: `personal-session-attach-${sessionId}`,
-        initialPersonalResourceAttachmentIntent: {
-          mode: "session",
-          workspaceSharedAcknowledged: true,
-          sharedOutputWarningVersion: 1,
-        },
-      });
-      await initializeSessionStartAtomically(client.db, {
-        accountId,
-        workspaceId,
-        sessionId,
-        reasoningEffortFallback: "medium",
-        createdEventPayload: {},
-      });
-
-      const materialize = async (actorSubjectId = subjectId) =>
-        await getVariableSetValuesForRun(client.db, {
+      const appUrl = new URL(blank.databaseUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = blank.appPassword ?? "apppw";
+      const client = createDb(appUrl.toString(), { max: 1 });
+      try {
+        await createSession(client.db, {
+          requestedSessionId: sessionId,
           accountId,
           workspaceId,
-          variableSetId: personalSet!.id,
-          authority: { kind: "session_attach", sessionId, subjectId: actorSubjectId },
+          initialMessage: "attach personal variables",
+          resources: [],
+          metadata: {},
+          createdBy: { kind: "subject", subjectId },
+          subjectId,
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "modal",
+          variableSetIds: [personalSet!.id, finalWorkspaceSet!.id],
+          variableSetId: finalWorkspaceSet!.id,
+          firstPartyMcpTools: [],
+          createIdempotencyKey: `personal-session-attach-${sessionId}`,
+          initialPersonalResourceAttachmentIntent: {
+            mode: "session",
+            workspaceSharedAcknowledged: true,
+            sharedOutputWarningVersion: 1,
+          },
         });
-      expect(await materialize()).toMatchObject({
-        variableSet: { id: personalSet!.id, scope: "user", generation: 1 },
-        values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
-      });
-      expect(await materialize()).toMatchObject({
-        values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
-      });
-      await expectSqlState(() => materialize(`user:${crypto.randomUUID()}`), "42501");
-      await expectSqlState(
-        () =>
-          client.db.transaction(async (tx) => {
-            await tx.execute(
-              drizzleSql`select set_config(
-                'opengeni.initiating_human_subject_id', ${subjectId}, true
-              )`,
-            );
-            await getVariableSetValuesForRun(tx as unknown as Database, {
+        await initializeSessionStartAtomically(client.db, {
+          accountId,
+          workspaceId,
+          sessionId,
+          reasoningEffortFallback: "medium",
+          createdEventPayload: {},
+          goal: { text: "Complete the owner's attached-resource work" },
+        });
+
+        const claim = async (targetSessionId = sessionId) => {
+          const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+            sessionId: targetSessionId,
+            workflowId: `session-${targetSessionId}`,
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: `dispatch-${crypto.randomUUID()}`,
+            trigger: { kind: "next" },
+          });
+          expect(claimed.action).toBe("claimed");
+          if (claimed.action !== "claimed") throw new Error("attachment turn was not claimed");
+          return claimed.turn;
+        };
+        const resolve = (turn: Awaited<ReturnType<typeof claim>>, actorSubjectId = subjectId) =>
+          resolveSessionAttemptPersonalResources(client.db, {
+            accountId,
+            workspaceId,
+            subjectId: actorSubjectId,
+            attemptId: turn.activeAttemptId!,
+          });
+        const read = (turn: Awaited<ReturnType<typeof claim>>) =>
+          getVariableSetValuesForRun(client.db, {
+            accountId,
+            workspaceId,
+            variableSetId: personalSet!.id,
+            authority: {
+              kind: "agent_attempt",
+              subjectId,
+              sessionId,
+              turnId: turn.id,
+              attemptId: turn.activeAttemptId!,
+              executionGeneration: turn.executionGeneration,
+              initiatingHumanSubjectId: subjectId,
+            },
+          });
+        const settle = async (turn: Awaited<ReturnType<typeof claim>>) => {
+          expect(
+            (
+              await applySessionTurnSettlement(client.db, workspaceId, {
+                sessionId,
+                turnId: turn.id,
+                triggerEventId: turn.triggerEventId,
+                attemptId: turn.activeAttemptId!,
+                turnStatus: "completed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+                events: [{ type: "turn.completed", payload: { reason: "test" } }],
+              })
+            ).action,
+          ).toBe("settled");
+        };
+        const recover = async (turn: Awaited<ReturnType<typeof claim>>) => {
+          expect(
+            (
+              await recoverSessionDispatch(client.db, workspaceId, {
+                sessionId,
+                attemptId: turn.activeAttemptId!,
+                timeoutType: "HEARTBEAT",
+                maxRedispatches: 3,
+              })
+            ).action,
+          ).toBe("recovering");
+        };
+
+        const initial = await claim();
+        await resolve(initial);
+        expect(await read(initial)).toMatchObject({
+          values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
+        });
+        await recover(initial);
+        const retry = await claim();
+        expect(retry.id).toBe(initial.id);
+        expect(retry.executionGeneration).toBe(initial.executionGeneration + 1);
+        await resolve(retry);
+        expect(await read(retry)).toMatchObject({
+          values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
+        });
+        await expectSqlState(() => resolve(initial), "42501");
+        await expectSqlState(() => read(initial), "42501");
+        await settle(retry);
+        expect(
+          (
+            await materializeGoalContinuation(client.db, {
               accountId,
               workspaceId,
-              variableSetId: personalSet!.id,
-              authority: {
-                kind: "session_attach",
-                sessionId,
-                subjectId: `user:${crypto.randomUUID()}`,
+              sessionId,
+              workflowId: `session-${sessionId}`,
+              defaultMaxAutoContinuations: null,
+              budgetBlocked: null,
+              policy: {
+                model: "test-model",
+                reasoningEffort: "medium",
+                latencyMode: "standard",
+                tools: [],
+                sandboxBackend: "modal",
+                turnExecutionPolicy: {
+                  schemaVersion: 1,
+                  productModelId: "test-model",
+                  requestedModelId: null,
+                  modelSource: "continuation",
+                  reasoningEffort: "medium",
+                  reasoningSource: "continuation",
+                  latencyMode: "standard",
+                  latencyModeSource: "continuation",
+                  providerId: "test-provider",
+                  upstreamModelId: "test-model",
+                  wireApi: "responses",
+                  credentialSource: { kind: "deployment", mechanism: "none" },
+                  billing: { upstreamPayer: "deployment", metering: "external" },
+                  definitionVersion: `sha256:${"0".repeat(64)}`,
+                },
               },
-            });
-          }),
-        "42501",
-      );
+              prompt: () => "Continue the owner's accepted work",
+            })
+          ).action,
+        ).toBe("continue");
 
-      const [grant] = await admin<Array<{ id: string }>>`
+        if (invalidation === "legacy selection regression") {
+          // Reproduce the exact pre-0430 function on this disposable database.
+          // Only the two selection predicates differ; no harness or auth bypass.
+          const migration = await Bun.file(
+            new URL(
+              "../drizzle/0430_session_personal_variable_set_continuations.sql",
+              import.meta.url,
+            ),
+          ).text();
+          const selection = migration.split("$selection$")[1]!;
+          const [current] = await admin<Array<{ definition: string }>>`
+          select pg_get_functiondef('admit_session_attempt_personal_resources()'::regprocedure)
+            as definition`;
+          expect(current!.definition.split(selection)).toHaveLength(3);
+          await admin.unsafe(
+            current!.definition.replaceAll(
+              selection,
+              "variable_set.id = session_row.variable_set_id",
+            ),
+          );
+          try {
+            const omitted = await claim();
+            const [snapshotCount] = await admin<Array<{ count: number }>>`
+            select count(*)::int as count from session_attempt_personal_resource_snapshots
+            where attempt_id = ${omitted.activeAttemptId!}`;
+            expect(snapshotCount!.count).toBe(0);
+            await expectSqlState(() => read(omitted), "42501");
+            await recover(omitted);
+          } finally {
+            await admin.begin(async (tx) => {
+              await tx.unsafe(migration);
+            });
+          }
+        }
+
+        const continuation = await claim();
+        expect(continuation.id).not.toBe(initial.id);
+        expect(continuation.source).toBe("goal");
+        expect(continuation.initiatingHumanSubjectId).toBe(subjectId);
+        const [protocol] = await admin<Array<{ version: number }>>`
+        select personal_resource_protocol_version as version from session_turn_attempts
+        where id = ${continuation.activeAttemptId!}`;
+        expect(protocol!.version).toBe(0);
+        await resolve(continuation);
+        expect(await read(continuation)).toMatchObject({
+          values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
+        });
+        const snapshots = await admin<
+          Array<{ mode: string; grantSessionId: string; count: number }>
+        >`
+        select grant_mode as mode, grant_session_id as "grantSessionId", count(*)::int as count
+        from session_attempt_personal_resource_snapshots
+        where attempt_id in (${initial.activeAttemptId!}, ${retry.activeAttemptId!},
+          ${continuation.activeAttemptId!})
+        group by grant_mode, grant_session_id`;
+        expect(Array.from(snapshots)).toEqual([
+          { mode: "session", grantSessionId: sessionId, count: 3 },
+        ]);
+
+        const materialize = async (actorSubjectId = subjectId) =>
+          await getVariableSetValuesForRun(client.db, {
+            accountId,
+            workspaceId,
+            variableSetId: personalSet!.id,
+            authority: { kind: "session_attach", sessionId, subjectId: actorSubjectId },
+          });
+        expect(await materialize()).toMatchObject({
+          variableSet: { id: personalSet!.id, scope: "user", generation: 1 },
+          values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
+        });
+        expect(await materialize()).toMatchObject({
+          values: { PERSONAL_ATTACH_TOKEN: "ciphertext:personal-attach" },
+        });
+        await expectSqlState(() => materialize(`user:${crypto.randomUUID()}`), "42501");
+        await expectSqlState(
+          () =>
+            client.db.transaction(async (tx) => {
+              await tx.execute(
+                drizzleSql`select set_config(
+                'opengeni.initiating_human_subject_id', ${subjectId}, true
+              )`,
+              );
+              await getVariableSetValuesForRun(tx as unknown as Database, {
+                accountId,
+                workspaceId,
+                variableSetId: personalSet!.id,
+                authority: {
+                  kind: "session_attach",
+                  sessionId,
+                  subjectId: `user:${crypto.randomUUID()}`,
+                },
+              });
+            }),
+          "42501",
+        );
+
+        const [grant] = await admin<Array<{ id: string }>>`
         select id from organization_user_resource_grants
         where account_id = ${accountId}
           and authority_id = ${authority!.id}
@@ -528,17 +728,112 @@ describe("migration 0306 atomic personal-resource attachments", () => {
           and action = 'variable_set.use'
           and mode = 'session'
           and status = 'active'`;
-      expect(grant?.id).toBeString();
-      await admin`
-        update organization_user_resource_grants
-        set status = 'revoked', revoked_at = clock_timestamp(),
-          generation = generation + 1, updated_at = clock_timestamp()
-        where id = ${grant!.id}`;
-      await expectSqlState(materialize, "42501");
-    } finally {
-      await client.close();
-    }
-  }, 900_000);
+        expect(grant?.id).toBeString();
+        if (invalidation === "unrelated human") {
+          const otherSubjectId = `user:${crypto.randomUUID()}`;
+          const otherPersonalWorkspaceId = crypto.randomUUID();
+          await admin`insert into workspaces (id, account_id, name)
+          values (${otherPersonalWorkspaceId}, ${accountId}, 'other personal')`;
+          await admin`insert into organization_memberships (
+          account_id, subject_id, status, personal_workspace_id
+        ) values (${accountId}, ${otherSubjectId}, 'active', ${otherPersonalWorkspaceId})`;
+          await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+          values (${accountId}, ${workspaceId}, ${otherSubjectId})`;
+          await expectSqlState(() => resolve(continuation, otherSubjectId), "42501");
+          await expectSqlState(() => materialize(otherSubjectId), "42501");
+          await settle(continuation);
+          await withWorkspaceSubjectSessionActivityRls(
+            client.db,
+            workspaceId,
+            otherSubjectId,
+            (db) =>
+              submitHumanPromptInTransaction(db, {
+                accountId,
+                workspaceId,
+                sessionId,
+                subjectId: otherSubjectId,
+                actor: { type: "human", subjectId: otherSubjectId },
+                operationKey: crypto.randomUUID(),
+                delivery: "send",
+                text: "My own shared-chat work",
+                resources: [],
+                reasoningEffortFallback: "medium",
+                source: "user",
+              }),
+          );
+          await expectSqlState(claim, "42501");
+        } else if (invalidation === "different session") {
+          // A matching causal human alone cannot turn an exact-session grant
+          // into child-session authority. No attachment intent is supplied here.
+          const otherSessionId = crypto.randomUUID();
+          await createSession(client.db, {
+            requestedSessionId: otherSessionId,
+            accountId,
+            workspaceId,
+            subjectId,
+            initialMessage: "Separate session",
+            resources: [],
+            metadata: {},
+            createdBy: { kind: "subject", subjectId },
+            model: "test-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "modal",
+            variableSetIds: [personalSet!.id, finalWorkspaceSet!.id],
+            variableSetId: finalWorkspaceSet!.id,
+            firstPartyMcpTools: [],
+          });
+          await initializeSessionStartAtomically(client.db, {
+            accountId,
+            workspaceId,
+            sessionId: otherSessionId,
+            reasoningEffortFallback: "medium",
+            createdEventPayload: {},
+          });
+          await expectSqlState(() => claim(otherSessionId), "42501");
+        } else if (invalidation !== "legacy selection regression") {
+          if (invalidation === "revocation") {
+            await revokeSelfUserResourceGrant(client.db, {
+              accountId,
+              workspaceId,
+              subjectId,
+              grantId: grant!.id,
+            });
+            await expectSqlState(materialize, "42501");
+          } else if (invalidation === "authority revocation") {
+            await admin`update organization_user_resource_authorities
+            set status = 'revoked', revoked_at = clock_timestamp(), generation = generation + 1
+            where id = ${authority!.id}`;
+          } else if (invalidation === "authority generation") {
+            await admin`update organization_user_resource_authorities
+            set generation = generation + 1 where id = ${authority!.id}`;
+          } else if (invalidation === "grant generation") {
+            await admin`update organization_user_resource_grants
+            set generation = generation + 1 where id = ${grant!.id}`;
+          } else if (invalidation === "grant epoch") {
+            await admin`update organization_user_resource_grants
+            set authority_epoch = authority_epoch + 1 where id = ${grant!.id}`;
+          } else {
+            await admin`update organization_memberships
+            set authorization_revision = authorization_revision + 1 where id = ${membership!.id}`;
+          }
+          await expectSqlState(() => resolve(continuation), "42501");
+          await expectSqlState(() => read(continuation), "42501");
+          if (
+            invalidation === "revocation" ||
+            invalidation === "authority revocation" ||
+            invalidation === "grant epoch"
+          ) {
+            await recover(continuation);
+            await expectSqlState(claim, "42501");
+          }
+        }
+      } finally {
+        await client.close();
+      }
+    },
+    900_000,
+  );
 });
 
 describe("migration 0306 under a NOSUPERUSER NOBYPASSRLS owner", () => {
