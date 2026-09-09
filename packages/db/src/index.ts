@@ -44061,6 +44061,35 @@ function validatedLegacyNativeSnapshotAdoption(
   return { archiveBase64: value.archiveBase64, descriptor };
 }
 
+/** Reuse the session control quiescence receipt instead of treating every
+ * historical closed attempt without a receipt as an active writer. Caller
+ * holds the workspace inference fence, which also serializes new claims. */
+async function hasSandboxGroupAttemptActivityTx(
+  tx: Database,
+  input: { workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+): Promise<boolean> {
+  const sessions = await tx.execute<{ id: string; active: boolean }>(sql`
+    select session.id, exists(select 1 from session_turn_attempts attempt
+      where attempt.workspace_id = session.workspace_id and attempt.session_id = session.id
+        and (attempt.state in ('claimed','running') or
+          coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at) > now() -
+            (${input.idleGraceMs}::bigint * interval '1 millisecond'))) as active
+    from sessions session where session.workspace_id = ${input.workspaceId}
+      and session.sandbox_group_id = ${input.sandboxGroupId}
+  `);
+  for (const session of sessions) {
+    if (
+      session.active ||
+      (await hasPendingSessionAttemptQuiescenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+      }))
+    )
+      return true;
+  }
+  return false;
+}
+
 /** Operator-only authorization for an exact historical checkpoint. Direct
  * database access is the authority boundary; subjectId records attribution.
  * This never resumes a turn or changes the archive/workspace generations. */
@@ -44108,12 +44137,10 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
       recoveryStateFromLeaseRow(row).archive.current?.revision !== input.selectedRevision
     )
       return { authorized: false };
+    if (await hasSandboxGroupAttemptActivityTx(tx, { ...input, idleGraceMs: 0 }))
+      return { authorized: false };
     const blockers = await tx.execute<{ present: boolean }>(sql`select
-      exists(select 1 from session_turn_attempts attempt join sessions session
-        on session.workspace_id = attempt.workspace_id and session.id = attempt.session_id
-        where session.workspace_id = ${input.workspaceId} and session.sandbox_group_id = ${input.sandboxGroupId}
-          and (attempt.state in ('claimed','running') or attempt.quiesced_at is null))
-      or exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+      exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
       or exists(select 1 from sandbox_workspace_mutation_admissions where lease_id = ${row.id} and settled_at is null)
       or exists(select 1 from sandbox_retained_processes where lease_id = ${row.id} and state = 'active') as present`);
     if (blockers[0]?.present) return { authorized: false };
@@ -48274,8 +48301,8 @@ export async function enrollUnobservableCommandIdleDrain(
           and process.provider_backend = 'modal' and process.route_target_id is null
           and process.last_reconcile_outcome in ('process_observation_unavailable',
             'quarantined_process_observation_unavailable')
-          and attempt.state = 'closed' and attempt.quiesced_at is not null
-          and greatest(attempt.quiesced_at, process.started_at) < now() -
+          and attempt.state = 'closed'
+          and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
             (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
       from sandbox_retained_processes process
       left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
@@ -48326,17 +48353,8 @@ export async function enrollUnobservableCommandIdleDrain(
     )
       return null;
     if (!enrolled) {
-      const active = await tx.execute<{ present: boolean }>(sql`
-        select exists(select 1 from session_turn_attempts attempt
-          join sessions session on session.id = attempt.session_id
-            and session.workspace_id = attempt.workspace_id
-          where session.workspace_id = ${input.workspaceId}
-            and session.sandbox_group_id = ${input.sandboxGroupId}
-            and (attempt.state in ('claimed','running') or attempt.quiesced_at is null
-              or attempt.quiesced_at > now() - (${input.idleGraceMs}::bigint * interval '1 millisecond'))
-            ) as present
-      `);
-      if (active[0]?.present || lease.archive_capture_id !== null) return null;
+      if (lease.archive_capture_id !== null || (await hasSandboxGroupAttemptActivityTx(tx, input)))
+        return null;
       await tx.execute(sql`
         update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
           liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
@@ -51847,6 +51865,11 @@ export async function readWorkspaceArchiveCapturePreflight(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -52638,6 +52661,11 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
+              and not exists(select 1 from sandbox_retained_processes process
+                where process.id = any(lease.unobservable_command_drain_ids)
+                  and process.parent_admission_id = admission.id and process.lease_id = lease.id
+                  and process.lease_epoch = lease.lease_epoch
+                  and process.provider_instance_id = lease.instance_id)
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -53977,6 +54005,12 @@ async function foldWorkspaceArchiveOntoLease(
           and admission.provider_instance_id = ${input.expectedInstanceId}
           and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
           and admission.settled_at is null
+          and not exists(select 1 from sandbox_retained_processes process
+            where lease.liveness = 'draining'
+              and process.id = any(lease.unobservable_command_drain_ids)
+              and process.parent_admission_id = admission.id and process.lease_id = lease.id
+              and process.lease_epoch = lease.lease_epoch
+              and process.provider_instance_id = lease.instance_id)
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id

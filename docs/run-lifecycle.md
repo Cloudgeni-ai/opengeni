@@ -1332,6 +1332,9 @@ account/workspace/group IDs. Authorization additionally requires the exact lease
 epoch, workspace and archive generations, selected revision, operation UUID,
 operator subject, reason, and `acceptHistoricalCheckpoint: true`. Authorization
 uses operator-controlled database access; the subject is audit attribution.
+Activity checks reuse session control's pending-quiescence predicate: a historical
+closed attempt without a quiescence timestamp is not itself an active writer.
+Claimed/running attempts and actual pending interruption receipts remain blockers.
 Every attempt in the group must be quiescent and the cold lease must have no holders or
 unsettled mutations. The existing audit store retains that decision and its
 generation gap. Neither generation nor checkpoint artifact provenance is

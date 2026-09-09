@@ -270,6 +270,34 @@ async function freshWarmSnapshotAttempt(ids: {
   };
 }
 
+async function verifyPendingQuiescenceBlocks(
+  ids: { accountId: string; workspaceId: string },
+  attempt: Awaited<ReturnType<typeof freshWarmSnapshotAttempt>>,
+  check: () => Promise<void>,
+): Promise<void> {
+  const [receipt] = await admin`insert into session_command_receipts (
+    account_id,workspace_id,actor_type,actor_subject_id,action,target_session_id,
+    target_turn_id,operation_key,canonical_request_hash) values (
+    ${ids.accountId},${ids.workspaceId},'human','quiescence-fixture','session.queue.steer',
+    ${attempt.sessionId},${attempt.turnId},${crypto.randomUUID()},'quiescence-fixture') returning id`;
+  const [interruption] = await admin`insert into session_attempt_interruptions (
+    account_id,workspace_id,session_id,operation_id,attempt_id,kind,control_revision,state)
+    values (${ids.accountId},${ids.workspaceId},${attempt.sessionId},${receipt!.id},
+      ${attempt.attemptId},'steer',1,'settled') returning id`;
+  await check();
+  await admin`delete from session_attempt_interruptions where id = ${interruption!.id}`;
+  await admin`delete from session_command_receipts where id = ${receipt!.id}`;
+  await admin`update session_turn_attempts set outcome = 'interrupted_recoverable' where id = ${attempt.attemptId}`;
+  const [event] = await admin`insert into session_events (
+    account_id,workspace_id,session_id,turn_id,turn_attempt_id,sequence,type)
+    select ${ids.accountId},${ids.workspaceId},${attempt.sessionId},${attempt.turnId},
+      ${attempt.attemptId},coalesce(max(sequence),0)+1,'turn.recovery.requested'
+    from session_events where session_id = ${attempt.sessionId} returning id`;
+  await check();
+  await admin`delete from session_events where id = ${event!.id}`;
+  await admin`update session_turn_attempts set outcome = 'completed' where id = ${attempt.attemptId}`;
+}
+
 type LeaseFixture = {
   liveness: "cold" | "warming" | "warm" | "draining";
   refcount?: number;
@@ -3231,12 +3259,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       const sibling = await freshWarmSnapshotAttempt({ ...ids, sandboxGroupId: ids.groupId });
       expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
       await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-      closed_at = now(), quiesced_at = now() where id = ${sibling.attemptId}`;
+      closed_at = now(), quiesced_at = null where id = ${sibling.attemptId}`;
       expect(
         await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
       ).toBeNull();
-      await admin`update session_turn_attempts set quiesced_at = now() - interval '2 minutes'
+      await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
+      await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      });
       const child = await advanceWorkspaceGenerationForRetainedProcess(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -6139,7 +6170,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         authorized: false,
       });
       await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-      closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
+      closed_at = now() - interval '2 minutes', quiesced_at = null where id = ${attempt.attemptId}`;
+      await verifyPendingQuiescenceBlocks(ids, attempt, async () => {
+        expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+          authorized: false,
+        });
+      });
       expect(
         await authorizeHistoricalSandboxCheckpointRecovery(db, {
           ...authorization,
