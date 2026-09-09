@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Manifest } from "@openai/agents/sandbox";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
-import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
+import {
+  installOpenGeniModalSnapshotPolicy,
+  ModalProcessObservationUnavailableError,
+} from "../src/sandbox/providers/modal";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
-import { SandboxChannelAService } from "../src/sandbox/channel-a";
+import { ChannelAConflictError, SandboxChannelAService } from "../src/sandbox/channel-a";
 
 // Exercise the pinned SDK process map, exec yielding, and terminal output. Only
 // the remote transport is replaced; two adapters share one physical command.
@@ -28,6 +31,13 @@ describe("Modal retained-command observation", () => {
       await expect(
         owner.writeStdin({ sessionId: 1, chars: "input", yieldTimeMs: 1 }),
       ).rejects.toThrow("observation unavailable");
+      await expect(
+        new SandboxChannelAService({ session: owner }).ptyWrite(
+          { ptyId: "unsupported-pty", data: "input" },
+          1,
+          "input",
+        ),
+      ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
     },
   );
 
@@ -167,6 +177,13 @@ describe("Modal retained-command observation", () => {
       await expect(
         observer.writeStdin({ sessionId: 1, chars: "", yieldTimeMs: 1 }),
       ).rejects.toThrow("observation unavailable");
+      await expect(
+        new SandboxChannelAService({ session: observer }).ptyWrite(
+          { ptyId: "resumed-pty", data: "do-not-replay" },
+          1,
+          "do-not-replay",
+        ),
+      ).rejects.toBeInstanceOf(ChannelAConflictError);
       expect(starts).toBe(1);
       expect(stdinWrites).toBe(0);
     } finally {

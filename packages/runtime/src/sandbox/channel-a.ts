@@ -68,6 +68,7 @@ import {
   relativeConnectedMachinePath,
   resolveConnectedMachinePath,
 } from "./selfhosted/workspace-path";
+import { ModalProcessObservationUnavailableError } from "./errors";
 import {
   hasTypedExecHandleLoss,
   isExecSessionLostBanner,
@@ -2390,11 +2391,22 @@ export class SandboxChannelAService {
     const typedHandleLoss =
       hasTypedExecHandleLoss(this.session) ||
       this.session.retainedProcessHasTypedHandleLoss?.(execSessionId) === true;
-    const out = await write({
-      sessionId: execSessionId,
-      chars: data,
-      yieldTimeMs: 250,
-    });
+    let out: string;
+    try {
+      out = await write({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 });
+    } catch (error) {
+      // Only the interactive terminal may reopen its missing handle. This does
+      // not settle a retained command as lost or authorize replay of its input.
+      if (
+        error instanceof ModalProcessObservationUnavailableError &&
+        error.reason === "missing_handle"
+      ) {
+        throw new ChannelAConflictError(
+          "pty handle unavailable; reopen the terminal without replaying input",
+        );
+      }
+      throw error;
+    }
     // The Modal exec surface reports a vanished exec-session as a NON-throwing
     // string ("write_stdin failed: session not found: N") that we used to stream
     // verbatim into the terminal. That happens when the persisted exec-session no

@@ -13,7 +13,8 @@ import {
 } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
-import { SandboxConfigError } from "../errors";
+import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
+export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
@@ -399,18 +400,6 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
   modalDirectoryRetentionWrappedSandboxes.add(sandbox);
 }
 
-/** A numeric SDK session id names an adapter-local map entry, not a durable
- * Modal process. Its absence proves neither process exit nor provider loss. */
-export class ModalProcessObservationUnavailableError extends Error {
-  readonly name = "ModalProcessObservationUnavailableError";
-  constructor(providerSessionId: number, options?: ErrorOptions) {
-    super(
-      `Modal command ${providerSessionId} observation unavailable; its SDK handle is missing or terminal output could not be recovered. Do not replay the command or treat it as exited.`,
-      options,
-    );
-  }
-}
-
 function installModalExecCompletionRecovery(session: MutableModalSandboxSession): void {
   const writeStdin = session.writeStdin;
   if (typeof writeStdin !== "function") return;
@@ -420,8 +409,15 @@ function installModalExecCompletionRecovery(session: MutableModalSandboxSession)
     // is observer-state loss, while a real command may print the exact missing
     // handle banner at ANY exit code. Never classify its output as authority.
     // An SDK shape change must fail closed rather than reintroduce that guess.
-    if (!(session.activeProcesses instanceof Map) || !session.activeProcesses.has(args.sessionId)) {
-      throw new ModalProcessObservationUnavailableError(args.sessionId);
+    if (!(session.activeProcesses instanceof Map)) {
+      throw new ModalProcessObservationUnavailableError(args.sessionId, {
+        reason: "unsupported_handle_map",
+      });
+    }
+    if (!session.activeProcesses.has(args.sessionId)) {
+      throw new ModalProcessObservationUnavailableError(args.sessionId, {
+        reason: "missing_handle",
+      });
     }
     return await writeStdin.call(session, args);
   };

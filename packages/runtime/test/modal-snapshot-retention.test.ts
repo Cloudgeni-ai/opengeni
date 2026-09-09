@@ -16,6 +16,8 @@ import {
   modalProvider,
 } from "../src/sandbox/providers/modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
+import { SandboxChannelAService } from "../src/sandbox/channel-a";
+import { ModalProcessObservationUnavailableError } from "../src/sandbox/errors";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
@@ -541,6 +543,14 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     await expect(session.writeStdin({ sessionId: 11, chars: "input" })).rejects.toThrow(
       "observation unavailable",
     );
+    call = 0;
+    await expect(
+      new SandboxChannelAService({ session }).ptyWrite(
+        { ptyId: "uncertain-pty", data: "input" },
+        11,
+        "input",
+      ),
+    ).rejects.toBeInstanceOf(ModalProcessObservationUnavailableError);
   });
 
   test("does not reinterpret other Modal or untyped stdin failures as terminal proof", async () => {
