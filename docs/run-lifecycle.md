@@ -631,8 +631,12 @@ five-hour reset semantics, and rollout fence are canonical in
 The first successful lease also stores a bounded accepted Codex allocator-policy
 snapshot in turn metadata. Re-acquisition and definitive-failure settlement use
 that snapshot for active-pointer, rotation, strategy, and pin constraints while
-using current account health/cooldowns; mutable policy changes affect later
-logical turns. Immediately before provider dispatch, a missing or expired
+using current account health/cooldowns; background policy changes affect later
+logical turns. An explicit session account switch may revise selection for a
+capacity-blocked turn under the allocator/session/turn/waiter locks, with a
+closed attempt and matching wait generation. It preserves the accepted
+credential source, authority, conversation history, and logical turn identity.
+Immediately before provider dispatch, a missing or expired
 last-confirmed lease deadline is treated as lease loss and follows lease-loss
 settlement instead of reaching the provider.
 
@@ -677,10 +681,12 @@ Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
 optional goal, downstream accepted credential-policy hash, or blocked-turn
-generation supersede the waiter/turn under their durable fences. Mutable Codex
-rotation or pin settings do not replace the accepted snapshot for this turn, so
-no stale timer or signal can produce double inference or silently change its
-policy.
+generation supersede the waiter/turn under their durable fences. Background
+Codex rotation or pin settings do not replace the accepted snapshot. An explicit
+account switch uses `switchSessionCodexAccount` to update a blocked selection,
+record its control receipt, and request a capacity recheck atomically. Ordinary
+lease claim reads that same revised selection; no new turn or automatic model
+retry is created by the switch itself.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
@@ -1489,6 +1495,39 @@ Waits also recheck durable state once a second if a hint is missed. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
+
+### Modal retained-command observation
+
+A resumed Modal SDK session restores the sandbox but not adapter-local numeric
+process handles. New commands use `modal-command-control.ts` and the verified
+Modal 0.9.0 control-plane RPC contract: the admitted workspace generation is
+their route-scoped numeric alias, while opaque provider execution identity and
+per-stream output cursors live in `sandbox_retained_processes.provider_command`.
+Promotion commits the locator with process retention. API, worker, and reaper
+readers adopt only the original sandbox identity, capture stable stream pages,
+then acknowledge cursors. Both streams must drain through provider terminal
+status before settlement. Sandbox files and printed status text are never
+execution authority. Failed initial observation still retains a successful
+start's locator; an ambiguous start is never automatically replayed.
+The dedicated command client preserves abort signals through a version-guarded
+non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
+and retry-disabled calls. Cancelling observation is not process-exit proof;
+the existing token/PGID cleanup fence still owns physical cancellation.
+
+For historical commands without that locator, the reaper reports
+`process_observation_unavailable`, retaining the exact process/admission/holder.
+After five probes it records `quarantined_process_observation_unavailable` and
+rechecks after 24 hours through the existing reconciliation diagnostics/metrics.
+A current owner's exact exit proof still settles immediately; independently
+verified loss of the bound provider instance remains authoritative. Neither a
+missing SDK map entry nor failure to recover terminal output proves command loss,
+including when a completed entry aged out in its original adapter.
+
+Historical containment cannot reconstruct an execution ID the old adapter never
+retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
+operators must reconcile the exact command/provider identity rather than replay
+unknown side effects or clear holders by age. No new process is launched by probing.
+
 
 Migration 0419 records the exact launch turn, attempt, and execution generation
 when either provider adopts a background command under the existing attempt

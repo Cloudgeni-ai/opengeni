@@ -1,4 +1,3 @@
-import { usePersonalResourceScopeChoice } from "../src/lib/use-personal-resource-scope-choice";
 import {
   newSessionPersonalResourceAttachment,
   buildPersonalResourceAttachmentIntent,
@@ -38,20 +37,12 @@ function Fixture() {
   const [createReceipt, setCreateReceipt] = useState("");
   const [sendReceipt, setSendReceipt] = useState("");
 
-  const createChoice = usePersonalResourceScopeChoice(
-    principal + ":new:" + sourceLost,
-    "workspace",
-  );
-  const sendChoice = usePersonalResourceScopeChoice(
-    principal + ":existing:" + sourceLost,
-    "workspace",
-  );
   const controller = useMemo<PersonalResourceAttachmentController>(() => {
     const resourceCount = principal === "owner" && !sourceLost && !authorityUnavailable ? 1 : 0;
     const intent =
       resourceCount > 0
         ? {
-            mode: sendChoice.mode,
+            mode: "session" as const,
             expectedAuthorityEpoch: epoch,
             workspaceSharedAcknowledged: true,
             sharedOutputWarningVersion: 1 as const,
@@ -74,9 +65,7 @@ function Fixture() {
         personalResourceCount: resourceCount,
         closureUnverified: false,
       },
-      mode: resourceCount > 0 ? sendChoice.mode : null,
-      setMode: sendChoice.setMode,
-      ongoingScope: null,
+      mode: resourceCount > 0 ? "session" : null,
       visibility: "workspace",
       requiresDecision: sourceLost || authorityUnavailable,
       intent,
@@ -84,15 +73,7 @@ function Fixture() {
       onAccepted: () => undefined,
       onDeliveryError: () => undefined,
     };
-  }, [
-    authorityUnavailable,
-    epoch,
-    notice,
-    principal,
-    sourceLost,
-    sendChoice.mode,
-    sendChoice.setMode,
-  ]);
+  }, [authorityUnavailable, epoch, notice, principal, sourceLost]);
 
   const resetDecision = (message: PersonalResourceNotice | null) => {
     setNotice(message);
@@ -106,9 +87,7 @@ function Fixture() {
         <h2 id="create-heading" className="font-medium">
           New session create
         </h2>
-        <PersonalResourceAttachmentControl
-          controller={{ ...controller, mode: createChoice.mode, setMode: createChoice.setMode }}
-        />
+        <PersonalResourceAttachmentControl controller={controller} />
         <button
           type="button"
           className="mt-3 rounded-md border p-2"
@@ -119,11 +98,9 @@ function Fixture() {
                 newSessionPersonalResourceAttachment({
                   personalResourceCount: controller.selected.resourceCount,
                   visibility: "workspace",
-                  mode: createChoice.mode,
                 }).intent,
               ),
             );
-            createChoice.consume(createChoice.mode);
           }}
         >
           Create session
@@ -142,7 +119,6 @@ function Fixture() {
           className="mr-2 rounded-md border p-2"
           onClick={() => {
             setSendReceipt(JSON.stringify(controller.intent));
-            sendChoice.consume(sendChoice.mode);
           }}
           disabled={!controller.intent}
         >
@@ -153,7 +129,6 @@ function Fixture() {
           className="rounded-md border p-2"
           onClick={() => {
             setSendReceipt(JSON.stringify({ delivery: "steer", ...controller.intent }));
-            sendChoice.consume(sendChoice.mode);
           }}
           disabled={!controller.intent}
         >
@@ -176,7 +151,7 @@ function Fixture() {
                 JSON.stringify({
                   delivery: "continue",
                   ...buildPersonalResourceAttachmentIntent({
-                    mode: sendChoice.mode,
+                    mode: "session",
                     visibility: "workspace",
                     acknowledged: true,
                     expectedAuthorityEpoch: epoch,
@@ -184,7 +159,6 @@ function Fixture() {
                   }),
                 }),
               );
-              sendChoice.consume(sendChoice.mode);
               return true;
             },
             onChooseModel: () => {},

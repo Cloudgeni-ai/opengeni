@@ -87,12 +87,11 @@ shares the customer's documents, instructions, and integrations:
 | Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
 | Shared agent access, no memory                    | any           | `false`       |
 
-`<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
-`@opengeni/react/chat` is the browser component to swap in for your chat box:
-it talks only to your handler, sends the conversation id as the
-`x-opengeni-conversation` header, and restores the history on reload. Graduate
-to `OpenGeniClient` below when you need the full session surface: files, tools,
-approvals with policies, forks, realtime voice.
+The chat handler is backend-only: connect a custom or compatible frontend to
+its protocol. For the full React agent experience, use `SessionConversation`
+with `OpenGeniClient` and authenticated session routes, not this simplified
+chat protocol. The normal SDK preserves files, tools, approvals with policies,
+forks, and realtime voice.
 
 ## Quick start
 

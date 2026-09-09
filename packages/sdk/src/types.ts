@@ -1405,6 +1405,8 @@ export type Session = {
   codexPinnedCredentialId?: string | null;
   /** Multi-account Codex (P1): the account the most recent turn ran on (the "Running on:" indicator). */
   codexLastCredentialId?: string | null;
+  /** Accepted current-turn account, separate from future session preferences. */
+  codexCurrentSelection?: { credentialId: string | null; waiting: boolean } | null | undefined;
   /**
    * Frozen at create. `remote_v2` ⇒ Codex remote compaction + Codex-only model
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
@@ -1897,6 +1899,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "codex.account.selection.changed",
   // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
   // Bounded, identity-free deterministic shadow/replay decision.
@@ -3794,6 +3797,7 @@ export type ClientConfig = {
 /** Client-safe voice-input capability projection. */
 export type ClientVoiceInputConfig = {
   available: boolean;
+  providers?: VoiceInputProviderId[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
@@ -4463,8 +4467,16 @@ export type UpdateSlackChannelRoutesRequest = {
   routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
 };
 
+export type VoiceInputProviderId =
+  | "supergrok-subscription"
+  | "codex-subscription"
+  | "openai"
+  | "azure-openai";
+
 export type WorkspaceVoiceInputSettings = {
   enabled: boolean;
+  preferredProvider?: VoiceInputProviderId | null | undefined;
+  fallbackEnabled?: boolean | undefined;
 };
 
 export type UpdateWorkspaceSettingsRequest = {

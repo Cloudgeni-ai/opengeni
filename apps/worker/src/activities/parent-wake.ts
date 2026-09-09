@@ -331,17 +331,50 @@ export async function reconcileAutomaticSessionTitleFanout(
   return { claimed: rows.length, delivered, failed };
 }
 
+export type WorkflowWakeReconciliationResult = {
+  claimed: number;
+  /** Transport acceptance is not durable admission. */
+  signaled: number;
+  /** Revisions acknowledged by the durable admission guard. */
+  delivered: number;
+  pendingAdmission: number;
+  /** Legacy/embedding signalers may not return an acknowledgment receipt. */
+  unconfirmed: number;
+  failed: number;
+  pendingAdmissionBlockers: Partial<
+    Record<
+      Extract<
+        import("@opengeni/db").SessionWorkflowWakeDeliveryResult,
+        { action: "pending_admission" }
+      >["blocker"],
+      number
+    >
+  >;
+};
+
 export async function reconcilePendingSessionWorkflowWakes(
   svc: NotifyServices,
   limit = 1_000,
   overrides: ReconcileSessionWorkflowWakeOverrides = {},
-): Promise<{ claimed: number; delivered: number; failed: number }> {
+): Promise<WorkflowWakeReconciliationResult> {
   const claimPendingSessionWorkflowWakesFn =
     overrides.claimPendingSessionWorkflowWakes ?? claimPendingSessionWorkflowWakes;
   if (!svc.wakeSessionWorkflow) {
-    return { claimed: 0, delivered: 0, failed: 0 };
+    return {
+      claimed: 0,
+      signaled: 0,
+      delivered: 0,
+      pendingAdmission: 0,
+      unconfirmed: 0,
+      failed: 0,
+      pendingAdmissionBlockers: {},
+    };
   }
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);
+  let signaled = 0;
+  let pendingAdmission = 0;
+  let unconfirmed = 0;
+  const pendingAdmissionBlockers: WorkflowWakeReconciliationResult["pendingAdmissionBlockers"] = {};
   let delivered = 0;
   let failed = 0;
   const queue = [...repairs];
@@ -349,16 +382,36 @@ export async function reconcilePendingSessionWorkflowWakes(
     for (;;) {
       const repair = queue.shift();
       if (!repair) return;
+      let signalAccepted = false;
+      const onSignalAccepted = () => {
+        if (signalAccepted) return;
+        signalAccepted = true;
+        signaled += 1;
+      };
       try {
-        await svc.wakeSessionWorkflow!({
+        const receipt = await svc.wakeSessionWorkflow!({
           accountId: repair.accountId,
           workspaceId: repair.workspaceId,
           sessionId: repair.sessionId,
           workflowId: repair.temporalWorkflowId,
           wakeRevision: repair.wakeRevision,
           ...(repair.interruptionRequested ? { interruptionRequested: true } : {}),
+          onSignalAccepted,
         });
-        delivered += 1;
+        // Older embeddings do not invoke the optional transport observer.
+        // Their successful return still proves a signal call, never an ACK.
+        onSignalAccepted();
+        if (receipt?.action === "acknowledged") {
+          delivered += 1;
+        } else if (receipt?.action === "pending_admission") {
+          pendingAdmission += 1;
+          pendingAdmissionBlockers[receipt.blocker] =
+            (pendingAdmissionBlockers[receipt.blocker] ?? 0) + 1;
+        } else {
+          // A successful legacy signal is not proof of acknowledgment. The
+          // committed outbox obligation remains owned by the existing guard.
+          unconfirmed += 1;
+        }
       } catch (error) {
         failed += 1;
         await markSessionWorkflowWakeFailed(
@@ -370,7 +423,15 @@ export async function reconcilePendingSessionWorkflowWakes(
     }
   });
   await Promise.all(workers);
-  return { claimed: repairs.length, delivered, failed };
+  return {
+    claimed: repairs.length,
+    signaled,
+    delivered,
+    pendingAdmission,
+    unconfirmed,
+    failed,
+    pendingAdmissionBlockers,
+  };
 }
 
 function childCompletionPayload(

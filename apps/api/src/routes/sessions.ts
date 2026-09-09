@@ -1,3 +1,4 @@
+import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "../site-session-origin";
@@ -141,8 +142,7 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  setSessionCodexPinInTransaction,
-  withSessionCodexCapacityMutation,
+  switchSessionCodexAccount,
   setSessionChannel,
   updateSessionVariableSets,
   ChannelNotFoundError,
@@ -401,8 +401,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "pty retained-process identity is stale; reopen the terminal",
       });
     }
+    const providerCommand = await getRetainedProviderCommand(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      processId: process.id,
+    });
     handle.routingSession.adoptRetainedProcess({
-      process: { id: process.id, providerSessionId: process.providerSessionId },
+      process: {
+        id: process.id,
+        providerSessionId: process.providerSessionId,
+        ...(providerCommand ? { providerCommand } : {}),
+      },
       backend: {
         sandboxId: null,
         leaseEpoch: process.leaseEpoch,
@@ -1898,8 +1908,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
   // "auto" clears the pin (the session follows the workspace active pointer); a
-  // uuid pins the session to that specific account. The pin applies to the NEXT
-  // turn (the worker reads it at turn start). 404 when the session or the target
+  // uuid pins the session to that specific account. Overrides a capacity-blocked
+  // turn; a running attempt keeps its account. 404 when the session or the target
   // account id isn't in the workspace.
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1924,15 +1934,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    const mutation = await withSessionCodexCapacityMutation(
-      db,
-      { workspaceId, reason: "codex_manual_session_pin_changed" },
-      async (tx) => {
-        const changed = await setSessionCodexPinInTransaction(tx, workspaceId, sessionId, pinned);
-        return { result: changed, changed };
-      },
-    );
-    const ok = mutation.result;
+    const mutation = await switchSessionCodexAccount(db, {
+      workspaceId,
+      sessionId,
+      credentialId: pinned,
+      subjectId: grant.subjectId,
+    });
+    const ok = mutation.result.changed;
     if (!ok) {
       throw new HTTPException(404, {
         message: "session or codex account not found",
@@ -1958,7 +1966,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             }),
       ),
     );
-    return c.json({ pinned: target === "auto" ? "auto" : target });
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, mutation.result.events);
+    return c.json({
+      pinned: target === "auto" ? "auto" : target,
+      appliedTo: mutation.result.appliedTo,
+    });
   });
 
   // Re-file the session into a workspace channel (rail organization only;

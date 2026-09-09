@@ -3,7 +3,7 @@
 > Whole-system orientation; code and focused docs own exact behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
-## How to use this document
+## Navigation
 
 1. **New here?** Read §2–4; skim §6.
 2. **Changing a subsystem?** Start with §13 and its canonical sources.
@@ -14,7 +14,7 @@
 
 ## 1. Scope
 
-Product shape, invariants, execution paths, and ownership; inventories live in code.
+Product shape, invariants, execution, and ownership.
 
 ---
 
@@ -35,9 +35,10 @@ Separate surfaces:
 - **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
   goals, approvals, structured human input, durable semantic titles, and
   durable history.
-- **Browser voice** has two separate boundaries: realtime conversation is a
-  coexisting transport for an ordinary session, while composer transcription
-  produces an editable draft that reaches session truth only through Send.
+- **Browser voice** supports realtime sessions and editable transcription drafts.
+  Drafts enter session history through Send. Workspace settings select billing
+  provider and fallback; successful or uncertain attempts pin the provider.
+  See [transcription](transcription.md) for recovery rules.
 - **Compute** supports provisioned sandbox providers and user-owned Connected
   Machines without changing the session model.
 - **Tools and integrations** combine first-party MCP, per-session MCP servers,
@@ -667,6 +668,9 @@ path.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
+Message-point forks preserve canonical history through an uncompacted protocol
+boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
@@ -912,6 +916,8 @@ Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 
 ### 5.7 Usage, limits, and billing
 
+Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
+
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
 telemetry, comparison pricing, and dashboards do not independently debit or
@@ -1033,7 +1039,7 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Smallest integration example |
+| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
@@ -1177,10 +1183,10 @@ injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
 Multiple SDK clients in the same document retain independent ports; connecting
-one must not cancel another. The same Site client exposes the ordinary session
-SDK for React providers, timelines, and composers. Published requests use the
-viewer-authenticated parent; sandbox previews use the existing attempt-bound
-Codemode HTTP handler, including incremental, cancellable event streams.
+one must not cancel another. Workspace SDK requests have no endpoint allowlist:
+the host binds routing; API handlers authorize. Published calls use viewer auth;
+previews retain the Codemode permission ceiling and cancellable streaming.
+Build/edit shortcuts send ordinary user prompts without authority overrides.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
@@ -1412,11 +1418,11 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Repeated retained-process Modal binding-missing or binding-mismatch observations
-may be quarantined for a 24-hour recheck after five claimed probes, but the
-process, admission, PTY, and holder remain capture blockers. Quarantine never
-becomes exit/loss proof and never authorizes capture, rotation, provider
-termination, or replay.
+After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
+recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
+never authorizes exit/loss, capture, rotation, termination, or replay.
+
+Modal command retention: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and

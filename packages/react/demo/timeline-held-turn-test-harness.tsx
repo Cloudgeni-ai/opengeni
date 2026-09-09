@@ -22,9 +22,12 @@ function event(type: string, payload: unknown): SessionEvent {
 }
 
 const fallback = "The child is still running; I will resume when it finishes.";
+const streamed = new URLSearchParams(location.search).get("streamed") === "1";
 const events = [
   event("user.message", { text: "Wait for the child and keep me posted." }),
-  event("agent.message.completed", { text: fallback, phase: "commentary" }),
+  streamed
+    ? event("agent.message.delta", { text: fallback })
+    : event("agent.message.completed", { text: fallback, phase: "commentary" }),
   event("agent.toolCall.created", {
     id: "input-wait-call",
     name: "wait_for_input",
@@ -35,7 +38,7 @@ const events = [
     id: "input-wait-call",
     output: { status: "waiting_for_input" },
   }),
-  event("turn.completed", {}),
+  event("turn.completed", { output: "" }),
 ];
 
 createRoot(document.getElementById("root")!).render(

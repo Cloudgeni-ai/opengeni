@@ -8,7 +8,7 @@ message by itself.
 
 - The ordinary composer presents **one microphone control** and **one editable
   draft**. Recording chrome exposes separate **Cancel** and **Stop** actions;
-  provider, model, credential, and region choices remain server-private.
+  provider preference is chosen in workspace settings; model, credentials, and region remain server-private.
 - The browser writes five-second `MediaRecorder` chunks and SHA-256 integrity
   metadata to IndexedDB before reporting the audio locally saved. Stop waits for
   pending writes, finalizes automatically, and appends the resulting text to the
@@ -25,10 +25,16 @@ message by itself.
   timing metadata match exactly; conflicting retries fail closed. Retryable API,
   database, storage, and provider failures stay in a bounded automatic recovery
   loop, including after reload, until the user explicitly pauses or discards.
-- Provider selection occurs once for the whole server recording before its first
-  segment is sent. The private provider id is persisted and every later segment
-  or retry remains pinned to it; a possibly-started recording never falls through
-  to another vendor.
+- Workspace voice settings choose a preferred provider and whether automatic
+  fallback is enabled (default true). Selection prefers that configured provider,
+  then the deployment order. Provider ids and billing labels are public; secrets
+  remain server-private.
+- A recording pins its provider before sending a segment. An explicit rejection
+  may advance an untouched recording to the next configured provider. The failure
+  and new pin settle atomically under the attempt fence. A null pre-claim segment
+  pin establishes eligibility; unknown failures keep the pin, so a later auth
+  rejection cannot move a previously uncertain request to another vendor. Legacy
+  pins fail closed. Successful segments also prevent vendor changes.
 - Provider results are persisted server-side so another browser carrying the same
   exact authenticated subject can list and resume an unexpired recording. The
   local browser still persists the final transcript before mutating the draft.
@@ -95,8 +101,8 @@ voiceInput: {
 ```
 
 The optional `resumable` member appears only when object storage, ffmpeg, and at
-least one transcription provider are ready. Workspace settings store only
-`{ voiceInput: { enabled: boolean } }`. Legacy
+least one transcription provider are ready. Workspace settings store
+`{ voiceInput: { enabled: boolean, preferredProvider?: string | null, fallbackEnabled?: boolean } }`. Legacy
 `settings.transcription.enabled` maps forward for one compatibility release;
 new writes use `voiceInput`.
 
@@ -165,15 +171,19 @@ the first occurrence of each nonempty language.
 
 | Provider | When selected | Notes |
 | --- | --- | --- |
+| `supergrok-subscription` | Enabled and an eligible SuperGrok account is connected. | xAI speech-to-text; subscription funding. |
 | `codex-subscription` | Subscription routing is enabled and the workspace has an active attached Codex credential. | Undocumented ChatGPT `/backend-api/transcribe`; preferred by default when attached. |
 | `openai` | A usable ordinary or voice-specific OpenAI key is configured. | `POST /v1/audio/transcriptions`, default model `gpt-transcribe`. |
 | `azure-openai` | Azure endpoint, deployment, and key or AD token are configured. | Deployment-scoped `/openai/deployments/{deployment}/audio/transcriptions`. |
 
 Selection uses `OPENGENI_VOICE_INPUT_PROVIDER_ORDER` (default
-`codex-subscription,openai,azure-openai`). Template placeholder values are
-ignored. The first ready provider wins before any segment is sent, is persisted
-on the recording, and remains authoritative until that recording is complete or
-discarded.
+`supergrok-subscription,codex-subscription,openai,azure-openai`). Template placeholder values are
+ignored. The workspace preference is tried first; automatic selection follows deployment
+order. With fallback disabled, only the preferred (or first configured) provider
+is eligible. Explicit pre-result rejection may advance the recording as described
+above; network failures and timeouts never switch vendors. SuperGrok tokens are
+refreshed before expiry, and the known 403 invalid-credential response triggers
+one refresh/retry.
 
 ## Operator configuration
 

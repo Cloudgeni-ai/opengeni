@@ -8,7 +8,6 @@ import {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { usePersonalResourceScopeChoice } from "./use-personal-resource-scope-choice";
 import type { AuthSession } from "@/types";
 import type { ManagedSelfContext } from "./managed-self-context";
 import {
@@ -34,12 +33,7 @@ type SessionAuthorityRecovery = Readonly<{
   error: Error | null;
 }>;
 
-export type PersonalResourceNotice =
-  | "source_changed"
-  | "reloading"
-  | "reload_failed"
-  | "reloaded"
-  | "accepted";
+export type PersonalResourceNotice = "source_changed" | "reloading" | "reload_failed" | "reloaded";
 
 export type PersonalResourceAttachmentController = Readonly<{
   eligible: boolean;
@@ -52,13 +46,6 @@ export type PersonalResourceAttachmentController = Readonly<{
   catalog: PersonalResourceCatalog | null;
   selected: ReturnType<typeof personalSelection>;
   mode: PersonalAttachmentMode | null;
-  ongoingScope: {
-    organizationId: string;
-    workspaceId: string;
-    sessionId: string;
-    authorityEpoch: number;
-  } | null;
-  setMode: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
   requiresDecision: boolean;
   intent: PersonalResourceAttachmentIntent | undefined;
@@ -308,27 +295,9 @@ export function usePersonalResourceAttachment(input: {
       ? "private"
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
-  const scopeChoice = usePersonalResourceScopeChoice(
-    [scopeKey, input.session?.id ?? "new", selectedIdentity].join(":"),
-    visibility,
-  );
-  const mode: PersonalAttachmentMode | null = selected.resourceCount > 0 ? scopeChoice.mode : null;
-  const ongoingScope =
-    scope &&
-    input.session?.tenancy &&
-    visibility === "workspace" &&
-    settledCatalogScopeKey === scopeKey &&
-    !loading &&
-    !refreshing &&
-    !error &&
-    !selected.closureUnverified
-      ? {
-          organizationId: scope.organizationId,
-          workspaceId: scope.targetWorkspaceId,
-          sessionId: input.session.id,
-          authorityEpoch: input.session.tenancy.authorityEpoch,
-        }
-      : null;
+  // Explicit attachment is consent for the owner's work and its continuations.
+  // Admission still verifies the selected closure, owner, and session epoch.
+  const mode: PersonalAttachmentMode | null = selected.resourceCount > 0 ? "session" : null;
   const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
     (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
@@ -483,22 +452,11 @@ export function usePersonalResourceAttachment(input: {
         : await load(true),
     [activeSessionAuthorityRecovery, load, recoverSessionAuthority],
   );
-  // Event reconciliation may invoke the latest callback for an older send.
-  // Nested intent identity survives live wire construction; unknown restored
-  // receipts must never consume a newer local choice.
-  const intentConsumers = useRef(new WeakMap<PersonalResourceAttachmentIntent, () => void>());
-  if (intent) {
-    intentConsumers.current.set(intent, () => scopeChoice.consume(intent.mode));
-  }
   const onAccepted = useCallback(
     (acceptedInput: {
       personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
     }) => {
       if (!acceptedInput.personalResourceAttachment) return;
-      const acceptedIntent = acceptedInput.personalResourceAttachment;
-      intentConsumers.current.get(acceptedIntent)?.();
-      intentConsumers.current.delete(acceptedIntent);
-      setNotice("accepted");
       void load(true);
     },
     [load],
@@ -534,8 +492,6 @@ export function usePersonalResourceAttachment(input: {
     catalog,
     selected,
     mode,
-    setMode: scopeChoice.setMode,
-    ongoingScope,
     visibility,
     requiresDecision,
     intent,
