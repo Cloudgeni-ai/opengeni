@@ -135,6 +135,20 @@ async function measureHistoryPreparationPhase<T>(
 }
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// Raw-byte allowance; base64 and request serialization add memory overhead.
+// This is transport admission, never an instruction to rewrite old messages.
+export const MAX_RETAINED_MODEL_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+
+export class RetainedAttachmentTransportLimitError extends Error {
+  constructor() {
+    super(
+      "Active uploaded images exceed the 64 MiB inline transport limit. " +
+        "History was preserved and no new image bytes were downloaded. " +
+        "Start a smaller conversation or fork before the image-heavy messages.",
+    );
+    this.name = "RetainedAttachmentTransportLimitError";
+  }
+}
 
 export type ModelAttachmentContent = {
   kind: "image" | "file";
@@ -319,6 +333,7 @@ export function createModelHistoryAttachmentProjector(
   const attemptedContentIds = new Set<string>();
   const fileById = new Map<string, FileAsset>();
   const resolvedFileIds = new Set<string>();
+  const retainedByteSizes = new Map<string, number>();
 
   return async (items, options = {}) => {
     for (const file of options.inlineFiles ?? []) {
@@ -348,6 +363,34 @@ export function createModelHistoryAttachmentProjector(
     }
 
     if (readFileBytes) {
+      const admitted = new Map(retainedByteSizes);
+      let requestImageBytes = 0;
+      for (const [index, refs] of refsByIndex) {
+        if (items[index]![MODEL_ATTACHMENT_CATALOG_MARKER] === true) continue;
+        for (const ref of refs) {
+          const file = fileById.get(ref.fileId);
+          if (
+            !file ||
+            !policy.supportsImageInput ||
+            file.status !== "ready" ||
+            file.sizeBytes > MAX_INLINE_MODEL_ATTACHMENT_BYTES ||
+            modelAttachmentDescriptor(file.contentType)?.kind !== "image" ||
+            !/^[a-f0-9]{64}$/i.test(file.sha256?.trim() ?? "")
+          )
+            continue;
+          // Repeated references share cached bytes but repeat in the wire body.
+          requestImageBytes += file.sizeBytes;
+          admitted.set(file.id, file.sizeBytes);
+        }
+      }
+      const turnImageBytes = [...admitted.values()].reduce((sum, bytes) => sum + bytes, 0);
+      if (
+        requestImageBytes > MAX_RETAINED_MODEL_ATTACHMENT_BYTES ||
+        turnImageBytes > MAX_RETAINED_MODEL_ATTACHMENT_BYTES
+      ) {
+        throw new RetainedAttachmentTransportLimitError();
+      }
+      for (const [id, bytes] of admitted) retainedByteSizes.set(id, bytes);
       // Every active attachment uses the same authorized projection. Metadata
       // and bytes are resolved once per turn, including compaction and retries.
       const readable = [...orderedFileIds]

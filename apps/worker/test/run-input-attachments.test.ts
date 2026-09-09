@@ -4,8 +4,10 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
+import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import {
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+  RetainedAttachmentTransportLimitError,
   createModelHistoryAttachmentProjector,
   modelAttachmentContentForFiles,
   turnInput,
@@ -830,5 +832,43 @@ test("a new turn cannot reuse image bytes when its file authority no longer gran
     async () => [],
   );
   expect(JSON.stringify(await revoked(history))).not.toContain("data:image");
+  expect(reads).toBe(0);
+});
+
+test("retained image transport admission failures do not retry the same oversized context", () => {
+  expect(agentRunFailurePayload(new RetainedAttachmentTransportLimitError())).toMatchObject({
+    code: "retained_attachment_transport_limit",
+    retryable: false,
+  });
+});
+
+test("oversized retained images fail before blob reads without rewriting history", async () => {
+  const files = Array.from({ length: 4 }, (_, i) => ({
+    ...file(
+      `00000000-0000-4000-8000-${String(200 + i).padStart(12, "0")}`,
+      "image/png",
+      MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+    ),
+    sha256: "a".repeat(64),
+  }));
+  let reads = 0;
+  const projector = createModelHistoryAttachmentProjector(
+    { supportsImageInput: true, inputFileMediaTypes: [] },
+    async () => {
+      reads++;
+      return new Uint8Array();
+    },
+    async () => files,
+  );
+  for (const refs of [files, Array.from({ length: 4 }, () => files[0]!)]) {
+    const history = refs.map((asset) => ({
+      ...user("inspect"),
+      [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }],
+    }));
+    const original = JSON.stringify(history);
+    await expect(projector(history)).rejects.toThrow("64 MiB inline transport limit");
+    await expect(projector(history)).rejects.toThrow("64 MiB inline transport limit");
+    expect(JSON.stringify(history)).toBe(original);
+  }
   expect(reads).toBe(0);
 });

@@ -1888,6 +1888,11 @@ audit reads may return it, so it is never a secret boundary.
    per turn and bytes are memoized; object reads have bounded concurrency.
    Historical images do not cause sandbox remounts. Each image retains the
    existing inline admission limit; adding an image does not evict older images.
+   Before blob reads, a 64 MiB raw-image transport limit bounds both accumulated
+   per-turn bytes and repeated images in each request. Exceeding it fails the
+   turn explicitly without altering history; compaction cannot bypass it.
+   Such histories require a smaller conversation or a fork before the heavy
+   messages until a streaming image transport exists.
    Missing/corrupt eligible bytes fail preparation rather than silently changing
    context. Compaction preserves images in retained messages and charges their
    projected token cost. Its omitted-file catalog is reference-only, so it does
