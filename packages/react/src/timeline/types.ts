@@ -451,6 +451,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** Keep an existing answer visible when a recorded input wait ends without final output. */
+  preserveWaitResponse?: true;
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;
