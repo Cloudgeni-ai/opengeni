@@ -1314,6 +1314,8 @@ Automatic underfill preserves the tail and offers explicit earlier navigation
 at the window limit. Underfilled history never auto-pages forward; Jump to latest
 restores the live tail. Provider message identity survives normalization and
 coalescing, joining interleaved chunks without merging distinct messages.
+The database reader batches up to 256 events, preserving the default 1 MiB
+full-payload page budget through metadata planning before payload transfer.
 
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.

@@ -37360,7 +37360,7 @@ export type SessionEventPage = {
 
 const POSTGRES_INT_MAX = 2_147_483_647;
 export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
-const SESSION_EVENT_DB_BATCH_SIZE = 64;
+const SESSION_EVENT_DB_BATCH_SIZE = 256;
 const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
 type SessionEventProjectionRow = {
@@ -37425,8 +37425,9 @@ export async function listSessionEventPage(
   );
   // Interactive browser pages intentionally stop at 255 rows. Carry their
   // one-row continuation lookahead in the same indexed query so latency is not
-  // multiplied by transaction-pool or cross-region round trips. Larger audit
-  // reads retain the smaller default batch to preserve their memory envelope.
+  // multiplied by transaction-pool or cross-region round trips. Larger reads
+  // use bounded 256-row batches; full-mode metadata planning below preserves
+  // the page's byte budget before any canonical payload is transferred.
   const defaultBatchSize =
     requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX
       ? requestedLimit + 1
