@@ -602,7 +602,10 @@ describe("timeline annotations", () => {
         onDraftAnnotationSelect={(id) => selected.push(id)}
       />,
     );
-    await flush();
+    await waitFor(
+      () => document.body.querySelectorAll("[data-og-annotation-badge]").length === 2,
+      "annotation badges did not render",
+    );
     const badges = [
       ...document.body.querySelectorAll<HTMLButtonElement>("[data-og-annotation-badge]"),
     ];
