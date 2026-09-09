@@ -1820,14 +1820,25 @@ describe("one chat Skill confirmation", () => {
         proposed.skillReview!,
       ),
     ).toBe("declined");
-    const staleSave = await answeredSkillInput(f, proposed.skillReview!, ["save"]);
-    await expect(
-      confirmSkillHumanResponse(client.db, {
-        ...f.context,
-        subjectId: f.human.actor.subjectId,
-        requestId: staleSave,
-      }),
-    ).rejects.toThrow();
+    const replay = await confirmSkillHumanResponse(client.db, {
+      ...f.context,
+      subjectId: f.human.actor.subjectId,
+      requestId,
+    });
+    expect(replay.replayed).toBe(true);
+    for (const choice of ["save", "skip"]) {
+      const repeatedRequest = await answeredSkillInput(f, proposed.skillReview!, [choice]);
+      await expect(
+        confirmSkillHumanResponse(client.db, {
+          ...f.context,
+          subjectId: f.human.actor.subjectId,
+          requestId: repeatedRequest,
+        }),
+      ).rejects.toThrow("This Skill changed");
+    }
+    const [rejections] =
+      await shared.admin`select count(*)::int as count from preference_registry_events where new_revision_id=${proposed.revisionId} and type='rejected'`;
+    expect(rejections?.count).toBe(1);
   }, 180000);
 
   test("autonomous produces no review and Off creates no durable proposal", async () => {

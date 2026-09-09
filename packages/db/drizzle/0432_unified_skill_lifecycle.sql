@@ -368,8 +368,8 @@ BEGIN
       END IF;
       IF original_operation='confirm_response' AND (
         (operation='reject' AND rev.id=head.active_revision_id)
-        OR (operation='approve' AND EXISTS(SELECT 1 FROM preference_registry_events event
-          WHERE event.preference_id=skill_id AND event.new_revision_id=rev.id AND event.type='rejected'))
+        OR EXISTS(SELECT 1 FROM preference_registry_events event
+          WHERE event.preference_id=skill_id AND event.new_revision_id=rev.id AND event.type='rejected')
       ) THEN RAISE EXCEPTION 'Skill proposal was already settled' USING ERRCODE='40001'; END IF;
       files := coalesce(rev.skill_files,jsonb_build_array(jsonb_build_object('path','SKILL.md','content',rev.content)));
       title := p_request->>'title'; description := p_request->>'description';
