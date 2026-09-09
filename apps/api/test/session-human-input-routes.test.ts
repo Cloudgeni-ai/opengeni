@@ -74,6 +74,7 @@ afterAll(async () => {
 async function frozenFixture(
   options: {
     optionalText?: boolean;
+    skillReview?: boolean;
     allowSkip?: boolean;
     expiresAt?: Date | null;
   } = {},
@@ -149,6 +150,17 @@ async function frozenFixture(
           allowOther: false,
         },
       ];
+  if (options.skillReview) {
+    Object.assign(questions[0]!, {
+      skillReview: {
+        sourceOperationId: crypto.randomUUID(),
+        skillId: crypto.randomUUID(),
+        revisionId: crypto.randomUUID(),
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+      },
+    });
+  }
   const allowSkip = options.allowSkip ?? false;
   const expiresAt = options.expiresAt ?? null;
   await applySessionTurnSettlement(client.db, grant.workspaceId!, {
@@ -577,4 +589,35 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       payload: { requestId: expired.requestId, response: { outcome: "expired" } },
     });
   });
+});
+
+test("a bearer naming the initiating human cannot answer a Skill review or stamp human authority", async () => {
+  const fixture = await frozenFixture({ skillReview: true });
+  const base = `/v1/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`;
+  const beforeSignals = approvalSignals;
+  const response = await app.request(`http://x${base}/events`, {
+    method: "POST",
+    headers: { authorization: fixture.authorization, "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "user.humanInputResponse",
+      clientEventId: crypto.randomUUID(),
+      payload: {
+        requestId: fixture.requestId,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "environment", values: ["staging"] }],
+        },
+      },
+    }),
+  });
+  expect(response.status).toBe(403);
+  expect(approvalSignals).toBe(beforeSignals);
+  const pending = await app.request(`http://x${base}/human-input-requests/${fixture.requestId}`, {
+    headers: { authorization: fixture.authorization },
+  });
+  expect(await pending.json()).toMatchObject({ status: "pending", response: null });
+  const [stored] = await shared.admin`
+    SELECT skill_review_human_authorized AS authorized
+    FROM session_human_input_requests WHERE id=${fixture.requestId}::uuid`;
+  expect(stored?.authorized).toBe(false);
 });

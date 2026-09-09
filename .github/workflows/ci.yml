@@ -806,7 +806,11 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
-        timeout-minutes: 4
+        # Includes a production web build, real PostgreSQL setup, and 23 serial
+        # browser cases. Baseline fa2b99a6 took 229s; run 34257100987 passed 22
+        # cases in 247s before the old 4m cap stopped the last case. Keep the
+        # individual test deadlines strict while allowing suite-level headroom.
+        timeout-minutes: 6
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -1136,7 +1140,9 @@ jobs:
   deployment:
     name: Deployment artifacts
     needs: [automation-admission, plan]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    # Every image-producing source needs the deployment receipt, including a
+    # docs-only main push. Staging validates it before importing these images.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

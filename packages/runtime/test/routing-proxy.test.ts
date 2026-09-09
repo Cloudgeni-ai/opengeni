@@ -1218,6 +1218,60 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(new Set(chunkIds).size).toBe(1);
   });
 
+  test("provider pages are acknowledged only after durable capture, including a failed capture retry", async () => {
+    const events: string[] = [];
+    let fail = true;
+    const initial = "Command journal: 179:0:5\nProcess running with session ID 179\nOutput:\nstart";
+    const terminal = "Command journal: 179:5:8\nProcess exited with code 7\nOutput:\nend";
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        sandboxId: null,
+        kind: "modal",
+        session: {
+          execCommand: async () => initial,
+          writeStdin: async () => terminal,
+          getProviderCommandOutput: (result) =>
+            result === initial || result === terminal
+              ? {
+                  command: {} as never,
+                  chunks: [
+                    {
+                      stream: "stdout",
+                      chunkId: result === initial ? "modal:179:0:5" : "modal:179:5:8",
+                      text: result === initial ? "start" : "end",
+                    },
+                  ],
+                  exitCode: result === initial ? null : 7,
+                }
+              : null,
+          acknowledgeCommandOutput: async (result) => {
+            events.push(result === initial ? "ack:start" : "ack:end");
+          },
+        },
+      }),
+      captureProcessOutput: async ({ chunk, chunkId }) => {
+        events.push(`capture:${chunkId}`);
+        if (chunk === "end" && fail) {
+          fail = false;
+          throw new Error("storage unavailable");
+        }
+      },
+    });
+    await proxy.execCommand({ cmd: "work" });
+    expect(events).toEqual(["capture:modal:179:0:5", "ack:start"]);
+    await expect(proxy.writeStdinForProcessRead({ sessionId: 179, chars: "" })).rejects.toThrow(
+      "output could not be retained",
+    );
+    expect(events).not.toContain("ack:end");
+    await proxy.writeStdinForProcessRead({ sessionId: 179, chars: "" });
+    expect(events.filter((event) => event === "capture:modal:179:5:8")).toHaveLength(2);
+    // A terminal retry can finish from the already-read, durably captured page;
+    // it must never acknowledge before that capture succeeds.
+    const acknowledgment = events.indexOf("ack:end");
+    expect(acknowledgment).toBeGreaterThan(events.lastIndexOf("capture:modal:179:5:8"));
+  });
+
   test("owner refresh captures exact adopted command without pointer lookup or observation", async () => {
     let pointerReads = 0;
     let observed = 0;

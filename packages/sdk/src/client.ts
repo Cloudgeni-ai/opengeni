@@ -12,6 +12,13 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import type {
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
 import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
@@ -6925,6 +6932,61 @@ export class OpenGeniClient {
     );
   }
 
+  /** Shared authored/installed catalog metadata. File bodies are read on demand. */
+  async listWorkspaceSkills(
+    workspaceId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<{ skills: SkillSummary[]; nextCursor: string | null }> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content${suffix}`);
+  }
+
+  async readWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    revisionId?: string,
+  ): Promise<SkillRecord> {
+    const query = revisionId ? `?revisionId=${encodeURIComponent(revisionId)}` : "";
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}${query}`,
+    );
+  }
+
+  async saveWorkspaceSkill(
+    workspaceId: string,
+    request: SaveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  async approveWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/approve`,
+      request,
+    );
+  }
+
+  async restoreWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/restore`,
+      request,
+    );
+  }
+
   /** Install one exact reviewed curated-library Skill through the Skill domain. */
   async installLibrarySkill(
     workspaceId: string,
@@ -7689,13 +7751,13 @@ export class OpenGeniClient {
     );
   }
 
-  /** Pin (or unpin via "auto") a session's Codex account. Applies on the next turn. */
+  /** Pin/unpin a Codex account. Overrides a capacity-blocked turn; otherwise applies next turn. */
   async pinSessionCodexAccount(
     workspaceId: string,
     sessionId: string,
     target: string,
-  ): Promise<{ pinned: string }> {
-    return await this.requestJson<{ pinned: string }>(
+  ): Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }> {
+    return await this.requestJson<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
       { target },

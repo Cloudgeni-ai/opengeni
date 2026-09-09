@@ -2587,7 +2587,9 @@ function registerGoalTools(
       description:
         "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
-        reason: inputWaitReasonSchema,
+        reason: inputWaitReasonSchema.describe(
+          "Shown directly to the user. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
+        ),
         timeoutSeconds: z4
           .number()
           .int()
@@ -4665,7 +4667,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
         inputSchema: {
           sessionId: z4
             .string()
@@ -5241,7 +5243,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Send information to another session. From an OpenGeni worker this becomes a canonical coalescible machine input: it appears in the target's compact incoming queue group, is durably added to model history when claimed, and remains visible in the timeline. A sessionless operator call appends one human/API prompt.",
+          "Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -5343,7 +5345,8 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_pause",
       {
-        description: "Pause this session. Waiting prompts stay saved and inert until Resume.",
+        description:
+          "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           idempotencyKey: z4.string().uuid(),

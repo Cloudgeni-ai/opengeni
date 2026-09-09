@@ -48,6 +48,10 @@ the returned opaque workspace ID and pass the exact product-selected Skills
 inline in `CreateSessionRequest.skills` for every product-created session;
 there is no organization-wide Skill inheritance. Turning workspace Memory off
 does not isolate sessions.
+Each submitted Skill contains `files` with a valid `SKILL.md`. Its YAML
+frontmatter owns the name and description used in the agent's initial index;
+do not keep a second editable summary in the product adapter. Submit files
+alone; optional legacy name/description values must exactly match frontmatter.
 Use a key issued by the organization API-key control plane. Do not reuse an
 ambiguous legacy null-workspace token; provenance migrations revoke those keys
 so old and new API instances both fail closed during rollout.

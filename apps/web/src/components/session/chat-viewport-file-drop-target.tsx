@@ -89,6 +89,7 @@ export function ChatViewportFileDropTarget({
 
   return (
     <section
+      data-og-conversation=""
       data-workspace-scroll-owner={scrollOwner}
       data-testid="chat-viewport-drop-target"
       className={cn("relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden", className)}

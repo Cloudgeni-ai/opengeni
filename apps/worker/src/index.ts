@@ -376,6 +376,7 @@ export async function createWorkerWorkflowSignaler(
       workflowId,
       wakeRevision,
       interruptionRequested,
+      onSignalAccepted,
     }) => {
       if (interruptionRequested) {
         await temporal.workflow.signalWithStart("sessionWorkflow", {
@@ -395,7 +396,8 @@ export async function createWorkerWorkflowSignaler(
           signal: "queueChanged",
         });
       }
-      await markSessionWorkflowWakeDelivered(db, {
+      onSignalAccepted?.();
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,

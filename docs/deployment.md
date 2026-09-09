@@ -3074,3 +3074,13 @@ Migration `0425_feedback_submissions.sql` extends the exact runtime table/privil
 contract. Stop old API and both worker types, migrate, run `db:provision-roles`,
 and start the feedback-aware binary. Do not restart an older binary afterward.
 See [Feedback](feedback.md) for API, privacy, and retention behavior.
+
+## Message-point fork activation
+
+Migration `0429_message_boundary_session_forks.sql` adds the exact runtime
+routine for message-boundary forks. Stop API, control-worker, and turn-worker
+processes before migrating, run `db:provision-roles`, and start only the new
+binary afterward. Do not use an older binary as the rollback image after this
+routine contract changes. Whole-session forks retain their existing signature.
+See [Forking at a message](organization-tenancy.md#forking-at-a-message) for
+boundary validation and compacted-history limitations.

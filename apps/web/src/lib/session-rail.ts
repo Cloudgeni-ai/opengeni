@@ -47,6 +47,19 @@ export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact =
 /** Honest user-facing state: lifecycle first, then the effective pause policy. */
 export function sessionStateLabel(session: Session): string {
   const commandActivity = session.backgroundCommandActivity;
+  if (commandActivity?.unavailableCount) {
+    const unavailable = Math.min(commandActivity.count, commandActivity.unavailableCount);
+    const known = commandActivity.count - unavailable;
+    const unknownLabel =
+      unavailable === 1
+        ? "Command status unavailable"
+        : `${unavailable} command statuses unavailable`;
+    return known > 0
+      ? `${known} other active background command${known === 1 ? "" : "s"} · ${unknownLabel}`
+      : commandActivity.state === "stopping"
+        ? `Stop requested · ${unknownLabel}`
+        : unknownLabel;
+  }
   if (commandActivity?.state === "stopping") {
     return commandActivity.count === 1
       ? "Stopping background command…"

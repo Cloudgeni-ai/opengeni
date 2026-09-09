@@ -2184,7 +2184,7 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     expect(webSearchHostedTools(agent)).toHaveLength(0);
     expect(
       ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
-    ).toEqual(["load_builtin_skill", HUMAN_INPUT_TOOL_NAME]);
+    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
     // encryptedReasoning off (chat wire API) → no providerData.include.
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,

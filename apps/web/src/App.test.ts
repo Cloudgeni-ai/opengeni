@@ -34,6 +34,7 @@ import {
   authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
   commitSessionBranchPage,
+  readLoadedSessionBranchWindow,
   failSessionBranchRequest,
   sessionBranchNeedsHydration,
   sessionBranchSummaryKey,
@@ -588,6 +589,78 @@ describe("rail session grouping", () => {
       stale: false,
     });
     expect(afterCompletion).toEqual({ acknowledge: true, refresh: true, markStale: false });
+  });
+
+  test("accepted root reads refresh observation-only child changes without parent edits", () => {
+    const parent = railSession({ id: "observation-parent" });
+    const previousKey = sessionBranchSummaryKey(parent, 1);
+    const nextKey = sessionBranchSummaryKey(parent, 2);
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey,
+        nextKey,
+        loading: false,
+        expanded: true,
+        stale: false,
+      }),
+    ).toEqual({ acknowledge: true, refresh: true, markStale: false });
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey,
+        nextKey,
+        loading: false,
+        expanded: false,
+        stale: false,
+      }),
+    ).toEqual({ acknowledge: true, refresh: false, markStale: true });
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey: nextKey,
+        nextKey,
+        loading: false,
+        expanded: true,
+        stale: false,
+      }).refresh,
+    ).toBe(false);
+  });
+
+  test("loaded child windows refresh observations beyond page one and drop removed tail rows", async () => {
+    const children = Array.from({ length: 60 }, (_, index) =>
+      railSession({ id: `child-${index}`, parentSessionId: "parent" }),
+    );
+    const unknown = {
+      ...children[55]!,
+      backgroundCommandActivity: { state: "running" as const, count: 1, unavailableCount: 1 },
+    };
+    const calls: (string | undefined)[] = [];
+    const window = await readLoadedSessionBranchWindow(async (cursor) => {
+      calls.push(cursor);
+      return {
+        sessions: cursor
+          ? children.slice(50, 59).map((child) => (child.id === unknown.id ? unknown : child))
+          : children.slice(0, 50),
+        pinned: [],
+        nextCursor: cursor ? null : "page-two",
+      };
+    }, children.length);
+    expect(calls).toEqual([undefined, "page-two"]);
+    let pages = commitSessionBranchPage(new Map(), "parent", {
+      sessions: children,
+      nextCursor: "old",
+    });
+    pages = commitSessionBranchPage(pages, "parent", window, { replaceWindow: true });
+    expect(
+      pages.get("parent")?.sessions.find((child) => child.id === unknown.id)
+        ?.backgroundCommandActivity?.unavailableCount,
+    ).toBe(1);
+    expect(pages.get("parent")?.sessions).toHaveLength(59);
+    expect(pages.get("parent")?.nextCursor).toBeNull();
+    await expect(
+      readLoadedSessionBranchWindow(
+        async () => ({ sessions: [], pinned: [], nextCursor: "repeated" }),
+        60,
+      ),
+    ).rejects.toThrow("cursor repeated");
   });
 
   test("a failed page-one invalidation retries page one instead of the old continuation", () => {

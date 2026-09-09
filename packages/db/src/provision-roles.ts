@@ -815,6 +815,10 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(format('%I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_files_valid(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regprocedure(
       format('%I.preference_registry_lock_heads(uuid[])', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -1452,6 +1456,22 @@ BEGIN
       );
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
@@ -2096,6 +2116,15 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'guard_workspace_owned_skill_head_delete()',
+      'guard_workspace_owned_skill_history_delete()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     EXECUTE format(
       'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM %I',
       owner_role,

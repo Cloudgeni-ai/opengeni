@@ -416,6 +416,7 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(Array.from(functions)).toEqual([
       { name: "fork_session_content", securityDefiner: true },
       { name: "fork_session_content", securityDefiner: true },
+      { name: "fork_session_content", securityDefiner: true },
       { name: "transition_session_visibility", securityDefiner: true },
     ]);
     const [constraint] = await shared.admin<Array<{ definition: string }>>`
@@ -674,6 +675,14 @@ describe("migration 0303 session tenancy product activation", () => {
     if (!shared || !client) return;
 
     const sharedSource = await sessionVisibilityFixture();
+    const orderedHistory = JSON.stringify({
+      type: "tool_search_call",
+      arguments: { query: "fork ordering", names: ["lookup"], limit: 5 },
+    });
+    await shared.admin`
+      update session_history_items
+      set item_ordered = ${shared.admin.typed(orderedHistory, 25)}::json
+      where session_id = ${sharedSource.session.id} and position = 1`;
     const invalidatedAt = new Date("2026-08-24T00:00:00.000Z");
     const invalidatedByAttemptId = crypto.randomUUID();
     await shared.admin`
@@ -722,6 +731,10 @@ describe("migration 0303 session tenancy product activation", () => {
       copiedHistoryItemCount: 3,
       replay: false,
     });
+    const [copiedOrderedHistory] = await shared.admin`
+      select item_ordered::text as item from session_history_items
+      where session_id = ${sharedFork.sessionId} and position = 1`;
+    expect(copiedOrderedHistory!.item).toBe(orderedHistory);
 
     const copiedInvalidations = await shared.admin<
       Array<{

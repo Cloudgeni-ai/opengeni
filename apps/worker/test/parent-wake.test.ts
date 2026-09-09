@@ -40,45 +40,79 @@ function durableFanoutBus(methods: Record<string, unknown>): EventBus {
   } as unknown as EventBus;
 }
 
-test("workflow-wake repair delivers an outstanding session receipt", async () => {
-  const wakeSessionWorkflow = mock(async () => undefined);
-  const claimPendingSessionWorkflowWakes = mock(async () => [
-    {
+for (const scenario of [
+  {
+    receipt: { action: "acknowledged" } as const,
+    delivered: 1,
+    pendingAdmission: 0,
+    unconfirmed: 0,
+  },
+  ...(
+    [
+      "pending_agent_steer",
+      "pending_prompt_turn",
+      "pending_quiescence",
+      "pending_machine_input",
+      "pending_input_wait",
+    ] as const
+  ).map((blocker) => ({
+    receipt: { action: "pending_admission", blocker } as const,
+    delivered: 0,
+    pendingAdmission: 1,
+    unconfirmed: 0,
+  })),
+  { receipt: undefined, delivered: 0, pendingAdmission: 0, unconfirmed: 1 },
+]) {
+  test(`workflow-wake repair preserves ${JSON.stringify(scenario.receipt)} receipt`, async () => {
+    const wakeSessionWorkflow = mock(async () => scenario.receipt);
+    const claimPendingSessionWorkflowWakes = mock(async () => [
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        temporalWorkflowId: "session-33333333-3333-4333-8333-333333333333",
+        wakeRevision: 7,
+        interruptionRequested: false,
+      },
+    ]);
+    const db = {} as Database;
+
+    const result = await reconcilePendingSessionWorkflowWakes(
+      {
+        db,
+        bus: { publish: async () => undefined } as unknown as EventBus,
+        settings: {} as Settings,
+        observability: {
+          info: () => undefined,
+          error: () => undefined,
+        } as unknown as NotifyServices["observability"],
+        wakeSessionWorkflow,
+      },
+      17,
+      { claimPendingSessionWorkflowWakes },
+    );
+
+    expect(result).toEqual({
+      claimed: 1,
+      signaled: 1,
+      delivered: scenario.delivered,
+      pendingAdmission: scenario.pendingAdmission,
+      unconfirmed: scenario.unconfirmed,
+      failed: 0,
+      pendingAdmissionBlockers:
+        scenario.receipt?.action === "pending_admission" ? { [scenario.receipt.blocker]: 1 } : {},
+    });
+    expect(claimPendingSessionWorkflowWakes).toHaveBeenCalledWith(db, 17);
+    expect(wakeSessionWorkflow).toHaveBeenCalledWith({
       accountId: "11111111-1111-4111-8111-111111111111",
       workspaceId: "22222222-2222-4222-8222-222222222222",
       sessionId: "33333333-3333-4333-8333-333333333333",
-      temporalWorkflowId: "session-33333333-3333-4333-8333-333333333333",
+      workflowId: "session-33333333-3333-4333-8333-333333333333",
       wakeRevision: 7,
-      interruptionRequested: false,
-    },
-  ]);
-  const db = {} as Database;
-
-  const result = await reconcilePendingSessionWorkflowWakes(
-    {
-      db,
-      bus: { publish: async () => undefined } as unknown as EventBus,
-      settings: {} as Settings,
-      observability: {
-        info: () => undefined,
-        error: () => undefined,
-      } as unknown as NotifyServices["observability"],
-      wakeSessionWorkflow,
-    },
-    17,
-    { claimPendingSessionWorkflowWakes },
-  );
-
-  expect(result).toEqual({ claimed: 1, delivered: 1, failed: 0 });
-  expect(claimPendingSessionWorkflowWakes).toHaveBeenCalledWith(db, 17);
-  expect(wakeSessionWorkflow).toHaveBeenCalledWith({
-    accountId: "11111111-1111-4111-8111-111111111111",
-    workspaceId: "22222222-2222-4222-8222-222222222222",
-    sessionId: "33333333-3333-4333-8333-333333333333",
-    workflowId: "session-33333333-3333-4333-8333-333333333333",
-    wakeRevision: 7,
+      onSignalAccepted: expect.any(Function),
+    });
   });
-});
+}
 
 test("automatic-title migration fanout publishes and acknowledges the durable event", async () => {
   const publish = mock(async () => undefined);

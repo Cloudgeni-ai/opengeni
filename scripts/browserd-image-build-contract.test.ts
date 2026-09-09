@@ -64,6 +64,17 @@ describe("browser controller image build contract", () => {
     test(`${imagePath} prepares shared inputs once and compiles natively for the target`, async () => {
       const dockerfile = await readFile(resolve(root, imagePath), "utf8");
 
+      // These images copy source packages, not a bundled dependency closure.
+      // Every contracts runtime dependency must accompany that source.
+      const contracts = JSON.parse(
+        await readFile(resolve(root, "packages/contracts/package.json"), "utf8"),
+      ) as { dependencies: Record<string, string> };
+      for (const dependency of Object.keys(contracts.dependencies)) {
+        expect(dockerfile).toContain(
+          `cp -aL packages/contracts/node_modules/${dependency} "$runtime/node_modules/${dependency}"`,
+        );
+      }
+
       expect(buildsBrowserControllerOnTargetPlatform(dockerfile)).toBe(true);
       expect(dockerfile).toContain('"$runtime/node_modules/@opengeni/tool-gateway"');
       expect(dockerfile).toContain(

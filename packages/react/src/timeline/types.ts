@@ -215,6 +215,7 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  blockedReason?: "rotation_in_progress" | undefined;
   occurredAt: string;
 };
 
@@ -451,6 +452,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** Keep an existing answer visible when a recorded input wait ends without final output. */
+  preserveWaitResponse?: true;
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;

@@ -203,12 +203,11 @@ describe("session control surface architecture", () => {
     expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).toContain("PersonalResourceScopeChoice");
-    expect(route).toContain("mode: personalScopeChoice.mode");
-    expect(route).toContain('personalOwnerScope?.identityKey ?? "ineligible"');
-    expect(
-      route.match(/setPersonalScopeGeneration\(\(generation\) => generation \+ 1\)/g),
-    ).toHaveLength(3);
+    expect(route).not.toContain("PersonalResourceScopeChoice");
+    expect(route).not.toContain("personalScopeChoice");
+    expect(route).not.toContain("setPersonalScopeGeneration");
+    expect(route).toContain("personalResourceCount: selectedPersonalResourceCount");
+    expect(route).toContain("will be available for your work in this session.");
     expect(route).not.toContain("personalResourceSendBlocker");
     expect(route).not.toContain("Confirm private credential or resource use before sending");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
@@ -272,7 +271,10 @@ describe("session control surface architecture", () => {
     );
     expect(establishedPicker).toContain("sessionHasVariableSetBlockingWork(props.session)");
     expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
-    expect(establishedPicker).toContain("Only-me Variable Sets are authorized for your own work.");
+    expect(establishedPicker).toContain(
+      "Attached Only-me Variable Sets are available for your work in this session.",
+    );
+    expect(establishedControl).not.toContain("PersonalResourceScopeChoice");
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');

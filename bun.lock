@@ -207,16 +207,9 @@
       "name": "@opengeni/example-chat-quickstart",
       "version": "0.0.1",
       "dependencies": {
-        "@opengeni/react": "workspace:*",
         "@opengeni/sdk": "workspace:*",
-        "@vitejs/plugin-react": "^6.0.1",
-        "react": "^19.2.5",
-        "react-dom": "^19.2.5",
-        "vite": "^8.0.9",
       },
       "devDependencies": {
-        "@types/react": "^19.2.14",
-        "@types/react-dom": "^19.2.3",
         "typescript": "7.0.2",
       },
     },
@@ -369,6 +362,7 @@
       "version": "2.13.0",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
+        "yaml": "2.9.0",
         "zod": "^4.2.1",
       },
       "devDependencies": {

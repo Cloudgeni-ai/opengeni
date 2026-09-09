@@ -24,31 +24,12 @@ ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
-## Drop-in chat (`@opengeni/react/chat`)
+## Conversation UI
 
-The smallest surface. `OpenGeniChat` talks only to your own endpoint served by
-`createChatHandler` from `@opengeni/sdk/chat`; it needs no provider, no SDK
-client, and no proxy of OpenGeni routes:
-
-```tsx
-import { OpenGeniChat } from "@opengeni/react/chat";
-
-<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" placeholder="Ask anything" />;
-```
-
-It posts `{ message }`, renders the streamed reply with `Markdown`, and shows a
-card with buttons when the agent stops for an approval or a structured
-human-input request (answered through `POST /api/chat/respond`). Optional props:
-`headers` for the host's auth header, `authKey`, `className`, and `renderMessage`.
-Changed header values clear messages, pending cards, drafts and in-flight
-requests before restoring the new identity's history. Header callbacks are
-resolved on each host render; re-render when their credentials change. For
-cookie authentication, pass `authKey={JSON.stringify([tenantId, userId])}` and
-change it on sign-in, sign-out and tenant switches, even when `conversation`
-stays the same. `authKey` is a local reset key and is never sent to the handler.
-`SessionConversation` below is the full-surface upgrade on the same session
-(files, queue, model picker, approvals with policies) once the host proxies the
-session routes.
+Use `SessionConversation` for an existing session, or compose `MessageTimeline`
+and `ChatComposer` with the session hooks. These use the normal SDK through
+your authenticated host routes. For custom or compatible frontends, the backend
+`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
 
 ## Editable Office artifacts
 
@@ -671,6 +652,11 @@ intentional changes should regenerate those snapshots and review the diff.
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
+  Top-level assistant tables in `MessageTimeline` can expand beyond the prose
+  column into the actual conversation panel's available space. Small tables,
+  paragraphs, user bubbles, and nested or standalone Markdown keep their normal
+  width; oversized tables retain table-only horizontal scrolling. No host prop
+  or viewport-wide layout override is required.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render
@@ -844,3 +830,9 @@ thinking labels through `messages`, and override payment descriptions through
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image
 compatibility warning only when the selected model cannot view those images.
+
+`MessageTimeline.renderMessageActions(item)` places host-owned controls beside
+Copy and the timestamp for user messages and completed assistant messages.
+The host owns feedback, fork authorization, and mutations; streaming assistant
+messages omit this slot. Use the `group/copy` hover/focus state and preserve
+visible touch targets when styling actions.

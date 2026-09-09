@@ -135,6 +135,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const ordered = orderTimelineEvents(events, prescan);
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
   const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
+  const identifiedMessages = new Map<string, AgentMessageItem>();
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -157,6 +158,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     mode = 0,
     explicitStartedAt?: string,
     explicitId?: string,
+    blockedReason?: StartupPhaseItem["blockedReason"],
   ): void => {
     const key = `${startupTurnId}:${phase}`;
     const priorState = startupPhases.get(key);
@@ -183,6 +185,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           ? elapsedDurationMs(open.startedAt, startupEvent.occurredAt)
           : Math.max(0, duration);
       open.outcome = outcome ?? open.outcome;
+      open.blockedReason = blockedReason;
       return;
     }
     const running = status === "running";
@@ -201,6 +204,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         completedAt: running ? null : startupEvent.occurredAt,
         durationMs,
         outcome,
+        blockedReason,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -216,6 +220,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       completedAt: running ? null : startupEvent.occurredAt,
       durationMs,
       outcome,
+      blockedReason,
       occurredAt: startedAt,
     };
     items.push(item);
@@ -408,8 +413,43 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!text) {
           break;
         }
+        const messageId = stringValue(payload.messageId);
+        const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
+        const identified = messageKey ? identifiedMessages.get(messageKey) : undefined;
+        if (identified) {
+          if (identified.annotationSource?.eventType !== "agent.message.completed") {
+            identified.text += text;
+            rememberAgentResponse(turnId, identified, false);
+          }
+          break;
+        }
         const open = last();
-        if (open?.kind === "agent-message" && open.streaming && open.turnId === turnId) {
+        if (!messageKey && open?.kind === "tool-call" && open.status === "running") {
+          const previous = latestAgentResponseByTurn.get(turnId);
+          const previousIndex = previous ? items.indexOf(previous.item) : -1;
+          if (
+            previous &&
+            !previous.completed &&
+            previousIndex >= 0 &&
+            items
+              .slice(previousIndex + 1)
+              .every(
+                (item) =>
+                  item.kind === "tool-call" && item.turnId === turnId && item.status === "running",
+              )
+          ) {
+            // Legacy deltas have no provider message identity. Tool creation
+            // alone is not a text boundary; completed output still is.
+            previous.item.text += text;
+            break;
+          }
+        }
+        if (
+          !messageKey &&
+          open?.kind === "agent-message" &&
+          open.streaming &&
+          open.turnId === turnId
+        ) {
           open.text += text;
           rememberAgentResponse(turnId, open, false);
           break;
@@ -424,18 +464,21 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           occurredAt: event.occurredAt,
         };
         items.push(item);
+        if (messageKey) identifiedMessages.set(messageKey, item);
         rememberAgentResponse(turnId, item, false);
         break;
       }
 
       case "agent.message.completed": {
         const text = stringValue(payload.text);
+        const messageId = stringValue(payload.messageId);
+        const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
         const phase = assistantMessagePhase(payload.phase);
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
-        let openIndex = -1;
-        for (let index = items.length - 1; index >= 0; index -= 1) {
+        let openIndex = messageKey ? items.indexOf(identifiedMessages.get(messageKey)!) : -1;
+        for (let index = messageKey ? -1 : items.length - 1; index >= 0; index -= 1) {
           const candidate = items[index];
           if (candidate?.kind === "agent-message" && candidate.turnId === turnId) {
             openIndex = index;
@@ -447,10 +490,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           candidate?.kind === "agent-message" ? candidate : undefined;
         if (
           open &&
-          (open.streaming || !open.text || text === open.text || text.startsWith(open.text))
+          (messageKey ||
+            open.streaming ||
+            !open.text ||
+            text === open.text ||
+            text.startsWith(open.text))
         ) {
-          // The completed text is authoritative when it extends what streamed.
-          if (!open.text || (text && text.startsWith(open.text))) {
+          // Identity makes the final text authoritative even if it corrects the
+          // draft; legacy receipts still require an extension match.
+          if (!open.text || (text && (messageKey || text.startsWith(open.text)))) {
             open.text = text || open.text;
           }
           open.streaming = false;
@@ -502,6 +550,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             },
           };
           items.push(item);
+          if (messageKey) identifiedMessages.set(messageKey, item);
           rememberAgentResponse(turnId, item, true);
         }
         break;
@@ -693,7 +742,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const startupPhase = startupPhaseForSandboxOperation(name);
         if (startupPhase) {
           closeStreamingTail();
-          settleStartupPhase(startupPhase, status, numberOrNull(payload.durationMs), origin);
+          settleStartupPhase(
+            startupPhase,
+            status,
+            numberOrNull(payload.durationMs),
+            origin,
+            0,
+            undefined,
+            undefined,
+            status === "cancelled" && payload.failureCode === "rotation_in_progress"
+              ? "rotation_in_progress"
+              : undefined,
+          );
           break;
         }
         // Routine per-turn platform plumbing that runs before EVERY turn to
@@ -1039,11 +1099,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           }
         }
         finalizeOpen(turnId, "complete", event.occurredAt);
-        items.push(turnEndItem(event, "complete", null));
+        const completedTurn = turnEndItem(event, "complete", null);
+        items.push(completedTurn);
         const hasCompletedFinalResponse =
           latestAgentResponse?.completed === true &&
           latestAgentResponse.item.phase !== "commentary" &&
           Boolean(visibleTrackedResponse);
+        if (!hasAuthoritativeFinalOutput && pendingWaitOutcome) {
+          // Preserve existing prose, including delta-only streams, when a
+          // trailing wait yields without a terminal output receipt.
+          completedTurn.preserveWaitResponse = true;
+        }
         if (!hasAuthoritativeFinalOutput && !hasCompletedFinalResponse && pendingWaitOutcome) {
           items.push({
             kind: "notice",
@@ -1808,7 +1874,31 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     return;
   }
 
-  const finalMessage = extractFinalAgentMessage(collected, turnEnd);
+  // Resolve only inside this turn's collected suffix. A user/machine-input
+  // boundary or an interleaved foreign turn must never donate its answer.
+  const waitMessages = turnEnd.preserveWaitResponse
+    ? collected.filter(
+        (group): group is Extract<TimelineGroup, { kind: "item" }> =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          !group.item.streaming &&
+          group.item.text.trim().length > 0 &&
+          belongsToTurn(group.item, turnEnd.turnId),
+      )
+    : [];
+  // A completed answer outranks later commentary. Otherwise use the latest
+  // visible existing prose, ignoring whitespace and opaque-only stream tails.
+  const waitResponse =
+    waitMessages
+      .slice()
+      .reverse()
+      .find(
+        (group) =>
+          group.item.kind === "agent-message" &&
+          group.item.phase !== "commentary" &&
+          group.item.annotationSource?.eventType === "agent.message.completed",
+      ) ?? waitMessages.at(-1);
+  const finalMessage = waitResponse ?? extractFinalAgentMessage(collected, turnEnd);
   const fallbackMessage =
     finalMessage || hasOrdinaryFinalAgentMessage(collected, turnEnd)
       ? null

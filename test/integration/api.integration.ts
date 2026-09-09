@@ -4080,7 +4080,7 @@ describe("API component integration", () => {
           files: [
             {
               path: "SKILL.md",
-              content: `---\nname: ${skillName}\ndescription: Operate infrastructure.\n---\n# Infra ops\n`,
+              content: `---\nname: ${skillName}\ndescription: Operate infrastructure with the pack runbook.\n---\n# Infra ops\n`,
             },
             { path: "references/runbook.md", content: "Runbook." },
           ],
@@ -4102,7 +4102,7 @@ describe("API component integration", () => {
         body: JSON.stringify(packManifest(packId)),
         headers: { "content-type": "application/json" },
       });
-      expect(registered.status).toBe(201);
+      expect(registered.status, await registered.text()).toBe(201);
     }
 
     // Packs that compose runtime components cannot use the legacy enable

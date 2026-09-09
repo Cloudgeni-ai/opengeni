@@ -117,6 +117,167 @@ describe("timeline scroll ownership browser regression", () => {
     }
   });
 
+  for (const compiled of [false, true]) {
+    const consumer = compiled ? "compiled CSS" : "Tailwind source CSS";
+    const openTables = async () => {
+      const tablePage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      observeBrowserErrors(tablePage, browserErrors);
+      await tablePage.goto(`${baseUrl}/timeline-table-test.html${compiled ? "?compiled" : ""}`);
+      await tablePage.waitForFunction(() => window.timelineTableHarness !== undefined);
+      await tablePage.locator("table").first().waitFor();
+      await tablePage.evaluate(() => document.fonts.ready);
+      return tablePage;
+    };
+
+    test(`wide tables use panel gutters without widening prose or nested content (${consumer})`, async () => {
+      const tablePage = await openTables();
+      try {
+        await tablePage.waitForFunction(
+          () => {
+            const table = document.querySelector("table")!;
+            const prose = [...document.querySelectorAll("[data-og-timeline-scroller] p")].find(
+              (node) => node.textContent?.startsWith("Ordinary assistant prose"),
+            )!;
+            return (
+              table.parentElement!.getBoundingClientRect().width >
+              prose.getBoundingClientRect().width + 100
+            );
+          },
+          undefined,
+          { timeout: 5_000 },
+        );
+        const geometry = await tableGeometry(tablePage);
+        expect(geometry.prose.width).toBeCloseTo(768, 0);
+        expect(geometry.tables.Wide!.width).toBeGreaterThan(868);
+        expect(geometry.tables.Wide!.left).toBeLessThan(geometry.prose.left - 40);
+        expect(geometry.tables.Wide!.right).toBeGreaterThan(geometry.prose.right + 40);
+        expect(geometry.tables.Small!.width).toBeCloseTo(geometry.prose.width, 0);
+        for (const name of ["Small", "Quoted", "Listed"]) {
+          expect(geometry.tables[name]!.left).toBeGreaterThanOrEqual(geometry.prose.left - 1);
+          expect(geometry.tables[name]!.right).toBeLessThanOrEqual(geometry.prose.right + 1);
+        }
+        for (const block of geometry.ordinary) {
+          expect(block.left).toBeGreaterThanOrEqual(geometry.prose.left - 1);
+          expect(block.right).toBeLessThanOrEqual(geometry.prose.right + 1);
+        }
+        assertTableContainment(geometry);
+        if (artifactDir) {
+          await mkdir(artifactDir, { recursive: true });
+          await tablePage.locator("table").first().scrollIntoViewIfNeeded();
+          await tablePage.screenshot({
+            path: `${artifactDir}/table-desktop-${compiled ? "compiled" : "source"}.png`,
+          });
+        }
+      } finally {
+        await tablePage.close();
+      }
+    }, 15_000);
+
+    test(`table overflow follows resize, an offset side panel, and mobile (${consumer})`, async () => {
+      const tablePage = await openTables();
+      try {
+        for (const state of [
+          { viewport: 1440, panel: 1100 },
+          { viewport: 1440, panel: 560 },
+          { viewport: 390, panel: null },
+          { viewport: 1440, panel: null },
+        ]) {
+          await tablePage.setViewportSize({ width: state.viewport, height: 900 });
+          await tablePage.evaluate(
+            (width) => window.timelineTableHarness!.panel(width),
+            state.panel,
+          );
+          await tablePage.waitForFunction(({ panel, viewport }) => {
+            const width = document
+              .querySelector("[data-table-panel]")!
+              .getBoundingClientRect().width;
+            return Math.abs(width - (panel ?? viewport - 24)) < 1;
+          }, state);
+          await tablePage.waitForTimeout(100); // ResizeObserver + layout measurement frames.
+          const geometry = await tableGeometry(tablePage);
+          assertTableContainment(geometry);
+          expect(geometry.tables.Oversized!.width).toBeCloseTo(geometry.right - geometry.left, 0);
+          expect(geometry.tables.Oversized!.scrollWidth).toBeGreaterThan(
+            geometry.tables.Oversized!.width + 100,
+          );
+          if (state.viewport === 390 && artifactDir) {
+            await mkdir(artifactDir, { recursive: true });
+            await tablePage.locator("table").first().scrollIntoViewIfNeeded();
+            await tablePage.screenshot({
+              path: `${artifactDir}/table-mobile-${compiled ? "compiled" : "source"}.png`,
+            });
+          }
+        }
+      } finally {
+        await tablePage.close();
+      }
+    }, 15_000);
+
+    test(`streaming table grows and shrinks in place (${consumer})`, async () => {
+      const tablePage = await openTables();
+      try {
+        for (const content of ["small", "wide", "oversized", "small"] as const) {
+          await tablePage.evaluate((value) => window.timelineTableHarness!.content(value), content);
+          await tablePage.waitForFunction(
+            ({ content: expectedContent }) => {
+              const table = document.querySelector("table")!;
+              if (table.querySelector("th")?.textContent?.toLowerCase() !== expectedContent)
+                return false;
+              const width = table.parentElement!.getBoundingClientRect().width;
+              return expectedContent === "small" ? Math.abs(width - 768) < 1 : width > 868;
+            },
+            { content },
+            { timeout: 5_000 },
+          );
+          assertTableContainment(await tableGeometry(tablePage));
+        }
+      } finally {
+        await tablePage.close();
+      }
+    }, 25_000);
+
+    test(`table TSV copy and focused keyboard scrolling remain local (${consumer})`, async () => {
+      const tablePage = await openTables();
+      try {
+        await tablePage.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+        const smallTable = tablePage
+          .locator("table")
+          .filter({ has: tablePage.getByRole("columnheader", { name: "Small", exact: true }) });
+        await smallTable
+          .locator("../..")
+          .getByRole("button", { name: "Copy table", exact: true })
+          .click();
+        expect(await tablePage.evaluate(() => navigator.clipboard.readText())).toBe(
+          "Small\tValue\nAlpha\tBeta",
+        );
+        const overflow = tablePage
+          .locator("table")
+          .filter({ has: tablePage.getByRole("columnheader", { name: "Oversized", exact: true }) })
+          .locator("..");
+        await overflow.scrollIntoViewIfNeeded();
+        await overflow.focus();
+        expect(
+          await overflow.evaluate((node) => node === document.activeElement && node.tabIndex === 0),
+        ).toBe(true);
+        const before = await tablePage
+          .locator("[data-og-timeline-scroller]")
+          .evaluate((node) => ({ left: node.scrollLeft, top: node.scrollTop }));
+        await tablePage.keyboard.press("ArrowRight");
+        await tablePage.waitForFunction(
+          () => (document.activeElement as HTMLElement).scrollLeft > 0,
+        );
+        const after = await tablePage
+          .locator("[data-og-timeline-scroller]")
+          .evaluate((node) => ({ left: node.scrollLeft, top: node.scrollTop }));
+        expect(after.left).toBe(before.left);
+        expect(after.top).toBeCloseTo(before.top, 0);
+        assertTableContainment(await tableGeometry(tablePage));
+      } finally {
+        await tablePage.close();
+      }
+    }, 15_000);
+  }
+
   test("keeps the reader's row and pixel anchor through prepend, wheel, resize, and append", async () => {
     if (artifactDir) {
       await mkdir(artifactDir, { recursive: true });
@@ -157,9 +318,20 @@ describe("timeline scroll ownership browser regression", () => {
 
     const scroller = page.locator("[data-timeline-test] .og-root > div");
     await scroller.hover();
-    await page.mouse.wheel(0, -96);
-    await page.waitForTimeout(100);
+    // wheel() dispatches input without waiting for native scrolling to finish.
+    // Capture the reader's new anchor at scrollend, not at an arbitrary timer
+    // that can expire before the compositor applies the gesture on a busy runner.
+    await Promise.all([
+      scroller.evaluate(
+        (node) =>
+          new Promise<void>((resolve) =>
+            node.addEventListener("scrollend", () => resolve(), { once: true }),
+          ),
+      ),
+      page.mouse.wheel(0, -96),
+    ]);
     const afterWheel = await visible(page);
+    expect(afterWheel.id).not.toBe(duringPrepend.id);
 
     await page.locator('[data-timeline-row="row-900"]').waitFor({ timeout: 15_000 });
     await page.waitForTimeout(100);
@@ -1443,39 +1615,48 @@ describe("timeline scroll ownership browser regression", () => {
     ).toBeGreaterThan(0);
   }, 30_000);
 
-  test("keeps one held-turn commentary reply visible across disclosure collapse and expand", async () => {
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(`${baseUrl}/timeline-held-turn-test.html`);
+  test.each(["commentary", "streamed"])(
+    "keeps one held-turn %s reply visible across disclosure collapse and expand",
+    async (mode) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(
+        `${baseUrl}/timeline-held-turn-test.html?streamed=${mode === "streamed" ? "1" : "0"}`,
+      );
 
-    const fallback = page.getByText("The child is still running; I will resume when it finishes.", {
-      exact: true,
-    });
-    const disclosure = page.getByRole("button", { name: /steps?/ }).first();
+      const fallback = page.getByText(
+        "The child is still running; I will resume when it finishes.",
+        {
+          exact: true,
+        },
+      );
+      const disclosure = page.getByRole("button", { name: /steps?/ }).first();
 
-    await fallback.waitFor({ timeout: 5_000 });
-    expect(await fallback.count()).toBe(1);
-    expect(await fallback.isVisible()).toBe(true);
-    expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
+      await fallback.waitFor({ timeout: 5_000 });
+      expect(await fallback.count()).toBe(1);
+      expect(await fallback.isVisible()).toBe(true);
+      expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
 
-    await disclosure.click();
-    expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
-    expect(await fallback.count()).toBe(1);
-    expect(await fallback.isVisible()).toBe(true);
-    expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
+      await disclosure.click();
+      expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
+      expect(await fallback.count()).toBe(1);
+      expect(await fallback.isVisible()).toBe(true);
+      expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
 
-    await disclosure.click();
-    expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(await fallback.count()).toBe(1);
-    expect(await fallback.isVisible()).toBe(true);
+      await disclosure.click();
+      expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
+      expect(await fallback.count()).toBe(1);
+      expect(await fallback.isVisible()).toBe(true);
 
-    if (artifactDir) {
-      await mkdir(artifactDir, { recursive: true });
-      await page.screenshot({
-        path: `${artifactDir}/timeline-held-turn-commentary-visible.png`,
-        fullPage: true,
-      });
-    }
-  }, 30_000);
+      if (artifactDir) {
+        await mkdir(artifactDir, { recursive: true });
+        await page.screenshot({
+          path: `${artifactDir}/timeline-held-turn-${mode}-visible.png`,
+          fullPage: true,
+        });
+      }
+    },
+    30_000,
+  );
 });
 
 async function visible(page: Page): Promise<VisibleRow> {
@@ -1595,8 +1776,55 @@ async function captureEvidenceMatrix(page: Page, outputDir: string): Promise<voi
   }
 }
 
+async function tableGeometry(page: Page) {
+  return page.evaluate(() => {
+    const bounds = (element: Element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width };
+    };
+    const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+    const style = getComputedStyle(scroller);
+    const rect = bounds(scroller);
+    const prose =
+      [...scroller.querySelectorAll("p")].find((node) =>
+        node.textContent?.startsWith("Ordinary assistant prose"),
+      ) ?? scroller.querySelector("table")!;
+    const tables = Object.fromEntries(
+      [...scroller.querySelectorAll("table")].map((table) => [
+        table.querySelector("th")!.textContent!,
+        { ...bounds(table.parentElement!), scrollWidth: table.parentElement!.scrollWidth },
+      ]),
+    );
+    return {
+      prose: bounds(prose),
+      tables,
+      ordinary: [...scroller.querySelectorAll("p, pre")].map(bounds),
+      left: rect.left + scroller.clientLeft + parseFloat(style.paddingLeft),
+      right:
+        rect.left + scroller.clientLeft + scroller.clientWidth - parseFloat(style.paddingRight),
+      scrollWidth: scroller.scrollWidth,
+      clientWidth: scroller.clientWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      viewport: innerWidth,
+    };
+  });
+}
+
+function assertTableContainment(geometry: Awaited<ReturnType<typeof tableGeometry>>) {
+  for (const table of Object.values(geometry.tables)) {
+    expect(table.left).toBeGreaterThanOrEqual(geometry.left - 1);
+    expect(table.right).toBeLessThanOrEqual(geometry.right + 1);
+  }
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewport + 1);
+}
+
 declare global {
   interface Window {
+    timelineTableHarness?: {
+      content: (value: "baseline" | "small" | "wide" | "oversized") => void;
+      panel: (width: number | null) => void;
+    };
     timelineScrollHarness?: {
       append: () => void;
       growRowsAbove: () => void;

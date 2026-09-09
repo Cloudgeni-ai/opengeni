@@ -33,7 +33,7 @@ import {
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import { PreferenceRegistryAdministration } from "./preference-registry-admin";
+import { SkillsPanel } from "./skills-panel";
 
 function formatDate(value: string | null): string {
   if (!value) return "No activity";
@@ -1350,12 +1350,7 @@ export function WorkspaceStateRoute({
               />
             ) : null}
             {view === "skills" ? (
-              <PreferenceRegistryAdministration
-                workspaceId={workspaceId}
-                onWorkspaceStateReload={reload}
-                compact
-                personalWorkspace={personalWorkspace}
-              />
+              <SkillsPanel workspaceId={workspaceId} personalWorkspace={personalWorkspace} />
             ) : null}
             {!view ? (
               <BrainOverview

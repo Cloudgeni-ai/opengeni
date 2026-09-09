@@ -20,6 +20,8 @@ A managed sandbox is a fresh box OpenGeni provisions for the session. Backends a
 
 Sandboxes are swappable within a session, and a session's files can be recovered from a snapshot or archive after the box is gone. A session can also run with no compute attached when the task needs only model and tool calls.
 
+Modal commands use provider-owned execution IDs, with their acknowledged output cursors retained in OpenGeni's database. Another worker can read a yielded command through its original handle without relying on a previous SDK client's in-memory process map. Output is saved before cursors advance, and exit status comes from the provider, never a file writable by the command. Recovering workspace files into a new sandbox does not resume an old process. Historical handles without a retained provider execution ID remain unknown rather than being assigned an invented exit status. This compatibility adapter is pinned to the verified Modal SDK control-plane contract; SDK upgrades require its regression and live-provider checks.
+
 ## Connected Machines
 
 A Connected Machine is a computer you enroll: a laptop, a workstation, a build server, a GPU box. When a session targets it, the agent runs there directly. There is no cloud box behind it.

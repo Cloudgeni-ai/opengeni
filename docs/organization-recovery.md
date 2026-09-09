@@ -36,7 +36,11 @@ Only a ready canonical-human managed browser session may read or mutate this
 surface. API keys, Authorization bearer credentials, agents, machines, service
 principals, recovery-only identities, deployment administrators, database
 operators, suspended members, and cross-organization identifiers do not become
-recovery principals. Denied identifiers return a non-enumerating result.
+recovery principals. Denied identifiers return a non-enumerating result. The browser presents a
+structured recovery read denial as a neutral account-unavailable state without
+revealing whether a policy exists. Other load failures retain retry controls.
+The navigation remains available to non-owner custodians; client role checks
+never replace recovery authority.
 
 Every mutation binds these server-owned facts in one transaction:
 

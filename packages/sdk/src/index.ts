@@ -368,6 +368,17 @@ export type {
 } from "./memory-slack-delivery";
 export { normalizePreferenceRegistryStableKey } from "./preference-registry";
 export type {
+  SkillFile,
+  SkillScope,
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SkillPublicationReceipt,
+  SkillSourceReleaseReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
+export type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
   CorrectPreferenceRegistryRequest,
@@ -1175,6 +1186,7 @@ export type {
   WorkspaceSettings,
   WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
+  VoiceInputProviderId,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,

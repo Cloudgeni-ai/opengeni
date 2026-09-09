@@ -10,6 +10,9 @@ import {
   UpdateAutomationSourceRequest,
   UpdateAutomationTriggerRequest,
   stableJson,
+  resolveBundledSkillSelection,
+  type AccessGrant,
+  type BundledSkillId,
 } from "@opengeni/contracts";
 import {
   AutomationDeliveryConflictError,
@@ -21,6 +24,7 @@ import {
   encryptVariableSetValue,
   getAutomationSourceSecret,
   getAutomationTriggerRevisions,
+  getSession,
   listActiveAutomationTriggersForSource,
   listAutomationRuns,
   listAutomationSources,
@@ -38,6 +42,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
+  creationInitiatorForGrant,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   requireAccessGrant,
@@ -48,6 +53,26 @@ import {
 } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+
+async function callerBundleSelection(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  requested: BundledSkillId[] | undefined,
+) {
+  const actor = creationInitiatorForGrant(grant).actor;
+  const parent = actor ? await getSession(deps.db, grant.workspaceId, actor.sessionId) : null;
+  if (actor && (!parent || parent.accountId !== grant.accountId))
+    throw new HTTPException(403, {
+      message: "Automation Skill selection requires the creating agent's session",
+    });
+  try {
+    return resolveBundledSkillSelection(requested, parent?.bundledSkillIds);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
+    });
+  }
+}
 
 export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/automations/sources", async (c) => {
@@ -146,6 +171,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const request = CreateAutomationTriggerRequest.parse(await c.req.json());
+    request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
+      deps,
+      grant,
+      request.sessionTemplate.bundledSkillIds,
+    );
     if (request.packInstallationId || request.packTemplateId) {
       throw new HTTPException(409, {
         message: "Pack-owned automation triggers must be created through their Pack setup API",
@@ -220,6 +250,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       requireAutomationAdapter(existing.adapterId).validateTriggerParameters(request.parameters);
     }
     if (request.sessionTemplate) {
+      request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
+        deps,
+        grant,
+        request.sessionTemplate.bundledSkillIds,
+      );
       for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
         requirePermission(grant, permission);
       }

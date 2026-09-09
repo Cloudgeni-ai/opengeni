@@ -12,6 +12,7 @@ export const RUNTIME_SKILL_ASSET_DIRECTORY_NAMES = [
   "bundled_project_skills",
   "bundled_site_skills",
   "bundled_video_skills",
+  "bundled_management_skills",
 ] as const;
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");

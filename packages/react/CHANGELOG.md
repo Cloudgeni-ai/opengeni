@@ -1,5 +1,41 @@
 # @opengeni/react
 
+## 4.0.1
+
+### Patch Changes
+
+- 068be26: Complete a Skill save in the same transaction as its one verified human chat decision. Show the full immutable Skill folder, preserve exact scope and revision checks, and refuse delegated, stale, or mismatched approval. Autonomous saves activate directly; declining a proposal preserves existing active guidance.
+- d1cb266: Keep automatic history filling from evicting the latest reply or cycling between older and newer pages. Preserve explicit history navigation and stable jumps back to latest. Retain provider message identity so assistant chunks interleaved with tool activity remain one message without merging distinct replies.
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/sdk@4.0.1
+
+## 4.0.0
+
+### Major Changes
+
+- c915b0f: Remove the separate `@opengeni/react/chat` component. Use the existing
+  `SessionConversation` or compose the timeline and composer for the full agent
+  experience. The server-side `@opengeni/sdk/chat` wrapper and adapters remain
+  unchanged; their protocol requires a custom or compatible frontend.
+
+### Minor Changes
+
+- 9827c25: Add message action slots and an optional source message boundary for managed-human forks. The web UI places turn feedback and Fork from here beside Copy and the timestamp. Message forks preserve existing authorization and idempotency, copy only the selected canonical history prefix, and reject ambiguous, compacted, or incomplete boundaries.
+
+  Migration 0429 requires draining the API and both worker pools and provisioning the updated runtime routine contract before starting the new binary.
+
+### Patch Changes
+
+- 0c5e2fd: Group composer timeline annotations into one count chip, pin numbered badges on the quoted source text, and keep Add note available for long highlights that end in message chrome. Dense and long notes stay in a viewport-clamped review list, overlapping badges pack onto distinct in-viewport points instead of stacking, Enter moves to the next empty note, and sent cards collapse instead of growing without bound.
+- 231b103: Apply explicit Codex account switches and unpins to capacity-blocked turns, preserving the same turn and history through recovery. Display current account selection separately from future preferences and report when a switch requests a capacity recheck.
+- 9d36a0f: Keep the latest streamed answer visible outside collapsed steps when an input wait ends a turn without final output.
+- Updated dependencies [231b103]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/sdk@4.0.0
+
 ## 3.8.0
 
 ### Minor Changes

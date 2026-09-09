@@ -16,6 +16,10 @@
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
+  createProviderCommandRetainer,
+  retainedProviderCommandPersistence,
+} from "@opengeni/db/retained-provider-commands";
+import {
   adoptConnectedMachineSessionBackgroundCommand,
   adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
@@ -79,12 +83,22 @@ import {
 } from "@opengeni/runtime";
 import { sandboxLeaseHolderIdForAttempt } from "./sandbox-resume";
 
+const retainWorkspaceProviderCommand = createProviderCommandRetainer(
+  retainWorkspaceMutationProcess,
+  (error) => (error instanceof SandboxRetainedProcessPromotionFencedError ? error.process : null),
+);
+
 type PersistableMutationAdmission = {
   admission: SandboxWorkspaceMutationAdmission;
   providerBinding: Awaited<
     ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
   > | null;
 };
+
+function admittedCommandHandle(value: unknown): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return (value as PersistableMutationAdmission).admission?.workspaceGeneration;
+}
 
 export type RoutingWiringServices = {
   db: Database;
@@ -506,12 +520,15 @@ function afterPersistableHomeMutation(
     }
     if (outcome === "resolved" && retainedProcess) {
       try {
-        await retainWorkspaceMutationProcess(services.db, {
+        await retainWorkspaceProviderCommand(services.db, {
           accountId: fence.accountId,
           workspaceId: ids.workspaceId,
           sessionId: ids.sessionId,
           processId: retainedProcess.id,
           providerSessionId: retainedProcess.providerSessionId,
+          ...(retainedProcess.providerCommand
+            ? { providerCommand: retainedProcess.providerCommand }
+            : {}),
           admissionId: exactAdmission.id,
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
@@ -1009,6 +1026,18 @@ export function wrapTurnBoxWithRouting(
     },
     resolveActiveBackend: resolver,
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    providerCommandHandle: admittedCommandHandle,
+    ...(ids.workspaceMutationFence
+      ? {
+          providerCommandPersistence: (process: RoutingRetainedProcess) =>
+            retainedProviderCommandPersistence(db, {
+              accountId: ids.workspaceMutationFence!.accountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              processId: process.id,
+            }),
+        }
+      : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
@@ -1248,6 +1277,18 @@ export function wrapLazyTurnBoxWithRouting(
     },
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(args.onFirstOperation ? { onFirstOperation: args.onFirstOperation } : {}),
+    providerCommandHandle: admittedCommandHandle,
+    ...(ids.workspaceMutationFence
+      ? {
+          providerCommandPersistence: (process: RoutingRetainedProcess) =>
+            retainedProviderCommandPersistence(db, {
+              accountId: ids.workspaceMutationFence!.accountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              processId: process.id,
+            }),
+        }
+      : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

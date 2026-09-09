@@ -411,9 +411,27 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 }
 
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
-  const tableRef = useRef<HTMLTableElement | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    const table = tableRef.current;
+    if (!wrapper?.closest("[data-og-wide-table-message]") || !table) return;
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    // Ordinary tables remain usable even if this optional layout chunk fails.
+    void import("./markdown-table-layout")
+      .then(({ observeMarkdownTableLayout }) => {
+        if (!disposed) cleanup = observeMarkdownTableLayout(wrapper, table);
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [children]);
   return (
-    <div className="group/copy relative mt-3 max-w-full first:mt-0">
+    <div ref={wrapperRef} className="group/copy relative mt-3 max-w-full first:mt-0">
       <div className="pointer-events-none absolute top-0 right-0 z-10">
         <div className="pointer-events-auto">
           <CopyButton

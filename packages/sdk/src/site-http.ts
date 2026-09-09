@@ -21,7 +21,8 @@ export function isSiteHttpRequest(value: unknown): value is SiteHttpRequest {
     v.type === SITE_HTTP &&
     typeof v.requestId === "string" &&
     typeof v.path === "string" &&
-    /^(GET|POST|PUT|PATCH|DELETE)$/u.test(v.method) &&
+    typeof v.method === "string" &&
+    /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(v.method) &&
     (v.body === undefined || typeof v.body === "string") &&
     Array.isArray(v.headers) &&
     v.headers.every(
