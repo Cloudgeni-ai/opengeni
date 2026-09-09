@@ -34,6 +34,7 @@ import {
   createKnowledgeMemory,
   getKnowledgeMemory,
   listKnowledgeMemories,
+  resolveSessionMemoryAgentScope,
   updateKnowledgeMemory,
   searchWorkspaceMemories,
 } from "@opengeni/db";
@@ -1001,6 +1002,16 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
       const attemptId =
         typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
+      // A session-bound caller reads Memory through its frozen selector
+      // (migration 0427); a missing row resolves to no Memory tools.
+      const memory =
+        sessionId !== undefined
+          ? ((await resolveSessionMemoryAgentScope(db, workspaceId, sessionId, grant.metadata)) ?? {
+              mode: "off" as const,
+              userSubjectId: null,
+              rootSessionId: null,
+            })
+          : null;
       const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
       const server = buildDocumentsMcpServer(
         db,
@@ -1011,6 +1022,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           createdBySessionId: sessionId,
           attemptId,
           initiatingSubjectId: grant.subjectId,
+          memory,
         },
       );
       await server.connect(transport);

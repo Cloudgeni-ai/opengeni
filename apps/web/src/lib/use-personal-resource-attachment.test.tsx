@@ -294,27 +294,21 @@ describe("usePersonalResourceAttachment", () => {
     );
     await flush();
     expect(hook.result.current.selected.resourceCount).toBe(1);
-    expect(hook.result.current.intent?.mode).toBe("once");
-    const originalIntent = hook.result.current.intent;
-    await actRun(() => hook.result.current.setMode("session"));
     expect(hook.result.current.intent?.mode).toBe("session");
-    expect(originalIntent?.mode).toBe("once");
     expect(hook.result.current.requiresDecision).toBe(false);
     const acceptedIntent = hook.result.current.intent!;
     const acceptedCallback = hook.result.current.onAccepted;
     await actRun(() => acceptedCallback({ personalResourceAttachment: acceptedIntent }));
     await flush();
-    expect(hook.result.current.intent?.mode).toBe("once");
+    expect(hook.result.current.intent?.mode).toBe("session");
+    expect(hook.result.current.notice).toBeNull();
     expect(acceptedIntent.mode).toBe("session");
-    await actRun(() => hook.result.current.setMode("session"));
     await actRun(() =>
       hook.result.current.onAccepted({ personalResourceAttachment: acceptedIntent }),
     );
     await flush();
     expect(hook.result.current.intent?.mode).toBe("session");
     const delayedIntent = hook.result.current.intent!;
-    await actRun(() => hook.result.current.setMode("once"));
-    await actRun(() => hook.result.current.setMode("session"));
     await actRun(() =>
       hook.result.current.onAccepted({ personalResourceAttachment: delayedIntent }),
     );
@@ -374,7 +368,7 @@ describe("usePersonalResourceAttachment", () => {
     ]);
     expect(hook.result.current.selected.resourceCount).toBe(1);
     expect(hook.result.current.requiresDecision).toBe(false);
-    expect(hook.result.current.intent?.mode).toBe("once");
+    expect(hook.result.current.intent?.mode).toBe("session");
     await hook.unmount();
   });
 
@@ -444,7 +438,7 @@ describe("usePersonalResourceAttachment", () => {
     );
     await flush();
     expect(sessionReloads).toBe(1);
-    expect(hook.result.current.mode).toBe("once");
+    expect(hook.result.current.mode).toBe("session");
     expect(hook.result.current.intent).toBeUndefined();
     expect(hook.result.current.refreshing).toBe(true);
     expect(hook.result.current.requiresDecision).toBe(true);
@@ -458,9 +452,9 @@ describe("usePersonalResourceAttachment", () => {
 
     await actRun(() => resolveUpdatedCatalog([variableSet()]));
     await flush();
-    expect(hook.result.current.mode).toBe("once");
+    expect(hook.result.current.mode).toBe("session");
     expect(hook.result.current.intent).toMatchObject({
-      mode: "once",
+      mode: "session",
       expectedAuthorityEpoch: 4,
     });
     expect(hook.result.current.refreshing).toBe(false);
@@ -601,7 +595,7 @@ describe("usePersonalResourceAttachment", () => {
     await hook.unmount();
   });
 
-  test("a selected personal Connected Machine automatically uses message-only authority", async () => {
+  test("a selected personal Connected Machine automatically authorizes ongoing work", async () => {
     const enrollmentId = "99999999-9999-4999-8999-999999999999";
     const client = {
       listVariableSets: async () => [],
@@ -654,7 +648,7 @@ describe("usePersonalResourceAttachment", () => {
     ]);
     expect(hook.result.current.requiresDecision).toBe(false);
     expect(hook.result.current.intent).toMatchObject({
-      mode: "once",
+      mode: "session",
       workspaceSharedAcknowledged: true,
     });
     await hook.unmount();
@@ -715,7 +709,7 @@ describe("usePersonalResourceAttachment", () => {
       expect(hook.result.current.selected.resourceCount).toBe(1);
       expect(hook.result.current.selected.personalResourceCount).toBe(1);
       expect(hook.result.current.requiresDecision).toBe(false);
-      expect(hook.result.current.intent?.mode).toBe("once");
+      expect(hook.result.current.intent?.mode).toBe("session");
       await hook.unmount();
     });
 
@@ -898,7 +892,7 @@ describe("usePersonalResourceAttachment", () => {
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.selected.resourceCount).toBe(1);
       expect(hook.result.current.requiresDecision).toBe(false);
-      expect(hook.result.current.intent?.mode).toBe("once");
+      expect(hook.result.current.intent?.mode).toBe("session");
       await hook.unmount();
     });
   }
@@ -939,7 +933,7 @@ describe("usePersonalResourceAttachment", () => {
 
     await hook.rerender({ enabled: true });
     await flush();
-    expect(hook.result.current.mode).toBe("once");
+    expect(hook.result.current.mode).toBe("session");
     expect(hook.result.current.requiresDecision).toBe(false);
     await hook.unmount();
   });

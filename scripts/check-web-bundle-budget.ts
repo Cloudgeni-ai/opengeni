@@ -452,7 +452,20 @@ const effectiveBudgets = {
   // entry points merged with 380bba5e6 measure 2,326,478 raw / 649,427 gzip
   // bytes on macOS/arm64.
   // Keep the established whole-KiB headroom and gzip platform-skew allowance.
-  directSessionRaw: Math.max(budgets.directSessionRaw, wholeKibEnvelope(2_326_478)),
+  // Chat integration against main 8e0bf0d28 on Bun 1.3.14 macOS/arm64:
+  // base 2,329,705 raw / 650,067 gzip; integrated 2,333,912 / 651,444.
+  // Organization-session SDK methods and the explicit Site route allowlist
+  // stay in the shared graph; the chat UI remains outside it. Both trees have
+  // 31 direct-session files and identical CSS. Bound only this measured delta
+  // with the existing raw headroom and gzip platform-skew policy.
+  directSessionRaw: Math.max(
+    budgets.directSessionRaw,
+    wholeKibEnvelope(2_326_478),
+    wholeKibEnvelope(2_333_912),
+    // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
+    // Restore the existing whole-KiB headroom; all other caps stay unchanged.
+    wholeKibEnvelope(2_335_755),
+  ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -478,6 +491,17 @@ const effectiveBudgets = {
     wholeKibEnvelope(647_413, 1.5 * kib),
     // Merged 380bba5e6 model/context UI: 649,427 gzip bytes locally.
     wholeKibEnvelope(649_427, 1.5 * kib),
+    wholeKibEnvelope(651_444, 1.5 * kib),
+    // Timeline-annotation UX (grouped composer chip + numbered
+    // MessageTimeline badges) plus the first current-main merge's
+    // unified-gateway rebound of this same graph (170045166): 652,195
+    // configured gzip. Keep this envelope so the annotation graph is
+    // not judged against `d06450ca3`'s smaller gzip pin.
+    wholeKibEnvelope(652_195, 1.5 * kib),
+    // Merged current main a7a60271a plus annotation UX: 653,717 gzip on
+    // Linux/x64 Bun 1.4. Restore the established 1.5 KiB platform-skew
+    // envelope; all other caps stay unchanged.
+    wholeKibEnvelope(653_717, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

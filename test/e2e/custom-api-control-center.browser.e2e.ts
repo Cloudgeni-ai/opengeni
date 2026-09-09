@@ -293,9 +293,8 @@ describe("custom API control center browser acceptance", () => {
       await loading.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "domcontentloaded",
       });
-      const refresh = loading.getByRole("button", { name: "Refresh", exact: true });
-      await expectVisible(refresh);
-      expect(await refresh.isDisabled()).toBe(true);
+      await expectVisible(loading.locator("[data-capability-catalog-skeleton]"));
+      expect(await loading.getByRole("button", { name: "Refresh", exact: true }).count()).toBe(0);
       await loading.screenshot({ path: `${evidenceDir}pass-5c-loading.png`, fullPage: true });
     } finally {
       await context.close();

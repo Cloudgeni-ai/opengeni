@@ -37,9 +37,12 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  grantHasAgentAttemptAuthority,
   requireAccessGrant,
   requireLiveAgentAttemptAuthorization,
+  requireSessionAuthorization,
   SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -440,9 +443,40 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  // These two retained-screenshot routes are registered before the session
+  // route module, so its `/sessions/:sessionId/*` authorization middleware
+  // does not cover them: an agent attempt must pass the same core seam here
+  // (private sessions, Slack ownership, and the 0426 agent-access scope) so a
+  // known artifact id cannot read into a tree the attempt may not reach.
+  const requireAgentSessionAccess = async (
+    c: Context,
+    grant: Awaited<ReturnType<typeof requireAccessGrant>>,
+  ): Promise<void> => {
+    if (!grantHasAgentAttemptAuthority(grant)) return;
+    try {
+      await requireSessionAuthorization(deps, grant, {
+        sessionId: c.req.param("sessionId") ?? "",
+        operation: "session.read",
+        surface: "http",
+      });
+    } catch (error) {
+      if (error instanceof SessionAuthorizationDeniedError) {
+        throw new HTTPException(404, { message: "session not found", cause: error });
+      }
+      if (error instanceof SessionAuthorizationUnavailableError) {
+        throw new HTTPException(503, {
+          message: "session authorization is unavailable",
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  };
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+    await requireAgentSessionAccess(c, grant);
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
     const artifact = await getRetainedScreenshotArtifact(
       db,
@@ -460,7 +494,8 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId/content",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "files:read");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+      await requireAgentSessionAccess(c, grant);
       const artifactId = retainedArtifactId(c.req.param("artifactId"));
       const artifact = await getRetainedScreenshotArtifact(
         db,

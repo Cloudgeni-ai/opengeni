@@ -1,3 +1,4 @@
+import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
@@ -158,6 +159,13 @@ const NativeConnectSetup = lazy(() =>
 const SessionFeedback = lazy(() =>
   import("@/components/feedback").then((module) => ({ default: module.SessionFeedback })),
 );
+const MessageForkDialog = lazy(() =>
+  import("@/components/session/session-tenancy-control").then((module) => ({
+    default: module.SessionTenancyRouteControl,
+  })),
+);
+
+const MessageActions = lazy(() => import("@/components/session/message-actions"));
 
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
@@ -217,6 +225,7 @@ export function SessionRoute({
   const {
     events,
     sessionStatus,
+    sessionStatusSequence,
     connectionState,
     initialLoading,
     hasOlder,
@@ -275,11 +284,15 @@ export function SessionRoute({
       sessionSeed
         ? {
             ...sessionSeed,
-            status: sessionStatus ?? sessionSeed.status,
+            // Old idle events must not overwrite a fresh queued/claimed detail read.
+            status:
+              (sessionStatusSequence ?? 0) > sessionSeed.lastSequence
+                ? (sessionStatus ?? sessionSeed.status)
+                : sessionSeed.status,
             effectiveControl: queue.effectiveControl ?? sessionSeed.effectiveControl,
           }
         : null,
-    [queue.effectiveControl, sessionSeed, sessionStatus],
+    [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
@@ -1870,6 +1883,74 @@ function SessionChatPane(props: {
     ],
   );
 
+  const [forkEventId, setForkEventId] = useState<string | null>(null);
+  const [turnRatings, setTurnRatings] = useState<Record<string, "positive" | "negative">>({});
+  const mayRate = hasWorkspacePermission(
+    context.accessContext,
+    props.session.workspaceId,
+    "sessions:create",
+  );
+  useEffect(() => {
+    setTurnRatings({});
+    setForkEventId(null);
+    if (!mayRate) return;
+    return loadSessionFeedback(
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      ({ feedback }) => {
+        const ratings: Record<string, "positive" | "negative"> = {};
+        for (const entry of feedback) {
+          if (entry.turnId && entry.sentiment && !ratings[entry.turnId])
+            ratings[entry.turnId] = entry.sentiment;
+        }
+        setTurnRatings((saved) => ({ ...ratings, ...saved }));
+      },
+    );
+  }, [
+    context.client,
+    props.session.workspaceId,
+    props.session.id,
+    mayRate,
+    context.accessContext.subjectId,
+  ]);
+  const mayForkMessage =
+    context.clientConfig.auth.mode === "managedSession" &&
+    context.authSession !== null &&
+    Boolean(props.session.tenancy) &&
+    mayRate;
+  const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
+    setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
+  }, []);
+  const renderMessageActions = useCallback(
+    (item: AgentMessageItem | UserMessageItem) => (
+      <Suspense fallback={null}>
+        <MessageActions
+          item={item}
+          client={context.client}
+          workspaceId={props.session.workspaceId}
+          sessionId={props.session.id}
+          mayRate={mayRate}
+          mayFork={mayForkMessage}
+          savedSentiment={
+            item.kind === "agent-message" && item.turnId ? (turnRatings[item.turnId] ?? null) : null
+          }
+          onRated={onMessageRated}
+          onFork={setForkEventId}
+        />
+      </Suspense>
+    ),
+    [
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      mayRate,
+      mayForkMessage,
+      turnRatings,
+      onMessageRated,
+    ],
+  );
+
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
@@ -1969,7 +2050,10 @@ function SessionChatPane(props: {
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
+              renderMessageActions={renderMessageActions}
               onAnnotate={composer.addAnnotation}
+              draftAnnotations={composer.annotations}
+              onDraftAnnotationSelect={composer.requestAnnotationReview}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
@@ -2048,17 +2132,14 @@ function SessionChatPane(props: {
         </>
       )}
 
-      {hasWorkspacePermission(
-        context.accessContext,
-        props.session.workspaceId,
-        "sessions:create",
-      ) ? (
+      {forkEventId ? (
         <Suspense fallback={null}>
-          <SessionFeedback
-            key={props.session.id}
-            client={context.client}
-            workspaceId={props.session.workspaceId}
-            sessionId={props.session.id}
+          <MessageForkDialog
+            key={forkEventId}
+            session={props.session}
+            events={props.events}
+            sourceEventId={forkEventId}
+            onForkClose={() => setForkEventId(null)}
           />
         </Suspense>
       ) : null}

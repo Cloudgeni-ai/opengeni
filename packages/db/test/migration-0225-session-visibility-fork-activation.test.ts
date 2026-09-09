@@ -416,6 +416,7 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(Array.from(functions)).toEqual([
       { name: "fork_session_content", securityDefiner: true },
       { name: "fork_session_content", securityDefiner: true },
+      { name: "fork_session_content", securityDefiner: true },
       { name: "transition_session_visibility", securityDefiner: true },
     ]);
     const [constraint] = await shared.admin<Array<{ definition: string }>>`

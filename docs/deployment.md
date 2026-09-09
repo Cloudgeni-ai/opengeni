@@ -1,9 +1,9 @@
 # Deployment
 
-### Host MCP, native-link and Connect authority migrations (0432–0445)
+### Host MCP, native-link and Connect authority migrations (0437–0445)
 
-`0432_host_mcp_binding_registry.sql`, `0433_host_mcp_delegations.sql`, and
-`0434_host_mcp_turn_authorities.sql` introduce the registry and direct-turn contract.
+`0437_host_mcp_binding_registry.sql`, `0438_host_mcp_delegations.sql`, and
+`0439_host_mcp_turn_authorities.sql` introduce the registry and direct-turn contract.
 Migrations 0435–0437 extend it with exact causal continuation, immutable task
 revision selections, and guarded child inheritance.
 Migrations 0438–0441 add optional native consent, immutable linked-work provenance,
@@ -32,7 +32,7 @@ API and SDK; direct human starts explicitly select grants for atomic
 initial-turn capture. Worker runtime
 validation requires an exact captured authority snapshot and denies missing records.
 Existing inline credentials remain unchanged; durable renewal is still opt-in.
-Migration 0434 adds direct-turn snapshot storage with a canonical insert guard
+Migration 0439 adds direct-turn snapshot storage with a canonical insert guard
 and SELECT/INSERT-only application privileges. Its binding/delegation foreign
 keys prevent deleting referenced metadata while accepted work remains. Internal
 capture is reached through verified direct-create admission, gated by the host
@@ -56,7 +56,15 @@ mutation.
 
 ## Organization-scoped external workspace cutover
 
-Migration `0426_organization_scoped_external_workspaces.sql` is maintenance-only.
+Migration `0431_organization_scoped_external_workspaces.sql` is maintenance-only.
+The combined embedding cutover includes `0451_canonical_session_scope_subject.sql`:
+drain every old API/control-worker/turn-worker database login, provide the complete
+application-role list, and start only the matching release. Do not restart old
+label-authority writers. The new canonical scope column is nullable for old
+sessions; no user is inferred from unverified historical end-user labels.
+Historical session-scoped Memory rows remain stored, but their old session
+selector reads as `off`; new requests must use workspace/user/off and task notes
+for task-local data. Do not backfill private rows into workspace Memory.
 Stop every old API, control worker, and turn worker, and supply the exact runtime
 database login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`.
 The migration checks those sessions before and after its workspace lock, replaces
@@ -66,7 +74,7 @@ Existing workspace IDs and rows are preserved. After commit, do not restart an
 old binary: its global `ON CONFLICT` target no longer matches the database.
 Rollback requires a reviewed database restore or forward repair, not an old image.
 
-Migration `0427_durable_connect_attempts.sql` adds actor-scoped setup state and
+Migration `0432_durable_connect_attempts.sql` adds actor-scoped setup state and
 changes the exact FORCE-RLS/runtime table contract. Drain the same complete
 API/worker role list, apply it, then run `db:provision-roles` for the matching
 runtime role. Do not restart an older binary after this cutover. Attempt state
@@ -76,10 +84,10 @@ requires reconciliation. Actor-local creation prunes at most 100 attempts older
 than 30 days after expiry, including their setup idempotency receipts, but never
 deletes the associated Connection.
 
-Migration `0428_external_identity_provisioning.sql` requires the same maintenance
+Migration `0433_external_identity_provisioning.sql` requires the same maintenance
 drain and matching role provisioning. Migrations
-`0429_external_workspace_member_removal.sql` and
-`0430_external_identity_membership_lifecycle.sql` are rolling extensions of the
+`0434_external_workspace_member_removal.sql` and
+`0435_external_identity_membership_lifecycle.sql` are rolling extensions of the
 existing lifecycle routines. The first adds live-key external-member removal;
 the second adds explicit service attribution to immutable organization lifecycle
 history and synchronizes external admission generations with member transitions.
@@ -89,7 +97,7 @@ transitions require explicit `account:admin`, and reactivation does not restore
 revoked memberships or durable grants. Include the nullable native actor and
 separate service subject when projecting lifecycle audit records.
 
-Migration `0431_external_owning_user_authority.sql` adds persisted external-owner
+Migration `0436_external_owning_user_authority.sql` adds persisted external-owner
 consistency checks to the existing self-membership and private-create routines.
 It does not activate private sessions: platform readiness and shared-workspace
 organization settings still apply. Pair it with the API's dedicated external
@@ -3167,3 +3175,13 @@ Migration `0425_feedback_submissions.sql` extends the exact runtime table/privil
 contract. Stop old API and both worker types, migrate, run `db:provision-roles`,
 and start the feedback-aware binary. Do not restart an older binary afterward.
 See [Feedback](feedback.md) for API, privacy, and retention behavior.
+
+## Message-point fork activation
+
+Migration `0429_message_boundary_session_forks.sql` adds the exact runtime
+routine for message-boundary forks. Stop API, control-worker, and turn-worker
+processes before migrating, run `db:provision-roles`, and start only the new
+binary afterward. Do not use an older binary as the rollback image after this
+routine contract changes. Whole-session forks retain their existing signature.
+See [Forking at a message](organization-tenancy.md#forking-at-a-message) for
+boundary validation and compacted-history limitations.

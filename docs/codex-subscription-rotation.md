@@ -93,7 +93,8 @@ relevant locks are acquired.
    definitive-failure settlement reuse its active pointer, rotation state,
    effective strategy, source, and session pin/last-used state while re-reading
    current account health and cooldowns. Later workspace/session policy changes
-   therefore do not change the constraints of an already accepted logical turn.
+   therefore do not change the constraints of an already accepted logical turn,
+   except an explicit in-session account switch while the turn is capacity-blocked.
    Pre-source snapshots remain readable and use their historical live-source
    behavior; all newly accepted turns persist the source explicitly.
 
@@ -103,8 +104,18 @@ awaiting action, recovering, or in `waiting_capacity`, or while a credential
 lease is still live. This prevents an accepted capacity waiter from resuming
 against a different workspace or organization pool; cancel or finish that
 turn before changing its effective source. Same-source pointer, rotation, and
-pin mutations may wake a waiter for re-evaluation, but they never rewrite its
-accepted snapshot.
+background pin mutations may wake a waiter for re-evaluation, but they never rewrite its
+accepted snapshot. The explicit session account-switch command is different:
+under the allocator/session/turn/waiter locks, it revises a capacity-blocked
+turn's account selection and records `codex.account.selection.changed` in the
+same transaction as the session preference and wake obligation. The attempt
+must be closed, with the matching waiting generation. Auto uses current
+rotation defaults within the same accepted pool; a manual selection overrides
+the old pin. Initiator, account authority, model, history, and turn identity stay
+unchanged. Reconciliation, lease reacquisition, and failure recovery all read
+the revised selection. Running attempts retain their lease and use the new
+preference only on a subsequent turn. Selecting the same preference again is
+allowed, including recovery of waits created before this override existed.
 
 Stored legacy strategy values are normalized at every worker read to the
 effective `sharded` behavior. The old column values and API input compatibility
@@ -406,9 +417,11 @@ selected account, the quarantined holder arms the same durable capacity waiter
 used by proactive admission. Quota/rate-limit cooldowns, reconnects that leave
 the effective source unchanged, status repairs, allocator changes, and
 same-source rotation-policy writes wake that exact turn for a recheck. The
-accepted source, active pointer, rotation setting, and session pin remain
-immutable for that turn, so a policy write that does not make the accepted pool
-eligible leaves it waiting. An effective-source change is fenced while the
+accepted source remains immutable. Background active-pointer, rotation-setting,
+and pin writes do not revise accepted turn selection, so a background policy
+write that does not make the accepted pool eligible leaves it waiting. Explicit
+in-session switching can override the blocked selection as described above.
+An effective-source change is fenced while the
 turn/waiter is live; cancel or finish it before changing source. An
 auth/forbidden refusal is terminal only when the pool is truly empty or has no
 allocatable account to wait for.
@@ -591,3 +604,42 @@ the presence of shadow records alone is not evidence of adaptive benefit.
 - Production release proof must additionally show concurrent live turns selecting
   distinct eligible credential ids and one controlled exhausted credential
   recovering on another id without a duplicate turn/message.
+
+### Conversation recency and historical repair
+
+Workspace pool changes, automatic policy assignments, and last-used credential
+bookkeeping preserve session recency. Manual in-session account switches remain
+explicit session activity. Migration 0426 fixes the bulk reset for old and new
+API binaries; deploy the matching worker binary to fix automatic assignment and
+last-used writes too.
+
+Historical timestamps cannot be reconstructed exactly from events alone: explicit
+session edits may have no event, retention may have removed evidence, and the
+workspace preference timestamp is not a reliable record of previous bulk resets.
+Never blanket-backfill cleared-affinity sessions. An operator must first confirm
+an affected set and independently review the proposed timestamp for each session.
+Use the ordinary configured database identity and tenant scope; the tool grants
+no additional access and does not bypass private-session RLS.
+
+For at most 50 explicit idle sessions, generate a private manifest (no writes):
+
+```bash
+bun scripts/session-recency-repair.ts --workspace-id <uuid> \
+  --session-ids <uuid>,<uuid> --evidence "confirmed incident evidence" > /private/path/recency-plan.json
+```
+
+The proposal is the latest retained semantic event, turn start/finish, or creation
+time. It includes title events and excludes the same raw delta types as ordinary
+activity tracking. Review the manifest against incident evidence before applying:
+
+```bash
+bun scripts/session-recency-repair.ts --apply /private/path/recency-plan.json
+```
+
+Apply rechecks the exact microsecond timestamp, activity revision, durable event
+cursor, idle state, and retained reconstruction under canonical session/cursor
+locks. Changed candidates are skipped. Each successful repair advances the normal
+activity revision (so incremental discovery sees it once), preserves event truth,
+and restores only the timestamp. Save the result beside the manifest. Replaying
+a successfully applied plan is a no-op. No deployment or historical write is
+performed merely by installing the migration.

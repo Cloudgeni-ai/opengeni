@@ -139,6 +139,61 @@ describe("bm25RankTools", () => {
   });
 });
 
+describe("searchToolPool disclosure bounds", () => {
+  test("keyword search backfills beyond the original rank cutoff", () => {
+    const oversized = connectorTool("first", "Find records");
+    const small = connectorTool("second", "Find records");
+    if (oversized.type !== "function") throw new Error("expected a function tool");
+    oversized.parameters = {
+      type: "object",
+      properties: {},
+      description: "x".repeat(130 * 1024),
+    } as never;
+    expect(bm25RankTools([oversized, small], "Find records", 1)).toEqual([oversized]);
+    expect(searchToolPool([oversized, small], { query: "Find records", limit: 1 })).toEqual([
+      small,
+    ]);
+  });
+
+  test("exact disclosure bypasses ranking without admitting unknown tools", () => {
+    const wanted = connectorTool("vault_fetch", "Read an item");
+    const unrelated = connectorTool("other", "Search legal agreements");
+    expect(
+      searchToolPool([unrelated, wanted], {
+        query: "",
+        names: ["codex_apps__vault_fetch", "not_authorized"],
+      }),
+    ).toEqual([wanted]);
+    expect(searchToolPool([unrelated], { query: "legal", names: ["not_authorized"] })).toEqual([]);
+  });
+
+  test("backfills rank-limited results after rejecting an oversized definition", () => {
+    const oversized = connectorTool("oversized", "x".repeat(130 * 1024));
+    const small = connectorTool("small", "Read an item");
+    expect(
+      searchToolPool([oversized, small], {
+        query: "",
+        names: ["codex_apps__oversized", "codex_apps__small"],
+        limit: 1,
+      }),
+    ).toEqual([small]);
+  });
+
+  test("backfills smaller definitions after aggregate overflow without exceeding the budget", () => {
+    const large = Array.from({ length: 3 }, (_, i) =>
+      connectorTool(`large_${i}`, "x".repeat(100 * 1024)),
+    );
+    const small = connectorTool("small", "Read an item");
+    const pool = [...large, small];
+    const result = searchToolPool(pool, {
+      query: "",
+      names: pool.map((t) => (t as any).name),
+      limit: 4,
+    });
+    expect(result).toEqual([large[0], large[1], small]);
+  });
+});
+
 describe("renderSearchToolDescription", () => {
   test("lists the account's live connector sources, sorted (codex-rs parity)", () => {
     const description = renderSearchToolDescription(

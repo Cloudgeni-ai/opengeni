@@ -30,6 +30,8 @@ export type UseSessionEventsResult = {
   timeline: TimelineItem[];
   /** Latest session status observed in the event log, if any. */
   sessionStatus: SessionStatus | null;
+  /** Sequence of the retained status projection, including events evicted from the window. */
+  sessionStatusSequence?: number;
   connectionState: SessionEventsConnectionState;
   /** Highest sequence seen so far (0 before the first event). */
   lastSequence: number;
@@ -875,6 +877,7 @@ export function useSessionEvents(
     events: visibleEvents,
     timeline,
     sessionStatus: identityMatches ? sessionStatusProjection : null,
+    sessionStatusSequence: identityMatches ? sessionStatusRef.current.sequence : 0,
     connectionState: identityMatches ? connectionState : "idle",
     lastSequence: identityMatches ? lastSequenceRef.current : after,
     windowBytes: identityMatches ? eventWindow.bytes : 2,

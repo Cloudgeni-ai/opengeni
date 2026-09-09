@@ -72,10 +72,10 @@ function RailBody() {
     );
   };
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface/40 pt-[env(safe-area-inset-top)]">
+    <div className="isolate flex h-full min-h-0 flex-col overflow-hidden bg-surface/40 pt-[env(safe-area-inset-top)]">
       <div
         data-rail-scroll-viewport
-        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
+        className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
           {/* Brand */}
@@ -203,7 +203,12 @@ function RailBody() {
           )}
         </div>
       </div>
-      <div className="shrink-0 border-t border-border pt-2">
+      {/* Keep the persistent controls opaque and above the scroll viewport,
+          including session-row actions with their own stacking levels. */}
+      <div
+        data-rail-footer
+        className="relative z-10 shrink-0 border-t border-border bg-surface pt-2"
+      >
         <WorkspaceNav />
         <RailFooter />
       </div>

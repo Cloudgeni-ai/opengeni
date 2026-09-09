@@ -16,7 +16,11 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { CommandReadResult, type AccessGrant } from "@opengeni/contracts";
+import {
+  CommandReadResult,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { SESSION_EVENT_MCP_MAX_BYTES } from "../src/mcp/session-view";
@@ -223,7 +227,12 @@ beforeAll(async () => {
   // session whose pending machine input the wait also watches.
   grant = {
     ...workspaceGrant,
-    metadata: { ...(workspaceGrant.metadata ?? {}), sessionId: selfSessionId },
+    metadata: {
+      ...(workspaceGrant.metadata ?? {}),
+      sessionId: selfSessionId,
+      // A session-scoped grant registers only its signed selection.
+      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    },
   };
   mcp = buildOpenGeniMcpServer(fakeDeps(bus), grant);
 }, 180_000);

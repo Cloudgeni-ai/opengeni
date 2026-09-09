@@ -3,9 +3,12 @@ import {
   SessionAuthorizationDecision,
   SessionAuthorizationListScope,
   type AccessGrant,
+  type SessionAgentAccess,
+  type SessionAgentAccessViewer,
   type SessionAuthorizationOperation,
   type SessionAuthorizationSurface,
   type SessionAuthorizationTarget,
+  type SessionScopeSubjectId,
 } from "@opengeni/contracts";
 import {
   getSessionAuthorityProjection,
@@ -48,17 +51,86 @@ export type ResolvedSessionAuthorization = {
   reauthorizeAfterMs: number | null;
 };
 
+/** The frozen agent-access facts of one session, as the pairwise rule sees them. */
+export type SessionAgentAccessFacts = {
+  agentAccess: SessionAgentAccess;
+  scopeSubjectId: SessionScopeSubjectId | null;
+};
+
 type ResolvedSessionAuthorizationActor = {
   actor: SessionAuthorizationActor;
   callerParentSessionId: string | null;
+  /** The caller session's own access facts; null for non-agent principals. */
+  callerAccess: SessionAgentAccessFacts | null;
 };
+
+function sameScopeSubject(
+  left: SessionScopeSubjectId | null,
+  right: SessionScopeSubjectId | null,
+): boolean {
+  return left !== null && right !== null && left === right;
+}
+
+/**
+ * The agent-to-agent reach rule (migration 0427) for one caller/target pair
+ * that live in DIFFERENT root trees. A caller always keeps its own tree, so
+ * this is never consulted for same-root access. The most restrictive side
+ * wins: a `session` side denies everything; a `user` side requires both
+ * sessions to carry the same non-null canonical user; two `workspace` sides
+ * are today's behaviour. Humans and API keys never pass through here.
+ */
+export function agentAccessPermitsCrossTreeAccess(
+  caller: SessionAgentAccessFacts,
+  target: SessionAgentAccessFacts,
+): boolean {
+  if (caller.agentAccess === "session" || target.agentAccess === "session") return false;
+  if (caller.agentAccess === "user" || target.agentAccess === "user") {
+    return sameScopeSubject(caller.scopeSubjectId, target.scopeSubjectId);
+  }
+  return true;
+}
+
+/**
+ * The in-database list scope for one calling attempt. A `session` caller is
+ * pinned to its own root tree when the host does not narrow it. Every caller
+ * carries the viewer so `sessionAuthorizationScopeFilter` intersects the host
+ * scope with the same pairwise rule in SQL, including for session callers.
+ */
+export function agentAccessListScopeForViewer(
+  viewer: SessionAgentAccessViewer,
+  hostScope: SessionAuthorizationListScope | null = null,
+): SessionAuthorizationListScope {
+  if (viewer.agentAccess === "session" && (!hostScope || hostScope.kind === "all")) {
+    return {
+      kind: "scoped",
+      rootSessionIds: [viewer.callerRootSessionId],
+      sessionIds: [],
+      agentAccessViewer: viewer,
+    };
+  }
+  if (!hostScope || hostScope.kind === "all") {
+    return { kind: "all", agentAccessViewer: viewer };
+  }
+  return {
+    kind: "scoped",
+    rootSessionIds: [...new Set(hostScope.rootSessionIds)],
+    sessionIds: [...new Set(hostScope.sessionIds)],
+    agentAccessViewer: viewer,
+  };
+}
 
 type ResolvedSessionAuthorizationTarget = {
   target: SessionAuthorizationTarget;
   parentSessionId: string | null;
 };
 
-function grantHasAgentAttemptAuthority(grant: AccessGrant): boolean {
+/**
+ * Whether a grant acts with live agent-attempt authority: an explicit
+ * `agent_attempt` principal kind, or (for legacy tokens without one) any
+ * worker-signed exact attempt claim. Shared by the session seam and by the
+ * narrowing fences that let a human widen a session an agent may only narrow.
+ */
+export function grantHasAgentAttemptAuthority(grant: AccessGrant): boolean {
   const hasAgentAttemptClaim =
     grant.metadata?.["turnId"] !== undefined ||
     grant.metadata?.["attemptId"] !== undefined ||
@@ -192,6 +264,22 @@ export async function requireSessionAuthorization(
         : actor.callerRootSessionId === target.rootSessionId;
     if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
   }
+  // Agent-access scope (migration 0427): an attempt always keeps its own root
+  // tree; across trees the most restrictive of the caller's and the target's
+  // declared reach wins. Both sides are read from durable session rows, never
+  // from the request, and an embedding-host port cannot widen this.
+  if (actor.kind === "agent_attempt" && target.rootSessionId !== actor.callerRootSessionId) {
+    const callerAccess = resolvedActor.callerAccess;
+    if (
+      !callerAccess ||
+      !agentAccessPermitsCrossTreeAccess(callerAccess, {
+        agentAccess: authority.agentAccess,
+        scopeSubjectId: authority.scopeSubjectId,
+      })
+    ) {
+      throw new SessionAuthorizationDeniedError("forbidden");
+    }
+  }
   if (!port) {
     return {
       actor,
@@ -241,10 +329,20 @@ export async function requireSessionAuthorizationListScope(
   const port = deps.sessionAuthorization;
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   if (!port && !isAgentAttempt) return null;
-  const { actor } = await resolveSessionAuthorizationActor(deps.db, grant);
-  // Standalone agents may retain compact workspace discovery, but only while
-  // the signed caller attempt is still the exact live attempt.
-  if (!port) return null;
+  const { actor, callerAccess } = await resolveSessionAuthorizationActor(deps.db, grant);
+  // Standalone agents retain compact workspace discovery only while the signed
+  // caller attempt is still the exact live attempt, and only within their own
+  // declared agent-access reach (migration 0427). The viewer is derived from
+  // the caller session row and applied as one SQL predicate by every list.
+  const viewer: SessionAgentAccessViewer | null =
+    actor.kind === "agent_attempt" && callerAccess
+      ? {
+          callerRootSessionId: actor.callerRootSessionId,
+          agentAccess: callerAccess.agentAccess,
+          scopeSubjectId: callerAccess.scopeSubjectId,
+        }
+      : null;
+  if (!port) return viewer ? agentAccessListScopeForViewer(viewer) : null;
   let rawScope: unknown;
   try {
     rawScope = await port.resolveListScope({
@@ -260,12 +358,17 @@ export async function requireSessionAuthorizationListScope(
   if (!parsed.success) {
     throw new SessionAuthorizationUnavailableError({ cause: parsed.error });
   }
-  if (parsed.data.kind === "all") return parsed.data;
-  return {
-    kind: "scoped",
-    rootSessionIds: [...new Set(parsed.data.rootSessionIds)],
-    sessionIds: [...new Set(parsed.data.sessionIds)],
-  };
+  // A host never supplies the viewer: OpenGeni resolved it above from durable
+  // state, so a host-returned value is dropped before the intersection.
+  const hostScope: SessionAuthorizationListScope =
+    parsed.data.kind === "all"
+      ? { kind: "all" }
+      : {
+          kind: "scoped",
+          rootSessionIds: [...new Set(parsed.data.rootSessionIds)],
+          sessionIds: [...new Set(parsed.data.sessionIds)],
+        };
+  return viewer ? agentAccessListScopeForViewer(viewer, hostScope) : hostScope;
 }
 
 async function resolveSessionAuthorizationTarget(
@@ -299,6 +402,7 @@ async function resolveSessionAuthorizationActor(
         ...(grant.subjectLabel ? { subjectLabel: grant.subjectLabel } : {}),
       }),
       callerParentSessionId: null,
+      callerAccess: null,
     };
   }
   if (
@@ -341,5 +445,9 @@ async function resolveSessionAuthorizationActor(
         (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
     }),
     callerParentSessionId: callerSession.parentSessionId,
+    callerAccess: {
+      agentAccess: callerSession.agentAccess,
+      scopeSubjectId: callerSession.scopeSubjectId,
+    },
   };
 }

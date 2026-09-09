@@ -59,6 +59,7 @@ const directHotMutatorInventory = [
   "detach_scoped_machine_dependent_sessions(uuid,uuid,uuid)",
   "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
   "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)",
+  "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,uuid)",
   "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",

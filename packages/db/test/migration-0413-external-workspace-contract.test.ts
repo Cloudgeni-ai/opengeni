@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const migration = await readFile(
-  new URL("../drizzle/0426_organization_scoped_external_workspaces.sql", import.meta.url),
+  new URL("../drizzle/0431_organization_scoped_external_workspaces.sql", import.meta.url),
   "utf8",
 );
 

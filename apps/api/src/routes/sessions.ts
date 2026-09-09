@@ -48,6 +48,7 @@ import {
   SessionEventReadMode,
   SessionEventLatestClass,
   SessionEventResultMode,
+  SessionScopeSubjectId,
   SessionEventSemanticClass,
   SessionEventType,
   SessionMcpServerId,
@@ -138,8 +139,7 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  setSessionCodexPinInTransaction,
-  withSessionCodexCapacityMutation,
+  switchSessionCodexAccount,
   setSessionChannel,
   updateSessionVariableSets,
   ChannelNotFoundError,
@@ -692,6 +692,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
         ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
         ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+        ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
         // the list's removal fence must fall back to the organization-membership
@@ -1921,8 +1922,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
   // "auto" clears the pin (the session follows the workspace active pointer); a
-  // uuid pins the session to that specific account. The pin applies to the NEXT
-  // turn (the worker reads it at turn start). 404 when the session or the target
+  // uuid pins the session to that specific account. Overrides a capacity-blocked
+  // turn; a running attempt keeps its account. 404 when the session or the target
   // account id isn't in the workspace.
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1947,15 +1948,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    const mutation = await withSessionCodexCapacityMutation(
-      db,
-      { workspaceId, reason: "codex_manual_session_pin_changed" },
-      async (tx) => {
-        const changed = await setSessionCodexPinInTransaction(tx, workspaceId, sessionId, pinned);
-        return { result: changed, changed };
-      },
-    );
-    const ok = mutation.result;
+    const mutation = await switchSessionCodexAccount(db, {
+      workspaceId,
+      sessionId,
+      credentialId: pinned,
+      subjectId: grant.subjectId,
+    });
+    const ok = mutation.result.changed;
     if (!ok) {
       throw new HTTPException(404, {
         message: "session or codex account not found",
@@ -1981,7 +1980,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             }),
       ),
     );
-    return c.json({ pinned: target === "auto" ? "auto" : target });
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, mutation.result.events);
+    return c.json({
+      pinned: target === "auto" ? "auto" : target,
+      appliedTo: mutation.result.appliedTo,
+    });
   });
 
   // Re-file the session into a workspace channel (rail organization only;
@@ -4737,6 +4740,7 @@ function sessionListQuery(
   updatedBefore: Date | undefined;
   createdFrom: Date | undefined;
   createdBefore: Date | undefined;
+  scopeSubjectId: SessionScopeSubjectId | undefined;
   hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
@@ -4830,6 +4834,23 @@ function sessionListQuery(
   if (createdFrom && createdBefore && createdFrom >= createdBefore) {
     throw new HTTPException(400, { message: "createdFrom must be earlier than createdBefore" });
   }
+  // The opaque end-user label filter is an exact pair: one half alone is a
+  // client error rather than a silently unfiltered list.
+  if (query.endUserSource !== undefined || query.endUserId !== undefined) {
+    throw new HTTPException(400, {
+      message: "Use canonical scopeSubjectId, not an external-user label",
+    });
+  }
+  let scopeSubjectId: SessionScopeSubjectId | undefined;
+  if (query.scopeSubjectId !== undefined) {
+    const parsedEndUser = SessionScopeSubjectId.safeParse(query.scopeSubjectId);
+    if (!parsedEndUser.success) {
+      throw new HTTPException(400, {
+        message: "scopeSubjectId must be a canonical OpenGeni user subject",
+      });
+    }
+    scopeSubjectId = parsedEndUser.data;
+  }
   const hasPageFilters =
     originSiteId !== undefined ||
     channelId !== undefined ||
@@ -4837,7 +4858,8 @@ function sessionListQuery(
     updatedFrom !== undefined ||
     updatedBefore !== undefined ||
     createdFrom !== undefined ||
-    createdBefore !== undefined;
+    createdBefore !== undefined ||
+    scopeSubjectId !== undefined;
   if (pinsOnly && !allowCursor) {
     throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
   }
@@ -4871,6 +4893,7 @@ function sessionListQuery(
     updatedBefore,
     createdFrom,
     createdBefore,
+    scopeSubjectId,
     hasPageFilters,
   };
 }

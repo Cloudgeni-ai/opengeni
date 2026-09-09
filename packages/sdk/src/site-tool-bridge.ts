@@ -29,7 +29,7 @@ export type CreateSiteToolBridgeOptions = {
   requestedTools: readonly ToolGatewayIdentity[];
   callTool: SiteToolCaller;
   isCatalogStale?: (error: unknown) => boolean;
-  /** Optional authenticated host transport for main's bounded Site session API.
+  /** Optional authenticated host transport for the host-bound workspace API.
    * Omit to expose tools only. Site-provided authorization headers are never forwarded. */
   fetchResponse?: (path: string, init: RequestInit) => Promise<Response>;
 };

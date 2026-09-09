@@ -65,7 +65,11 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column input_wait_turn_id uuid,
       add column input_wait_until timestamptz,
       add column input_wait_reason text,
-      add column input_wait_set_at timestamptz`;
+      add column input_wait_set_at timestamptz,
+      add column agent_access text not null default 'workspace',
+      add column end_user_source text,
+      add column end_user_id text,
+      add column memory_scope text not null default 'workspace'`;
     // The current claim adapter also reads timer fields under the workspace
     // fence. These temporary nullable fields are removed before 0420 runs.
     await admin`
@@ -249,7 +253,11 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column input_wait_turn_id,
       drop column input_wait_until,
       drop column input_wait_reason,
-      drop column input_wait_set_at`;
+      drop column input_wait_set_at,
+      drop column agent_access,
+      drop column end_user_source,
+      drop column end_user_id,
+      drop column memory_scope`;
     await migrate(ownerUrl);
     app = openApp();
 

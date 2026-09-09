@@ -37,10 +37,11 @@ only the authenticated principal's general feedback, newest first. Pass
 by the web rating indicator. `limit` is 1-100 (default 50); this is a bounded recent list, not a full export.
 The SDK equivalent is `client.listOwnFeedback(workspaceId, { sessionId, limit })`.
 
-The web sidebar offers **Send feedback**. Session controls open a thumbs-up/down
-form with an optional comment and explicit submission. These rate the whole
-session; SDK callers may attach an exact turn. The UI's current thumb is the
-latest session-level rating returned for the viewer.
+The web sidebar offers **Send feedback**. Completed assistant messages show
+thumbs up/down beside Copy and the timestamp on hover, keyboard focus, or touch.
+The optional-comment form submits the selected reply's exact turn. Messages from
+the same turn share the current rating. The route loads the viewer's recent
+ratings once; it does not fetch separately for every message.
 
 ## Authority and analysis
 

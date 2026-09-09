@@ -66,6 +66,12 @@ shared, even if a source session is private. See
 [`examples/embedded-product`](../../examples/embedded-product/README.md) for the
 runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
+## Conversation UI
+
+Use `SessionConversation` for an existing session, or compose `MessageTimeline`
+and `ChatComposer` with the session hooks. These use the normal SDK through
+your authenticated host routes. For custom or compatible frontends, the backend
+`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
 
 ## Editable Office artifacts
 
@@ -765,6 +771,16 @@ capability document so every surface degrades to a reason instead of crashing.
 These surfaces pull in [optional peer dependencies](#optional-peer-dependencies)
 — install only the ones for surfaces you actually mount.
 
+`SandboxWorkspace` keeps capture-backed file browsing passive, but an explicit
+live-file open acquires a viewer. Failed opens show the connection error and a
+retry that renegotiates the viewer instead of leaving a waking spinner running.
+When composing `SandboxFiles` directly, pass `workspaceError` alongside
+`liveWorkspaceReady` and supply an `onWakeWorkspace` callback that can retry a
+failed negotiation. Complete PNG, JPEG, GIF, and WebP reads render as read-only
+image previews; truncated reads and other binary formats remain non-editable
+notices. Image previews use the existing bounded file-read path and do not
+publish or retain additional files.
+
 ## Connected Machines (`@opengeni/react/machines`)
 
 Bring-your-own-compute UI: the Machines dashboard, per-machine metrics, the
@@ -851,3 +867,9 @@ thinking labels through `messages`, and override payment descriptions through
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image
 compatibility warning only when the selected model cannot view those images.
+
+`MessageTimeline.renderMessageActions(item)` places host-owned controls beside
+Copy and the timestamp for user messages and completed assistant messages.
+The host owns feedback, fork authorization, and mutations; streaming assistant
+messages omit this slot. Use the `group/copy` hover/focus state and preserve
+visible touch targets when styling actions.

@@ -987,7 +987,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's schema. A database frozen immediately after 0353 predates the
     // 0361 Memory materialization table/function and the 0380 company-profile
     // autonomy policy tables/functions, the 0400 model-context snapshot table,
-    // the 0401 setup-delivery transport routines, and the 0422 Codex inventory.
+    // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
+    // and the 0429 message-boundary fork overload.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
@@ -1007,6 +1008,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability get_external_identity_link_reference(uuid, uuid, text) is missing or ambiguous",
       "target-schema runtime capability get_external_identity_link_inventory_references(uuid, uuid[]) is missing or ambiguous",
       "target-schema runtime capability ensure_external_identity(uuid, text, text) is missing or ambiguous",
+      "target-schema runtime capability fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_codex_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",

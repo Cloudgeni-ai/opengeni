@@ -280,6 +280,7 @@ import type {
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
@@ -305,6 +306,7 @@ import type {
   OrganizationRecoveryMutationResponse,
   OrganizationRecoveryOperationCommandRequest,
   OrganizationRecoveryOverview,
+  OrganizationSessionListResponse,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
@@ -379,6 +381,7 @@ import type {
   UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
+  SessionScopeSubjectId,
   SessionEvent,
   SessionEventCompactResult,
   SessionEventCompactResultOptions,
@@ -591,12 +594,14 @@ function sessionListQuery(options: {
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
+  scopeSubjectId?: SessionScopeSubjectId;
 }): Record<string, string> {
-  const { limit, parentSessionId } = options;
+  const { limit, parentSessionId, scopeSubjectId } = options;
   return {
     ...(options.originSiteId ? { originSiteId: options.originSiteId } : {}),
     ...(limit === undefined ? {} : { limit: String(limit) }),
     ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
+    ...(scopeSubjectId === undefined ? {} : { scopeSubjectId }),
   };
 }
 
@@ -605,6 +610,8 @@ export type SessionListPageOptions = {
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
+  /** Only sessions carrying this exact opaque end-user label. */
+  scopeSubjectId?: SessionScopeSubjectId;
   cursor?: string;
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
@@ -1298,6 +1305,8 @@ export class OpenGeniClient {
       limit?: number;
       parentSessionId?: string | null;
       search?: string;
+      /** Only sessions carrying this exact opaque end-user label. */
+      scopeSubjectId?: SessionScopeSubjectId;
     } = {},
   ): Promise<Session[]> {
     // Search and Site filtering use the pin-aware page endpoint. An older API silently
@@ -7616,6 +7625,56 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Organization-wide sessions ----------------------------------------------------------------
+
+  /**
+   * One page of sessions across every shared workspace of the organization the
+   * caller may read (an organization API key, `full` or `read`, or an
+   * organization owner). Each row carries its `workspaceId`; read events,
+   * history, and files through the ordinary workspace methods. Personal
+   * workspaces are never included and private sessions stay invisible.
+   */
+  async listOrganizationSessions(
+    organizationId: string,
+    options: ListOrganizationSessionsOptions = {},
+  ): Promise<OrganizationSessionListResponse> {
+    return await this.requestJson<OrganizationSessionListResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/sessions`,
+      undefined,
+      {
+        ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+        ...(options.scopeSubjectId ? { scopeSubjectId: options.scopeSubjectId } : {}),
+        ...(options.status === undefined ? {} : { status: options.status }),
+      },
+      { signal: options.signal },
+    );
+  }
+
+  /**
+   * Every session `listOrganizationSessions` would return, following
+   * `nextCursor` page by page until the organization is exhausted. A page may
+   * be shorter than `limit` while more pages remain, so callers must not treat
+   * a short page as the end.
+   */
+  async *iterateOrganizationSessions(
+    organizationId: string,
+    options: Omit<ListOrganizationSessionsOptions, "cursor"> = {},
+  ): AsyncGenerator<Session, void, undefined> {
+    let cursor: string | undefined;
+    do {
+      const page: OrganizationSessionListResponse = await this.listOrganizationSessions(
+        organizationId,
+        { ...options, ...(cursor === undefined ? {} : { cursor }) },
+      );
+      for (const session of page.sessions) {
+        yield session;
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+  }
+
   // --- Billing (account-scoped) --------------------------------------------------------------------
 
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
@@ -7868,13 +7927,13 @@ export class OpenGeniClient {
     );
   }
 
-  /** Pin (or unpin via "auto") a session's Codex account. Applies on the next turn. */
+  /** Pin/unpin a Codex account. Overrides a capacity-blocked turn; otherwise applies next turn. */
   async pinSessionCodexAccount(
     workspaceId: string,
     sessionId: string,
     target: string,
-  ): Promise<{ pinned: string }> {
-    return await this.requestJson<{ pinned: string }>(
+  ): Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }> {
+    return await this.requestJson<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
       { target },

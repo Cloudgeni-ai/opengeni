@@ -119,6 +119,8 @@ import {
   requireScheduledTask,
   requireSession,
   searchWorkspaceMemories,
+  memoryWriteScopeForAgentScope,
+  type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
@@ -165,6 +167,10 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import {
+  FIRST_PARTY_TOOL_AUTHORIZATION,
+  type FirstPartyToolAuthorization,
+} from "./first-party-tool-permissions";
 import {
   hasLiteralPermission,
   hasPermission,
@@ -322,6 +328,13 @@ export type McpServerOptions = {
   requestOrigin?: string | null;
   workspaceMemoryEnabled?: boolean | undefined;
   workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
+  /**
+   * The bound session's typed Memory selector (migration 0427), resolved by
+   * the route from the session row. `off` registers no Memory tools; `user`
+   * and `session` read the workspace layer plus their own private layer and
+   * save into that private layer. Omitted/null keeps the workspace layer.
+   */
+  sessionMemory?: MemoryAgentScope | null | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -446,260 +459,6 @@ function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown)
   };
 }
 
-type FirstPartyToolAuthorization = {
-  sessionRequired?: true;
-  allOf?: readonly Permission[];
-  anyOf?: readonly Permission[];
-};
-
-/**
- * Authorization is deliberately complete and separate from visibility. The
- * `satisfies Record` check makes every catalog addition choose an explicit
- * registration predicate before it can compile.
- */
-const FIRST_PARTY_TOOL_AUTHORIZATION = {
-  set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
-  goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
-  wait_for_input: { sessionRequired: true, allOf: ["sessions:control"] },
-  goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_resume: { sessionRequired: true, allOf: ["goals:manage"] },
-  memory_search: { sessionRequired: true, allOf: ["documents:search"] },
-  memory_save: { sessionRequired: true, allOf: ["documents:search"] },
-  memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  preference_registry_summary: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
-  task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
-  task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
-  task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
-  task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
-  work_claim_upsert: { sessionRequired: true, allOf: ["sessions:control"] },
-  work_claim_release: { sessionRequired: true, allOf: ["sessions:control"] },
-  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
-  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  task_note_promote_knowledge: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control"],
-  },
-  task_note_promote_instruction_policy: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  task_note_promote_preference: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  instruction_policy_propose: {
-    sessionRequired: true,
-    allOf: ["documents:search", "workspace:read"],
-  },
-  preference_propose: {
-    sessionRequired: true,
-    allOf: ["documents:search", "workspace:read"],
-  },
-  // Explicit user-directed remember composes task-note evidence with the
-  // governed promotion path, so it needs the union of both permission sets.
-  remember: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  remember_confirm: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  company_profile_propose: {
-    sessionRequired: true,
-    allOf: ["sessions:control", "workspace:read"],
-  },
-  company_profile_confirm: {
-    sessionRequired: true,
-    allOf: ["sessions:control", "workspace:read"],
-  },
-  sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
-  sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
-  sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
-  run_on: { sessionRequired: true, allOf: ["sessions:control"] },
-  sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
-  connected_machine_remove: { allOf: ["enrollments:manage"] },
-  project_list: { allOf: ["sessions:read"] },
-  project_get: { allOf: ["sessions:read"] },
-  project_create: { allOf: ["sessions:create"] },
-  project_update: { allOf: ["sessions:create"] },
-  project_reorder: { allOf: ["sessions:create"] },
-  project_delete: { allOf: ["sessions:create"] },
-  session_set_project: { allOf: ["sessions:control"] },
-  rig_list: { allOf: ["rigs:use"] },
-  rig_get: { allOf: ["rigs:use"] },
-  rig_propose_change: { allOf: ["rigs:use"] },
-  rig_verify: { allOf: ["rigs:use"] },
-  rig_promote: { allOf: ["rigs:manage"] },
-  sessions_list: { allOf: ["sessions:read"] },
-  session_get: { allOf: ["sessions:read"] },
-  session_events: { allOf: ["sessions:read"] },
-  // Blocking wait inside a running turn: the live attempt's own session is the
-  // self target, so the tool exists only for session-scoped grants.
-  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
-  command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
-  command_read: { sessionRequired: true, allOf: ["sessions:read"] },
-  session_create: { allOf: ["sessions:create"] },
-  session_send_message: { allOf: ["sessions:control"] },
-  session_pause: { allOf: ["sessions:control"] },
-  session_resume: { allOf: ["sessions:control"] },
-  session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
-  // A live attempt may answer another session's structured human-input
-  // request (never a tool approval, which stays human-only).
-  session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
-  set_other_session_title: { allOf: ["sessions:control"] },
-  interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_observe: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
-  interaction_request_human: {
-    sessionRequired: true,
-    allOf: ["sessions:control"],
-  },
-  browser_identity: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_publish: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_open: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_targets: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
-  variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
-  environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
-  variable_set_get_variable: {
-    sessionRequired: true,
-    allOf: ["variable-sets:read", "secrets:read"],
-  },
-  variable_set_set_variable: {
-    allOf: ["variable-sets:write", "secrets:write"],
-  },
-  environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
-  capability_catalog_search: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  capability_authorization_request: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  github_connect_link: { allOf: ["github:use"] },
-  github_repositories_list: { allOf: ["github:use"] },
-  social_connections_list: { allOf: ["connections:read"] },
-  social_posts_recent: { allOf: ["connections:read"] },
-  social_daily_analysis_context: { allOf: ["connections:read"] },
-  social_search_live: { allOf: ["connections:read"] },
-  social_mentions_live: { allOf: ["connections:read"] },
-  social_thread_fetch: { allOf: ["connections:read"] },
-  // Writes the social_posts store, so it takes the write scope like the REST
-  // equivalent (POST /social/posts is workspace:admin).
-  social_posts_sync: { allOf: ["connections:write"] },
-  // Publishes under the user's identity: connections:write keeps it out of the
-  // default agent permission set, unlike the read-only social tools above.
-  social_post_reply: { allOf: ["connections:write"] },
-  x_accounts_list: { allOf: ["connections:read"] },
-  x_search_live: { allOf: ["connections:read"] },
-  x_mentions_live: { allOf: ["connections:read"] },
-  x_thread_fetch: { allOf: ["connections:read"] },
-  x_posts_sync: { allOf: ["connections:write"] },
-  x_post_reply: { allOf: ["connections:write"] },
-  reddit_accounts_list: { allOf: ["connections:read"] },
-  reddit_search_live: { allOf: ["connections:read"] },
-  reddit_mentions_live: { allOf: ["connections:read"] },
-  reddit_thread_fetch: { allOf: ["connections:read"] },
-  reddit_posts_sync: { allOf: ["connections:write"] },
-  reddit_post_reply: { allOf: ["connections:write"] },
-  scheduled_tasks_list: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  scheduled_tasks_get: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_update: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_pause: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_resume: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_trigger: { allOf: ["scheduled_tasks:run"] },
-  scheduled_tasks_delete: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_task_runs_list: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  slack_bot_list_channels: { allOf: ["connections:read"] },
-  slack_bot_search: { allOf: ["connections:read"] },
-  slack_bot_channel_history: { allOf: ["connections:read"] },
-  slack_bot_thread_replies: { allOf: ["connections:read"] },
-  slack_bot_list_users: { allOf: ["connections:read"] },
-  slack_bot_list_files: { allOf: ["connections:read"] },
-  slack_bot_file_info: { allOf: ["connections:read"] },
-  slack_bot_file_content: { allOf: ["connections:read"] },
-  slack_bot_post_message: { allOf: ["connections:read"] },
-  slack_bot_delete_message: { allOf: ["connections:read"] },
-  fiken_companies_list: { allOf: ["connections:read"] },
-  fiken_contacts_list: { allOf: ["connections:read"] },
-  fiken_products_list: { allOf: ["connections:read"] },
-  fiken_invoices_list: { allOf: ["connections:read"] },
-  fiken_invoice_get: { allOf: ["connections:read"] },
-  fiken_bank_accounts_list: { allOf: ["connections:read"] },
-  fiken_purchases_list: { allOf: ["connections:read"] },
-  fiken_sales_list: { allOf: ["connections:read"] },
-  // Writes into the workspace's real accounting ledger surface take the write
-  // scope, keeping them out of the default agent permission set.
-  fiken_contact_create: { allOf: ["connections:write"] },
-  fiken_invoice_draft_create: { allOf: ["connections:write"] },
-  atlassian_sources_list: { allOf: ["connections:read"] },
-  atlassian_search: { allOf: ["connections:read"] },
-  atlassian_get: { allOf: ["connections:read"] },
-  artifacts_list: { allOf: ["artifacts:read"] },
-  artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
-  artifacts_prepare_upload: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_archive: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_restore: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  sandbox_file_publish: {
-    sessionRequired: true,
-    allOf: ["files:read", "files:upload"],
-  },
-  editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_create: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish"],
-  },
-  editable_artifact_import: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish", "files:read"],
-  },
-  editable_artifact_get: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_inspect: {
-    sessionRequired: true,
-    allOf: ["artifacts:read"],
-  },
-  editable_artifact_apply: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish"],
-  },
-  editable_artifact_export: {
-    sessionRequired: true,
-    allOf: ["artifacts:read"],
-  },
-  editable_artifact_export_status: {
-    sessionRequired: true,
-    allOf: ["artifacts:read", "files:upload"],
-  },
-} satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
-
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
 
 class PolicyMcpServer extends McpServer {
@@ -815,13 +574,20 @@ export function buildOpenGeniMcpServer(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  // A session-scoped grant carries its model-visible selection as a signed
+  // claim. When that claim is absent the grant was not minted for the ordinary
+  // first-party MCP surface (today only the sandbox Codemode bearer has that
+  // shape), so it resolves to no session tools rather than the deployment
+  // default catalog: an omitted claim must never widen.
+  const signedSelection = grant.metadata?.["firstPartyMcpTools"] as
+    | FirstPartyMcpToolName[]
+    | undefined;
   const selectedTools =
     sessionId !== null
       ? new Set(
-          allowedFirstPartyMcpToolsForSession(
-            deps.settings,
-            grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined,
-          ),
+          signedSelection === undefined
+            ? []
+            : allowedFirstPartyMcpToolsForSession(deps.settings, signedSelection),
         )
       : null;
   const nestedAgentDepth = grant.metadata?.["nestedAgentDepth"];
@@ -863,7 +629,13 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
-  if (sessionId !== null && options.workspaceMemoryEnabled === true) {
+  // A session frozen with memoryScope "off" receives no Memory tools at all,
+  // independent of the workspace-level Memory setting.
+  if (
+    sessionId !== null &&
+    options.workspaceMemoryEnabled === true &&
+    options.sessionMemory?.mode !== "off"
+  ) {
     registerMemoryTools(
       server,
       deps,
@@ -871,6 +643,7 @@ export function buildOpenGeniMcpServer(
       sessionId,
       json,
       options.workspaceMemoryPromptMode ?? "retrieval_only",
+      options.sessionMemory ?? null,
     );
   }
   server.registerTool(
@@ -1602,7 +1375,8 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_create",
       {
-        description: "Create a scheduled task.",
+        description:
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -3831,7 +3605,17 @@ function registerMemoryTools(
   sessionId: string,
   json: JsonResult,
   promptMode: WorkspaceMemoryPromptMode,
+  sessionMemory: MemoryAgentScope | null,
 ): void {
+  // Read layers: workspace plus the session's private layer. Write layer: the
+  // session's narrowest layer. A null scope is the pre-0426 workspace path.
+  const agentScope: MemoryAgentScope = sessionMemory ?? {
+    mode: "workspace",
+    userSubjectId: null,
+    rootSessionId: null,
+  };
+  const writeScope = memoryWriteScopeForAgentScope(agentScope);
+  if (!writeScope) return;
   const publicationInputSchema = z4.object({
     importance: z4.enum(["major", "normal", "minor"]),
     audience: z4.literal("workspace"),
@@ -3859,6 +3643,7 @@ function registerMemoryTools(
             ...(kind ? { kind } : {}),
             ...(limit ? { limit } : {}),
             agentPromptMode: promptMode,
+            agentScope,
           },
           deps.getDocumentServices().embedder,
         ),
@@ -3894,6 +3679,7 @@ function registerMemoryTools(
           ...(confidence !== undefined ? { confidence } : {}),
           ...(replaces_id ? { replacesId: replaces_id } : {}),
           origin: "agent",
+          scope: writeScope,
         },
         slack_publication
           ? {
@@ -4012,6 +3798,7 @@ function registerMemoryTools(
           ...(reason ? { reason } : {}),
           ...(replacement_text ? { replacementText: replacement_text } : {}),
           origin: "agent",
+          agentScope,
         },
         slack_publication
           ? {
@@ -4878,7 +4665,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
         inputSchema: {
           sessionId: z4
             .string()
@@ -5364,7 +5151,16 @@ function registerWorkspaceOrchestrationTools(
           .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
           .optional()
           .describe(
-            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+          ),
+        // The child's agent-access scope and end-user label are never model
+        // choices: it inherits this session's exactly. Only the Memory
+        // selector may be narrowed here (workspace > user > off).
+        memoryScope: z4
+          .enum(["workspace", "user", "off"])
+          .optional()
+          .describe(
+            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
           ),
         // Omission is the ordinary safe sharing path. Literal "shared" remains
         // available to advanced REST/SDK callers but is intentionally absent
@@ -5399,7 +5195,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
@@ -5445,7 +5241,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Send information to another session. From an OpenGeni worker this becomes a canonical coalescible machine input: it appears in the target's compact incoming queue group, is durably added to model history when claimed, and remains visible in the timeline. A sessionless operator call appends one human/API prompt.",
+          "Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -5547,7 +5343,8 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_pause",
       {
-        description: "Pause this session. Waiting prompts stay saved and inert until Resume.",
+        description:
+          "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           idempotencyKey: z4.string().uuid(),

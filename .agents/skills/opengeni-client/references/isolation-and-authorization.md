@@ -9,10 +9,10 @@ Use the smallest group allowed to share those workspace-scoped capabilities as t
 | Product requirement | Default mapping | Why |
 | --- | --- | --- |
 | A team or tenant may collaborate across all chats | One workspace per team or tenant | Shared sessions and workspace resources match the product rule |
-| Each end user's chats are private from other end users, but that user's chats may share context or agent authority | One workspace per end user | Other users are outside the workspace boundary |
-| Every chat must be isolated, including from the same user's other chats | One workspace per chat | Session separation alone is not the current hard agent boundary |
+| Users share workspace resources but their conversations are private | One workspace per tenant; `asUser()` and private session visibility | Canonical ownership protects transcripts without duplicating shared resources |
+| An agent must not reach even its user's other conversations | `agentAccess: "session"` | An additional task-tree boundary, independent of human visibility |
 | Chats may share but data access differs by tenant | At least one workspace per data tenant | Provider authority must never span a tenant that may not share data |
-| Different users access the same data but their chats are private | Separate user or chat workspaces, each with suitable data authority | Shared upstream data does not weaken the conversation boundary |
+| Different users access the same data but their chats are private | Shared workspace data and private sessions | Shared upstream data does not make a private transcript shared |
 
 Other mappings are valid when the product explicitly accepts their sharing semantics. Document that decision; do not use workspace count alone as an optimization goal.
 
@@ -21,12 +21,19 @@ A workspace is control-plane state, not a dedicated cluster or permanently runni
 ## Current session authority facts
 
 - A top-level session created by an organization API key defaults to workspace visibility.
-- Managed-human private or Only-me sessions require the exact supported managed-cookie human path and organization activation. They are not available merely because a backend includes an external user ID.
-- A live agent attempt with the relevant first-party session tools and permissions can read, message, or control unrelated sessions in the same workspace. Parent/child lineage is not the general access boundary.
+- Private or Only-me sessions require verified owning-user authority and organization activation. Native managed sessions and the server-side `asUser()` path establish that authority; a raw `endUser` payload does not.
+- An agent must pass ordinary permissions and private-session ownership checks. `agentAccess` optionally narrows reach further: `session` stays in its root tree; `user` requires matching canonical scope users across trees; `workspace` adds no further restriction. Both caller and target policies apply. None of these modes overrides private visibility.
 - Workspace Memory controls retrieval and saving of workspace facts. Turning it off does not remove session history, change session visibility, or neutralize cross-session tools.
 - Hiding session-list and session-get alone is incomplete. Events, waiting, messaging, control, discovery, workspace Memory, documents, notes, or other workspace-wide tools may still cross the intended boundary.
 
-If the requirement is a hard boundary, use workspaces. If a customer deliberately accepts a softer same-workspace boundary, remove every unnecessary peer-session and workspace-wide capability as defense in depth and test the exact live tool catalog. Describe the remaining risk honestly.
+One workspace per end user or One workspace per chat remains possible when the
+resources and integration configuration themselves must be isolated, but is not
+required merely to make a conversation private. Use the canonical private
+session boundary for transcripts; choose separate workspaces for workspace
+resources. Remove unnecessary tools as defense in depth, never as a substitute
+for either boundary. User Memory follows the verified active-turn user; task
+notes cover task-local coordination. Session-scoped Memory is retired without
+promoting historical rows into workspace visibility.
 
 ## Explicit headless tool policy
 
@@ -65,4 +72,6 @@ Include negative tests, not only a successful chat:
 - Provider credentials and API tools cannot request another tenant merely by changing a request argument.
 - Deleting or disabling a product user applies the customer's chosen session/workspace retention and access policy.
 
-For a softer same-workspace design, add an explicit regression test over the effective tool policy. Treat that as defense in depth, not proof of database isolation.
+For same-workspace private sessions, verify ownership through HTTP, tools,
+lists and streams; also verify optional agent reach independently. Test the
+effective tool policy as defense in depth, not as proof of ownership enforcement.

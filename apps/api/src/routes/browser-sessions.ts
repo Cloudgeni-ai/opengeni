@@ -191,6 +191,7 @@ import {
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
+import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
@@ -284,13 +285,15 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/workspaces/:workspaceId/browser-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
+    const listed = await listBrowserSessions(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     return context.json(
-      BrowserSessionListResponse.parse(
-        await listBrowserSessions(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-        }),
-      ),
+      BrowserSessionListResponse.parse({
+        ...listed,
+        sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
+      }),
     );
   });
 

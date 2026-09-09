@@ -6,11 +6,13 @@ import { createRoot } from "react-dom/client";
 import type { SessionVariableSetPickerSharedState } from "./session-variable-set-picker";
 
 const variableSetId = "11111111-1111-4111-8111-111111111111";
+const personalVariableSetId = "44444444-4444-4444-8444-444444444444";
 const updateSessionVariableSets = mock(async () => undefined);
 
 mock.module("@opengeni/react", () => ({
   useVariableSets: () => ({
     variableSets: [
+      { id: personalVariableSetId, name: "Personal credentials", scope: "user", variables: [] },
       {
         id: variableSetId,
         name: "Deploy credentials",
@@ -49,6 +51,8 @@ const sessionFixture = {
   workspaceId: "33333333-3333-4333-8333-333333333333",
   variableSetIds: [] as string[],
   variableSetId: null,
+  status: "idle" as const,
+  activeTurnId: null,
   tenancy: {
     visibility: "workspace" as const,
     authorityEpoch: 1,
@@ -57,14 +61,17 @@ const sessionFixture = {
   },
 };
 
-function ResponsivePickerPair(props: { onReloadSession: () => Promise<void> }) {
+function ResponsivePickerPair(props: {
+  onReloadSession: () => Promise<void>;
+  session?: Parameters<typeof SessionVariableSetPicker>[0]["session"];
+}) {
   const [sharedState, setSharedState] = useState<SessionVariableSetPickerSharedState>({
     saving: false,
     committedSelection: null,
   });
   const picker = (triggerClassName: string) => (
     <SessionVariableSetPicker
-      session={sessionFixture}
+      session={props.session ?? sessionFixture}
       canControl
       canAttach
       canUse
@@ -100,6 +107,56 @@ afterAll(() => {
 });
 
 describe("SessionVariableSetPicker", () => {
+  test("blocks personal detach when live status changes before activeTurnId refreshes", async () => {
+    updateSessionVariableSets.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const session = { ...sessionFixture, variableSetIds: [variableSetId, personalVariableSetId] };
+    const reloadSession = mock(async () => undefined);
+    const render = (status: Parameters<typeof SessionVariableSetPicker>[0]["session"]["status"]) =>
+      root.render(
+        <ResponsivePickerPair session={{ ...session, status }} onReloadSession={reloadSession} />,
+      );
+    try {
+      await act(async () => render("idle"));
+      const remove = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Remove Personal credentials"]',
+      )!;
+      await act(async () => remove.click());
+      const save = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Save",
+      )!;
+      expect(save.disabled).toBe(false);
+      for (const status of [
+        "running",
+        "queued",
+        "recovering",
+        "requires_action",
+        "waiting_capacity",
+      ] as const) {
+        await act(async () => render(status));
+        expect(save.disabled).toBe(true);
+        expect(container.textContent).toContain("after the current and queued work finishes");
+        await act(async () => save.click());
+        expect(updateSessionVariableSets).not.toHaveBeenCalled();
+      }
+      await act(async () => render("idle"));
+      expect(save.disabled).toBe(false);
+      await act(async () => {
+        save.click();
+        await flush();
+      });
+      expect(updateSessionVariableSets).toHaveBeenCalledWith(session.workspaceId, session.id, {
+        variableSetIds: [variableSetId],
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      updateSessionVariableSets.mockClear();
+    }
+  });
+
   test("embedded read-only panel keeps navigation and cancel available", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

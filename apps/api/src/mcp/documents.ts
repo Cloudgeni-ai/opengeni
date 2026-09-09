@@ -18,7 +18,12 @@ import {
   type DocumentAccessFilter,
   type DocumentServices,
 } from "@opengeni/documents";
-import { createKnowledgeMemory, listKnowledgeMemories, type Database } from "@opengeni/db";
+import {
+  createKnowledgeMemory,
+  listKnowledgeMemories,
+  type Database,
+  type MemoryAgentScope,
+} from "@opengeni/db";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { mcpMutationReceipt } from "./receipts";
@@ -64,6 +69,13 @@ export function buildDocumentsMcpServer(
     attemptId?: string | undefined;
     /** Immutable human subject whose agent is making this retrieval request. */
     initiatingSubjectId: string;
+    /**
+     * The bound session's typed Memory selector (migration 0427), resolved by
+     * the caller from the session row. `off` registers neither memory tool;
+     * `user`/`session` search the workspace layer plus the own private layer.
+     * Omitted keeps the workspace layer.
+     */
+    memory?: MemoryAgentScope | null | undefined;
   },
 ): McpServer {
   const server = new McpServer({
@@ -281,6 +293,14 @@ export function buildDocumentsMcpServer(
     },
   );
 
+  const memoryScope = options.memory ?? null;
+  if (memoryScope?.mode === "off") return server;
+  const memoryReadScope: MemoryAgentScope = memoryScope ?? {
+    mode: "workspace",
+    userSubjectId: null,
+    rootSessionId: null,
+  };
+
   server.registerTool(
     "memory_search",
     {
@@ -303,6 +323,7 @@ export function buildDocumentsMcpServer(
               ...(kind ? { kind } : {}),
               ...(scope ? { scope } : {}),
               ...(limit ? { limit } : {}),
+              agentScope: memoryReadScope,
             }),
           ),
         },

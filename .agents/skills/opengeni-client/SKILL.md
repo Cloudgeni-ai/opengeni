@@ -50,6 +50,74 @@ ownership.
 - This Skill guides an implementation agent. Never copy it into the runtime
   Skills of the customer-facing agent.
 
+## Fastest Path: `@opengeni/sdk/chat`
+
+When using `user`, first provision that user's approved workspace membership
+through the explicit onboarding flow in `references/external-users-and-connect.md`.
+The facade uses `asUser()` and never grants or restores membership on a chat
+request. An existing tenant is not proof that this user belongs to it. For shared
+conversations use the same OpenGeni session ID; identity changes authority, not
+the conversation address. Use `chatBySessionId` to reopen historical sessions
+whose IDs were derived with the old user-namespaced helper.
+
+Start here when the product already has a chat, or wants one, and OpenGeni
+should sit behind it. Install, keep the organization API key on the server, and
+put one handler behind the chat endpoint:
+
+```bash
+bun add @opengeni/sdk
+```
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
+
+export const POST = createChatHandler(og, {
+  // Your auth hook. Tenant and user come from the authenticated request, never the body.
+  resolve: async (request) => {
+    const me = await authenticate(request);
+    return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
+  },
+  // format: "vercel" keeps an existing useChat client; "openai-chat" / "openai-responses"
+  // keep an OpenAI-shaped client. The default streams native chunks for custom clients.
+});
+
+// Server-side use without an endpoint:
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
+```
+
+Browser: use a custom or compatible frontend for the backend chat handler.
+For native OpenGeni React UI, install `@opengeni/react` and use
+`SessionConversation` or compose `MessageTimeline` and `ChatComposer` with
+the normal SDK and authenticated session routes. Reset private UI state and cancel old
+requests when the authenticated user or tenant changes. Every customer gets one workspace (`tenant`), every
+conversation one deterministic session, and each session picks its own
+isolation. Conversation ids are namespaced per `user`: the handler scopes a
+client conversation id to the user `resolve` returned, and without a `user`,
+`resolve` must return the `conversation` itself. The Vercel and OpenAI adapters
+send only the latest user message and import earlier messages once as context
+on the first message; afterwards OpenGeni owns the history.
+
+| Scenario | `agentAccess` | `memory` |
+| --- | --- | --- |
+| Support desk: every chat isolated | `"session"` (default) | `"session"` (default) |
+| One customer, several users, private from each other | `"user"` with a `user` label | `"user"` |
+| A team collaborating across chats | `"workspace"` | `"workspace"` |
+| Any of the above without Memory tools | any | `false` |
+
+`agentAccess` is enforced in the server-side session-authorization seam for
+agents (own tree always allowed, most restrictive side wins); `user` is an opaque
+label for memory scope and list filtering, never a login. Humans and the
+organization key still see every session. Graduate to `og.client`
+(`OpenGeniClient`) on the same `chat.sessionId` when the product needs files,
+tools, approval policies, forks, or realtime voice. The
+`examples/chat-quickstart` directory provides a backend-only server example.
+
 ## Choose The Integration Shape First
 
 Pick the smallest surface that satisfies the product:
@@ -139,21 +207,28 @@ insert from an idempotent replay. Call it an **organization workspace** in
 customer guidance; its exact wire kind is `"shared"`. Personal workspaces are
 excluded and must never be selected through a default-workspace fallback.
 
-Choose the boundary from who may share workspace-scoped agent authority and
-resources, not from a preferred workspace count: use one workspace per tenant
-for collaborative chats, per end user when chats are private between users, and
-per chat when even the same user's chats require a hard boundary. Shared
-upstream data does not weaken the chat boundary. Turning `memoryEnabled` off
-does not isolate sessions.
+Choose the workspace from who shares documents, workspace instructions,
+Connections, and integrations: normally one workspace per customer. Chat
+human visibility is controlled by `visibility`, not by `agentAccess` or Memory.
+Use `asUser(externalId)` for the authenticated product user. The server derives
+the canonical user; never supply an `endUser` label as authority. Separately,
+`agentAccess: "session" | "user" | "workspace"` controls cross-session agent
+reach. `memoryScope: "workspace" | "user" | "off"` controls Memory tools, not
+transcript visibility. User Memory belongs to the verified user of the active
+turn, including when different users collaborate in one shared session. Use
+existing task notes for temporary session-tree coordination; there is no active
+session Memory scope. Use a separate workspace when groups need different
+Connections, integrations, or instructions.
 
 Unscoped organization-key-created top-level sessions are workspace-visible.
 For product-user ownership, use the server-side `asUser(externalId)` client and
 explicit workspace membership described in `references/external-users-and-connect.md`;
 verified external owners can create private sessions when the organization enables
 that feature. Private sessions do not make workspace Files or Sites private.
-Managed-human Only-me sessions are not a backend impersonation mechanism. A live agent
-with cross-session tools can reach unrelated sessions in the same workspace;
-removing those tools is defense in depth, not a hard boundary.
+Managed-human Only-me sessions are not a backend impersonation mechanism. A live
+agent with cross-session tools can reach unrelated sessions only when both
+sessions' agent reach policies and ordinary resource authorization allow it.
+Removing tools is not a substitute for private human visibility.
 
 The external backend owns product Skills. Store and version them outside
 OpenGeni, then pass the selected definitions inline in
@@ -205,11 +280,12 @@ agent instruction prefix.
   themselves.
 - Organization workspaces have wire `kind: "shared"`; Personal workspaces are
   outside the external product mapping.
-- Use the smallest workspace whose members may share agent authority. Memory
-  settings and prompt instructions do not create a tenant boundary.
-- For hard session isolation use separate workspaces. Removing every
-  unnecessary peer-session and workspace-wide tool can narrow a deliberately
-  softer design, but cannot replace the boundary.
+- Use one workspace per customer and private/shared visibility for human
+  access. Memory settings and prompt instructions do not create a tenant boundary.
+  `agentAccess` optionally restricts agent reach further; tool removal is
+  defense in depth, not a replacement for authorization.
+- Use separate workspaces only when groups must not share documents,
+  Connections, integrations, or workspace instructions.
 - Do not invent an organization-wide Skill registry or rely on Skill
   inheritance. The external backend passes selected Skills inline per session.
 - The SDK cannot accept arbitrary customer backend functions as remote tools.

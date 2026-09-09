@@ -631,8 +631,12 @@ five-hour reset semantics, and rollout fence are canonical in
 The first successful lease also stores a bounded accepted Codex allocator-policy
 snapshot in turn metadata. Re-acquisition and definitive-failure settlement use
 that snapshot for active-pointer, rotation, strategy, and pin constraints while
-using current account health/cooldowns; mutable policy changes affect later
-logical turns. Immediately before provider dispatch, a missing or expired
+using current account health/cooldowns; background policy changes affect later
+logical turns. An explicit session account switch may revise selection for a
+capacity-blocked turn under the allocator/session/turn/waiter locks, with a
+closed attempt and matching wait generation. It preserves the accepted
+credential source, authority, conversation history, and logical turn identity.
+Immediately before provider dispatch, a missing or expired
 last-confirmed lease deadline is treated as lease loss and follows lease-loss
 settlement instead of reaching the provider.
 
@@ -677,10 +681,12 @@ Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
 optional goal, downstream accepted credential-policy hash, or blocked-turn
-generation supersede the waiter/turn under their durable fences. Mutable Codex
-rotation or pin settings do not replace the accepted snapshot for this turn, so
-no stale timer or signal can produce double inference or silently change its
-policy.
+generation supersede the waiter/turn under their durable fences. Background
+Codex rotation or pin settings do not replace the accepted snapshot. An explicit
+account switch uses `switchSessionCodexAccount` to update a blocked selection,
+record its control receipt, and request a capacity recheck atomically. Ordinary
+lease claim reads that same revised selection; no new turn or automatic model
+retry is created by the switch itself.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
@@ -1490,6 +1496,25 @@ stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
 
+### Modal retained-command observation
+
+A resumed Modal SDK session restores the sandbox but not the adapter-local
+numeric process handles. The reaper reports `process_observation_unavailable`
+for that observation boundary, retaining the exact process/admission/holder.
+After five probes it records `quarantined_process_observation_unavailable` and
+rechecks after 24 hours through the existing reconciliation diagnostics/metrics.
+A current owner's exact exit proof still settles immediately; independently
+verified loss of the bound provider instance remains authoritative. Neither a
+missing SDK map entry nor failure to recover terminal output proves command loss,
+including when a completed entry aged out in its original adapter.
+
+This is safe containment, not cross-worker command reattachment. A command whose
+owner cannot recover its terminal receipt remains a visible capture blocker;
+operators must reconcile the exact command/provider identity rather than replay
+unknown side effects or clear holders by age. Durable provider execution IDs and
+output reattachment remain separate work. No new process is launched by probing.
+
+
 Migration 0419 records the exact launch turn, attempt, and execution generation
 when either provider adopts a background command under the existing attempt
 fence. Terminal results resolve that immutable receipt, copy only eligible
@@ -1989,6 +2014,15 @@ session. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.
+
+Provider bookkeeping is not an explicit session mutation for this purpose:
+workspace Codex source changes, automatic policy pins, and recording the last
+used Codex credential preserve both activity fields. A human's explicit
+in-session account switch still counts, as do the ordinary turn/message events.
+Migration 0426 corrects the workspace affinity-reset trigger without rewriting
+historical activity. Retained events cannot reconstruct every legitimate
+non-event session edit, so historical recency repair requires explicit reviewed
+candidates rather than an automatic global backfill.
 
 Operation-keyed session commands retry only their rolled-back database
 transaction on PostgreSQL deadlock or serialization SQLSTATEs, with a bounded

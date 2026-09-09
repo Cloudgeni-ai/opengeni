@@ -26,6 +26,8 @@ async function buildSchemaContract(directory?: string) {
         "0401_organization_user_setup_token_transport.sql",
         "0402_session_input_wait_and_background_command_results.sql",
         "0403_codex_unconditional_credential_leasing.sql",
+        "0429_message_boundary_session_forks.sql",
+        "0430_session_personal_variable_set_continuations.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -131,7 +133,7 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe("0445_social_connection_versions.sql");
+    expect(completeSourceContract.latestMigration).toBe("0451_canonical_session_scope_subject.sql");
     expect(
       completeSourceContract.migrations.find(
         (migration) =>
@@ -258,68 +260,86 @@ describe("release schema contract", () => {
     const modelConnectionAccess = completeSourceContract.migrations.some(
       (migration) => migration.path === "0424_model_connection_access.sql",
     );
+    const codexBookkeepingPreservesSessionRecency = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0426_codex_bookkeeping_preserves_session_recency.sql",
+    );
     const feedbackSubmissions = completeSourceContract.migrations.some(
       (migration) => migration.path === "0425_feedback_submissions.sql",
     );
+    const sessionAgentAccessScope = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0427_session_agent_access_scope.sql",
+    );
+    const scheduledTaskCreatorPolicy = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0428_scheduled_task_creator_policy.sql",
+    );
+    const messageBoundarySessionForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0429_message_boundary_session_forks.sql",
+    );
+    const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
+    );
     const organizationScopedExternalWorkspaces = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0426_organization_scoped_external_workspaces.sql",
+      (migration) => migration.path === "0431_organization_scoped_external_workspaces.sql",
     );
     const durableConnectAttempts = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0427_durable_connect_attempts.sql",
+      (migration) => migration.path === "0432_durable_connect_attempts.sql",
     );
     const externalIdentityProvisioning = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0428_external_identity_provisioning.sql",
+      (migration) => migration.path === "0433_external_identity_provisioning.sql",
     );
     const externalWorkspaceMemberRemoval = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0429_external_workspace_member_removal.sql",
+      (migration) => migration.path === "0434_external_workspace_member_removal.sql",
     );
     const externalIdentityMembershipLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0430_external_identity_membership_lifecycle.sql",
+      (migration) => migration.path === "0435_external_identity_membership_lifecycle.sql",
     );
     const externalOwningUserAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0431_external_owning_user_authority.sql",
+      (migration) => migration.path === "0436_external_owning_user_authority.sql",
     );
     const hostMcpBindingRegistry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0432_host_mcp_binding_registry.sql",
+      (migration) => migration.path === "0437_host_mcp_binding_registry.sql",
     );
     const hostMcpDelegations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0433_host_mcp_delegations.sql",
+      (migration) => migration.path === "0438_host_mcp_delegations.sql",
     );
     const hostMcpTurnAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0434_host_mcp_turn_authorities.sql",
+      (migration) => migration.path === "0439_host_mcp_turn_authorities.sql",
     );
     const hostMcpCausalContinuation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0435_host_mcp_causal_continuation.sql",
+      (migration) => migration.path === "0440_host_mcp_causal_continuation.sql",
     );
     const hostMcpTaskAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0436_host_mcp_task_authorities.sql",
+      (migration) => migration.path === "0441_host_mcp_task_authorities.sql",
     );
     const hostMcpChildAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0437_host_mcp_child_authority.sql",
+      (migration) => migration.path === "0442_host_mcp_child_authority.sql",
     );
     const externalIdentityLinkLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0438_external_identity_link_lifecycle.sql",
+      (migration) => migration.path === "0443_external_identity_link_lifecycle.sql",
     );
     const externalIdentityLinkWork = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0439_external_identity_link_work.sql",
+      (migration) => migration.path === "0444_external_identity_link_work.sql",
     );
     const externalLinkPreviewAndPermissionCeiling = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0440_external_link_preview_and_permission_ceiling.sql",
+      (migration) => migration.path === "0445_external_link_preview_and_permission_ceiling.sql",
     );
     const externalLinkScheduledOrigin = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0441_external_link_scheduled_origin.sql",
+      (migration) => migration.path === "0446_external_link_scheduled_origin.sql",
     );
     const hostMcpNativeOwner = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0442_host_mcp_native_owner.sql",
+      (migration) => migration.path === "0447_host_mcp_native_owner.sql",
     );
     const connectOriginAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0443_connect_origin_authority.sql",
+      (migration) => migration.path === "0448_connect_origin_authority.sql",
     );
     const externalLinkInventoryLabels = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0444_external_link_inventory_labels.sql",
+      (migration) => migration.path === "0449_external_link_inventory_labels.sql",
+    );
+    const canonicalSessionScopeSubject = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0451_canonical_session_scope_subject.sql",
     );
     const socialConnectionVersions = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0445_social_connection_versions.sql",
+      (migration) => migration.path === "0450_social_connection_versions.sql",
     );
     const personalWorkspaceOrganizationCodexInheritance = completeSourceContract.migrations.some(
       (migration) =>
@@ -710,6 +730,7 @@ describe("release schema contract", () => {
       };
     }
     const automaticSessionTitleMigrationPaths = new Set([
+      "0426_codex_bookkeeping_preserves_session_recency.sql",
       "0398_organization_workspace_management_entry.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0394_session_selected_skill_activation.sql",
@@ -777,26 +798,31 @@ describe("release schema contract", () => {
       "0423_organization_supergrok_subscriptions.sql",
       "0424_model_connection_access.sql",
       "0425_feedback_submissions.sql",
-      "0426_organization_scoped_external_workspaces.sql",
-      "0427_durable_connect_attempts.sql",
-      "0428_external_identity_provisioning.sql",
-      "0429_external_workspace_member_removal.sql",
-      "0430_external_identity_membership_lifecycle.sql",
-      "0431_external_owning_user_authority.sql",
-      "0432_host_mcp_binding_registry.sql",
-      "0433_host_mcp_delegations.sql",
-      "0434_host_mcp_turn_authorities.sql",
-      "0435_host_mcp_causal_continuation.sql",
-      "0436_host_mcp_task_authorities.sql",
-      "0437_host_mcp_child_authority.sql",
-      "0438_external_identity_link_lifecycle.sql",
-      "0439_external_identity_link_work.sql",
-      "0440_external_link_preview_and_permission_ceiling.sql",
-      "0441_external_link_scheduled_origin.sql",
-      "0442_host_mcp_native_owner.sql",
-      "0443_connect_origin_authority.sql",
-      "0444_external_link_inventory_labels.sql",
-      "0445_social_connection_versions.sql",
+      "0427_session_agent_access_scope.sql",
+      "0428_scheduled_task_creator_policy.sql",
+      "0429_message_boundary_session_forks.sql",
+      "0430_session_personal_variable_set_continuations.sql",
+      "0431_organization_scoped_external_workspaces.sql",
+      "0432_durable_connect_attempts.sql",
+      "0433_external_identity_provisioning.sql",
+      "0434_external_workspace_member_removal.sql",
+      "0435_external_identity_membership_lifecycle.sql",
+      "0436_external_owning_user_authority.sql",
+      "0437_host_mcp_binding_registry.sql",
+      "0438_host_mcp_delegations.sql",
+      "0439_host_mcp_turn_authorities.sql",
+      "0440_host_mcp_causal_continuation.sql",
+      "0441_host_mcp_task_authorities.sql",
+      "0442_host_mcp_child_authority.sql",
+      "0443_external_identity_link_lifecycle.sql",
+      "0444_external_identity_link_work.sql",
+      "0445_external_link_preview_and_permission_ceiling.sql",
+      "0446_external_link_scheduled_origin.sql",
+      "0447_host_mcp_native_owner.sql",
+      "0448_connect_origin_authority.sql",
+      "0449_external_link_inventory_labels.sql",
+      "0450_social_connection_versions.sql",
+      "0451_canonical_session_scope_subject.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -877,108 +903,116 @@ describe("release schema contract", () => {
     if (organizationScopedExternalWorkspaces)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0426_organization_scoped_external_workspaces.sql",
+        latestMigration: "0431_organization_scoped_external_workspaces.sql",
       };
     if (durableConnectAttempts)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0427_durable_connect_attempts.sql",
+        latestMigration: "0432_durable_connect_attempts.sql",
       };
     if (externalIdentityProvisioning)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0428_external_identity_provisioning.sql",
+        latestMigration: "0433_external_identity_provisioning.sql",
       };
     if (externalWorkspaceMemberRemoval)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0429_external_workspace_member_removal.sql",
+        latestMigration: "0434_external_workspace_member_removal.sql",
       };
     if (externalIdentityMembershipLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0430_external_identity_membership_lifecycle.sql",
+        latestMigration: "0435_external_identity_membership_lifecycle.sql",
       };
     if (externalOwningUserAuthority)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0431_external_owning_user_authority.sql",
+        latestMigration: "0436_external_owning_user_authority.sql",
       };
     if (hostMcpBindingRegistry)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0432_host_mcp_binding_registry.sql",
+        latestMigration: "0437_host_mcp_binding_registry.sql",
       };
     if (hostMcpDelegations)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0433_host_mcp_delegations.sql",
+        latestMigration: "0438_host_mcp_delegations.sql",
       };
     if (hostMcpTurnAuthorities)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0434_host_mcp_turn_authorities.sql",
+        latestMigration: "0439_host_mcp_turn_authorities.sql",
       };
     if (hostMcpCausalContinuation)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0435_host_mcp_causal_continuation.sql",
+        latestMigration: "0440_host_mcp_causal_continuation.sql",
       };
     if (hostMcpTaskAuthorities)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0436_host_mcp_task_authorities.sql",
+        latestMigration: "0441_host_mcp_task_authorities.sql",
       };
     if (hostMcpChildAuthority)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0437_host_mcp_child_authority.sql",
+        latestMigration: "0442_host_mcp_child_authority.sql",
       };
     if (externalIdentityLinkLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0438_external_identity_link_lifecycle.sql",
+        latestMigration: "0443_external_identity_link_lifecycle.sql",
       };
     if (externalIdentityLinkWork)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0439_external_identity_link_work.sql",
+        latestMigration: "0444_external_identity_link_work.sql",
       };
     if (externalLinkPreviewAndPermissionCeiling)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0440_external_link_preview_and_permission_ceiling.sql",
+        latestMigration: "0445_external_link_preview_and_permission_ceiling.sql",
       };
     if (externalLinkScheduledOrigin)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0441_external_link_scheduled_origin.sql",
+        latestMigration: "0446_external_link_scheduled_origin.sql",
       };
     if (hostMcpNativeOwner)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0442_host_mcp_native_owner.sql",
+        latestMigration: "0447_host_mcp_native_owner.sql",
       };
     if (connectOriginAuthority)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0443_connect_origin_authority.sql",
+        latestMigration: "0448_connect_origin_authority.sql",
       };
     if (externalLinkInventoryLabels)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0444_external_link_inventory_labels.sql",
+        latestMigration: "0449_external_link_inventory_labels.sql",
       };
     if (socialConnectionVersions)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0445_social_connection_versions.sql",
+        latestMigration: canonicalSessionScopeSubject
+          ? "0451_canonical_session_scope_subject.sql"
+          : "0450_social_connection_versions.sql",
       };
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
         ? { latestMigration: "0397_sandbox_deadline_rotation_preemption.sql" }
         : {}),
       fileCount:
+        (sessionAgentAccessScope ? 1 : 0) +
+        (scheduledTaskCreatorPolicy ? 1 : 0) +
+        (messageBoundarySessionForks ? 1 : 0) +
+        (sessionPersonalVariableSetContinuations ? 1 : 0) +
+        (feedbackSubmissions ? 1 : 0) +
+        (codexBookkeepingPreservesSessionRecency ? 1 : 0) +
         (organizationScopedExternalWorkspaces ? 1 : 0) +
         (durableConnectAttempts ? 1 : 0) +
         (externalIdentityProvisioning ? 1 : 0) +
@@ -998,10 +1032,10 @@ describe("release schema contract", () => {
         (hostMcpNativeOwner ? 1 : 0) +
         (connectOriginAuthority ? 1 : 0) +
         (externalLinkInventoryLabels ? 1 : 0) +
+        (canonicalSessionScopeSubject ? 1 : 0) +
         (socialConnectionVersions ? 1 : 0) +
         (modelConnectionAccess ? 1 : 0) +
         (organizationSupergrokSubscriptions ? 1 : 0) +
-        (feedbackSubmissions ? 1 : 0) +
         (workspacePauseTimers ? 1 : 0) +
         (sessionFilterActivity ? 1 : 0) +
         (newSessionDraftProjectProvenance ? 1 : 0) +
@@ -1077,122 +1111,130 @@ describe("release schema contract", () => {
         (workspaceHtmlSiteSources ? 1 : 0) +
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
-      latestMigration: feedbackSubmissions
-        ? "0425_feedback_submissions.sql"
-        : organizationSupergrokSubscriptions
-          ? "0423_organization_supergrok_subscriptions.sql"
-          : personalWorkspaceOrganizationCodexInheritance
-            ? "0422_personal_workspace_organization_codex_inheritance.sql"
-            : workspacePauseTimers
-              ? "0420_workspace_pause_timers.sql"
-              : siteDirectUploads
-                ? "0418_site_direct_uploads.sql"
-                : commandRunnerFailureMetadata
-                  ? "0417_command_runner_failure_metadata.sql"
-                  : scheduledInheritedToolAdmission
-                    ? "0416_scheduled_inherited_tool_admission.sql"
-                    : commandCompletionObservation
-                      ? "0415_command_completion_observation.sql"
-                      : scheduledGeneratedProducerMaterialization
-                        ? "0414_scheduled_generated_producer_materialization.sql"
-                        : sessionFilterActivity
-                          ? "0413_session_filter_activity.sql"
-                          : newSessionDraftProjectProvenanceValidation
-                            ? "0412_new_session_draft_project_provenance_validation.sql"
-                            : newSessionDraftProjectProvenanceBackfill
-                              ? "0411_new_session_draft_project_provenance_backfill.sql"
-                              : newSessionDraftProjectProvenanceIndex
-                                ? "0410_new_session_draft_project_provenance_index.sql"
-                                : newSessionDraftProjectProvenance
-                                  ? "0409_new_session_draft_project_provenance.sql"
-                                  : scheduledSessionTargetIndex
-                                    ? "0408_scheduled_session_target_index.sql"
-                                    : connectedCommandTrackingRetirement
-                                      ? "0407_connected_command_tracking_retirement.sql"
-                                      : sandboxProviderDeadlineInteractionFollowup
-                                        ? "0391_sandbox_provider_deadline_interaction_followup.sql"
-                                        : organizationModelProviderConnections
-                                          ? "0390_organization_model_provider_connections.sql"
-                                          : modelCatalogAndGatewayCustomModels
-                                            ? "0389_model_catalog_and_gateway_custom_models.sql"
-                                            : sandboxProviderDeadlineInteractions
-                                              ? "0388_sandbox_provider_deadline_interactions.sql"
-                                              : boundHostExportSessionPayloads
-                                                ? "0387_bound_host_export_session_payloads.sql"
-                                                : localOrganizationAdministration
-                                                  ? "0386_local_organization_administration.sql"
-                                                  : connectedMachineLegacyTildeWorkdirs
-                                                    ? "0385_connected_machine_legacy_tilde_workdirs.sql"
-                                                    : codexCooldownRevisionGuardPrivileges
-                                                      ? "0384_codex_cooldown_revision_guard_privileges.sql"
-                                                      : codexCooldownReconciliation
-                                                        ? "0383_codex_cooldown_reconciliation.sql"
-                                                        : organizationApiKeyProvenance
-                                                          ? "0382_organization_api_key_provenance.sql"
-                                                          : organizationCodexSubscriptionInheritance
-                                                            ? "0381_organization_codex_subscription_inheritance.sql"
-                                                            : autonomousCompanyProfileAgentPolicy
-                                                              ? "0380_autonomous_company_profile_agent_policy.sql"
-                                                              : sessionEventRawLaneActivation
-                                                                ? "0379_session_event_raw_lane_activation.sql"
-                                                                : scopedRigHealthAuditTimestamp
-                                                                  ? "0378_scoped_rig_health_audit_timestamp.sql"
-                                                                  : scopedRigHealthProjection
-                                                                    ? "0377_scoped_rig_health_projection.sql"
-                                                                    : organizationWorkspaceInventory
-                                                                      ? "0376_organization_workspace_inventory.sql"
-                                                                      : sessionRecoveryObservability
-                                                                        ? "0375_session_recovery_observability.sql"
-                                                                        : sessionEventCursors
-                                                                          ? "0374_session_event_cursors.sql"
-                                                                          : sandboxSharedPreparation
-                                                                            ? "0373_sandbox_shared_preparation.sql"
-                                                                            : orderedVariableSetRuntimeAuthority
-                                                                              ? "0372_ordered_variable_set_runtime_authority.sql"
-                                                                              : workspaceMemberCandidateInventory
-                                                                                ? "0371_workspace_member_candidate_inventory.sql"
-                                                                                : workspaceMemberManagementScope
-                                                                                  ? "0370_workspace_member_management_scope.sql"
-                                                                                  : localHumanPersonalAuthority
-                                                                                    ? "0369_local_human_personal_authority.sql"
-                                                                                    : sessionDiscoveryClaimSearchIndex
-                                                                                      ? "0368_session_discovery_claim_search_index.sql"
-                                                                                      : sessionDiscoveryGoalSearchIndex
-                                                                                        ? "0367_session_discovery_goal_search_index.sql"
-                                                                                        : sessionDiscoveryTitleSearchIndex
-                                                                                          ? "0366_session_discovery_title_search_index.sql"
-                                                                                          : permissionScopedWorkClaims
-                                                                                            ? "0365_permission_scoped_work_claims.sql"
-                                                                                            : workspaceLearningPolicySnapshotLockOrder
-                                                                                              ? "0364_workspace_learning_policy_snapshot_lock_order.sql"
-                                                                                              : organizationRecoveryCustody
-                                                                                                ? "0363_organization_recovery_custody.sql"
-                                                                                                : managedAuthSessionSets
-                                                                                                  ? "0362_managed_auth_session_sets.sql"
-                                                                                                  : rememberKnowledgeMemoryMaterialization
-                                                                                                    ? "0361_remember_knowledge_memory_materialization.sql"
-                                                                                                    : organizationIdentityConfirmationPrompt
-                                                                                                      ? "0360_organization_identity_confirmation_prompt.sql"
-                                                                                                      : insightsForceRlsReadCapability
-                                                                                                        ? "0359_insights_force_rls_read_capability.sql"
-                                                                                                        : prReviewManagedGithubApp
-                                                                                                          ? "0358_pr_review_managed_github_app.sql"
-                                                                                                          : rigPlatformBaseOnly
-                                                                                                            ? "0357_rig_platform_base_only.sql"
-                                                                                                            : setBasedInsightsSessionVisibility
-                                                                                                              ? "0356_set_based_insights_session_visibility.sql"
-                                                                                                              : automaticSessionTitleQuarantine
-                                                                                                                ? "0355_automatic_session_title_quarantine.sql"
-                                                                                                                : automaticSessionTitleQuarantineIndex
-                                                                                                                  ? "0354_automatic_session_title_quarantine_index.sql"
-                                                                                                                  : automaticSessionTitlePolicyFence
-                                                                                                                    ? "0353_automatic_session_title_policy_fence.sql"
-                                                                                                                    : sessionVariableSetAttachments
-                                                                                                                      ? "0352_session_variable_set_attachments.sql"
-                                                                                                                      : migrationsBeforeAutomaticSessionTitles.at(
-                                                                                                                          -1,
-                                                                                                                        )
-                                                                                                                          ?.path,
+      latestMigration: canonicalSessionScopeSubject
+        ? "0451_canonical_session_scope_subject.sql"
+        : scheduledTaskCreatorPolicy
+          ? "0428_scheduled_task_creator_policy.sql"
+          : sessionAgentAccessScope
+            ? "0427_session_agent_access_scope.sql"
+            : codexBookkeepingPreservesSessionRecency
+              ? "0426_codex_bookkeeping_preserves_session_recency.sql"
+              : feedbackSubmissions
+                ? "0425_feedback_submissions.sql"
+                : organizationSupergrokSubscriptions
+                  ? "0423_organization_supergrok_subscriptions.sql"
+                  : personalWorkspaceOrganizationCodexInheritance
+                    ? "0422_personal_workspace_organization_codex_inheritance.sql"
+                    : workspacePauseTimers
+                      ? "0420_workspace_pause_timers.sql"
+                      : siteDirectUploads
+                        ? "0418_site_direct_uploads.sql"
+                        : commandRunnerFailureMetadata
+                          ? "0417_command_runner_failure_metadata.sql"
+                          : scheduledInheritedToolAdmission
+                            ? "0416_scheduled_inherited_tool_admission.sql"
+                            : commandCompletionObservation
+                              ? "0415_command_completion_observation.sql"
+                              : scheduledGeneratedProducerMaterialization
+                                ? "0414_scheduled_generated_producer_materialization.sql"
+                                : sessionFilterActivity
+                                  ? "0413_session_filter_activity.sql"
+                                  : newSessionDraftProjectProvenanceValidation
+                                    ? "0412_new_session_draft_project_provenance_validation.sql"
+                                    : newSessionDraftProjectProvenanceBackfill
+                                      ? "0411_new_session_draft_project_provenance_backfill.sql"
+                                      : newSessionDraftProjectProvenanceIndex
+                                        ? "0410_new_session_draft_project_provenance_index.sql"
+                                        : newSessionDraftProjectProvenance
+                                          ? "0409_new_session_draft_project_provenance.sql"
+                                          : scheduledSessionTargetIndex
+                                            ? "0408_scheduled_session_target_index.sql"
+                                            : connectedCommandTrackingRetirement
+                                              ? "0407_connected_command_tracking_retirement.sql"
+                                              : sandboxProviderDeadlineInteractionFollowup
+                                                ? "0391_sandbox_provider_deadline_interaction_followup.sql"
+                                                : organizationModelProviderConnections
+                                                  ? "0390_organization_model_provider_connections.sql"
+                                                  : modelCatalogAndGatewayCustomModels
+                                                    ? "0389_model_catalog_and_gateway_custom_models.sql"
+                                                    : sandboxProviderDeadlineInteractions
+                                                      ? "0388_sandbox_provider_deadline_interactions.sql"
+                                                      : boundHostExportSessionPayloads
+                                                        ? "0387_bound_host_export_session_payloads.sql"
+                                                        : localOrganizationAdministration
+                                                          ? "0386_local_organization_administration.sql"
+                                                          : connectedMachineLegacyTildeWorkdirs
+                                                            ? "0385_connected_machine_legacy_tilde_workdirs.sql"
+                                                            : codexCooldownRevisionGuardPrivileges
+                                                              ? "0384_codex_cooldown_revision_guard_privileges.sql"
+                                                              : codexCooldownReconciliation
+                                                                ? "0383_codex_cooldown_reconciliation.sql"
+                                                                : organizationApiKeyProvenance
+                                                                  ? "0382_organization_api_key_provenance.sql"
+                                                                  : organizationCodexSubscriptionInheritance
+                                                                    ? "0381_organization_codex_subscription_inheritance.sql"
+                                                                    : autonomousCompanyProfileAgentPolicy
+                                                                      ? "0380_autonomous_company_profile_agent_policy.sql"
+                                                                      : sessionEventRawLaneActivation
+                                                                        ? "0379_session_event_raw_lane_activation.sql"
+                                                                        : scopedRigHealthAuditTimestamp
+                                                                          ? "0378_scoped_rig_health_audit_timestamp.sql"
+                                                                          : scopedRigHealthProjection
+                                                                            ? "0377_scoped_rig_health_projection.sql"
+                                                                            : organizationWorkspaceInventory
+                                                                              ? "0376_organization_workspace_inventory.sql"
+                                                                              : sessionRecoveryObservability
+                                                                                ? "0375_session_recovery_observability.sql"
+                                                                                : sessionEventCursors
+                                                                                  ? "0374_session_event_cursors.sql"
+                                                                                  : sandboxSharedPreparation
+                                                                                    ? "0373_sandbox_shared_preparation.sql"
+                                                                                    : orderedVariableSetRuntimeAuthority
+                                                                                      ? "0372_ordered_variable_set_runtime_authority.sql"
+                                                                                      : workspaceMemberCandidateInventory
+                                                                                        ? "0371_workspace_member_candidate_inventory.sql"
+                                                                                        : workspaceMemberManagementScope
+                                                                                          ? "0370_workspace_member_management_scope.sql"
+                                                                                          : localHumanPersonalAuthority
+                                                                                            ? "0369_local_human_personal_authority.sql"
+                                                                                            : sessionDiscoveryClaimSearchIndex
+                                                                                              ? "0368_session_discovery_claim_search_index.sql"
+                                                                                              : sessionDiscoveryGoalSearchIndex
+                                                                                                ? "0367_session_discovery_goal_search_index.sql"
+                                                                                                : sessionDiscoveryTitleSearchIndex
+                                                                                                  ? "0366_session_discovery_title_search_index.sql"
+                                                                                                  : permissionScopedWorkClaims
+                                                                                                    ? "0365_permission_scoped_work_claims.sql"
+                                                                                                    : workspaceLearningPolicySnapshotLockOrder
+                                                                                                      ? "0364_workspace_learning_policy_snapshot_lock_order.sql"
+                                                                                                      : organizationRecoveryCustody
+                                                                                                        ? "0363_organization_recovery_custody.sql"
+                                                                                                        : managedAuthSessionSets
+                                                                                                          ? "0362_managed_auth_session_sets.sql"
+                                                                                                          : rememberKnowledgeMemoryMaterialization
+                                                                                                            ? "0361_remember_knowledge_memory_materialization.sql"
+                                                                                                            : organizationIdentityConfirmationPrompt
+                                                                                                              ? "0360_organization_identity_confirmation_prompt.sql"
+                                                                                                              : insightsForceRlsReadCapability
+                                                                                                                ? "0359_insights_force_rls_read_capability.sql"
+                                                                                                                : prReviewManagedGithubApp
+                                                                                                                  ? "0358_pr_review_managed_github_app.sql"
+                                                                                                                  : rigPlatformBaseOnly
+                                                                                                                    ? "0357_rig_platform_base_only.sql"
+                                                                                                                    : setBasedInsightsSessionVisibility
+                                                                                                                      ? "0356_set_based_insights_session_visibility.sql"
+                                                                                                                      : automaticSessionTitleQuarantine
+                                                                                                                        ? "0355_automatic_session_title_quarantine.sql"
+                                                                                                                        : automaticSessionTitleQuarantineIndex
+                                                                                                                          ? "0354_automatic_session_title_quarantine_index.sql"
+                                                                                                                          : automaticSessionTitlePolicyFence
+                                                                                                                            ? "0353_automatic_session_title_policy_fence.sql"
+                                                                                                                            : sessionVariableSetAttachments
+                                                                                                                              ? "0352_session_variable_set_attachments.sql"
+                                                                                                                              : migrationsBeforeAutomaticSessionTitles.at(
+                                                                                                                                  -1,
+                                                                                                                                )
+                                                                                                                                  ?.path,
       ...(workspaceMemoryAndLearningDefaults
         ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
         : {}),
@@ -1282,48 +1324,52 @@ describe("release schema contract", () => {
       ...(modelConnectionAccess ? { latestMigration: "0424_model_connection_access.sql" } : {}),
       ...(feedbackSubmissions ? { latestMigration: "0425_feedback_submissions.sql" } : {}),
       ...(organizationScopedExternalWorkspaces
-        ? { latestMigration: "0426_organization_scoped_external_workspaces.sql" }
+        ? { latestMigration: "0431_organization_scoped_external_workspaces.sql" }
         : {}),
-      ...(durableConnectAttempts ? { latestMigration: "0427_durable_connect_attempts.sql" } : {}),
+      ...(durableConnectAttempts ? { latestMigration: "0432_durable_connect_attempts.sql" } : {}),
       ...(externalIdentityProvisioning
-        ? { latestMigration: "0428_external_identity_provisioning.sql" }
+        ? { latestMigration: "0433_external_identity_provisioning.sql" }
         : {}),
       ...(externalWorkspaceMemberRemoval
-        ? { latestMigration: "0429_external_workspace_member_removal.sql" }
+        ? { latestMigration: "0434_external_workspace_member_removal.sql" }
         : {}),
       ...(externalIdentityMembershipLifecycle
-        ? { latestMigration: "0430_external_identity_membership_lifecycle.sql" }
+        ? { latestMigration: "0435_external_identity_membership_lifecycle.sql" }
         : {}),
       ...(externalOwningUserAuthority
-        ? { latestMigration: "0431_external_owning_user_authority.sql" }
+        ? { latestMigration: "0436_external_owning_user_authority.sql" }
         : {}),
-      ...(hostMcpBindingRegistry ? { latestMigration: "0432_host_mcp_binding_registry.sql" } : {}),
-      ...(hostMcpDelegations ? { latestMigration: "0433_host_mcp_delegations.sql" } : {}),
-      ...(hostMcpTurnAuthorities ? { latestMigration: "0434_host_mcp_turn_authorities.sql" } : {}),
+      ...(hostMcpBindingRegistry ? { latestMigration: "0437_host_mcp_binding_registry.sql" } : {}),
+      ...(hostMcpDelegations ? { latestMigration: "0438_host_mcp_delegations.sql" } : {}),
+      ...(hostMcpTurnAuthorities ? { latestMigration: "0439_host_mcp_turn_authorities.sql" } : {}),
       ...(hostMcpCausalContinuation
-        ? { latestMigration: "0435_host_mcp_causal_continuation.sql" }
+        ? { latestMigration: "0440_host_mcp_causal_continuation.sql" }
         : {}),
-      ...(hostMcpTaskAuthorities ? { latestMigration: "0436_host_mcp_task_authorities.sql" } : {}),
-      ...(hostMcpChildAuthority ? { latestMigration: "0437_host_mcp_child_authority.sql" } : {}),
+      ...(hostMcpTaskAuthorities ? { latestMigration: "0441_host_mcp_task_authorities.sql" } : {}),
+      ...(hostMcpChildAuthority ? { latestMigration: "0442_host_mcp_child_authority.sql" } : {}),
       ...(externalIdentityLinkLifecycle
-        ? { latestMigration: "0438_external_identity_link_lifecycle.sql" }
+        ? { latestMigration: "0443_external_identity_link_lifecycle.sql" }
         : {}),
       ...(externalIdentityLinkWork
-        ? { latestMigration: "0439_external_identity_link_work.sql" }
+        ? { latestMigration: "0444_external_identity_link_work.sql" }
         : {}),
       ...(externalLinkPreviewAndPermissionCeiling
-        ? { latestMigration: "0440_external_link_preview_and_permission_ceiling.sql" }
+        ? { latestMigration: "0445_external_link_preview_and_permission_ceiling.sql" }
         : {}),
       ...(externalLinkScheduledOrigin
-        ? { latestMigration: "0441_external_link_scheduled_origin.sql" }
+        ? { latestMigration: "0446_external_link_scheduled_origin.sql" }
         : {}),
-      ...(hostMcpNativeOwner ? { latestMigration: "0442_host_mcp_native_owner.sql" } : {}),
-      ...(connectOriginAuthority ? { latestMigration: "0443_connect_origin_authority.sql" } : {}),
+      ...(hostMcpNativeOwner ? { latestMigration: "0447_host_mcp_native_owner.sql" } : {}),
+      ...(connectOriginAuthority ? { latestMigration: "0448_connect_origin_authority.sql" } : {}),
       ...(externalLinkInventoryLabels
-        ? { latestMigration: "0444_external_link_inventory_labels.sql" }
+        ? { latestMigration: "0449_external_link_inventory_labels.sql" }
         : {}),
       ...(socialConnectionVersions
-        ? { latestMigration: "0445_social_connection_versions.sql" }
+        ? {
+            latestMigration: canonicalSessionScopeSubject
+              ? "0451_canonical_session_scope_subject.sql"
+              : "0450_social_connection_versions.sql",
+          }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
@@ -1409,68 +1455,86 @@ describe("release schema contract", () => {
     const modelConnectionAccess = completeSourceContract.migrations.some(
       (migration) => migration.path === "0424_model_connection_access.sql",
     );
+    const codexBookkeepingPreservesSessionRecency = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0426_codex_bookkeeping_preserves_session_recency.sql",
+    );
     const feedbackSubmissions = completeSourceContract.migrations.some(
       (migration) => migration.path === "0425_feedback_submissions.sql",
     );
+    const sessionAgentAccessScope = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0427_session_agent_access_scope.sql",
+    );
+    const scheduledTaskCreatorPolicy = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0428_scheduled_task_creator_policy.sql",
+    );
+    const messageBoundarySessionForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0429_message_boundary_session_forks.sql",
+    );
+    const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
+    );
     const organizationScopedExternalWorkspaces = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0426_organization_scoped_external_workspaces.sql",
+      (migration) => migration.path === "0431_organization_scoped_external_workspaces.sql",
     );
     const durableConnectAttempts = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0427_durable_connect_attempts.sql",
+      (migration) => migration.path === "0432_durable_connect_attempts.sql",
     );
     const externalIdentityProvisioning = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0428_external_identity_provisioning.sql",
+      (migration) => migration.path === "0433_external_identity_provisioning.sql",
     );
     const externalWorkspaceMemberRemoval = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0429_external_workspace_member_removal.sql",
+      (migration) => migration.path === "0434_external_workspace_member_removal.sql",
     );
     const externalIdentityMembershipLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0430_external_identity_membership_lifecycle.sql",
+      (migration) => migration.path === "0435_external_identity_membership_lifecycle.sql",
     );
     const externalOwningUserAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0431_external_owning_user_authority.sql",
+      (migration) => migration.path === "0436_external_owning_user_authority.sql",
     );
     const hostMcpBindingRegistry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0432_host_mcp_binding_registry.sql",
+      (migration) => migration.path === "0437_host_mcp_binding_registry.sql",
     );
     const hostMcpDelegations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0433_host_mcp_delegations.sql",
+      (migration) => migration.path === "0438_host_mcp_delegations.sql",
     );
     const hostMcpTurnAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0434_host_mcp_turn_authorities.sql",
+      (migration) => migration.path === "0439_host_mcp_turn_authorities.sql",
     );
     const hostMcpCausalContinuation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0435_host_mcp_causal_continuation.sql",
+      (migration) => migration.path === "0440_host_mcp_causal_continuation.sql",
     );
     const hostMcpTaskAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0436_host_mcp_task_authorities.sql",
+      (migration) => migration.path === "0441_host_mcp_task_authorities.sql",
     );
     const hostMcpChildAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0437_host_mcp_child_authority.sql",
+      (migration) => migration.path === "0442_host_mcp_child_authority.sql",
     );
     const externalIdentityLinkLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0438_external_identity_link_lifecycle.sql",
+      (migration) => migration.path === "0443_external_identity_link_lifecycle.sql",
     );
     const externalIdentityLinkWork = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0439_external_identity_link_work.sql",
+      (migration) => migration.path === "0444_external_identity_link_work.sql",
     );
     const externalLinkPreviewAndPermissionCeiling = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0440_external_link_preview_and_permission_ceiling.sql",
+      (migration) => migration.path === "0445_external_link_preview_and_permission_ceiling.sql",
     );
     const externalLinkScheduledOrigin = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0441_external_link_scheduled_origin.sql",
+      (migration) => migration.path === "0446_external_link_scheduled_origin.sql",
     );
     const hostMcpNativeOwner = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0442_host_mcp_native_owner.sql",
+      (migration) => migration.path === "0447_host_mcp_native_owner.sql",
     );
     const connectOriginAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0443_connect_origin_authority.sql",
+      (migration) => migration.path === "0448_connect_origin_authority.sql",
     );
     const externalLinkInventoryLabels = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0444_external_link_inventory_labels.sql",
+      (migration) => migration.path === "0449_external_link_inventory_labels.sql",
+    );
+    const canonicalSessionScopeSubject = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0451_canonical_session_scope_subject.sql",
     );
     const socialConnectionVersions = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0445_social_connection_versions.sql",
+      (migration) => migration.path === "0450_social_connection_versions.sql",
     );
     const personalWorkspaceOrganizationCodexInheritance = completeSourceContract.migrations.some(
       (migration) =>
@@ -1675,6 +1739,10 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0426_codex_bookkeeping_preserves_session_recency.sql",
+      "0428_scheduled_task_creator_policy.sql",
+      "0425_feedback_submissions.sql",
+      "0427_session_agent_access_scope.sql",
       "0424_model_connection_access.sql",
       "0423_organization_supergrok_subscriptions.sql",
       "0420_workspace_pause_timers.sql",
@@ -1805,26 +1873,31 @@ describe("release schema contract", () => {
       "0421_recovery_notification_claim_snapshot.sql",
       "0422_personal_workspace_organization_codex_inheritance.sql",
       "0425_feedback_submissions.sql",
-      "0426_organization_scoped_external_workspaces.sql",
-      "0427_durable_connect_attempts.sql",
-      "0428_external_identity_provisioning.sql",
-      "0429_external_workspace_member_removal.sql",
-      "0430_external_identity_membership_lifecycle.sql",
-      "0431_external_owning_user_authority.sql",
-      "0432_host_mcp_binding_registry.sql",
-      "0433_host_mcp_delegations.sql",
-      "0434_host_mcp_turn_authorities.sql",
-      "0435_host_mcp_causal_continuation.sql",
-      "0436_host_mcp_task_authorities.sql",
-      "0437_host_mcp_child_authority.sql",
-      "0438_external_identity_link_lifecycle.sql",
-      "0439_external_identity_link_work.sql",
-      "0440_external_link_preview_and_permission_ceiling.sql",
-      "0441_external_link_scheduled_origin.sql",
-      "0442_host_mcp_native_owner.sql",
-      "0443_connect_origin_authority.sql",
-      "0444_external_link_inventory_labels.sql",
-      "0445_social_connection_versions.sql",
+      "0427_session_agent_access_scope.sql",
+      "0428_scheduled_task_creator_policy.sql",
+      "0429_message_boundary_session_forks.sql",
+      "0430_session_personal_variable_set_continuations.sql",
+      "0431_organization_scoped_external_workspaces.sql",
+      "0432_durable_connect_attempts.sql",
+      "0433_external_identity_provisioning.sql",
+      "0434_external_workspace_member_removal.sql",
+      "0435_external_identity_membership_lifecycle.sql",
+      "0436_external_owning_user_authority.sql",
+      "0437_host_mcp_binding_registry.sql",
+      "0438_host_mcp_delegations.sql",
+      "0439_host_mcp_turn_authorities.sql",
+      "0440_host_mcp_causal_continuation.sql",
+      "0441_host_mcp_task_authorities.sql",
+      "0442_host_mcp_child_authority.sql",
+      "0443_external_identity_link_lifecycle.sql",
+      "0444_external_identity_link_work.sql",
+      "0445_external_link_preview_and_permission_ceiling.sql",
+      "0446_external_link_scheduled_origin.sql",
+      "0447_host_mcp_native_owner.sql",
+      "0448_connect_origin_authority.sql",
+      "0449_external_link_inventory_labels.sql",
+      "0450_social_connection_versions.sql",
+      "0451_canonical_session_scope_subject.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2141,105 +2214,113 @@ describe("release schema contract", () => {
     if (organizationScopedExternalWorkspaces)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0426_organization_scoped_external_workspaces.sql",
+        latestMigration: "0431_organization_scoped_external_workspaces.sql",
       };
     if (durableConnectAttempts)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0427_durable_connect_attempts.sql",
+        latestMigration: "0432_durable_connect_attempts.sql",
       };
     if (externalIdentityProvisioning)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0428_external_identity_provisioning.sql",
+        latestMigration: "0433_external_identity_provisioning.sql",
       };
     if (externalWorkspaceMemberRemoval)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0429_external_workspace_member_removal.sql",
+        latestMigration: "0434_external_workspace_member_removal.sql",
       };
     if (externalIdentityMembershipLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0430_external_identity_membership_lifecycle.sql",
+        latestMigration: "0435_external_identity_membership_lifecycle.sql",
       };
     if (externalOwningUserAuthority)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0431_external_owning_user_authority.sql",
+        latestMigration: "0436_external_owning_user_authority.sql",
       };
     if (hostMcpBindingRegistry)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0432_host_mcp_binding_registry.sql",
+        latestMigration: "0437_host_mcp_binding_registry.sql",
       };
     if (hostMcpDelegations)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0433_host_mcp_delegations.sql",
+        latestMigration: "0438_host_mcp_delegations.sql",
       };
     if (hostMcpTurnAuthorities)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0434_host_mcp_turn_authorities.sql",
+        latestMigration: "0439_host_mcp_turn_authorities.sql",
       };
     if (hostMcpCausalContinuation)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0435_host_mcp_causal_continuation.sql",
+        latestMigration: "0440_host_mcp_causal_continuation.sql",
       };
     if (hostMcpTaskAuthorities)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0436_host_mcp_task_authorities.sql",
+        latestMigration: "0441_host_mcp_task_authorities.sql",
       };
     if (hostMcpChildAuthority)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0437_host_mcp_child_authority.sql",
+        latestMigration: "0442_host_mcp_child_authority.sql",
       };
     if (externalIdentityLinkLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0438_external_identity_link_lifecycle.sql",
+        latestMigration: "0443_external_identity_link_lifecycle.sql",
       };
     if (externalIdentityLinkWork)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0439_external_identity_link_work.sql",
+        latestMigration: "0444_external_identity_link_work.sql",
       };
     if (externalLinkPreviewAndPermissionCeiling)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0440_external_link_preview_and_permission_ceiling.sql",
+        latestMigration: "0445_external_link_preview_and_permission_ceiling.sql",
       };
     if (externalLinkScheduledOrigin)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0441_external_link_scheduled_origin.sql",
+        latestMigration: "0446_external_link_scheduled_origin.sql",
       };
     if (hostMcpNativeOwner)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0442_host_mcp_native_owner.sql",
+        latestMigration: "0447_host_mcp_native_owner.sql",
       };
     if (connectOriginAuthority)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0443_connect_origin_authority.sql",
+        latestMigration: "0448_connect_origin_authority.sql",
       };
     if (externalLinkInventoryLabels)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0444_external_link_inventory_labels.sql",
+        latestMigration: "0449_external_link_inventory_labels.sql",
       };
     if (socialConnectionVersions)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0445_social_connection_versions.sql",
+        latestMigration: canonicalSessionScopeSubject
+          ? "0451_canonical_session_scope_subject.sql"
+          : "0450_social_connection_versions.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionAgentAccessScope ? 1 : 0) +
+        (scheduledTaskCreatorPolicy ? 1 : 0) +
+        (messageBoundarySessionForks ? 1 : 0) +
+        (sessionPersonalVariableSetContinuations ? 1 : 0) +
+        (feedbackSubmissions ? 1 : 0) +
+        (codexBookkeepingPreservesSessionRecency ? 1 : 0) +
         (organizationScopedExternalWorkspaces ? 1 : 0) +
         (durableConnectAttempts ? 1 : 0) +
         (externalIdentityProvisioning ? 1 : 0) +
@@ -2259,8 +2340,8 @@ describe("release schema contract", () => {
         (hostMcpNativeOwner ? 1 : 0) +
         (connectOriginAuthority ? 1 : 0) +
         (externalLinkInventoryLabels ? 1 : 0) +
+        (canonicalSessionScopeSubject ? 1 : 0) +
         (socialConnectionVersions ? 1 : 0) +
-        (feedbackSubmissions ? 1 : 0) +
         (modelConnectionAccess ? 1 : 0) +
         (organizationSupergrokSubscriptions ? 1 : 0) +
         (workspacePauseTimers ? 1 : 0) +
@@ -2343,129 +2424,137 @@ describe("release schema contract", () => {
         (workspaceHtmlSiteSources ? 1 : 0) +
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
-      latestMigration: feedbackSubmissions
-        ? "0425_feedback_submissions.sql"
-        : organizationSupergrokSubscriptions
-          ? "0423_organization_supergrok_subscriptions.sql"
-          : personalWorkspaceOrganizationCodexInheritance
-            ? "0422_personal_workspace_organization_codex_inheritance.sql"
-            : siteDirectUploads
-              ? "0418_site_direct_uploads.sql"
-              : commandRunnerFailureMetadata
-                ? "0417_command_runner_failure_metadata.sql"
-                : scheduledInheritedToolAdmission
-                  ? "0416_scheduled_inherited_tool_admission.sql"
-                  : commandCompletionObservation
-                    ? "0415_command_completion_observation.sql"
-                    : scheduledGeneratedProducerMaterialization
-                      ? "0414_scheduled_generated_producer_materialization.sql"
-                      : sessionFilterActivity
-                        ? "0413_session_filter_activity.sql"
-                        : newSessionDraftProjectProvenanceValidation
-                          ? "0412_new_session_draft_project_provenance_validation.sql"
-                          : newSessionDraftProjectProvenanceBackfill
-                            ? "0411_new_session_draft_project_provenance_backfill.sql"
-                            : newSessionDraftProjectProvenanceIndex
-                              ? "0410_new_session_draft_project_provenance_index.sql"
-                              : newSessionDraftProjectProvenance
-                                ? "0409_new_session_draft_project_provenance.sql"
-                                : scheduledSessionTargetIndex
-                                  ? "0408_scheduled_session_target_index.sql"
-                                  : connectedCommandTrackingRetirement
-                                    ? "0407_connected_command_tracking_retirement.sql"
-                                    : sandboxProviderDeadlineInteractionFollowup
-                                      ? "0391_sandbox_provider_deadline_interaction_followup.sql"
-                                      : organizationModelProviderConnections
-                                        ? "0390_organization_model_provider_connections.sql"
-                                        : modelCatalogAndGatewayCustomModels
-                                          ? "0389_model_catalog_and_gateway_custom_models.sql"
-                                          : sandboxProviderDeadlineInteractions
-                                            ? "0388_sandbox_provider_deadline_interactions.sql"
-                                            : boundHostExportSessionPayloads
-                                              ? "0387_bound_host_export_session_payloads.sql"
-                                              : localOrganizationAdministration
-                                                ? "0386_local_organization_administration.sql"
-                                                : connectedMachineLegacyTildeWorkdirs
-                                                  ? "0385_connected_machine_legacy_tilde_workdirs.sql"
-                                                  : codexCooldownRevisionGuardPrivileges
-                                                    ? "0384_codex_cooldown_revision_guard_privileges.sql"
-                                                    : codexCooldownReconciliation
-                                                      ? "0383_codex_cooldown_reconciliation.sql"
-                                                      : organizationApiKeyProvenance
-                                                        ? "0382_organization_api_key_provenance.sql"
-                                                        : organizationCodexSubscriptionInheritance
-                                                          ? "0381_organization_codex_subscription_inheritance.sql"
-                                                          : autonomousCompanyProfileAgentPolicy
-                                                            ? "0380_autonomous_company_profile_agent_policy.sql"
-                                                            : sessionEventRawLaneActivation
-                                                              ? "0379_session_event_raw_lane_activation.sql"
-                                                              : scopedRigHealthAuditTimestamp
-                                                                ? "0378_scoped_rig_health_audit_timestamp.sql"
-                                                                : scopedRigHealthProjection
-                                                                  ? "0377_scoped_rig_health_projection.sql"
-                                                                  : organizationWorkspaceInventory
-                                                                    ? "0376_organization_workspace_inventory.sql"
-                                                                    : sessionRecoveryObservability
-                                                                      ? "0375_session_recovery_observability.sql"
-                                                                      : sessionEventCursors
-                                                                        ? "0374_session_event_cursors.sql"
-                                                                        : sandboxSharedPreparation
-                                                                          ? "0373_sandbox_shared_preparation.sql"
-                                                                          : orderedVariableSetRuntimeAuthority
-                                                                            ? "0372_ordered_variable_set_runtime_authority.sql"
-                                                                            : workspaceMemberCandidateInventory
-                                                                              ? "0371_workspace_member_candidate_inventory.sql"
-                                                                              : workspaceMemberManagementScope
-                                                                                ? "0370_workspace_member_management_scope.sql"
-                                                                                : localHumanPersonalAuthority
-                                                                                  ? "0369_local_human_personal_authority.sql"
-                                                                                  : sessionDiscoveryClaimSearchIndex
-                                                                                    ? "0368_session_discovery_claim_search_index.sql"
-                                                                                    : sessionDiscoveryGoalSearchIndex
-                                                                                      ? "0367_session_discovery_goal_search_index.sql"
-                                                                                      : sessionDiscoveryTitleSearchIndex
-                                                                                        ? "0366_session_discovery_title_search_index.sql"
-                                                                                        : permissionScopedWorkClaims
-                                                                                          ? "0365_permission_scoped_work_claims.sql"
-                                                                                          : workspaceLearningPolicySnapshotLockOrder
-                                                                                            ? "0364_workspace_learning_policy_snapshot_lock_order.sql"
-                                                                                            : organizationRecoveryCustody
-                                                                                              ? "0363_organization_recovery_custody.sql"
-                                                                                              : managedAuthSessionSets
-                                                                                                ? "0362_managed_auth_session_sets.sql"
-                                                                                                : sessionVariableSetAttachments
-                                                                                                  ? "0352_session_variable_set_attachments.sql"
-                                                                                                  : organizationUserSetupDelivery
-                                                                                                    ? "0351_organization_user_setup_delivery.sql"
-                                                                                                    : organizationSharedWorkspaceAdministration
-                                                                                                      ? "0350_organization_shared_workspace_administration.sql"
-                                                                                                      : greenfieldSessionTenancyActivation
-                                                                                                        ? "0349_greenfield_session_tenancy_activation.sql"
-                                                                                                        : namedSignupAndUserSetup
-                                                                                                          ? "0348_named_signup_and_user_setup.sql"
-                                                                                                          : connectionAuthorityConvergenceEvidence
-                                                                                                            ? "0347_connection_authority_convergence_evidence.sql"
-                                                                                                            : documentMigrationAuditSurface
-                                                                                                              ? "0346_document_migration_audit_surface.sql"
-                                                                                                              : tenantScopedSessionTenancyFence
-                                                                                                                ? "0345_tenant_scoped_session_tenancy_fence.sql"
-                                                                                                                : privateSessionVisibilityTransitionGate
-                                                                                                                  ? "0344_private_session_visibility_transition_gate.sql"
-                                                                                                                  : personalDocumentForceRlsRepair
-                                                                                                                    ? "0343_personal_document_force_rls_lock_repair.sql"
-                                                                                                                    : slackRoutePromptSinglePending
-                                                                                                                      ? "0342_slack_route_prompt_single_pending.sql"
-                                                                                                                      : slackRoutingProbeFence
-                                                                                                                        ? "0341_slack_routing_probe_organization_fence.sql"
-                                                                                                                        : tenancyBackfillActivationEvidence
-                                                                                                                          ? "0340_tenancy_backfill_activation_evidence.sql"
-                                                                                                                          : documentAuthorityReclassification
-                                                                                                                            ? "0339_document_authority_reclassification.sql"
-                                                                                                                            : atomicConnectedMachineAttachments
-                                                                                                                              ? "0338_atomic_connected_machine_attachments.sql"
-                                                                                                                              : routedSlackHandles
-                                                                                                                                ? "0337_slack_routed_action_handles.sql"
-                                                                                                                                : "0336_atomic_session_fork_visibility.sql",
+      latestMigration: canonicalSessionScopeSubject
+        ? "0451_canonical_session_scope_subject.sql"
+        : scheduledTaskCreatorPolicy
+          ? "0428_scheduled_task_creator_policy.sql"
+          : sessionAgentAccessScope
+            ? "0427_session_agent_access_scope.sql"
+            : codexBookkeepingPreservesSessionRecency
+              ? "0426_codex_bookkeeping_preserves_session_recency.sql"
+              : feedbackSubmissions
+                ? "0425_feedback_submissions.sql"
+                : organizationSupergrokSubscriptions
+                  ? "0423_organization_supergrok_subscriptions.sql"
+                  : personalWorkspaceOrganizationCodexInheritance
+                    ? "0422_personal_workspace_organization_codex_inheritance.sql"
+                    : siteDirectUploads
+                      ? "0418_site_direct_uploads.sql"
+                      : commandRunnerFailureMetadata
+                        ? "0417_command_runner_failure_metadata.sql"
+                        : scheduledInheritedToolAdmission
+                          ? "0416_scheduled_inherited_tool_admission.sql"
+                          : commandCompletionObservation
+                            ? "0415_command_completion_observation.sql"
+                            : scheduledGeneratedProducerMaterialization
+                              ? "0414_scheduled_generated_producer_materialization.sql"
+                              : sessionFilterActivity
+                                ? "0413_session_filter_activity.sql"
+                                : newSessionDraftProjectProvenanceValidation
+                                  ? "0412_new_session_draft_project_provenance_validation.sql"
+                                  : newSessionDraftProjectProvenanceBackfill
+                                    ? "0411_new_session_draft_project_provenance_backfill.sql"
+                                    : newSessionDraftProjectProvenanceIndex
+                                      ? "0410_new_session_draft_project_provenance_index.sql"
+                                      : newSessionDraftProjectProvenance
+                                        ? "0409_new_session_draft_project_provenance.sql"
+                                        : scheduledSessionTargetIndex
+                                          ? "0408_scheduled_session_target_index.sql"
+                                          : connectedCommandTrackingRetirement
+                                            ? "0407_connected_command_tracking_retirement.sql"
+                                            : sandboxProviderDeadlineInteractionFollowup
+                                              ? "0391_sandbox_provider_deadline_interaction_followup.sql"
+                                              : organizationModelProviderConnections
+                                                ? "0390_organization_model_provider_connections.sql"
+                                                : modelCatalogAndGatewayCustomModels
+                                                  ? "0389_model_catalog_and_gateway_custom_models.sql"
+                                                  : sandboxProviderDeadlineInteractions
+                                                    ? "0388_sandbox_provider_deadline_interactions.sql"
+                                                    : boundHostExportSessionPayloads
+                                                      ? "0387_bound_host_export_session_payloads.sql"
+                                                      : localOrganizationAdministration
+                                                        ? "0386_local_organization_administration.sql"
+                                                        : connectedMachineLegacyTildeWorkdirs
+                                                          ? "0385_connected_machine_legacy_tilde_workdirs.sql"
+                                                          : codexCooldownRevisionGuardPrivileges
+                                                            ? "0384_codex_cooldown_revision_guard_privileges.sql"
+                                                            : codexCooldownReconciliation
+                                                              ? "0383_codex_cooldown_reconciliation.sql"
+                                                              : organizationApiKeyProvenance
+                                                                ? "0382_organization_api_key_provenance.sql"
+                                                                : organizationCodexSubscriptionInheritance
+                                                                  ? "0381_organization_codex_subscription_inheritance.sql"
+                                                                  : autonomousCompanyProfileAgentPolicy
+                                                                    ? "0380_autonomous_company_profile_agent_policy.sql"
+                                                                    : sessionEventRawLaneActivation
+                                                                      ? "0379_session_event_raw_lane_activation.sql"
+                                                                      : scopedRigHealthAuditTimestamp
+                                                                        ? "0378_scoped_rig_health_audit_timestamp.sql"
+                                                                        : scopedRigHealthProjection
+                                                                          ? "0377_scoped_rig_health_projection.sql"
+                                                                          : organizationWorkspaceInventory
+                                                                            ? "0376_organization_workspace_inventory.sql"
+                                                                            : sessionRecoveryObservability
+                                                                              ? "0375_session_recovery_observability.sql"
+                                                                              : sessionEventCursors
+                                                                                ? "0374_session_event_cursors.sql"
+                                                                                : sandboxSharedPreparation
+                                                                                  ? "0373_sandbox_shared_preparation.sql"
+                                                                                  : orderedVariableSetRuntimeAuthority
+                                                                                    ? "0372_ordered_variable_set_runtime_authority.sql"
+                                                                                    : workspaceMemberCandidateInventory
+                                                                                      ? "0371_workspace_member_candidate_inventory.sql"
+                                                                                      : workspaceMemberManagementScope
+                                                                                        ? "0370_workspace_member_management_scope.sql"
+                                                                                        : localHumanPersonalAuthority
+                                                                                          ? "0369_local_human_personal_authority.sql"
+                                                                                          : sessionDiscoveryClaimSearchIndex
+                                                                                            ? "0368_session_discovery_claim_search_index.sql"
+                                                                                            : sessionDiscoveryGoalSearchIndex
+                                                                                              ? "0367_session_discovery_goal_search_index.sql"
+                                                                                              : sessionDiscoveryTitleSearchIndex
+                                                                                                ? "0366_session_discovery_title_search_index.sql"
+                                                                                                : permissionScopedWorkClaims
+                                                                                                  ? "0365_permission_scoped_work_claims.sql"
+                                                                                                  : workspaceLearningPolicySnapshotLockOrder
+                                                                                                    ? "0364_workspace_learning_policy_snapshot_lock_order.sql"
+                                                                                                    : organizationRecoveryCustody
+                                                                                                      ? "0363_organization_recovery_custody.sql"
+                                                                                                      : managedAuthSessionSets
+                                                                                                        ? "0362_managed_auth_session_sets.sql"
+                                                                                                        : sessionVariableSetAttachments
+                                                                                                          ? "0352_session_variable_set_attachments.sql"
+                                                                                                          : organizationUserSetupDelivery
+                                                                                                            ? "0351_organization_user_setup_delivery.sql"
+                                                                                                            : organizationSharedWorkspaceAdministration
+                                                                                                              ? "0350_organization_shared_workspace_administration.sql"
+                                                                                                              : greenfieldSessionTenancyActivation
+                                                                                                                ? "0349_greenfield_session_tenancy_activation.sql"
+                                                                                                                : namedSignupAndUserSetup
+                                                                                                                  ? "0348_named_signup_and_user_setup.sql"
+                                                                                                                  : connectionAuthorityConvergenceEvidence
+                                                                                                                    ? "0347_connection_authority_convergence_evidence.sql"
+                                                                                                                    : documentMigrationAuditSurface
+                                                                                                                      ? "0346_document_migration_audit_surface.sql"
+                                                                                                                      : tenantScopedSessionTenancyFence
+                                                                                                                        ? "0345_tenant_scoped_session_tenancy_fence.sql"
+                                                                                                                        : privateSessionVisibilityTransitionGate
+                                                                                                                          ? "0344_private_session_visibility_transition_gate.sql"
+                                                                                                                          : personalDocumentForceRlsRepair
+                                                                                                                            ? "0343_personal_document_force_rls_lock_repair.sql"
+                                                                                                                            : slackRoutePromptSinglePending
+                                                                                                                              ? "0342_slack_route_prompt_single_pending.sql"
+                                                                                                                              : slackRoutingProbeFence
+                                                                                                                                ? "0341_slack_routing_probe_organization_fence.sql"
+                                                                                                                                : tenancyBackfillActivationEvidence
+                                                                                                                                  ? "0340_tenancy_backfill_activation_evidence.sql"
+                                                                                                                                  : documentAuthorityReclassification
+                                                                                                                                    ? "0339_document_authority_reclassification.sql"
+                                                                                                                                    : atomicConnectedMachineAttachments
+                                                                                                                                      ? "0338_atomic_connected_machine_attachments.sql"
+                                                                                                                                      : routedSlackHandles
+                                                                                                                                        ? "0337_slack_routed_action_handles.sql"
+                                                                                                                                        : "0336_atomic_session_fork_visibility.sql",
       ...(workspaceMemoryAndLearningDefaults
         ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
         : {}),
@@ -2545,48 +2634,52 @@ describe("release schema contract", () => {
       ...(modelConnectionAccess ? { latestMigration: "0424_model_connection_access.sql" } : {}),
       ...(feedbackSubmissions ? { latestMigration: "0425_feedback_submissions.sql" } : {}),
       ...(organizationScopedExternalWorkspaces
-        ? { latestMigration: "0426_organization_scoped_external_workspaces.sql" }
+        ? { latestMigration: "0431_organization_scoped_external_workspaces.sql" }
         : {}),
-      ...(durableConnectAttempts ? { latestMigration: "0427_durable_connect_attempts.sql" } : {}),
+      ...(durableConnectAttempts ? { latestMigration: "0432_durable_connect_attempts.sql" } : {}),
       ...(externalIdentityProvisioning
-        ? { latestMigration: "0428_external_identity_provisioning.sql" }
+        ? { latestMigration: "0433_external_identity_provisioning.sql" }
         : {}),
       ...(externalWorkspaceMemberRemoval
-        ? { latestMigration: "0429_external_workspace_member_removal.sql" }
+        ? { latestMigration: "0434_external_workspace_member_removal.sql" }
         : {}),
       ...(externalIdentityMembershipLifecycle
-        ? { latestMigration: "0430_external_identity_membership_lifecycle.sql" }
+        ? { latestMigration: "0435_external_identity_membership_lifecycle.sql" }
         : {}),
       ...(externalOwningUserAuthority
-        ? { latestMigration: "0431_external_owning_user_authority.sql" }
+        ? { latestMigration: "0436_external_owning_user_authority.sql" }
         : {}),
-      ...(hostMcpBindingRegistry ? { latestMigration: "0432_host_mcp_binding_registry.sql" } : {}),
-      ...(hostMcpDelegations ? { latestMigration: "0433_host_mcp_delegations.sql" } : {}),
-      ...(hostMcpTurnAuthorities ? { latestMigration: "0434_host_mcp_turn_authorities.sql" } : {}),
+      ...(hostMcpBindingRegistry ? { latestMigration: "0437_host_mcp_binding_registry.sql" } : {}),
+      ...(hostMcpDelegations ? { latestMigration: "0438_host_mcp_delegations.sql" } : {}),
+      ...(hostMcpTurnAuthorities ? { latestMigration: "0439_host_mcp_turn_authorities.sql" } : {}),
       ...(hostMcpCausalContinuation
-        ? { latestMigration: "0435_host_mcp_causal_continuation.sql" }
+        ? { latestMigration: "0440_host_mcp_causal_continuation.sql" }
         : {}),
-      ...(hostMcpTaskAuthorities ? { latestMigration: "0436_host_mcp_task_authorities.sql" } : {}),
-      ...(hostMcpChildAuthority ? { latestMigration: "0437_host_mcp_child_authority.sql" } : {}),
+      ...(hostMcpTaskAuthorities ? { latestMigration: "0441_host_mcp_task_authorities.sql" } : {}),
+      ...(hostMcpChildAuthority ? { latestMigration: "0442_host_mcp_child_authority.sql" } : {}),
       ...(externalIdentityLinkLifecycle
-        ? { latestMigration: "0438_external_identity_link_lifecycle.sql" }
+        ? { latestMigration: "0443_external_identity_link_lifecycle.sql" }
         : {}),
       ...(externalIdentityLinkWork
-        ? { latestMigration: "0439_external_identity_link_work.sql" }
+        ? { latestMigration: "0444_external_identity_link_work.sql" }
         : {}),
       ...(externalLinkPreviewAndPermissionCeiling
-        ? { latestMigration: "0440_external_link_preview_and_permission_ceiling.sql" }
+        ? { latestMigration: "0445_external_link_preview_and_permission_ceiling.sql" }
         : {}),
       ...(externalLinkScheduledOrigin
-        ? { latestMigration: "0441_external_link_scheduled_origin.sql" }
+        ? { latestMigration: "0446_external_link_scheduled_origin.sql" }
         : {}),
-      ...(hostMcpNativeOwner ? { latestMigration: "0442_host_mcp_native_owner.sql" } : {}),
-      ...(connectOriginAuthority ? { latestMigration: "0443_connect_origin_authority.sql" } : {}),
+      ...(hostMcpNativeOwner ? { latestMigration: "0447_host_mcp_native_owner.sql" } : {}),
+      ...(connectOriginAuthority ? { latestMigration: "0448_connect_origin_authority.sql" } : {}),
       ...(externalLinkInventoryLabels
-        ? { latestMigration: "0444_external_link_inventory_labels.sql" }
+        ? { latestMigration: "0449_external_link_inventory_labels.sql" }
         : {}),
       ...(socialConnectionVersions
-        ? { latestMigration: "0445_social_connection_versions.sql" }
+        ? {
+            latestMigration: canonicalSessionScopeSubject
+              ? "0451_canonical_session_scope_subject.sql"
+              : "0450_social_connection_versions.sql",
+          }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
@@ -4704,7 +4797,12 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
   const source = join(import.meta.dir, "../packages/db/drizzle");
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
-  const excluded = new Set([...excludedPaths, "0397_sandbox_deadline_rotation_preemption.sql"]);
+  const excluded = new Set([
+    ...excludedPaths,
+    "0397_sandbox_deadline_rotation_preemption.sql",
+    "0429_message_boundary_session_forks.sql",
+    "0430_session_personal_variable_set_continuations.sql",
+  ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));
