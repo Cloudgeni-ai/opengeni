@@ -17,12 +17,13 @@ test("new connections default on without undoing draft choices, including revoca
     configuredIds?: string[];
     principal?: string;
   };
-  function Draft({ workspaceId, availableIds, configuredIds }: Props) {
+  function Draft({ workspaceId, availableIds, configuredIds, principal = "owner" }: Props) {
     const [selected, setSelected] = useState(new Set<string>());
     const appliedKey = useRef<string | null>(null);
     const seenIds = useRef(new Set<string>());
     useCapabilityToolDefaults({
       ready: true,
+      principalKey: principal,
       workspaceId,
       availableIds,
       configuredIds,
@@ -60,7 +61,7 @@ test("new connections default on without undoing draft choices, including revoca
     act(async () =>
       root.render(
         <StrictMode>
-          <Draft key={props.principal ?? "owner"} {...props} />
+          <Draft {...props} />
         </StrictMode>,
       ),
     );
@@ -103,6 +104,7 @@ test("new connections default on without undoing draft choices, including revoca
   await render({ workspaceId: "b", availableIds: ["drive"] });
   expect(checked("drive")).toBe(true);
   await deselect("drive");
+  await render({ workspaceId: "b", availableIds: [], principal: "member" });
   await render({ workspaceId: "b", availableIds: ["drive"], principal: "member" });
   expect(checked("drive")).toBe(true);
   await act(async () => root.unmount());

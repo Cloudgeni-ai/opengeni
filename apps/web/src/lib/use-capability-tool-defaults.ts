@@ -6,6 +6,7 @@ export function useCapabilityToolDefaults(input: {
   ready: boolean;
   workspaceId: string | null;
   configuredIds?: string[];
+  principalKey: string;
   availableIds: string[];
   defaultIds: string[];
   appliedKey: RefObject<string | null>;
@@ -16,6 +17,7 @@ export function useCapabilityToolDefaults(input: {
   const excludedIds = useRef(new Set<string>());
   const policyKey = JSON.stringify([
     workspaceId,
+    input.principalKey,
     configuredIds === undefined ? null : [...configuredIds].sort(),
   ]);
   const availableKey = JSON.stringify(input.availableIds);

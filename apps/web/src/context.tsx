@@ -1143,6 +1143,7 @@ export function RootRouteComponent() {
   const repositoryValidationError = repositoryBuild.error;
 
   useCapabilityToolDefaults({
+    principalKey: JSON.stringify(principalTransitionIdentity.current),
     ready: clientConfig !== null,
     workspaceId: routedWorkspaceId,
     configuredIds: configuredWorkspaceToolDefaults?.mcpServerIds,
