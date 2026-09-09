@@ -135,6 +135,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const ordered = orderTimelineEvents(events, prescan);
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
   const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
+  const identifiedMessages = new Map<string, AgentMessageItem>();
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -408,8 +409,43 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!text) {
           break;
         }
+        const messageId = stringValue(payload.messageId);
+        const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
+        const identified = messageKey ? identifiedMessages.get(messageKey) : undefined;
+        if (identified) {
+          if (identified.annotationSource?.eventType !== "agent.message.completed") {
+            identified.text += text;
+            rememberAgentResponse(turnId, identified, false);
+          }
+          break;
+        }
         const open = last();
-        if (open?.kind === "agent-message" && open.streaming && open.turnId === turnId) {
+        if (!messageKey && open?.kind === "tool-call" && open.status === "running") {
+          const previous = latestAgentResponseByTurn.get(turnId);
+          const previousIndex = previous ? items.indexOf(previous.item) : -1;
+          if (
+            previous &&
+            !previous.completed &&
+            previousIndex >= 0 &&
+            items
+              .slice(previousIndex + 1)
+              .every(
+                (item) =>
+                  item.kind === "tool-call" && item.turnId === turnId && item.status === "running",
+              )
+          ) {
+            // Legacy deltas have no provider message identity. Tool creation
+            // alone is not a text boundary; completed output still is.
+            previous.item.text += text;
+            break;
+          }
+        }
+        if (
+          !messageKey &&
+          open?.kind === "agent-message" &&
+          open.streaming &&
+          open.turnId === turnId
+        ) {
           open.text += text;
           rememberAgentResponse(turnId, open, false);
           break;
@@ -424,18 +460,21 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           occurredAt: event.occurredAt,
         };
         items.push(item);
+        if (messageKey) identifiedMessages.set(messageKey, item);
         rememberAgentResponse(turnId, item, false);
         break;
       }
 
       case "agent.message.completed": {
         const text = stringValue(payload.text);
+        const messageId = stringValue(payload.messageId);
+        const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
         const phase = assistantMessagePhase(payload.phase);
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
-        let openIndex = -1;
-        for (let index = items.length - 1; index >= 0; index -= 1) {
+        let openIndex = messageKey ? items.indexOf(identifiedMessages.get(messageKey)!) : -1;
+        for (let index = messageKey ? -1 : items.length - 1; index >= 0; index -= 1) {
           const candidate = items[index];
           if (candidate?.kind === "agent-message" && candidate.turnId === turnId) {
             openIndex = index;
@@ -502,6 +541,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             },
           };
           items.push(item);
+          if (messageKey) identifiedMessages.set(messageKey, item);
           rememberAgentResponse(turnId, item, true);
         }
         break;

@@ -1307,6 +1307,12 @@ immediately before React mutates the DOM; `message-timeline.tsx` applies only
 the residual correction after browser anchoring. Corrections cannot resume
 tip-follow, and continued upward input permits bounded sequential older-page
 loads even when collapsed content adds no scroll range.
+Automatic underfill loads preserve the retained tail; a window-budget refusal
+offers explicit earlier navigation instead of silently entering history mode.
+Underfilled history does not auto-page forward merely because both sentinels
+are visible. Explicit Jump to latest restores a stable live-tail window.
+Provider message identity survives runtime event normalization so the timeline
+can coalesce interleaved chunks without combining distinct assistant messages.
 
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.

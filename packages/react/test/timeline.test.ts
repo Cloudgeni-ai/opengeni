@@ -1148,6 +1148,38 @@ describe("buildTimeline", () => {
     expect((items[0] as AgentMessageItem).streaming).toBe(false);
   });
 
+  test("message identity joins interleaved chunks but preserves distinct replies", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Checking this calc", messageId: "message-a" }),
+      event("agent.toolCall.created", { id: "call-1", name: "read_record", arguments: {} }),
+      event("agent.message.delta", { text: "ulation.", messageId: "message-a" }),
+      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      event("agent.message.completed", {
+        text: "Checking this calculation.",
+        messageId: "message-a",
+      }),
+      event("agent.message.delta", { text: "Another reply.", messageId: "message-b" }),
+    ]);
+    expect(items.filter((item) => item.kind === "agent-message").map((item) => item.text)).toEqual([
+      "Checking this calculation.",
+      "Another reply.",
+    ]);
+  });
+
+  test("legacy pending tool creation does not split an unfinished word", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Checking this calc" }),
+      event("agent.toolCall.created", { id: "call-1", name: "read_record", arguments: {} }),
+      event("agent.message.delta", { text: "ulation before continuing." }),
+      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+    ]);
+    expect(items.filter((item) => item.kind === "agent-message").map((item) => item.text)).toEqual([
+      "Checking this calculation before continuing.",
+    ]);
+  });
+
   test("matches tool outputs to calls by id and marks them complete", () => {
     reset();
     const items = buildTimeline([

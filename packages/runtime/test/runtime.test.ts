@@ -798,6 +798,22 @@ describe("runtime event normalization", () => {
     });
   });
 
+  test("preserves provider message identity across text deltas and completion", () => {
+    const [delta] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "output_text_delta",
+        delta: "partial",
+        itemId: "message-a",
+      } as any),
+    );
+    const [completed] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: { type: "message_output_item", text: "partial answer", rawItem: { id: "message-a" } },
+    } as any);
+    expect(delta?.payload).toEqual({ text: "partial", messageId: "message-a" });
+    expect(completed?.payload).toEqual({ text: "partial answer", messageId: "message-a" });
+  });
+
   test("extracts streamed usage without manufacturing a durable event", () => {
     const event = {
       type: "raw_model_stream_event",

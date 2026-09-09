@@ -28,6 +28,7 @@ type DeltaRun = {
   sandboxName: string | undefined;
   sandboxStream: string | undefined;
   sandboxCommandId: string | undefined;
+  messageId: string | undefined;
 };
 
 export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent[] {
@@ -59,6 +60,7 @@ export function coalesceSessionEventDeltasWithCoverage(
         : {
             text: run.text,
             coalescedUntil: run.lastSequence,
+            ...(run.messageId !== undefined ? { messageId: run.messageId } : {}),
           };
     coalesced.push({
       ...run.first,
@@ -84,11 +86,16 @@ export function coalesceSessionEventDeltasWithCoverage(
     const sandboxStream = isSandbox ? sandboxDeltaString(event.payload, "stream") : undefined;
     const sandboxCommandId = isSandbox ? sandboxDeltaString(event.payload, "commandId") : undefined;
     const text = deltaText(event);
+    const messageId =
+      event.type === "agent.message.delta" && typeof asRecord(event.payload).messageId === "string"
+        ? (asRecord(event.payload).messageId as string)
+        : undefined;
     if (
       run &&
       sameDeltaRun(run.first, event, run.sandboxName, sandboxName) &&
       run.sandboxStream === sandboxStream &&
-      run.sandboxCommandId === sandboxCommandId
+      run.sandboxCommandId === sandboxCommandId &&
+      run.messageId === messageId
     ) {
       const textBytes = encoder.encode(text).byteLength;
       if (
@@ -116,6 +123,7 @@ export function coalesceSessionEventDeltasWithCoverage(
       sandboxName,
       sandboxStream,
       sandboxCommandId,
+      messageId,
     };
   }
 
