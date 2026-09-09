@@ -722,6 +722,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     );
 
     const historyItem = {
+      orderedProbe: {
+        query: "search",
+        names: ["tool"],
+        limit: 5,
+        schema: { zebra: { type: "string" }, alpha: { type: "number" } },
+      },
       type: "message",
       role: "user",
       content: [
@@ -775,7 +781,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           ),
         ),
     );
-    expect(fromPostgresLosslessJson(history!.item, history!.itemCodecVersion)).toEqual(historyItem);
+    expect(JSON.stringify(fromPostgresLosslessJson(history!.item, history!.itemCodecVersion))).toBe(
+      JSON.stringify(historyItem),
+    );
     const [rawHistory] = await shared.admin<Array<{ type: string | null }>>`
       select item ->> 'type' as type from session_history_items
       where workspace_id = ${workspaceId} and session_id = ${session.id} and position = 1`;
@@ -798,6 +806,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
 
     const callId = "pending-synthetic-call";
     const callItem = {
+      orderedProbe: { query: "search", names: [], limit: 5 },
       type: "function_call",
       callId,
       name: "synthetic_tool",
@@ -854,6 +863,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         .where(eq(schema.sessionPendingToolCalls.callId, callId)),
     );
     if (!pending?.eventOutput) throw new Error("Pending tool event output was not retained");
+    expect(
+      JSON.stringify(fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion)),
+    ).toBe(JSON.stringify(callItem));
     expect({
       callItem: fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
       resultItem: fromPostgresLosslessJson(pending.resultItem, pending.resultItemCodecVersion),

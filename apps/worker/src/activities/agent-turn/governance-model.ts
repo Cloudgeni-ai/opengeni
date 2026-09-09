@@ -1,6 +1,7 @@
 import {
   materializeRigVersionForAttempt,
   getWorkspaceModelPolicy,
+  getFilesForSubject,
   getWorkspace,
   resolveCompanyBrainContextSelection,
   getGeneratedVideoArtifact,
@@ -356,6 +357,13 @@ export async function prepareGovernanceAndModel(
           return object.bytes;
         }
       : undefined,
+    (fileIds) =>
+      getFilesForSubject(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: fileAuthoritySubjectId,
+        fileIds,
+      }),
   );
   const modelHistoryProjector = async (
     items: Array<Record<string, unknown>>,
