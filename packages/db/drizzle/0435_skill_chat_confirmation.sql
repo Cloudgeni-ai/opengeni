@@ -1,7 +1,7 @@
 -- deployment-mode: maintenance
 -- Exact human response admission and worker question serialization must cut over
 -- together: an old API can answer a new question without activating its Skill.
--- Drain every old API/control/turn runtime and never restart a pre-0434 binary.
+-- Drain every old API/control/turn runtime and never restart a pre-0435 binary.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '1min';
 DO $drain$
