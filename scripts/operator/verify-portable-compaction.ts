@@ -52,6 +52,20 @@ export function assertOpaqueKickoff(output: Item[]): void {
   }
 }
 
+export function getVerificationCall(output: Item[]): { callId: string; arguments: string } {
+  const calls = output.filter((item) => item.type === "function_call");
+  const call = calls[0];
+  if (
+    calls.length !== 1 ||
+    call?.name !== "verify_checkpoint" ||
+    typeof call.call_id !== "string" ||
+    !call.call_id ||
+    typeof call.arguments !== "string"
+  )
+    throw new CompactionVerificationError("Expected exactly one verify_checkpoint tool call.");
+  return { callId: call.call_id, arguments: call.arguments };
+}
+
 export async function main(args: string[] = process.argv.slice(2)) {
   if (!args.includes("--live"))
     throw new CompactionVerificationError("Pass --live to run synthetic provider requests.");
@@ -95,6 +109,9 @@ export async function main(args: string[] = process.argv.slice(2)) {
     if (item.type === "message") return { ...item, providerData: { id: item.id } };
     throw new CompactionVerificationError("Unexpected kickoff output type");
   });
+  // This unpredictable fact exists only in an old tool result: retained user
+  // messages and summarizer instructions must not supply the expected answer.
+  const toolReceipt = crypto.randomUUID();
   const history: Item[] = [
     {
       type: "message",
@@ -102,7 +119,7 @@ export async function main(args: string[] = process.argv.slice(2)) {
       content: "Remember checkpoint amber-orchid-42. Preserve it through compaction.",
     },
     ...initialOutput,
-    ...compactionHistoryFixture(),
+    ...compactionHistoryFixture(toolReceipt),
   ];
   const original = JSON.stringify(history);
   const estimatedBefore = estimateTokens(history);
@@ -113,7 +130,7 @@ export async function main(args: string[] = process.argv.slice(2)) {
       maxOutputTokens: 20_000,
       model: settings.openaiModel,
       systemInstructions:
-        "Preserve the checkpoint, release color, and the last completed patch result in the summary.",
+        "Preserve the checkpoint, release color, and the last patch result including its exact verification receipt in the summary.",
       onUsage: (usage) => {
         summaryUsage = usage;
       },
@@ -122,9 +139,16 @@ export async function main(args: string[] = process.argv.slice(2)) {
   let replacement: Item[];
   if (args.includes("--durable")) {
     const { compactDurableFixture } = await import("./compaction-durable");
-    const result = await compactDurableFixture(settings, history, summarize);
-    replacement = result.replacement;
-    durableProof = result.proof;
+    const { acquireSharedTestDatabase } = await import("@opengeni/testing");
+    const shared = await acquireSharedTestDatabase("portable-compaction-live");
+    if (!shared) throw new CompactionVerificationError("Disposable PostgreSQL unavailable");
+    try {
+      const result = await compactDurableFixture(settings, history, summarize, shared);
+      replacement = result.replacement;
+      durableProof = result.proof;
+    } finally {
+      await shared.release();
+    }
   } else {
     replacement = buildCompactionReplacementHistory(
       history,
@@ -145,15 +169,16 @@ export async function main(args: string[] = process.argv.slice(2)) {
       );
     return { role: "user" as const, content: item.content };
   });
+  const continuedInput = [
+    ...input,
+    {
+      role: "user" as const,
+      content:
+        "Call verify_checkpoint using the remembered checkpoint, release color, patch outcome, and exact verification receipt returned by the old patch tool.",
+    },
+  ];
   const continued = await request({
-    input: [
-      ...input,
-      {
-        role: "user",
-        content:
-          "Call verify_checkpoint using the remembered checkpoint, release color, and patch outcome.",
-      },
-    ],
+    input: continuedInput,
     tools: [
       {
         type: "function",
@@ -166,28 +191,27 @@ export async function main(args: string[] = process.argv.slice(2)) {
             checkpoint: { type: "string" },
             release: { type: "string" },
             patchStatus: { type: "string", enum: ["completed", "failed", "unknown"] },
+            toolReceipt: { type: "string" },
           },
-          required: ["checkpoint", "release", "patchStatus"],
+          required: ["checkpoint", "release", "patchStatus", "toolReceipt"],
           additionalProperties: false,
         },
       },
     ],
     tool_choice: { type: "function", name: "verify_checkpoint" },
+    parallel_tool_calls: false,
     max_output_tokens: 8192,
   });
-  const call = continued.output.find(
-    (item) => item.type === "function_call" && item.name === "verify_checkpoint",
-  );
-  if (!call || call.type !== "function_call" || typeof call.arguments !== "string")
-    throw new CompactionVerificationError("No continuation tool call");
+  const call = getVerificationCall(continued.output as unknown as Item[]);
   const facts = JSON.parse(call.arguments) as Record<string, unknown>;
   if (
     facts.checkpoint !== "amber-orchid-42" ||
     facts.release !== "blue" ||
-    facts.patchStatus !== "completed"
+    facts.patchStatus !== "completed" ||
+    facts.toolReceipt !== toolReceipt
   )
     throw new CompactionVerificationError(
-      "Synthetic compacted checkpoint, release or patch facts mismatch.",
+      "Synthetic compacted checkpoint, release, patch outcome or old tool receipt mismatch.",
     );
   const receipt = "verified-amber-orchid-42";
   const continuationOutput = continued.output.map((item) => {
@@ -197,11 +221,16 @@ export async function main(args: string[] = process.argv.slice(2)) {
   });
   const finished = await request({
     input: [
-      ...input,
+      ...continuedInput,
       ...continuationOutput,
-      { type: "function_call_output", call_id: call.call_id, output: receipt },
-      { role: "user", content: "Reply with the exact verification receipt from the tool result." },
+      { type: "function_call_output", call_id: call.callId, output: receipt },
+      {
+        role: "user",
+        content: "Reply with the exact output of the most recent verify_checkpoint call.",
+      },
     ],
+    tools: [],
+    tool_choice: "none",
     max_output_tokens: 8192,
   });
   const text = finished.output
@@ -226,6 +255,7 @@ export async function main(args: string[] = process.argv.slice(2)) {
     providerReceipts: receipts,
     canonicalHistoryUnchanged: true,
     continuedToolFactsVerified: true,
+    historicalToolReceiptRecovered: true,
     pairedToolResultConsumed: true,
     durableSessionWritten: Boolean(durableProof),
     durableProof,

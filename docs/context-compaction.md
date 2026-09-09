@@ -366,10 +366,14 @@ equivalence. Original history remains archived by the existing checkpoint flow.
 
 Run `bun test packages/runtime/test/portable-compaction-identity.test.ts` for SDK
 wire coverage and `bun test scripts/operator/verify-portable-compaction.test.ts`
-for the operator/disposable PostgreSQL regression. The operator project is part
-of CI typechecking; its source fixtures are formatted TypeScript rather than
-byte-exact fixture exemptions. Database settlement/fencing also remains covered
-by `apps/worker/test/context-compaction-activity.test.ts`.
+for the operator/disposable PostgreSQL regression. The test omits its database
+case when PostgreSQL is unavailable locally; `OPENGENI_REQUIRE_REAL_DB=1` makes
+that absence fail in CI. The explicit `--live --durable` canary always requires
+PostgreSQL. Each caller owns and releases its disposable database, including
+when checkpoint verification or client cleanup fails. The operator project is
+part of CI typechecking; its source fixtures are formatted TypeScript rather
+than byte-exact fixture exemptions. Database settlement/fencing also remains
+covered by `apps/worker/test/context-compaction-activity.test.ts`.
 
 For live verification, configure Azure's base URL or endpoint/deployment and
 API key or AD token, then run `bun run verify:portable-compaction --live --durable`.
@@ -378,7 +382,12 @@ and API-version query handling. The kickoff must contain opaque reasoning and
 a dependent assistant message. Durable mode uses disposable PostgreSQL and the
 real fenced compaction activity, verifies unchanged archival, the committed
 checkpoint event and cleared token/request state, then supplies the reloaded
-checkpoint to a correlated tool call/result continuation. It never reads or
-modifies a customer session. Omit `--durable` for provider-only verification;
+checkpoint to a correlated tool call/result continuation. That continuation must
+recover an unpredictable receipt from an old tool result; the receipt is absent
+from retained user messages, system instructions and the verification prompt.
+The canary requires exactly one continuation call, preserves that request's
+complete prefix when supplying its result, and disables further tool selection
+for the final acknowledgement. It never reads or modifies a customer session.
+Omit `--durable` for provider-only verification;
 the receipt distinguishes the two modes. Locally authored assertion messages
 are visible; arbitrary provider errors and SDK causes remain content-free.

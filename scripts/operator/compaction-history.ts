@@ -1,7 +1,7 @@
 type Item = Record<string, unknown>;
 
 /** Synthetic protocol history shared by regression coverage and the live canary. */
-export function compactionHistoryFixture(): Item[] {
+export function compactionHistoryFixture(toolReceipt = "synthetic-tool-receipt"): Item[] {
   const items: Item[] = [
     {
       type: "message",
@@ -70,7 +70,7 @@ export function compactionHistoryFixture(): Item[] {
       type: "apply_patch_call_output",
       callId: "patch_fixture",
       status: "completed",
-      output: "Patched fixture.",
+      output: `Patched fixture. Verification receipt: ${toolReceipt}`,
     },
   );
   return items;

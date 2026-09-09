@@ -13,7 +13,7 @@ import {
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import type { SharedTestDatabase } from "@opengeni/testing";
 import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
 import type { Settings } from "@opengeni/config";
 
@@ -21,14 +21,13 @@ import { CompactionVerificationError } from "./compaction-verification-errors";
 
 type Item = Record<string, unknown>;
 
-/** Exercise the real fenced checkpoint on disposable PostgreSQL, never customer data. */
+/** Exercise a fenced checkpoint; the caller owns the disposable database and its release. */
 export async function compactDurableFixture(
   settings: Settings,
   history: Item[],
   summarize: (settings: Settings, input: Item[]) => Promise<string>,
+  shared: SharedTestDatabase,
 ) {
-  const shared = await acquireSharedTestDatabase("portable-compaction-live");
-  if (!shared) throw new CompactionVerificationError("Disposable PostgreSQL unavailable");
   const client = createDb(shared.appUrl);
   try {
     const suffix = crypto.randomUUID();
@@ -153,10 +152,6 @@ export async function compactDurableFixture(
       },
     };
   } finally {
-    try {
-      await client.close();
-    } finally {
-      await shared.release();
-    }
+    await client.close();
   }
 }
