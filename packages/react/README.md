@@ -652,6 +652,11 @@ intentional changes should regenerate those snapshots and review the diff.
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
+  Top-level assistant tables in `MessageTimeline` can expand beyond the prose
+  column into the actual conversation panel's available space. Small tables,
+  paragraphs, user bubbles, and nested or standalone Markdown keep their normal
+  width; oversized tables retain table-only horizontal scrolling. No host prop
+  or viewport-wide layout override is required.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render

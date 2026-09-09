@@ -21,6 +21,7 @@ import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
+import { useMarkdownTableLayout } from "./markdown-table-layout";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
@@ -411,9 +412,9 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 }
 
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
-  const tableRef = useRef<HTMLTableElement | null>(null);
+  const { wrapperRef, tableRef, style } = useMarkdownTableLayout(children);
   return (
-    <div className="group/copy relative mt-3 max-w-full first:mt-0">
+    <div ref={wrapperRef} style={style} className="group/copy relative mt-3 max-w-full first:mt-0">
       <div className="pointer-events-none absolute top-0 right-0 z-10">
         <div className="pointer-events-auto">
           <CopyButton
