@@ -215,6 +215,7 @@ describe("workflow timeout contract", () => {
       const proc = Bun.spawn(["bash", "--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
         env: {
           ...process.env,
+          GITHUB_ACTION_PATH: resolve(root, ".github/actions/playwright-browsers"),
           PATH: `${binDir}:${process.env.PATH ?? ""}`,
           PLAYWRIGHT_BROWSERS: "chromium",
           PLAYWRIGHT_ONLY_SHELL: "false",
