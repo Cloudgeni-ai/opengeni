@@ -554,7 +554,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
         { cpClient: mutable.modal.cpClient, version: mutable.modal.version.bind(mutable.modal) },
         mutable.state.sandboxId,
         mutable.state.manifest.root,
-        mutable.state.environment,
+        () => mutable.state?.environment ?? {},
       ),
     );
   }

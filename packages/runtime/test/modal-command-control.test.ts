@@ -138,7 +138,7 @@ test("start disables ambiguous mutation retries and PTY idle-stdin termination",
   expect(command.execId).toBe("tp-test");
   expect(observed).toMatchObject({
     request: {
-      command: ["/bin/bash", "-c", "printf test"],
+      command: ["/bin/sh", "-c", "printf test"],
       ptyInfo: { noTerminateOnIdleStdin: true },
     },
     options: { retries: 0 },
@@ -149,6 +149,33 @@ test("foreign sandbox locators never reach the provider", async () => {
   await expect(controller({}).read({ ...locator(), sandboxId: "sb-other" }, 1)).rejects.toThrow(
     "original sandbox",
   );
+});
+
+test("each start observes renewed environment and preserves explicit shell login behavior", async () => {
+  let environment = { TEST_VALUE: "initial" };
+  const commands: string[][] = [];
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: {
+        sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
+        containerExec: async (request: { command: string[] }) => {
+          commands.push(request.command);
+          return { execId: "tp-test" };
+        },
+      },
+    } as never,
+    "sb-test",
+    "/workspace",
+    () => environment,
+  );
+  await control.start({ cmd: "true" });
+  environment = { TEST_VALUE: "renewed" };
+  await control.start({ cmd: "true", shell: "/bin/bash" });
+  expect(commands).toEqual([
+    ["/usr/bin/env", "--", "TEST_VALUE=initial", "/bin/sh", "-c", "true"],
+    ["/usr/bin/env", "--", "TEST_VALUE=renewed", "/bin/bash", "-lc", "true"],
+  ]);
 });
 
 test("stdin uses the protected monotonic sequence across fresh controllers", async () => {

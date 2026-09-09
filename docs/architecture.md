@@ -1417,15 +1417,11 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Modal uses provider execution IDs and control-plane-persisted stream cursors.
-Readers capture stable pages before acknowledgment; sandbox files never prove exit.
-Missing legacy locators remain unknown, not completed.
-
 After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
 recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
 never authorizes exit/loss, capture, rotation, termination, or replay.
 
-Modal command observation: `docs/run-lifecycle.md`.
+Modal provider-owned command identities, output replay, and legacy observation: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and

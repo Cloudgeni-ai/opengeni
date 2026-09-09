@@ -2,6 +2,7 @@ import { posix } from "node:path";
 import type { ModalClient } from "modal";
 import { SandboxProviderCommand } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
+import { shellQuote } from "@openai/agents-core/sandbox/internal";
 
 type ControlPlane = Pick<
   ModalClient["cpClient"],
@@ -63,14 +64,14 @@ export class ModalCommandControl {
     private readonly client: ControlPlane,
     private readonly sandboxId: string,
     private readonly root: string,
-    private readonly environment: Record<string, string> = {},
+    private readonly environment: Record<string, string> | (() => Record<string, string>) = {},
   ) {}
 
   static forSandbox(
     client: Pick<ModalClient, "cpClient" | "version">,
     sandboxId: string,
     root: string,
-    environment: Record<string, string> = {},
+    environment: Record<string, string> | (() => Record<string, string>) = {},
   ): ModalCommandControl {
     if (client.version() !== "0.9.0")
       throw new Error("Modal command control requires the verified 0.9.0 SDK contract");
@@ -83,12 +84,23 @@ export class ModalCommandControl {
       throw new Error("Command workdir is outside the sandbox workspace");
     const task = await this.client.sandboxGetTaskId({ sandboxId: this.sandboxId });
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    let command = [args.shell ?? "/bin/bash", args.login === false ? "-c" : "-lc", args.cmd];
-    if (args.runAs) command = ["runuser", "-u", args.runAs, "--", ...command];
-    if (Object.keys(this.environment).length) {
+    // Match the pinned SDK's default non-login /bin/sh and runAs behavior,
+    // including an already-matching non-root user and sudo-based transitions.
+    let script = args.cmd;
+    if (args.runAs) {
+      const user = shellQuote(args.runAs);
+      const body = shellQuote(script);
+      script = `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then /bin/sh -lc ${body}; elif [ "$(id -u)" = 0 ]; then su -s /bin/sh ${user} -c ${body}; else sudo -n -u ${user} -- sh -lc ${body}; fi`;
+    }
+    const login = args.shell ? (args.login ?? true) : false;
+    let command = [args.shell ?? "/bin/sh", login ? "-lc" : "-c", script];
+    const environment =
+      typeof this.environment === "function" ? this.environment() : this.environment;
+    if (Object.keys(environment).length) {
       command = [
         "/usr/bin/env",
-        ...Object.entries(this.environment).map(([key, value]) => `${key}=${value}`),
+        "--",
+        ...Object.entries(environment).map(([key, value]) => `${key}=${value}`),
         ...command,
       ];
     }
