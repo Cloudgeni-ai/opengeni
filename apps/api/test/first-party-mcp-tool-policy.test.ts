@@ -291,6 +291,42 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("agent discovery exposes recursive pause scope and receipt-versus-progress guidance", async () => {
+    const names: FirstPartyMcpToolName[] = ["session_pause", "session_send_message", "session_get"];
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read", "sessions:control"], names));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "session-coordination-guidance-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const descriptions = new Map(tools.map((tool) => [tool.name, tool.description ?? ""]));
+      expect(descriptions.get("session_pause")).toContain("including descendants");
+      expect(descriptions.get("session_pause")).toContain("pausing an ancestor also stops this caller");
+      expect(descriptions.get("session_send_message")).toContain("Acceptance is not execution");
+      expect(descriptions.get("session_send_message")).toContain("Do not resend an unconsumed message");
+      expect(descriptions.get("session_get")).toContain("Queued status and updatedAt are not proof of execution");
+      const catalog = createAttemptToolEnvironment({
+        scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+        generation: 1,
+        definitions: tools.map((tool) => ({
+          identity: { serverId: "opengeni", toolName: tool.name },
+          modelName: `opengeni__${tool.name}`,
+          description: tool.description!,
+          inputSchema: tool.inputSchema,
+          source: "opengeni" as const,
+          approval: "none" as const,
+          execute: async () => ({ content: [] }),
+        })),
+      }).catalog;
+      const declarations = generateCodemodeDeclarations(catalog);
+      expect(declarations).toContain("pausing an ancestor also stops this caller");
+      expect(declarations).toContain("Acceptance is not execution");
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   test("session_get tools/list and generated attempt declarations allow an omitted ID", async () => {
     const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["session_get"]));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

@@ -118,6 +118,15 @@ before addressing the target. An optional embedding-host `SessionAuthorizationPo
 runs only after the preflight check and may narrow the result; it cannot widen
 private-session access.
 
+Agent-facing Pause guidance names its recursive workstream scope: pausing an
+ancestor interrupts the caller too, so it must not be used merely to coordinate
+concurrent edits. This is guidance for the existing control semantics, not a new
+exception for agent descendants. Message acceptance and queued/updated session
+projections do not prove execution. Agents supervising authorized work must
+verify subsequent turns/results through the existing session observation tools,
+retain consumed event cursors, and inspect blockers instead of duplicating
+unconsumed messages. Explicit human pauses and approvals remain authoritative.
+
 Authority never widens down a tree or through a side door:
 
 - `resolveFirstPartyMcpToolsForCreate` rejects a child `firstPartyMcpTools`

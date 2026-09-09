@@ -106,6 +106,10 @@ describe("provider-neutral operational instructions", () => {
       "A `goal.completed` event records goal state but is not a terminal child result",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("pausing an ancestor also stops you");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Verify a subsequent turn or result");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not repeatedly send unconsumed input");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Preserve explicit human pauses and approvals");
   });
 
   test("holds an unchanged external wait during the status turn without stalling useful work", () => {
