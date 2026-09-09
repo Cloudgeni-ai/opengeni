@@ -1325,6 +1325,21 @@ replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
 
+An operator may explicitly authorize recovery from an older, verified checkpoint
+after the provider is gone. `scripts/operator/historical-checkpoint-recovery.ts`
+accepts `preview` or `authorize` and a private JSON input file. Preview needs
+account/workspace/group IDs. Authorization additionally requires the exact lease
+epoch, workspace and archive generations, selected revision, operation UUID,
+operator subject, reason, and `acceptHistoricalCheckpoint: true`. Authorization
+uses operator-controlled database access; the subject is audit attribution.
+Every attempt in the group must be quiescent and the cold lease must have no holders or
+unsettled mutations. The existing audit store retains that decision and its
+generation gap. Neither generation nor checkpoint artifact provenance is
+rewritten. Existing election, restore verification, and warm publication consume
+the exact receipt; unrelated revisions or newer writes invalidate it. Only a
+subsequent fresh checkpoint makes the archive current. This operation does not
+resume a turn, modify session history, or claim recovery of unavailable writes.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected rig/pack/base
 image instead of replacing the whole machine. Existing serialized sessions keep

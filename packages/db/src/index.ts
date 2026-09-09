@@ -43378,6 +43378,11 @@ function resumeStateWithPreservedArchives(
       : {};
   return {
     ...(resumeState ?? {}),
+    ...(typeof archiveSource?.opengeniHistoricalArchiveRecoveryId === "string"
+      ? {
+          opengeniHistoricalArchiveRecoveryId: archiveSource.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
@@ -43414,6 +43419,11 @@ function archiveOnlyResumeState(
         ? current.backendId
         : (row.resume_backend_id ?? row.backend),
     ...(Object.keys(durableSession).length > 0 ? { sessionState: durableSession } : {}),
+    ...(typeof current?.opengeniHistoricalArchiveRecoveryId === "string"
+      ? {
+          opengeniHistoricalArchiveRecoveryId: current.opengeniHistoricalArchiveRecoveryId,
+        }
+      : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -43842,8 +43852,9 @@ async function acquireLeaseOnce(
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
           if (
-            (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
-            recovery.restore.status === "unrecoverable"
+            ((recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
+              recovery.restore.status === "unrecoverable") &&
+            (await authorizedHistoricalArchiveGeneration(tx, row)) === null
           ) {
             return {
               role: "blocked" as const,
@@ -44050,6 +44061,137 @@ function validatedLegacyNativeSnapshotAdoption(
   return { archiveBase64: value.archiveBase64, descriptor };
 }
 
+/** Operator-only authorization for an exact historical checkpoint. Direct
+ * database access is the authority boundary; subjectId records attribution.
+ * This never resumes a turn or changes the archive/workspace generations. */
+export async function authorizeHistoricalSandboxCheckpointRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedWorkspaceGeneration: number;
+    expectedArchiveGeneration: number;
+    selectedRevision: string;
+    operationId: string;
+    subjectId: string;
+    reason: string;
+    acceptHistoricalCheckpoint: true;
+  },
+): Promise<{ authorized: boolean }> {
+  if (
+    input.acceptHistoricalCheckpoint !== true ||
+    !input.subjectId.trim() ||
+    !input.reason.trim()
+  ) {
+    throw new Error(
+      "Historical checkpoint recovery requires an identified operator and explicit reason",
+    );
+  }
+  return await withRlsContext(db, input, async (tx) => {
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId} for update`);
+    const row = rows[0];
+    if (
+      !row ||
+      row.backend !== "modal" ||
+      row.liveness !== "cold" ||
+      row.instance_id !== null ||
+      Number(row.lease_epoch) !== input.expectedEpoch ||
+      Number(row.refcount) !== 0 ||
+      Number(row.workspace_generation) !== input.expectedWorkspaceGeneration ||
+      row.archive_generation === null ||
+      Number(row.archive_generation) !== input.expectedArchiveGeneration ||
+      input.expectedArchiveGeneration >= input.expectedWorkspaceGeneration ||
+      recoveryStateFromLeaseRow(row).archive.current?.revision !== input.selectedRevision
+    )
+      return { authorized: false };
+    const blockers = await tx.execute<{ present: boolean }>(sql`select
+      exists(select 1 from session_turn_attempts attempt join sessions session
+        on session.workspace_id = attempt.workspace_id and session.id = attempt.session_id
+        where session.workspace_id = ${input.workspaceId} and session.sandbox_group_id = ${input.sandboxGroupId}
+          and (attempt.state in ('claimed','running') or attempt.quiesced_at is null))
+      or exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+      or exists(select 1 from sandbox_workspace_mutation_admissions where lease_id = ${row.id} and settled_at is null)
+      or exists(select 1 from sandbox_retained_processes where lease_id = ${row.id} and state = 'active') as present`);
+    if (blockers[0]?.present) return { authorized: false };
+    if (
+      row.resume_state?.opengeniHistoricalArchiveRecoveryId === input.operationId &&
+      (await authorizedHistoricalArchiveGeneration(tx, row)) === input.expectedArchiveGeneration
+    )
+      return { authorized: true };
+    const metadata = {
+      version: 1,
+      leaseId: row.id,
+      leaseEpoch: input.expectedEpoch,
+      workspaceGeneration: input.expectedWorkspaceGeneration,
+      archiveGeneration: input.expectedArchiveGeneration,
+      selectedRevision: input.selectedRevision,
+      reason: input.reason,
+      acceptedHistoricalCheckpoint: true,
+    };
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          id: input.operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          action: "sandbox.historical_checkpoint_recovery.authorized",
+          targetType: "sandbox_group",
+          targetId: input.sandboxGroupId,
+          metadata,
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    await tx.execute(sql`update sandbox_leases set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+      '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(input.operationId)}::jsonb), updated_at = now()
+      where id = ${row.id}`);
+    return { authorized: true };
+  });
+}
+
+async function authorizedHistoricalArchiveGeneration(
+  db: Database,
+  row: LeaseRow,
+): Promise<number | null> {
+  const operationId = row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+  if (
+    typeof operationId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId)
+  )
+    return null;
+  const [receipt] = await db
+    .select({ metadata: schema.auditEvents.metadata })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.id, operationId),
+        eq(schema.auditEvents.accountId, row.account_id),
+        eq(schema.auditEvents.workspaceId, row.workspace_id),
+        eq(schema.auditEvents.targetId, row.sandbox_group_id),
+        eq(schema.auditEvents.action, "sandbox.historical_checkpoint_recovery.authorized"),
+      ),
+    );
+  const metadata = receipt?.metadata;
+  const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  return metadata?.version === 1 &&
+    metadata.acceptedHistoricalCheckpoint === true &&
+    metadata.leaseId === row.id &&
+    metadata.leaseEpoch === Number(row.lease_epoch) &&
+    metadata.workspaceGeneration === Number(row.workspace_generation) &&
+    metadata.archiveGeneration === archiveGeneration &&
+    archiveGeneration !== null &&
+    archiveGeneration < Number(row.workspace_generation) &&
+    metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
+    ? archiveGeneration
+    : null;
+}
+
 /** Records the single cold->warming winner's exact restore attempt. The lease
  * election remains the sole spawner guard; this adds durable selected-revision
  * and progress truth under the same epoch. */
@@ -44166,7 +44308,9 @@ export async function beginSandboxRematerialization(
             importedArchiveGeneration = true;
           }
         }
-        const archiveComplete = hasCompleteWorkspaceArchive(workingRow);
+        const historicalGeneration = await authorizedHistoricalArchiveGeneration(tx, workingRow);
+        const archiveComplete =
+          hasCompleteWorkspaceArchive(workingRow) || historicalGeneration !== null;
         if (
           current.archive.status !== "available" ||
           !current.archive.current ||
@@ -44282,7 +44426,7 @@ export async function beginSandboxRematerialization(
             ((artifact.provenance === "native_capture" &&
               artifact.source_workspace_generation !== null &&
               Number(artifact.source_workspace_generation) ===
-                Number(workingRow.workspace_generation)) ||
+                (historicalGeneration ?? Number(workingRow.workspace_generation))) ||
               (artifact.provenance === "legacy_provider_adopted" &&
                 artifact.source_workspace_generation === null)) &&
             artifact.provider_backend === workingRow.backend &&
@@ -44767,7 +44911,11 @@ export async function commitWarmingToWarm(
             reason: "archive_revision_mismatch" as const,
           };
         }
-        if (rematerialization && !hasCompleteWorkspaceArchive(row)) {
+        if (
+          rematerialization &&
+          !hasCompleteWorkspaceArchive(row) &&
+          (await authorizedHistoricalArchiveGeneration(tx, row)) === null
+        ) {
           return {
             committed: false,
             lease: mapLeaseRow(row),

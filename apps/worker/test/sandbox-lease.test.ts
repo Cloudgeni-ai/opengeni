@@ -33,6 +33,8 @@ import postgres from "postgres";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  authorizeHistoricalSandboxCheckpointRecovery,
+  registerSandboxCheckpointArtifact,
   enrollUnobservableCommandIdleDrain,
   reapStaleLeaseHoldersGlobal,
   advanceWorkspaceGeneration,
@@ -6050,4 +6052,262 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       drainReason: "provider_deadline",
     });
   }, 60_000);
+
+  for (const native of [false, true]) {
+    test(`historical checkpoint recovery preserves the audited gap; native=${native}`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const archive = Buffer.from(
+        native
+          ? `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({ snapshot_id: "im-historical-recovery", workspace_persistence: "snapshot_filesystem" })}`
+          : "historical-archive",
+      ).toString("base64");
+      const tarDescriptor = archiveDescriptor(archive, 1_900_000_000_000);
+      const descriptor = native
+        ? {
+            version: 2 as const,
+            kind: "provider_snapshot" as const,
+            revision: `wa2:1900000000000:${tarDescriptor.archiveSha256}`,
+            archiveSha256: tarDescriptor.archiveSha256,
+            archiveBytes: tarDescriptor.archiveBytes,
+            capturedAt: tarDescriptor.capturedAt,
+            provider: "modal_snapshot_filesystem" as const,
+            snapshotId: "im-historical-recovery",
+            workspacePersistence: "snapshot_filesystem",
+          }
+        : tarDescriptor;
+      const leaseId = await insertLease(ids, {
+        liveness: "cold",
+        backend: "modal",
+        refcount: 0,
+        leaseEpoch: 1,
+        instanceId: null,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            workspaceArchive: archive,
+            workspaceArchiveMeta: descriptor,
+          },
+        },
+      });
+      if (native) {
+        const binding = {
+          version: 1,
+          serverUrl: "https://modal.test",
+          workspaceName: "historical-recovery",
+          environment: "main",
+        };
+        const artifact = await registerSandboxCheckpointArtifact(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          sourceLeaseId: leaseId,
+          sourceLeaseEpoch: 1,
+          sourceInstanceId: "gone-provider",
+          sourceWorkspaceGeneration: 0,
+          providerBinding: binding,
+          providerBindingKey: JSON.stringify(binding),
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        });
+        await admin.begin(async (tx) => {
+          await tx`update sandbox_leases set archive_generation = 0, current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
+          await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
+        });
+      }
+      await admin`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`;
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+      };
+      const authorization = {
+        ...scope,
+        expectedEpoch: 1,
+        expectedWorkspaceGeneration: 3,
+        expectedArchiveGeneration: 0,
+        selectedRevision: descriptor.revision,
+        operationId: crypto.randomUUID(),
+        subjectId: "operator@example.test",
+        reason: "Recover the preserved checkpoint; subsequent writes are unavailable",
+        acceptHistoricalCheckpoint: true as const,
+      };
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: false,
+      });
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+      closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
+      expect(
+        await authorizeHistoricalSandboxCheckpointRecovery(db, {
+          ...authorization,
+          expectedWorkspaceGeneration: 4,
+        }),
+      ).toEqual({ authorized: false });
+      await admin`update sandbox_leases set liveness = 'warming' where id = ${leaseId}`;
+      expect(
+        await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: 1,
+          rematerializationId: crypto.randomUUID(),
+        }),
+      ).toMatchObject({
+        status: "blocked",
+        code: "archive_generation_mismatch",
+      });
+      await admin`update sandbox_leases set liveness = 'cold' where id = ${leaseId}`;
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: true,
+      });
+      for (const mutation of [
+        "epoch",
+        "generation",
+        "pointer",
+        "revision",
+        "receipt-group",
+      ] as const) {
+        // Native revision mismatch is rejected by the existing SQL artifact fence.
+        if (native && mutation === "revision") continue;
+        if (mutation === "epoch")
+          await admin`update sandbox_leases set lease_epoch = 2 where id = ${leaseId}`;
+        if (mutation === "generation")
+          await admin`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`;
+        if (mutation === "pointer")
+          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`;
+        if (mutation === "revision")
+          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`;
+        if (mutation === "receipt-group")
+          await admin`update audit_events set target_id = ${crypto.randomUUID()} where id = ${authorization.operationId}`;
+        expect(
+          await acquireLease(db, {
+            ...scope,
+            kind: "viewer",
+            holderId: "recovery-negative",
+            backend: "modal",
+            leaseTtlMs: 60_000,
+          }),
+        ).toMatchObject({ role: "blocked" });
+        await admin`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
+          resume_state = jsonb_set(resume_state, '{opengeniHistoricalArchiveRecoveryId}',
+          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`;
+        await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`;
+        await admin`update audit_events set target_id = ${ids.groupId} where id = ${authorization.operationId}`;
+      }
+      expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
+        authorized: true,
+      });
+      const elected = await acquireLease(db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "recovery-verification",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      });
+      const rematerializationId = crypto.randomUUID();
+      const epoch = elected.lease.leaseEpoch;
+      if (native) {
+        // Even a fixture bypassing immutability cannot commit mismatched provenance.
+        await expect(
+          admin.begin(async (tx) => {
+            await tx`alter table sandbox_checkpoint_artifacts disable trigger sandbox_checkpoint_artifact_immutability_guard`;
+            await tx`update sandbox_checkpoint_artifacts set source_workspace_generation = 1
+            where id = (select current_checkpoint_artifact_id from sandbox_leases where id = ${leaseId})`;
+            await tx`update sandbox_leases set current_checkpoint_artifact_id = current_checkpoint_artifact_id where id = ${leaseId}`;
+            await tx`alter table sandbox_checkpoint_artifacts enable trigger sandbox_checkpoint_artifact_immutability_guard`;
+          }),
+        ).rejects.toThrow("current checkpoint artifact does not match its exact lease scope");
+      }
+      expect(
+        await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: epoch,
+          rematerializationId,
+        }),
+      ).toMatchObject({ status: "started" });
+      expect(
+        await recordWarmingSandboxCreated(db, {
+          ...scope,
+          expectedEpoch: epoch,
+          rematerializationId,
+          instanceId: "verified-recovery-box",
+          resumeBackendId: "modal",
+          resumeState: {
+            backendId: "modal",
+            sessionState: {
+              providerState: { sandboxId: "verified-recovery-box" },
+            },
+          },
+          leaseTtlMs: 60_000,
+        }),
+      ).toMatchObject({ recorded: true });
+      await markSandboxRestoreVerifying(db, {
+        ...scope,
+        expectedEpoch: epoch,
+        rematerializationId,
+      });
+      const committed = await commitWarmingToWarm(db, {
+        ...scope,
+        expectedEpoch: epoch,
+        instanceId: "verified-recovery-box",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            providerState: { sandboxId: "verified-recovery-box" },
+          },
+        },
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: descriptor.revision,
+        },
+        leaseTtlMs: 60_000,
+      });
+      expect(committed.committed).toBe(true);
+      expect(committed.lease).toMatchObject({
+        workspaceGeneration: 3,
+        archiveGeneration: 0,
+        archiveComplete: false,
+      });
+      const [receipt] =
+        await admin`select metadata from audit_events where id = ${authorization.operationId}`;
+      expect(receipt?.metadata).toMatchObject({
+        workspaceGeneration: 3,
+        archiveGeneration: 0,
+        selectedRevision: descriptor.revision,
+      });
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "recovery-verification",
+        idleGraceMs: 1,
+      });
+      await admin`update sandbox_leases set expires_at = now() - interval '1 second' where id = ${leaseId}`;
+      const draining = await readLease(db, ids.workspaceId, ids.groupId);
+      const spy = makeTerminateSpy();
+      const recoveryDrain = await createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      }).drainSandboxLease({
+        target: {
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          instanceId: "verified-recovery-box",
+          leaseEpoch: draining!.leaseEpoch,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(recoveryDrain).toMatchObject({ status: "terminated" });
+      expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+        archiveGeneration: 3,
+        archiveComplete: true,
+      });
+    }, 180_000);
+  }
 });
