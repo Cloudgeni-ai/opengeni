@@ -1532,11 +1532,12 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 /**
  * Build the active history after compaction:
  * the newest real user messages that fit one cumulative 20k-token budget
- * (prior summaries excluded, images removed) plus one marked summary item.
+ * (prior summaries excluded, retained images preserved) plus one marked summary item.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
   summaryBody: string,
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
 ): CompactionItem[] {
   const retainedReversed: CompactionItem[] = [];
   let remaining = COMPACT_USER_MESSAGE_MAX_TOKENS;
@@ -1546,12 +1547,14 @@ export function buildCompactionReplacementHistory(
       continue;
     }
     const textTokens = estimateTextTokens(messageText(item));
-    retainedReversed.push(compactMessageToTokenBudget(item, remaining));
-    if (textTokens > remaining) {
+    const nonTextTokens = Math.max(0, retainedItemTokens(item) - textTokens);
+    if (nonTextTokens >= remaining) continue;
+    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+    if (textTokens + nonTextTokens > remaining) {
       remaining = 0;
       break;
     }
-    remaining -= textTokens;
+    remaining -= textTokens + nonTextTokens;
   }
   const history = retainedReversed.reverse();
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
@@ -1585,14 +1588,13 @@ export function isRetainedRemoteV2Message(item: unknown): boolean {
  * newest retained user/developer messages within the CLI 64k budget plus the
  * opaque `{ type: "compaction", encrypted_content }` item.
  *
- * Unlike the portable rebuild, retained messages keep `input_image` parts
- * (Codex CLI `truncate_retained_messages_for_remote_compaction`). Image-only
- * messages charge at least 1 token against the retain budget, matching CLI
- * `message_text_token_count(...).max(1)`.
+ * Both modes preserve retained image parts. Charge their projected image
+ * tokens, including uploads represented by durable refs, against the budget.
  */
 export function buildRemoteV2ReplacementHistory(
   items: readonly CompactionItem[],
   compactionItem: CompactionItem,
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
 ): CompactionItem[] {
   if (!isRemoteCompactionItem(compactionItem)) {
     throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
@@ -1603,13 +1605,15 @@ export function buildRemoteV2ReplacementHistory(
     const item = items[index]!;
     if (!isRetainedRemoteV2Message(item)) continue;
     const textTokens = estimateTextTokens(messageText(item));
-    const chargeTokens = Math.max(1, textTokens);
+    const chargeTokens = Math.max(1, retainedItemTokens(item));
+    const nonTextTokens = Math.max(0, chargeTokens - textTokens);
+    if (nonTextTokens >= remaining) continue;
     if (chargeTokens <= remaining) {
-      retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+      retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
       remaining -= chargeTokens;
       continue;
     }
-    retainedReversed.push(compactRemoteV2RetainedMessage(item, remaining));
+    retainedReversed.push(compactRetainedMessage(item, remaining));
     remaining = 0;
     break;
   }
@@ -1753,22 +1757,11 @@ export function buildSummaryItem(summaryBody: string): CompactionItem {
   };
 }
 
-function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): CompactionItem {
-  const text = messageText(item);
-  const next = { ...item };
-  if (estimateTextTokens(text) > maxTokens) {
-    next.content = truncateMiddleByEstimatedTokens(text, maxTokens);
-    return next;
-  }
-  next.content = contentWithoutImages(item);
-  return next;
-}
-
 /**
- * Retain a remote_v2 suffix message: keep images, truncate text only when the
+ * Retain a suffix message: keep images, truncate text only when the
  * text budget is exceeded (CLI keeps InputImage parts through truncation).
  */
-function compactRemoteV2RetainedMessage(item: CompactionItem, maxTokens: number): CompactionItem {
+function compactRetainedMessage(item: CompactionItem, maxTokens: number): CompactionItem {
   const text = messageText(item);
   const next = { ...item };
   if (estimateTextTokens(text) <= maxTokens) {
@@ -1876,20 +1869,6 @@ function isHighSurrogate(codeUnit: number): boolean {
 
 function isLowSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
-}
-
-function contentWithoutImages(item: CompactionItem): unknown {
-  const content = (item as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return content;
-  }
-  return content.filter((part) => {
-    if (!part || typeof part !== "object") {
-      return true;
-    }
-    const type = (part as { type?: unknown }).type;
-    return type !== "input_image" && type !== "image_url";
-  });
 }
 
 function messageText(item: CompactionItem): string {

@@ -852,8 +852,8 @@ operation enters the existing single-flight provisioner, writes that exact
 resolved material to the lease before the waiting operation, and starts renewal.
 A model-only turn therefore owns no credential write, renewal, lease, box, or
 exact-generation cleanup work. Signed file resources are eager only on the exact
-turn that attached them; historical attachment ids do not cause sandbox or
-object-storage work. This-turn generated-video files may still copy onto the
+turn that attached them; historical attachment ids do not cause sandbox work.
+Active model-history images are independently read from object storage. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
 Source-bearing `generate_video` calls join that same single-flight provisioner
@@ -1838,7 +1838,11 @@ audit reads may return it, so it is never a secret boundary.
    content and RLS-scoped. Token-shaped strings, headers, assignments, URLs,
    PEM-looking text, and configured-secret-shaped strings are never classified
    or rewritten. A new turn's
-   input is built from this store. It is dual-written as the agent streams
+   input is built from this store. Ordered PostgreSQL `json` columns preserve
+   object-key order, with trigger-synchronized `jsonb` projections for existing
+   SQL queries. The pending-call ledger uses the same representation. Reads use
+   normal JSON decoding without sorting or another database round trip. Legacy
+   rows retain their already-normalized order. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
    second conversation-memory read path. At this persistence boundary only,
@@ -1878,15 +1882,16 @@ audit reads may return it, so it is never a secret boundary.
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
-   User attachments use a separate one-turn delivery rule. The accepted user
-   row stores private stable file references beside the message. Only that
-   triggering turn resolves metadata, optionally inlines supported bytes, and
-   materializes the files into active compute. Later model requests project the
-   references as compact `fileId` receipts without file metadata reads,
-   object-storage reads, filesystem checks, remounts, or downloads. Compaction
-   preserves omitted references in one compact catalog. When old bytes are
-   actually needed, the model uses the existing dedicated Files MCP download
-   URL plus shell instead of startup rematerialization.
+   User attachment rows store stable file references, not inline bytes. Active
+   messages reconstruct the same authorized receipt and supported image content
+   across turns and before compaction. File metadata is batch-authorized once
+   per turn and bytes are memoized; object reads have bounded concurrency.
+   Historical images do not cause sandbox remounts. Each image retains the
+   existing inline admission limit; adding an image does not evict older images.
+   Missing/corrupt eligible bytes fail preparation rather than silently changing
+   context. Compaction preserves images in retained messages and charges their
+   projected token cost. Its omitted-file catalog is reference-only, so it does
+   not rehydrate images from messages deliberately replaced by compaction.
 2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
    Pauses flush completed-pair history, then persist the bounded open suffix
    on `session_pending_tool_calls` (the pending call item, tied reasoning the
