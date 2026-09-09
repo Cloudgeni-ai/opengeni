@@ -1920,11 +1920,11 @@ audit reads may return it, so it is never a secret boundary.
    Do not use it as conversation memory.
 3. **`session_events` — the exact human/audit timeline for accepted payloads.**
    Append-only, per-session sequence numbers, drives replay/SSE/UI. Event content
-   is never secret-scanned or rewritten. The event, SSE, monitoring, and browser
-   contracts still apply deterministic count/byte/media bounds; those bounds are
-   content-agnostic protocol limits with explicit omission metadata, not secret
-   classification. Inline media is represented by a compact `media_preview`; its
-   bytes are not retained by that generic bounded path.
+   is never secret-scanned or rewritten. Full REST reads, compact text-delta
+   batches, SSE, and browser chat preserve that content, including long messages
+   and tool outputs. Pagination and loaded-history windows select whole events;
+   they never replace content with omission markers. Explicit monitoring
+   previews remain separately bounded and must not be reused as full messages.
    A newly retained `computer_screenshot` event instead carries only its closed
    session artifact receipt after settlement succeeds, or a typed unavailable
    reason if validation, quota, or storage could not establish that receipt.
@@ -2057,22 +2057,24 @@ fixed safe message plus structured diagnostics while retaining the exact driver
 failure only as the internal cause.
 
 Those durable stores are still not the realtime or browser representation.
-NATS chunks bounded encoded messages; each session/workspace-control SSE body
-queues at most one complete frame of at most 96 KiB, retains one latest-wins
+NATS chunks bounded notifications; session SSE always re-reads canonical events
+from Postgres rather than rendering those notification previews. Each SSE body
+queues at most one complete frame, retains one latest-wins
 live notification, and uses bounded-page Postgres replay/gap fill. If a second
 write sees non-positive `desiredSize` for 30 seconds, the API errors only that
 connection, releases its upstream subscription, and records a fixed-label bound
 metric; reconnect resumes from the client's last observed durable sequence.
-REST uses byte-bounded forward prefixes/backward suffixes; and
+REST uses byte-targeted forward prefixes/backward suffixes; an oversized event
+travels intact and alone in a page or frame, so it cannot strand its cursor. And
 React retains one direction-aware count+byte window. Live/default accumulation
 keeps the newest suffix. If backward paging retains an older prefix and evicts
 the live tail, the hook aborts that iterator and reconnects from the retained
 high-water mark, replaying the evicted tail before appending newer live rows.
 Its highest-ever-observed sequence and latest status are stored separately from
-that rewindable resume cursor. Historical oversized event rows remain readable
-during the rolling migration and are defensively normalized at each outbound
-boundary. Generic omitted output is unavailable unless a separate
-access-controlled artifact/file receipt explicitly retained it.
+that rewindable resume cursor. A single event exceeding the browser byte target
+is retained alone rather than shortened or dropped. Model tool-output budgets
+and explicit diagnostic summaries are independent of this full-content contract.
+Previously lost source bytes cannot be reconstructed from omission markers.
 
 Workspace-control events follow a smaller independent contract because they are
 cursor invalidations, not evidence or conversation history. Human reason input
@@ -2080,7 +2082,7 @@ is limited to 8 KiB UTF-8 (and cannot contain NUL), authenticated actor ids are
 limited to 1 KiB, and the durable event is at most 16 KiB with explicit original /
 delivered / omitted byte facts for guarded historical or direct-writer values.
 The generic full value was not retained. NATS asserts a 32-KiB message, SSE uses
-the same one-frame 96-KiB connection queue, and REST pages use a separate 1-MiB
+the same one-frame connection queue, and REST pages use a separate 1-MiB
 byte envelope plus the last delivered sequence as the resume cursor. Replaying
 one guarded poison row must still advance to every later durable revision.
 

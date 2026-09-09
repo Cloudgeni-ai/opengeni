@@ -211,6 +211,8 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
+[Chat delivery](run-lifecycle.md): lossless content, windowed history.
+
 Workspace Memory stores retrieval context. It is enabled by default: exact
 live agent attempts autonomously save and correct active facts, decisions,
 incidents, fixes, and outcomes independently of Learning mode. A workspace

@@ -6,7 +6,10 @@ import {
 } from "@opengeni/contracts";
 import {
   SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
+  boundSessionEventHttpPage,
   coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
+  formatSessionEventSse,
 } from "../src/index";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -198,6 +201,9 @@ describe("coalesceSessionEventDeltas", () => {
     expect(result.at(-1)?.payload).toMatchObject({ coalescedUntil: 2_000 });
     expect(JSON.stringify(result[0]?.payload)).toContain("HEAD-");
     expect(JSON.stringify(result.at(-1)?.payload)).toContain("-TAIL");
+    expect(result.map((item) => (item.payload as { text: string }).text).join("")).toBe(
+      events.map((item) => (item.payload as { text: string }).text).join(""),
+    );
     expect(result.map((projected) => Number((projected.payload as any).coalescedUntil))).toEqual(
       [...result]
         .map((projected) => Number((projected.payload as any).coalescedUntil))
@@ -216,10 +222,59 @@ describe("coalesceSessionEventDeltas", () => {
 
     expect(result).toHaveLength(3);
     expect(result.map((projected) => (projected.payload as any).coalescedUntil)).toEqual([1, 2, 3]);
-    for (const projected of result) {
-      expect(sessionEventJsonBytes(projected.payload)).toBeLessThanOrEqual(
-        SESSION_EVENT_PAYLOAD_MAX_BYTES,
-      );
-    }
+    expect(result.map((projected) => (projected.payload as { text: string }).text)).toEqual([
+      "",
+      "x".repeat(SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES * 4),
+      "tail",
+    ]);
   });
+
+  for (const type of [
+    "agent.message.delta",
+    "agent.reasoning.delta",
+    "sandbox.command.output.delta",
+  ] as const) {
+    test(`preserves long UTF-8 ${type} text across coalescing, SSE, and default HTTP`, () => {
+      const key = type === "sandbox.command.output.delta" ? "chunk" : "text";
+      const parts = [
+        "",
+        '界🙂e\u0301"\\\n'.repeat(150_000),
+        ...Array.from({ length: 40 }, (_, index) => `${index}:${"🙂界".repeat(2_000)}\n`),
+        "end",
+      ];
+      const events = parts.map((text, index) => event(index + 1, type, { [key]: text }));
+      const compact = coalesceSessionEventDeltasWithCoverage(events);
+      const textOf = (items: SessionEvent[]) =>
+        items.map((item) => (item.payload as Record<string, string>)[key]).join("");
+      expect(textOf(compact.events)).toBe(parts.join(""));
+      expect(compact.events.length).toBeLessThan(events.length);
+
+      const replayed: SessionEvent[] = [];
+      let cursor = 0;
+      while (replayed.length < compact.events.length) {
+        const page = boundSessionEventHttpPage(
+          compact.events.filter((item) => item.sequence > cursor),
+          { direction: "after", coveredThroughBySequence: compact.coveredThroughBySequence },
+        );
+        expect(page.events.length).toBeGreaterThan(0);
+        expect(page.nextSequence!).toBeGreaterThan(cursor);
+        expect(page.bytes).toBe(sessionEventJsonBytes(page.events));
+        for (const item of page.events) {
+          const coverage = compact.coveredThroughBySequence.get(item.sequence)!;
+          const frame = formatSessionEventSse(item, coverage);
+          expect(frame).toStartWith(`id: ${coverage}\n`);
+          const data = frame
+            .split("\n")
+            .find((line) => line.startsWith("data: "))!
+            .slice(6);
+          expect(JSON.parse(data)).toEqual(item);
+          replayed.push(JSON.parse(data));
+        }
+        cursor = page.nextSequence!;
+      }
+      expect(replayed).toEqual(compact.events);
+      expect(textOf(replayed)).toBe(parts.join(""));
+      expect(cursor).toBe(events.at(-1)!.sequence);
+    });
+  }
 });

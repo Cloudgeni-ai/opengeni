@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { sessionEventPayloadTruncation } from "@opengeni/contracts";
+
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { createDb, listSessionEventPage, SESSION_EVENT_DB_PAGE_MAX_BYTES } from "../src";
 import { readdir, readFile } from "node:fs/promises";
@@ -287,47 +287,81 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         expect(exactMarkerPage.fullPayloadsExact).toBeTrue();
         expect(exactMarkerPage.events[0]?.payload).toEqual(projectionMarkerPayload);
 
-        const forwardAcrossProjectedRow = await listSessionEventPage(
-          projectionClient.db,
-          workspace!.id,
-          sessionId,
-          { after: 8, limit: 2 },
-        );
-        expect(forwardAcrossProjectedRow.events.map((event) => event.sequence)).toEqual([9, 10]);
-        expect(forwardAcrossProjectedRow.fullPayloadsExact).toBeFalse();
-        expect(forwardAcrossProjectedRow.hasMore).toBeFalse();
+        // Exercise both the interactive CTE and metadata-batched read paths.
+        for (const batchOptions of [{}, { batchSize: 1 }]) {
+          for (const direction of ["after", "before"] as const) {
+            let after = 6;
+            let before = 11;
+            const expectedSequences = direction === "after" ? [7, 9, 10] : [10, 9, 7];
+            for (const [index, sequence] of expectedSequences.entries()) {
+              const page = await listSessionEventPage(
+                projectionClient.db,
+                workspace!.id,
+                sessionId,
+                { after, before, direction, limit: 3, ...batchOptions },
+              );
+              expect(page.events.map((event) => event.sequence)).toEqual([sequence]);
+              expect(page.fullPayloadsExact).toBeTrue();
+              expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+              expect(page.coveredSequence).toEqual({ first: sequence, last: sequence });
+              expect(page.hasMore).toBe(index < expectedSequences.length - 1);
+              expect(page.truncatedBy).toBe(index < expectedSequences.length - 1 ? "bytes" : null);
+              if (sequence === 9) {
+                expect(page.events[0]?.payload).toEqual(cursorStrandingPayload);
+                expect(page.bytes).toBeGreaterThan(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+              } else {
+                expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+              }
+              if (sequence === 10) {
+                // Producer-controlled truncation-like metadata remains untouched.
+                expect(page.events[0]?.payload).toEqual(projectionMarkerPayload);
+              }
+              if (direction === "after") {
+                expect(page.nextAfter).toBe(sequence);
+                expect(page.nextBefore).toBeNull();
+                after = page.nextAfter!;
+              } else {
+                expect(page.nextBefore).toBe(sequence);
+                expect(page.nextAfter).toBeNull();
+                before = page.nextBefore!;
+              }
+            }
+          }
 
-        const backwardAcrossProjectedRow = await listSessionEventPage(
-          projectionClient.db,
-          workspace!.id,
-          sessionId,
-          { before: 10, limit: 2 },
-        );
-        expect(backwardAcrossProjectedRow.events.map((event) => event.sequence)).toEqual([7, 9]);
-        expect(backwardAcrossProjectedRow.fullPayloadsExact).toBeFalse();
-        expect(backwardAcrossProjectedRow.hasMore).toBeTrue();
+          // A lone oversized event terminates without a phantom continuation,
+          // including the one-row limit used for exact event inspection.
+          for (const direction of ["after", "before"] as const) {
+            const page = await listSessionEventPage(projectionClient.db, workspace!.id, sessionId, {
+              after: 8,
+              before: 10,
+              direction,
+              limit: 1,
+              ...batchOptions,
+            });
+            expect(page.events.map((event) => event.sequence)).toEqual([9]);
+            expect(page.events[0]?.payload).toEqual(cursorStrandingPayload);
+            expect(page.fullPayloadsExact).toBeTrue();
+            expect(page.hasMore).toBeFalse();
+            expect(page.truncatedBy).toBeNull();
+            expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+            expect(page.bytes).toBeGreaterThan(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+          }
+        }
 
-        const projectedCursorStrandingPage = await listSessionEventPage(
-          projectionClient.db,
-          workspace!.id,
-          sessionId,
-          { before: 10, limit: 1 },
-        );
-        expect(projectedCursorStrandingPage.events).toHaveLength(1);
-        expect(projectedCursorStrandingPage.events[0]?.sequence).toBe(9);
-        expect(projectedCursorStrandingPage.nextBefore).toBe(9);
-        expect(projectedCursorStrandingPage.fullPayloadsExact).toBeFalse();
-        expect(projectedCursorStrandingPage.bytes).toBe(
-          Buffer.byteLength(JSON.stringify(projectedCursorStrandingPage.events), "utf8"),
-        );
-        expect(projectedCursorStrandingPage.bytes).toBeLessThanOrEqual(
-          SESSION_EVENT_DB_PAGE_MAX_BYTES,
-        );
-        expect(
-          sessionEventPayloadTruncation(projectedCursorStrandingPage.events[0]?.payload)?.surface,
-        ).toBe("database_read_projection");
-        expect(JSON.stringify(projectedCursorStrandingPage.events)).toContain("HEAD-");
-        expect(JSON.stringify(projectedCursorStrandingPage.events)).toContain("-TAIL");
+        for (const payloadMode of ["summary", "none"] as const) {
+          const page = await listSessionEventPage(projectionClient.db, workspace!.id, sessionId, {
+            after: 8,
+            before: 10,
+            limit: 1,
+            payloadMode,
+          });
+          expect(page.events.map((event) => event.sequence)).toEqual([9]);
+          expect(page.fullPayloadsExact).toBeFalse();
+          expect(page.events[0]?.payload).not.toEqual(cursorStrandingPayload);
+          expect(page.hasMore).toBeFalse();
+          expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+          expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+        }
 
         const projectedEnvelopePage = await listSessionEventPage(
           projectionClient.db,

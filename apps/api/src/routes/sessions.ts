@@ -2753,14 +2753,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
-      eventProjection: forensicExact ? "exact" : "bounded",
+      eventProjection: payloadMode === "full" ? "exact" : "bounded",
       ...(compactProjection
         ? { coveredThroughBySequence: compactProjection.coveredThroughBySequence }
         : {}),
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
-    c.header("X-OpenGeni-Page-Max-Bytes", String(1024 * 1024));
+    // One oversized exact event is admitted alone; never advertise a maximum
+    // smaller than the response we actually deliver.
+    c.header("X-OpenGeni-Page-Max-Bytes", String(Math.max(1024 * 1024, page.bytes)));
     c.header("X-OpenGeni-Page-Truncated", String(hasMore));
     c.header("X-OpenGeni-Has-More", String(hasMore));
     c.header("X-OpenGeni-Event-Mode", mode);
