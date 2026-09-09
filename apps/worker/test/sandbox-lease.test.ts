@@ -30,6 +30,11 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import {
+  backgroundCommandActivityForSessions,
+  getSessionBackgroundCommand,
+  listSessionBackgroundCommands,
+} from "../../../packages/db/src/session-background-commands";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
@@ -3222,6 +3227,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         admittedWorkspaceGeneration: admission.workspaceGeneration,
         operation: "unknownIdleCommand",
         providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "legacy background command" },
         owner: {
           kind: "turn",
           turnId: attempt.turnId,
@@ -3246,6 +3252,26 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         last_reconcile_outcome = 'quarantined_process_observation_unavailable',
         started_at = now() - interval '2 minutes',
       reconcile_after = now() + interval '24 hours' where id = ${processId}`;
+      const commandScope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+      };
+      expect((await listSessionBackgroundCommands(db, commandScope))[0]?.observationStatus).toBe(
+        "unavailable",
+      );
+      expect(
+        (await getSessionBackgroundCommand(db, { ...commandScope, commandId: processId }))
+          ?.observationStatus,
+      ).toBe("unavailable");
+      expect(
+        (
+          await backgroundCommandActivityForSessions(db, {
+            ...commandScope,
+            sessionIds: [attempt.sessionId],
+          })
+        ).get(attempt.sessionId),
+      ).toMatchObject({ count: 1, unavailableCount: 1 });
       expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
       // A live attempt without a holder is still protected.
@@ -3391,6 +3417,18 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       });
       expect(result.status).toBe("terminated");
       expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+      expect(
+        (await getSessionBackgroundCommand(db, { ...commandScope, commandId: processId }))
+          ?.observationStatus,
+      ).toBeUndefined();
+      expect(
+        (
+          await backgroundCommandActivityForSessions(db, {
+            ...commandScope,
+            sessionIds: [attempt.sessionId],
+          })
+        ).size,
+      ).toBe(0);
       expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
       expect(
         (

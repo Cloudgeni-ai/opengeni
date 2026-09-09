@@ -1474,6 +1474,12 @@ lookup and ordinary reconciliation.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
+Command reads expose `observationStatus: unavailable` when the exact retained
+process cannot be observed; session aggregates expose `unavailableCount`.
+The panel and sidebar distinguish that uncertainty from running or a requested
+stop. Observation failure never invents terminal state, and definitive settlement
+clears the unavailable projection.
+
 Connected Machine background commands use the same proof-before-settlement
 discipline without borrowing managed lease identity. The global maintenance pass
 claims oldest-due rows with `SKIP LOCKED`, sends `OpQuery` for `running` or

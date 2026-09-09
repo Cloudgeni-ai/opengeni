@@ -12139,6 +12139,7 @@ export const SessionBackgroundCommandActivity = z
   .object({
     state: z.enum(["running", "stopping"]),
     count: z.number().int().positive(),
+    unavailableCount: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
@@ -12164,6 +12165,7 @@ export const SessionBackgroundCommand = z
     sessionId: z.string().uuid(),
     provider: SessionBackgroundCommandProvider,
     state: SessionBackgroundCommandState,
+    observationStatus: z.literal("unavailable").optional(),
     commandPreview: z.string().max(512),
     cancelRequestedAt: z.string().nullable(),
     exitCode: z.number().int().nullable(),

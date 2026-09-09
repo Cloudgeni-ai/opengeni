@@ -1313,11 +1313,13 @@ export type ForkSessionResponse = {
 };
 
 export type SessionBackgroundCommandActivity = {
+  unavailableCount?: number | undefined;
   state: "running" | "stopping";
   count: number;
 };
 
 export type SessionBackgroundCommand = {
+  observationStatus?: "unavailable" | undefined;
   id: string;
   workspaceId: string;
   sessionId: string;
