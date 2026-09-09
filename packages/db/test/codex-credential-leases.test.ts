@@ -13,6 +13,7 @@ import {
   type RotationDecision,
 } from "../../../apps/worker/src/activities/codex-rotation";
 import { codexCredentialLeaseHolderId } from "../../../apps/worker/src/activities/agent-turn/claim";
+import { codexCapacityDecision } from "../../../apps/worker/src/activities/codex-capacity";
 import * as schema from "../src/schema";
 import {
   acquireCodexCredentialLease,
@@ -39,6 +40,8 @@ import {
   setCodexCredentialStatusById,
   setActiveCodexCredential,
   setSessionCodexPinInTransaction,
+  switchSessionCodexAccount,
+  getSession,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withCodexCredentialRefreshLock,
@@ -335,6 +338,214 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  async function pinnedCapacityWait() {
+    const [ws] = await freshAccount();
+    const exhausted = await connectCredential(ws!, "exhausted@example.test");
+    const healthy = await connectCredential(ws!, "healthy@example.test");
+    const turnId = await seedTurn(ws!, 1);
+    const fence = await attemptFenceForTurn(turnId);
+    await withSessionCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws!.workspaceId, reason: "test_pin" },
+      async (tx) => {
+        const changed = await setSessionCodexPinInTransaction(
+          tx,
+          ws!.workspaceId,
+          fence.sessionId,
+          exhausted,
+        );
+        return { result: changed, changed };
+      },
+    );
+    await admin`update codex_subscription_credentials set secondary_used_percent = 100,
+      secondary_reset_at = now() + interval '1 day', exhausted_until = now() + interval '1 day',
+      exhausted_kind = 'quota' where id = ${exhausted}`;
+    const first = await acquireCodexCredentialLease(
+      dbA,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...fence,
+        turnId,
+        holderId: "blocked-first",
+        advanceActivePointer: true,
+      },
+      (context, state) =>
+        selectCodexCredentialLeaseForTurn({
+          context,
+          sessionId: fence.sessionId,
+          sessionPinnedCredentialId: state.pinnedCredentialId,
+          sessionPinSource: state.pinSource,
+          sessionLastCredentialId: state.lastCredentialId,
+          now: new Date(),
+        }),
+    );
+    expect(first.credentialId).toBeNull();
+    expect(first.codexPolicySnapshot?.pinnedCredentialId).toBe(exhausted);
+    const armed = await armCodexCapacityWait(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: fence.sessionId,
+      turnId,
+      attemptId: fence.attemptId,
+      workflowId: fence.workflowId,
+      earliestResetAt: new Date(Date.now() + 86_400_000),
+      resetKind: "bounded_refresh",
+      failurePayload: { code: "codex_usage_limit_reached", error: "synthetic quota refusal" },
+    });
+    if (armed.action !== "waiting") throw new Error("Expected capacity wait");
+    return { ws: ws!, turnId, fence, exhausted, healthy, waiter: armed.waiter };
+  }
+
+  for (const selection of ["pin", "auto", "repeat_auto"] as const) {
+    test(`explicit ${selection} overrides a snapshot-bearing wait through reconciliation and reacquisition`, async () => {
+      if (!available) return;
+      const { ws, turnId, fence, exhausted, healthy, waiter } = await pinnedCapacityWait();
+      const before = await getSession(dbA, ws.workspaceId, fence.sessionId);
+      expect(before?.codexCurrentSelection).toEqual({ credentialId: exhausted, waiting: true });
+      // Reproduce a previously saved unpin that did not update the accepted turn.
+      if (selection === "repeat_auto") {
+        await withSessionCodexCapacityMutation(
+          dbA,
+          { workspaceId: ws.workspaceId, reason: "legacy_unpin" },
+          async (tx) => {
+            const changed = await setSessionCodexPinInTransaction(
+              tx,
+              ws.workspaceId,
+              fence.sessionId,
+              null,
+            );
+            return { result: changed, changed };
+          },
+        );
+      }
+      const metadataBefore = (
+        await admin`select metadata from session_turns where id = ${turnId}`
+      )[0]!.metadata;
+      const switched = await switchSessionCodexAccount(dbA, {
+        workspaceId: ws.workspaceId,
+        sessionId: fence.sessionId,
+        credentialId: selection === "pin" ? healthy : null,
+        subjectId: "test-user",
+      });
+      expect(switched.result.appliedTo).toBe("waiting_turn");
+      expect(switched.wakeTargets.some((target) => target.sessionId === fence.sessionId)).toBe(
+        true,
+      );
+      expect(switched.result.events[0]?.type).toBe("codex.account.selection.changed");
+      const [afterSwitch] = await admin`select metadata from session_turns where id = ${turnId}`;
+      for (const [key, value] of Object.entries(metadataBefore)) {
+        if (key !== "codexCredentialPolicySnapshotV1")
+          expect(afterSwitch!.metadata[key]).toEqual(value);
+      }
+      const reconciled = await reconcileCodexCapacityWait(
+        dbB,
+        {
+          accountId: ws.accountId,
+          workspaceId: ws.workspaceId,
+          sessionId: fence.sessionId,
+          waiterId: waiter.id,
+          generation: waiter.generation,
+        },
+        (context) => codexCapacityDecision(context),
+      );
+      expect(reconciled.action).toBe("resumed");
+      // A duplicate signal cannot create another turn or attempt.
+      expect(
+        (
+          await reconcileCodexCapacityWait(
+            dbA,
+            {
+              accountId: ws.accountId,
+              workspaceId: ws.workspaceId,
+              sessionId: fence.sessionId,
+              waiterId: waiter.id,
+              generation: waiter.generation,
+            },
+            (context) => codexCapacityDecision(context),
+          )
+        ).action,
+      ).toBe("stale");
+      await startRecoveryAttempt(ws, turnId);
+      const acquired = await acquireCodexCredentialLease(
+        dbA,
+        {
+          accountId: ws.accountId,
+          workspaceId: ws.workspaceId,
+          ...(await attemptFenceForTurn(turnId)),
+          turnId,
+          holderId: "override-recovery",
+          advanceActivePointer: true,
+        },
+        (context, state) =>
+          selectCodexCredentialLeaseForTurn({
+            context,
+            sessionId: fence.sessionId,
+            sessionPinnedCredentialId: state.pinnedCredentialId,
+            sessionPinSource: state.pinSource,
+            sessionLastCredentialId: state.lastCredentialId,
+            now: new Date(),
+          }),
+      );
+      expect(acquired.credentialId).toBe(healthy);
+      expect(acquired.codexPolicySnapshotReused).toBe(true);
+      const rows =
+        await admin`select id, metadata from session_turns where session_id = ${fence.sessionId}`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.id).toBe(turnId);
+      expect(
+        (await getSession(dbA, ws.workspaceId, fence.sessionId))?.codexCurrentSelection,
+      ).toEqual({ credentialId: healthy, waiting: false });
+    }, 60_000);
+  }
+
+  test("foreign account is rejected without changing the waiting pin or snapshot", async () => {
+    if (!available) return;
+    const { ws, fence, exhausted, turnId } = await pinnedCapacityWait();
+    const [foreign] = await freshAccount();
+    const foreignCredential = await connectCredential(foreign!, "foreign@example.test");
+    const result = await switchSessionCodexAccount(dbA, {
+      workspaceId: ws.workspaceId,
+      sessionId: fence.sessionId,
+      credentialId: foreignCredential,
+      subjectId: "test-user",
+    });
+    expect(result.result.changed).toBe(false);
+    expect(result.wakeTargets).toEqual([]);
+    expect(
+      (await getSessionCodexState(dbA, ws.workspaceId, fence.sessionId))?.pinnedCredentialId,
+    ).toBe(exhausted);
+    const [row] = await admin`select metadata from session_turns where id = ${turnId}`;
+    expect(readCodexCredentialPolicySnapshotV1(row!.metadata)).toMatchObject({
+      kind: "valid",
+      policy: { pinnedCredentialId: exhausted },
+    });
+  }, 60_000);
+
+  test("concurrent explicit switches keep the session preference and waiting snapshot consistent", async () => {
+    if (!available) return;
+    const { ws, fence, healthy, turnId } = await pinnedCapacityWait();
+    await Promise.all(
+      [dbA, dbB].map((db, index) =>
+        switchSessionCodexAccount(db, {
+          workspaceId: ws.workspaceId,
+          sessionId: fence.sessionId,
+          credentialId: index === 0 ? healthy : null,
+          subjectId: "test-user",
+        }),
+      ),
+    );
+    const state = await getSessionCodexState(dbA, ws.workspaceId, fence.sessionId);
+    const [row] = await admin`select metadata from session_turns where id = ${turnId}`;
+    expect(readCodexCredentialPolicySnapshotV1(row!.metadata)).toMatchObject({
+      kind: "valid",
+      policy: {
+        pinnedCredentialId: state!.pinnedCredentialId,
+        pinSource: state!.pinSource,
+      },
+    });
+  }, 60_000);
+
   test("persists the first accepted policy and reuses it after pin and rotation mutate", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
@@ -373,6 +584,13 @@ describe("credential allocator atomic Codex credential allocation", () => {
       pinnedCredentialId: null,
       pinSource: null,
     });
+    const runningSwitch = await switchSessionCodexAccount(dbB, {
+      workspaceId: ws!.workspaceId,
+      sessionId: (await attemptFenceForTurn(turnId)).sessionId,
+      credentialId: laterPinned,
+      subjectId: "test-user",
+    });
+    expect(runningSwitch.result.appliedTo).toBe("next_turn");
 
     const [storedTurn] = await admin<{ metadata: Record<string, unknown> | null }[]>`
       select metadata from session_turns where id = ${turnId}`;
