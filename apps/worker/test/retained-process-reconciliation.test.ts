@@ -1575,6 +1575,10 @@ describe("retained-process terminal-owner reconciliation", () => {
 
     const plans = await admin.begin(async (tx) => {
       await tx`set local enable_seqscan = off`;
+      // Prove the ordered live-subset access path is available, independently
+      // of small-fixture costs favoring another index followed by a sort.
+      await tx`set local enable_sort = off`;
+      await tx`set local enable_incremental_sort = off`;
       const candidates = await tx`
         explain (analyze, buffers, format json, costs off, summary off, timing off)
         with candidate_window as materialized (
