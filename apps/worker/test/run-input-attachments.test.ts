@@ -803,3 +803,32 @@ test("retained uploads exceed the old aggregate cap without eviction or unbounde
   expect(reads).toBe(12);
   expect(peak).toBeLessThanOrEqual(8);
 });
+
+test("a new turn cannot reuse image bytes when its file authority no longer grants access", async () => {
+  const bytes = new TextEncoder().encode("image");
+  const asset = {
+    ...file("00000000-0000-4000-8000-000000000099", "image/png", bytes.length, "a.png"),
+    sha256: sha256(bytes),
+  };
+  const history = [
+    { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+  ];
+  const policy = { supportsImageInput: true, inputFileMediaTypes: [] };
+  const allowed = createModelHistoryAttachmentProjector(
+    policy,
+    async () => bytes,
+    async () => [asset],
+  );
+  expect(JSON.stringify(await allowed(history))).toContain("data:image");
+  let reads = 0;
+  const revoked = createModelHistoryAttachmentProjector(
+    policy,
+    async () => {
+      reads++;
+      return bytes;
+    },
+    async () => [],
+  );
+  expect(JSON.stringify(await revoked(history))).not.toContain("data:image");
+  expect(reads).toBe(0);
+});
