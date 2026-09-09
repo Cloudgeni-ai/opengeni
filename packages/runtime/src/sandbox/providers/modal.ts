@@ -562,7 +562,11 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
           profile: mutable.modal.profile,
           ...(mutable.modal.logger ? { logger: mutable.modal.logger } : {}),
         },
-        mutable.state.sandboxId,
+        () => {
+          const sandboxId = mutable.state?.sandboxId;
+          if (!sandboxId) throw new Error("Modal session sandbox identity is unavailable");
+          return sandboxId;
+        },
         mutable.state.manifest.root,
         () => mutable.state?.environment ?? {},
       ),
