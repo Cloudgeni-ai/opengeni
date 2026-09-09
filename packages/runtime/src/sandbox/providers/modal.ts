@@ -13,6 +13,9 @@ import {
 } from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
+import { installModalCommandSession } from "./modal-command-session";
+import { ModalCommandControl } from "./modal-command-control";
+import type { ModalClient } from "modal";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -98,6 +101,9 @@ type MutableModalSandboxSession = {
   // Pinned Agents Extensions 0.14.3 uses this synchronous adapter-local map.
   activeProcesses?: unknown;
   modal?: {
+    cpClient?: ModalClient["cpClient"];
+    profile?: ModalClient["profile"];
+    logger?: ModalClient["logger"];
     version?: () => string;
     sandboxes?: {
       fromId?: (sandboxId: string) => Promise<MutableModalSnapshotSandbox>;
@@ -106,6 +112,7 @@ type MutableModalSandboxSession = {
   sandbox?: MutableModalSnapshotSandbox;
   state?: {
     sandboxId?: string;
+    environment?: Record<string, string>;
     manifest?: { root?: string };
     workspacePersistence?: string;
     snapshotFilesystemTimeoutMs?: number;
@@ -538,7 +545,29 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
   installModalPendingExecCancellation(mutable);
-
+  if (
+    mutable.modal?.cpClient &&
+    mutable.modal.version &&
+    mutable.state?.sandboxId &&
+    mutable.state.manifest?.root
+  ) {
+    if (!mutable.modal.profile)
+      throw new Error("Modal command control requires its original authenticated SDK profile");
+    installModalCommandSession(
+      mutable,
+      ModalCommandControl.forSandbox(
+        {
+          cpClient: mutable.modal.cpClient,
+          version: mutable.modal.version.bind(mutable.modal),
+          profile: mutable.modal.profile,
+          ...(mutable.modal.logger ? { logger: mutable.modal.logger } : {}),
+        },
+        mutable.state.sandboxId,
+        mutable.state.manifest.root,
+        () => mutable.state?.environment ?? {},
+      ),
+    );
+  }
   const persistWorkspace = mutable.persistWorkspace.bind(session);
   mutable.persistWorkspace = async (options?: ModalWorkspaceCaptureOptions) => {
     assertPinnedModalSdk(mutable);

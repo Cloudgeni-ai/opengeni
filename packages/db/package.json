@@ -19,6 +19,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./retained-provider-commands": {
+      "types": "./src/retained-provider-commands.ts",
+      "default": "./src/retained-provider-commands.ts"
+    },
     "./workspace-tool-defaults": {
       "types": "./src/workspace-tool-defaults.ts",
       "default": "./src/workspace-tool-defaults.ts"
