@@ -2,7 +2,18 @@ import { RefreshCwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { PersonalResourceAttachmentController } from "@/lib/use-personal-resource-attachment";
+import type {
+  PersonalResourceAttachmentController,
+  PersonalResourceNotice,
+} from "@/lib/use-personal-resource-attachment";
+
+const noticeMessages: Record<PersonalResourceNotice, string> = {
+  source_changed:
+    "Access to the selected personal resource changed. Choose an available resource before submitting.",
+  reloading: "Session authority changed. Reloading personal resources before retrying.",
+  reload_failed: "Session authority could not be refreshed. Retry before sending again.",
+  reloaded: "Session authority changed. Personal resources were reloaded before retrying.",
+};
 
 export function PersonalResourceAttachmentControl(props: {
   controller: PersonalResourceAttachmentController;
@@ -34,7 +45,7 @@ export function PersonalResourceAttachmentControl(props: {
       ) : null}
       {controller.notice ? (
         <p className="text-xs text-fg-muted" role="status" aria-live="polite">
-          {controller.notice}
+          {noticeMessages[controller.notice]}
         </p>
       ) : null}
       {controller.error ? (

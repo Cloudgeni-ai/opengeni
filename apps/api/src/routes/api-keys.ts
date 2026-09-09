@@ -4,6 +4,8 @@ import {
   CreateOrganizationApiKeyRequest,
   Permission,
   type AccessContext,
+  type ApiKey,
+  type OrganizationApiKeyAccess,
 } from "@opengeni/contracts";
 import {
   createApiKey,
@@ -28,6 +30,7 @@ import {
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 
+/** Permissions minted onto a `full` organization API key. */
 export const organizationApiKeyPermissions: Permission[] = [
   "account:read",
   "workspace:create",
@@ -35,6 +38,40 @@ export const organizationApiKeyPermissions: Permission[] = [
   "workspace:admin",
   "api_keys:manage",
 ];
+
+/**
+ * Permissions minted onto a `read` organization API key. The key inventories
+ * shared workspaces and reads their sessions, events, and files; it holds no
+ * `workspace:admin` wildcard, so every control, create, and key-management
+ * route denies it, and no `api_keys:manage`, so it cannot mint keys.
+ */
+export const organizationReadApiKeyPermissions: Permission[] = [
+  "account:read",
+  "workspace:read",
+  "sessions:read",
+  "files:read",
+];
+
+export function organizationApiKeyPermissionsForAccess(
+  access: OrganizationApiKeyAccess,
+): Permission[] {
+  return access === "read"
+    ? [...organizationReadApiKeyPermissions]
+    : [...organizationApiKeyPermissions];
+}
+
+/**
+ * The access tier is derived from stored permissions rather than a column: a
+ * key that carries the `workspace:admin` wildcard administers the
+ * organization, any other organization key is read-only.
+ */
+export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
+  return permissions.includes("workspace:admin") ? "full" : "read";
+}
+
+function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {
+  return { ...apiKey, access: organizationApiKeyAccess(apiKey.permissions) };
+}
 
 export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/api-keys", async (c) => {
@@ -91,7 +128,11 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     const context = await requireAccessContext(c, deps);
     requireOrganizationApiKeyControlPermission(context, organizationId);
-    return c.json({ apiKeys: await listOrganizationApiKeys(deps.db, organizationId) });
+    return c.json({
+      apiKeys: (await listOrganizationApiKeys(deps.db, organizationId)).map(
+        withOrganizationApiKeyAccess,
+      ),
+    });
   });
 
   app.post(
@@ -110,12 +151,15 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
           description: body.description ?? null,
           prefix: token.slice(0, 14),
           keyHash: await sha256Hex(token),
-          permissions: organizationApiKeyPermissions,
+          permissions: organizationApiKeyPermissionsForAccess(body.access),
           expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
           maxActiveKeys: organizationApiKeyLimit(deps),
           rotationSourceApiKeyId: authenticatedApiKeyId(context),
         });
-        return c.json(CreateApiKeyResponse.parse({ apiKey, token }), 201);
+        return c.json(
+          CreateApiKeyResponse.parse({ apiKey: withOrganizationApiKeyAccess(apiKey), token }),
+          201,
+        );
       } catch (error) {
         if (error instanceof OrganizationApiKeyLimitExceededError) {
           throw new HTTPException(429, { message: error.message });
@@ -133,7 +177,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!apiKey) {
       throw new HTTPException(404, { message: "API key not found" });
     }
-    return c.json(apiKey);
+    return c.json(withOrganizationApiKeyAccess(apiKey));
   });
 }
 

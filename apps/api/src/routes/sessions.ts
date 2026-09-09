@@ -1,4 +1,7 @@
+import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { scheduledSessionIds } from "@opengeni/db";
+import { withSiteSessionOrigin } from "@opengeni/core";
+import { resolveSiteSessionOrigin } from "../site-session-origin";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -46,6 +49,9 @@ import {
   SessionEventReadMode,
   SessionEventLatestClass,
   SessionEventResultMode,
+  SessionEndUser,
+  SESSION_END_USER_ID_MAX_CHARS,
+  SESSION_END_USER_SOURCE_MAX_CHARS,
   SessionEventSemanticClass,
   SessionEventType,
   SessionMcpServerId,
@@ -136,8 +142,7 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  setSessionCodexPinInTransaction,
-  withSessionCodexCapacityMutation,
+  switchSessionCodexAccount,
   setSessionChannel,
   updateSessionVariableSets,
   ChannelNotFoundError,
@@ -176,6 +181,7 @@ import {
   SessionTenancyInvalidRequestError,
   SessionTenancyNotActivatedError,
   HumanInputResponseValidationError,
+  SkillHumanResponseError,
   latestWorkspaceCapture,
   sessionLatestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
@@ -396,8 +402,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "pty retained-process identity is stale; reopen the terminal",
       });
     }
+    const providerCommand = await getRetainedProviderCommand(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      processId: process.id,
+    });
     handle.routingSession.adoptRetainedProcess({
-      process: { id: process.id, providerSessionId: process.providerSessionId },
+      process: {
+        id: process.id,
+        providerSessionId: process.providerSessionId,
+        ...(providerCommand ? { providerCommand } : {}),
+      },
       backend: {
         sandboxId: null,
         leaseEpoch: process.leaseEpoch,
@@ -559,7 +575,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+      const origin = await resolveSiteSessionOrigin(
+        db,
+        workspaceId,
+        c.req.header("x-opengeni-site-id"),
+        c.req.header("x-opengeni-site-version"),
+      );
+      const create = () =>
+        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
+      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
@@ -669,6 +693,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.archivedOnly ? { archivedOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+        ...(query.endUser ? { endUser: query.endUser } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
         // the list's removal fence must fall back to the organization-membership
@@ -725,6 +757,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (pageView) {
       return c.json({
         ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
         pinned: page.pinned.map(decorate),
         sessions: page.sessions.map(decorate),
       });
@@ -1875,8 +1909,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
   // "auto" clears the pin (the session follows the workspace active pointer); a
-  // uuid pins the session to that specific account. The pin applies to the NEXT
-  // turn (the worker reads it at turn start). 404 when the session or the target
+  // uuid pins the session to that specific account. Overrides a capacity-blocked
+  // turn; a running attempt keeps its account. 404 when the session or the target
   // account id isn't in the workspace.
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1901,15 +1935,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    const mutation = await withSessionCodexCapacityMutation(
-      db,
-      { workspaceId, reason: "codex_manual_session_pin_changed" },
-      async (tx) => {
-        const changed = await setSessionCodexPinInTransaction(tx, workspaceId, sessionId, pinned);
-        return { result: changed, changed };
-      },
-    );
-    const ok = mutation.result;
+    const mutation = await switchSessionCodexAccount(db, {
+      workspaceId,
+      sessionId,
+      credentialId: pinned,
+      subjectId: grant.subjectId,
+    });
+    const ok = mutation.result.changed;
     if (!ok) {
       throw new HTTPException(404, {
         message: "session or codex account not found",
@@ -1935,7 +1967,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             }),
       ),
     );
-    return c.json({ pinned: target === "auto" ? "auto" : target });
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, mutation.result.events);
+    return c.json({
+      pinned: target === "auto" ? "auto" : target,
+      appliedTo: mutation.result.appliedTo,
+    });
   });
 
   // Re-file the session into a workspace channel (rail organization only;
@@ -1946,6 +1982,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.control",
+      surface: "http",
+    });
     const payload = UpdateSessionChannelRequest.parse(await c.req.json());
     try {
       const updated = await setSessionChannel(db, {
@@ -2712,14 +2753,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
-      eventProjection: forensicExact ? "exact" : "bounded",
+      eventProjection: payloadMode === "full" ? "exact" : "bounded",
       ...(compactProjection
         ? { coveredThroughBySequence: compactProjection.coveredThroughBySequence }
         : {}),
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
-    c.header("X-OpenGeni-Page-Max-Bytes", String(1024 * 1024));
+    // One oversized exact event is admitted alone; never advertise a maximum
+    // smaller than the response we actually deliver.
+    c.header("X-OpenGeni-Page-Max-Bytes", String(Math.max(1024 * 1024, page.bytes)));
     c.header("X-OpenGeni-Page-Truncated", String(hasMore));
     c.header("X-OpenGeni-Has-More", String(hasMore));
     c.header("X-OpenGeni-Event-Mode", mode);
@@ -3159,14 +3202,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           requestId: event.payload.requestId,
           response: event.payload.response,
           respondedBy: grant.subjectId,
+          canonicalHumanSession:
+            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
         });
       } catch (error) {
+        if (error instanceof SkillHumanResponseError) {
+          throw new HTTPException(
+            error.code === "conflict" ? 409 : error.code === "forbidden" ? 403 : 422,
+            {
+              message: error.message,
+            },
+          );
+        }
         if (error instanceof HumanInputResponseValidationError) {
-          throw new HTTPException(error.code === "SKIP_NOT_ALLOWED" ? 409 : 422, {
-            message: error.message,
-          });
+          throw new HTTPException(
+            error.code === "HUMAN_AUTH_REQUIRED"
+              ? 403
+              : error.code === "SKIP_NOT_ALLOWED"
+                ? 409
+                : 422,
+            {
+              message: error.message,
+            },
+          );
         }
         throw error;
       }
@@ -4667,14 +4727,26 @@ function sessionListQuery(
   query: Record<string, string>,
   allowCursor = true,
 ): {
+  originSiteId: string | undefined;
   limit: string | undefined;
   parentSessionId: string | null | undefined;
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
   pinsOnly: boolean;
   archivedOnly: boolean;
+  channelId: string | null | undefined;
+  createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
+  updatedFrom: Date | undefined;
+  updatedBefore: Date | undefined;
+  createdFrom: Date | undefined;
+  createdBefore: Date | undefined;
+  endUser: SessionEndUser | undefined;
+  hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
+  const originSiteId = query.originSiteId;
+  if (originSiteId !== undefined && !z.string().uuid().safeParse(originSiteId).success)
+    throw new HTTPException(400, { message: "originSiteId must be a Site id" });
   // "null" = roots only; a uuid = children of that session; anything else is
   // a client error (an unvalidated value would surface as a Postgres uuid cast
   // failure -> 500 rather than an honest 400).
@@ -4708,12 +4780,94 @@ function sessionListQuery(
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
   const archivedOnly = query.archivedOnly === "true";
+  const channelId = query.channelId;
+  if (
+    channelId !== undefined &&
+    channelId !== "null" &&
+    !z.string().uuid().safeParse(channelId).success
+  ) {
+    throw new HTTPException(400, {
+      message: 'channelId must be a channel id or the literal "null"',
+    });
+  }
+  const createdByKind = query.createdByKind;
+  const createdBySubjectId = query.createdBySubjectId;
+  if ((createdByKind === undefined) !== (createdBySubjectId === undefined)) {
+    throw new HTTPException(400, {
+      message: "createdByKind and createdBySubjectId must be supplied together",
+    });
+  }
+  if (createdByKind !== undefined && createdByKind !== "subject" && createdByKind !== "service") {
+    throw new HTTPException(400, {
+      message: 'createdByKind must be "subject" or "service"',
+    });
+  }
+  if (
+    createdBySubjectId !== undefined &&
+    (createdBySubjectId.trim().length < 1 || createdBySubjectId.length > 1_024)
+  ) {
+    throw new HTTPException(400, {
+      message: "createdBySubjectId must be between 1 and 1024 characters",
+    });
+  }
+  const parseDateBound = (name: string): Date | undefined => {
+    const raw = query[name];
+    if (raw === undefined) return undefined;
+    const parsed = z.string().datetime({ offset: true }).safeParse(raw);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `${name} must be an ISO-8601 timestamp` });
+    }
+    // Date-backed filters must not silently round accepted microseconds to an
+    // earlier boundary. Clients can use any ISO offset with at most 3 decimals.
+    if (/\.\d{4,}/.test(parsed.data)) {
+      throw new HTTPException(400, { message: `${name} supports at most millisecond precision` });
+    }
+    return new Date(parsed.data);
+  };
+  const updatedFrom = parseDateBound("updatedFrom");
+  const updatedBefore = parseDateBound("updatedBefore");
+  const createdFrom = parseDateBound("createdFrom");
+  const createdBefore = parseDateBound("createdBefore");
+  if (updatedFrom && updatedBefore && updatedFrom >= updatedBefore) {
+    throw new HTTPException(400, { message: "updatedFrom must be earlier than updatedBefore" });
+  }
+  if (createdFrom && createdBefore && createdFrom >= createdBefore) {
+    throw new HTTPException(400, { message: "createdFrom must be earlier than createdBefore" });
+  }
+  // The opaque end-user label filter is an exact pair: one half alone is a
+  // client error rather than a silently unfiltered list.
+  const endUserSource = query.endUserSource;
+  const endUserId = query.endUserId;
+  if ((endUserSource === undefined) !== (endUserId === undefined)) {
+    throw new HTTPException(400, {
+      message: "endUserSource and endUserId must be supplied together",
+    });
+  }
+  let endUser: SessionEndUser | undefined;
+  if (endUserSource !== undefined && endUserId !== undefined) {
+    const parsedEndUser = SessionEndUser.safeParse({ source: endUserSource, id: endUserId });
+    if (!parsedEndUser.success) {
+      throw new HTTPException(400, {
+        message: `endUserSource must be 1-${SESSION_END_USER_SOURCE_MAX_CHARS} and endUserId 1-${SESSION_END_USER_ID_MAX_CHARS} well-formed characters`,
+      });
+    }
+    endUser = parsedEndUser.data;
+  }
+  const hasPageFilters =
+    originSiteId !== undefined ||
+    channelId !== undefined ||
+    createdByKind !== undefined ||
+    updatedFrom !== undefined ||
+    updatedBefore !== undefined ||
+    createdFrom !== undefined ||
+    createdBefore !== undefined ||
+    endUser !== undefined;
   if (pinsOnly && !allowCursor) {
     throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
   }
-  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search)) {
+  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search || hasPageFilters)) {
     throw new HTTPException(400, {
-      message: "pinsOnly cannot be combined with cursor, parentSessionId, or search",
+      message: "pinsOnly cannot be combined with cursor, parentSessionId, search, or filters",
     });
   }
   if (pinsOnly && archivedOnly) {
@@ -4721,6 +4875,7 @@ function sessionListQuery(
   }
   return {
     limit: query.limit,
+    originSiteId,
     parentSessionId:
       parentSessionId === undefined
         ? undefined
@@ -4731,6 +4886,17 @@ function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     archivedOnly,
+    channelId: channelId === undefined ? undefined : channelId === "null" ? null : channelId,
+    createdBy:
+      createdByKind && createdBySubjectId
+        ? { kind: createdByKind, subjectId: createdBySubjectId }
+        : undefined,
+    updatedFrom,
+    updatedBefore,
+    createdFrom,
+    createdBefore,
+    endUser,
+    hasPageFilters,
   };
 }
 

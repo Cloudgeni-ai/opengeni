@@ -768,7 +768,7 @@ describe("durable Codex capacity waits", () => {
     expect(claimed[0]?.activeAttemptId).not.toBe(scenario.attemptId);
   });
 
-  test("an organization-pool capacity mutation wakes sibling workspace waiters atomically", async () => {
+  test("an organization-pool capacity mutation wakes shared and Personal workspace waiters atomically", async () => {
     if (!available) return;
     const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('organization capacity account') returning id`;
@@ -782,6 +782,13 @@ describe("durable Codex capacity waits", () => {
         values (${workspace!.id}, ${account!.id})`;
       workspaces.push({ accountId: account!.id, workspaceId: workspace!.id });
     }
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (
+        ${account!.id}, ${`user:${crypto.randomUUID()}`}, 'member', 'active',
+        ${workspaces[1]!.workspaceId}
+      )`;
     const [credential] = await admin<{ id: string }[]>`
       insert into codex_subscription_credentials (
         account_id, workspace_id, organization_id, authority_scope,

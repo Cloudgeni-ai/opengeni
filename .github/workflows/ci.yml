@@ -47,6 +47,9 @@ concurrency:
 permissions:
   contents: read
 
+# Substantive jobs must use !cancelled(), not always(): GitHub reevaluates
+# job conditions on cancellation. Keep bounded final reports and cleanup able
+# to run, while superseded heads release their test/build capacity promptly.
 jobs:
   automation-admission:
     name: Admit automation Version PR
@@ -138,7 +141,7 @@ jobs:
   plan:
     name: Explain change impact
     needs: automation-admission
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -272,7 +275,7 @@ jobs:
   source-contracts:
     name: Source and type contracts
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -407,7 +410,7 @@ jobs:
   unit-shards:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -468,7 +471,7 @@ jobs:
   integration-shards:
     name: Real-service shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -520,7 +523,7 @@ jobs:
   e2e-shards:
     name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -610,7 +613,7 @@ jobs:
   test-suite:
     name: Real-service and recovery tests
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -667,7 +670,7 @@ jobs:
   browser-acceptance:
     name: Browser and visual acceptance (${{ matrix.lane }})
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -803,7 +806,11 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
-        timeout-minutes: 4
+        # Includes a production web build, real PostgreSQL setup, and 23 serial
+        # browser cases. Baseline fa2b99a6 took 229s; run 34257100987 passed 22
+        # cases in 247s before the old 4m cap stopped the last case. Keep the
+        # individual test deadlines strict while allowing suite-level headroom.
+        timeout-minutes: 6
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -959,7 +966,7 @@ jobs:
   package-contracts:
     name: Package and bundle contracts
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
@@ -1133,7 +1140,9 @@ jobs:
   deployment:
     name: Deployment artifacts
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    # Every image-producing source needs the deployment receipt, including a
+    # docs-only main push. Staging validates it before importing these images.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1351,7 +1360,7 @@ jobs:
   artifact-runtime:
     name: Build exact artifact runtime inputs
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     uses: ./.github/workflows/artifact-runtime.yml
     with:
       source_sha: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -1359,7 +1368,7 @@ jobs:
   api-image:
     name: Build API workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -1441,7 +1450,7 @@ jobs:
   worker-image:
     name: Build worker workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -1490,7 +1499,7 @@ jobs:
   web-image:
     name: Build web workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -1504,9 +1513,6 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1540,7 +1546,7 @@ jobs:
   artifact-materializer-image:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -1595,7 +1601,7 @@ jobs:
   artifact-outbox-dispatcher-image:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -1644,7 +1650,7 @@ jobs:
   relay-image:
     name: Build relay workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1689,7 +1695,7 @@ jobs:
   sandbox-image:
     name: Build headless sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

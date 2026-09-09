@@ -52,6 +52,8 @@ const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "guard_workspace_owned_skill_head_delete()",
+  "guard_workspace_owned_skill_history_delete()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -95,6 +97,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_workspace_kind(uuid, uuid)",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
+  "list_organization_codex_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -489,6 +492,8 @@ const LEGACY_FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
 const FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
+const MESSAGE_FORK_SESSION_CONTENT_ROUTINE =
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid)";
 const REPLAY_APPLIED_SESSION_FORK_ROUTINE =
   "replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
 const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
@@ -511,6 +516,7 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
+  MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
   REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
@@ -548,6 +554,7 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   ...COMPANY_PROFILE_AGENT_ADMIN_ROUTINES,
@@ -555,6 +562,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
+  MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
@@ -724,6 +732,7 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_versions",
   "editable_artifacts",
   "enrollments",
+  "feedback_submissions",
   "file_uploads",
   "files",
   "generated_image_artifacts",
@@ -914,6 +923,9 @@ export const FORCE_RLS_TABLES = [
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
+  "skill_config_conversion_receipts",
+  "skill_source_bindings",
+  "skill_write_receipts",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
@@ -957,6 +969,7 @@ export const FORCE_RLS_TABLES = [
   "video_generation_operations",
   "video_generation_references",
   "workspace_artifact_events",
+  "workspace_artifact_uploads",
   "workspace_artifact_versions",
   "workspace_artifacts",
   "workspace_captures",
@@ -1167,6 +1180,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_artifact_uploads",
   "workspace_artifacts",
   "workspace_captures",
   "workspace_codex_subscription_preferences",
@@ -1203,6 +1217,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_snapshots",
   "session_tenancy_activations",
   "session_work_claims",
+  "skill_source_bindings",
+  "skill_write_receipts",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -1233,6 +1249,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "feedback_submissions",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
   "knowledge_change_proposals",
@@ -1405,6 +1422,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_visibility_write_capabilities",
   "session_work_claim_revisions",
   "session_work_claim_write_capabilities",
+  "skill_config_conversion_receipts",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
   "task_note_replacement_receipts",
@@ -2414,6 +2432,20 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if (routine.name === "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)") {
+      const authorityTables = [
+        "preference_registry_preferences",
+        "preference_registry_revisions",
+        "preference_registry_events",
+      ];
+      for (const name of authorityTables) {
+        const table = tableByName.get(name);
+        if (!table) violations.push(`Skill lifecycle authority table ${name} is missing`);
+        else if (routine.owner !== table.owner)
+          violations.push(
+            `Skill lifecycle owner ${routine.owner} does not match ${name} owner ${table.owner}`,
+          );
+      }
     } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {
         continue;
@@ -3306,6 +3338,17 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      [
+        "guard_workspace_owned_skill_head_delete()",
+        "guard_workspace_owned_skill_history_delete()",
+      ].includes(routine.name) &&
+      (routine.execute || routine.publicExecute)
+    ) {
+      violations.push(
+        `runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard ${routine.name}`,
+      );
+    }
     if (!routine.execute && !ownerInternalRoutine) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }

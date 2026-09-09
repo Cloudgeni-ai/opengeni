@@ -535,6 +535,7 @@ async function grantAppRoleIfSchemaExists(
     "get_workspace_kind(uuid,uuid)",
     "resolve_workspace_codex_subscription_source(uuid,uuid)",
     "list_organization_workspace_ids(uuid)",
+    "list_organization_codex_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
     "authorize_organization_shared_workspace_administration(uuid,uuid,text)",
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
@@ -813,6 +814,10 @@ BEGIN
         ${literal(schema)},
         ${literal(role)}
       );
+    END IF;
+    IF to_regprocedure(format('%I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_files_valid(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
       format('%I.preference_registry_lock_heads(uuid[])', ${literal(schema)})
@@ -1457,6 +1462,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.replay_applied_session_fork(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)',
         ${literal(schema)}
       )
@@ -2095,6 +2116,15 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'guard_workspace_owned_skill_head_delete()',
+      'guard_workspace_owned_skill_history_delete()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     EXECUTE format(
       'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM %I',
       owner_role,

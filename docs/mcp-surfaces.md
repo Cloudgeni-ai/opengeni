@@ -32,6 +32,53 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+
+### Recovery from tool-search misses
+
+Progressive discovery uses the same authorized deferred pool on Codex-native,
+OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
+exhaustive. `tool_list` is a query-independent fallback: it returns compact
+names and description previews, with a default page of 20, a maximum of 40,
+and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
+optional literal `namePrefix` filter. An invalid cursor requires restarting
+the listing against the current pool. Names and prefixes are display/routing
+keys, never authorization identities.
+
+Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
+listed tool's full schema without keyword ranking. Exact lookup cannot admit
+a tool outside the current pool. Search backfills smaller candidates after
+schema-size exclusions while retaining existing count and byte limits.
+Native disclosure returns the original SDK tool objects; generic dispatch,
+approvals, and invocation continue through the existing runtime. Listing
+joins deferred preparation but adds no preparation barrier to the first model
+request, no shell dependency, and no change to eager/search policy defaults.
+
+The native Connected Machine Codemode client sends its compiled API contract
+acknowledgement for compatibility with older deployments whose Codemode routes
+were protected by the product mutation fence. Current deployments scope
+Codemode through the attempt protocol independently, and the TypeScript client
+does not send this header. A server contract mismatch must fail explicitly;
+clients must not blindly echo a newly advertised version. The native mirror is
+pinned to the shared contracts by `packages/codemode/test/native-api-contract.test.ts`.
+
+Native Codemode failures emit a JSON receipt on stderr with the operation ID,
+observed state, error code, and message once an operation ID has been allocated.
+Its existence may remain unconfirmed if submission and subsequent observation fail.
+An unobserved state remains null, never an inferred execution failure.
+`opengeni-agent codemode read <operation-id>` reads the existing journal under
+the current attempt's authority without submitting or repeating the tool.
+Unknown outcomes are not automatically retried. Client compatibility must be
+verified on packaged artifacts; catalog authority does not certify an installed
+JavaScript client, and an optional client failure grants no additional access.
+The `read` command exits successfully when journal observation succeeds, even
+when the returned operation failed; inspect `operation.state` before using its
+result. Reads remain attempt-authorized and can be denied after an attempt ends.
+On a Linux Docker build host, `bun scripts/test-codemode-image.ts <image>
+<absolute-native-binary> receipts` verifies the packaged clients against an
+owned loopback fixture, including credential modes and GET-only recovery. This
+is release verification, not a health probe that executes customer tools.
+
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
@@ -48,9 +95,9 @@ First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEn
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 
-- `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and the byte-bounded semantic event tail. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
+- `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
 - `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. Do not immediately repeat a timed-out short wait without new evidence.
-- `command_wait` - the provider-neutral short wait for one session-owned background command. It returns the authoritative durable command row immediately when already terminal, otherwise waits up to 50 seconds for the matching `session.command.finished` event or immediate input on the calling session, then re-reads the command row. Timeout never cancels the command and should not be looped; use `wait_for_input` for a long or uncertain wait.
+- `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
 - `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 
 Exact-attempt advisory work-claim mutations (`sessions:control`) use

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "3.7.0",
+  "version": "4.0.2",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -101,6 +101,10 @@
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
+    },
+    "./chat": {
+      "types": "./src/chat/index.ts",
+      "default": "./src/chat/index.ts"
     }
   },
   "publishConfig": {
@@ -122,6 +126,7 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/deployment": "workspace:*",
     "fake-indexeddb": "^6.2.5",
+    "openai": "6.47.0",
     "tsup": "^8.5.0",
     "typescript": "7.0.2",
     "zod": "^4.2.1"

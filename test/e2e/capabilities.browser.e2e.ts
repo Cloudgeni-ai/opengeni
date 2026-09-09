@@ -261,9 +261,9 @@ describe("capabilities browser e2e", () => {
 
         for (const theme of ["light", "dark"] as const) {
           await setTheme(page, theme);
-          await expectVisible(page.getByLabel("Search connectors"));
-          expect(await page.getByLabel("Search connectors").count()).toBe(1);
-          await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+          await expectVisible(page.getByLabel("Search all plugins"));
+          expect(await page.getByLabel("Search all plugins").count()).toBe(1);
+          await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
           await page.screenshot({
             path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
             fullPage: true,
@@ -274,6 +274,46 @@ describe("capabilities browser e2e", () => {
       }
     }
   }, 150_000);
+
+  test("top-level search filters MCP servers and apps, and resource names opt out of identity autofill", async () => {
+    const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      const search = page.getByLabel("Search all plugins");
+      const apps = page.locator("[data-integration-list] [data-integration-row]");
+      const appCount = await apps.count();
+      expect(appCount).toBeGreaterThan(0);
+      const searchBox = await search.boundingBox();
+      const appsHeading = await page
+        .getByRole("heading", { name: "Apps", exact: true })
+        .boundingBox();
+      expect(searchBox!.y).toBeLessThan(appsHeading!.y);
+      await search.fill(capabilityName);
+      await expectVisible(page.locator(`[data-capability-catalog-tile="${capabilityId}"]`));
+      expect(await apps.count()).toBe(0);
+      await search.fill("GitHub");
+      await expectVisible(apps.first());
+      expect(await apps.count()).toBeLessThan(appCount);
+      await search.fill("no-such-plugin-xyz");
+      expect(await page.locator("[data-capability-catalog-tile]").count()).toBe(0);
+      expect(await apps.count()).toBe(0);
+      await search.fill("");
+      expect(await apps.count()).toBe(appCount);
+      await page.getByRole("button", { name: "Add MCP server", exact: true }).click();
+      const name = page.getByRole("dialog").getByLabel("Name", { exact: true });
+      expect(await name.getAttribute("autocomplete")).toBe("off");
+      expect(await name.getAttribute("data-1p-ignore")).toBe("true");
+      await name.fill("Internal Tools MCP");
+      await page.screenshot({ path: `${evidenceDir}mcp-name-autofill-desktop.png` });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("four-column tiles preserve readable names and non-overlapping metadata", async () => {
     const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
@@ -338,7 +378,7 @@ describe("capabilities browser e2e", () => {
       expect(layout.state.right).toBeLessThanOrEqual(layout.tile.right);
       expect(await tile.locator("button").count()).toBe(2);
 
-      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
       await page.screenshot({
         path: `${evidenceDir}tile-layout-four-column-1440.png`,
         fullPage: true,
@@ -408,7 +448,7 @@ describe("capabilities browser e2e", () => {
       expect(await tiles.count()).toBe(96);
 
       const startedAt = performance.now();
-      await page.getByLabel("Search connectors").fill("Capability 4999");
+      await page.getByLabel("Search all plugins").fill("Capability 4999");
       await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
       expect(performance.now() - startedAt).toBeLessThan(1_000);
       expect(await tiles.count()).toBe(1);
@@ -729,7 +769,7 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
       await setTheme(mobilePage, "dark");
-      await expectText(mobilePage.getByRole("region", { name: "Capabilities" }), "Needs attention");
+      await expectText(mobilePage.getByRole("region", { name: "Plugins" }), "Needs attention");
       await openMobbinSheet(mobilePage, true);
       await expectText(
         mobilePage.getByRole("dialog"),
@@ -959,6 +999,9 @@ async function installCapabilityApi(
         installations: [],
       });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({
         connections:
@@ -977,6 +1020,9 @@ async function installCapabilityApi(
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`) {
+      return json({ skills: [], nextCursor: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
@@ -1148,6 +1194,9 @@ async function installLargeCatalogApi(
       await new Promise((resolve) => setTimeout(resolve, catalogDelayMs));
       return json({ items: catalog, installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: [] });
     }
@@ -1160,6 +1209,9 @@ async function installLargeCatalogApi(
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`) {
+      return json({ skills: [], nextCursor: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
@@ -1264,11 +1316,13 @@ async function installWorkspaceCatalogApi(
       }
       return json({ items: catalogs.get(routeWorkspaceId), installations: [] });
     }
+    if (resource === "connections/slack-bot/bindings") return json({ bindings: [] });
     if (resource === "connections") return json({ connections: [] });
     if (resource === "social/connections") return json([]);
     if (resource === "integrations/definitions") return json({ definitions: [] });
     if (resource === "integrations") return json({ integrations: [] });
     if (resource === "skills") return json({ skills: [] });
+    if (resource === "skills/content") return json({ skills: [], nextCursor: null });
     if (resource === "plugins") return json({ plugins: [] });
     if (resource === "packs") return json({ packs: [], installations: [] });
     if (resource === "variable-sets" || resource === "rigs" || resource === "channels") {

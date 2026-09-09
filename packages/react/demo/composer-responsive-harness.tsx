@@ -1,4 +1,9 @@
-import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  EffectiveSessionControl,
+  LatencyMode,
+  ReasoningEffort,
+} from "@opengeni/sdk";
 import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 import {
   ChatComposer,
@@ -145,6 +150,8 @@ function ResponsiveComposerHarness() {
   const [voiceActive, setVoiceActive] = useState(initialVoiceActive);
   const [value, setValue] = useState("A long prompt remains editable while the panel resizes.");
   const [model, setModel] = useState(models[0]!.id);
+  const [effort, setEffort] = useState<ReasoningEffort>("medium");
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>("fast");
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const composer = useMemo<ComposerState>(
@@ -283,11 +290,11 @@ function ResponsiveComposerHarness() {
                 <ModelPolicyPicker
                   models={models}
                   model={model}
-                  effort="medium"
-                  latencyMode="fast"
+                  effort={effort}
+                  latencyMode={latencyMode}
                   onModelChange={setModel}
-                  onEffortChange={() => {}}
-                  onLatencyModeChange={() => {}}
+                  onEffortChange={setEffort}
+                  onLatencyModeChange={setLatencyMode}
                 />
               }
               actionsStart={

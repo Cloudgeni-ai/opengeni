@@ -65,7 +65,32 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column input_wait_turn_id uuid,
       add column input_wait_until timestamptz,
       add column input_wait_reason text,
-      add column input_wait_set_at timestamptz`;
+      add column input_wait_set_at timestamptz,
+      add column agent_access text not null default 'workspace',
+      add column end_user_source text,
+      add column end_user_id text,
+      add column memory_scope text not null default 'workspace'`;
+    // The current claim adapter also reads timer fields under the workspace
+    // fence. These temporary nullable fields are removed before 0420 runs.
+    await admin`
+      alter table workspace_inference_controls
+      add column timer_id uuid,
+      add column timer_action text,
+      add column timer_due_at timestamptz,
+      add column timer_pause_for_seconds integer,
+      add column timer_pause_revision bigint`;
+    // The current claim writer uses ordered JSON. Bridge it to this historical
+    // schema, then remove the bridge so 0434 performs its actual backfill.
+    await admin`alter table session_history_items add column item_ordered json`;
+    await admin.unsafe(`
+      create function fixture_0343_history_write() returns trigger language plpgsql as $$
+      begin
+        new.item := new.item_ordered::jsonb;
+        return new;
+      end $$;
+      create trigger fixture_0343_history_write before insert on session_history_items
+      for each row execute function fixture_0343_history_write();
+    `);
     await provisionRoles(adminUrl, { appPassword, rlsStrategy: "force" });
 
     const [posture] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
@@ -227,13 +252,27 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await app.end({ timeout: 5 });
     expect(await applicationSessionCount()).toBe(0);
     await admin`drop table session_event_cursors`;
+    await admin`drop trigger fixture_0343_history_write on session_history_items`;
+    await admin`drop function fixture_0343_history_write()`;
+    await admin`alter table session_history_items drop column item_ordered`;
+    await admin`
+      alter table workspace_inference_controls
+      drop column timer_id,
+      drop column timer_action,
+      drop column timer_due_at,
+      drop column timer_pause_for_seconds,
+      drop column timer_pause_revision`;
     await admin`
       alter table sessions
       drop column variable_set_ids,
       drop column input_wait_turn_id,
       drop column input_wait_until,
       drop column input_wait_reason,
-      drop column input_wait_set_at`;
+      drop column input_wait_set_at,
+      drop column agent_access,
+      drop column end_user_source,
+      drop column end_user_id,
+      drop column memory_scope`;
     await migrate(ownerUrl);
     app = openApp();
 

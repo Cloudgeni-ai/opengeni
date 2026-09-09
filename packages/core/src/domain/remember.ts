@@ -50,6 +50,7 @@ export class RememberError extends Error {
       | "proposal_unavailable"
       | "proposal_not_confirmable"
       | "human_confirmation_unavailable"
+      | "preference_retired"
       | "baseline_stale",
     message: string,
   ) {
@@ -327,6 +328,12 @@ export function createRememberRouter(options: RememberRouterOptions): {
     async remember(input) {
       const attempt = await attemptOf(input.attempt);
       const request = RememberRequest.parse(input.request);
+      if (request.lane === "preference") {
+        throw new RememberError(
+          "preference_retired",
+          "The Remember preference lane is retired; use skill_save for shared Skill files. No note or proposal was created.",
+        );
+      }
       const note = await createNote(options.db, {
         ...attempt,
         operationId: derivedRememberOperationId(request.operationId, "note"),

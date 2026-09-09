@@ -1,3 +1,4 @@
+import { assertModelConnectionAllowsTurn } from "@opengeni/db";
 import {
   setSessionLastInputTokensForTurnAttempt,
   getMaterializedSandboxFileResources,
@@ -468,10 +469,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         requiredGeneratedVideoFiles,
       });
       if ("exit" in governance) return governance.exit;
+      await assertModelConnectionAllowsTurn(db, {
+        workspaceId: input.workspaceId,
+        subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
+        modelId: turnExecutionPolicy.productModelId,
+        codexCredentialId: providerTurn.effectiveCodexCredentialId,
+        xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+      });
       const {
         runtimePreparationStartedAt,
         packRuntime,
-        installedSkillRuntime,
         rigVersion,
         rigName,
         agentHumanInputEnabled,
@@ -1144,6 +1151,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ).values(),
       ];
       const toolRuntime = await prepareTurnToolRuntime({
+        selectedSkillActivations: packRuntime.skillActivations,
         input,
         catalogSourceSettings,
         db,
@@ -1191,6 +1199,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       } = toolRuntime;
 
       const builtAgent = await buildTurnAgent({
+        skillCatalog: toolRuntime.skillCatalog,
         input,
         db,
         runtime,
@@ -1225,8 +1234,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceMemory,
         rigVersion,
         rigName,
-        packRuntime,
-        installedSkillRuntime,
         buildCompanyBrainContributionReceiptFor,
         promptCacheKey,
         workspaceVariableSet,
@@ -1248,8 +1255,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         postToolPreparationStartedAt,
         codexContext,
       });
-      const { agent, modelVisibleRuntimeSkillActivations, postAgentPreparationStartedAt } =
-        builtAgent;
+      const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
 
       await bindLazySandboxProvisioner({
         ...sandboxRoute,
@@ -1305,7 +1311,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         companyBrainContributionReceiptRecorded = true;
         try {
           const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
-            modelVisibleRuntimeSkillActivations,
+            modelVisibleSkillCatalogText,
           );
           eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
             companyBrainContributionReceipt,

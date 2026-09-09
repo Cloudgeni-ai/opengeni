@@ -1,3 +1,9 @@
+import {
+  beginSocialLoginAnalytics,
+  noteSuccessfulLogin,
+  observeSocialLoginResult,
+} from "@/lib/analytics-login";
+import { hasWorkspacePermission } from "@/lib/permissions";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -49,7 +55,6 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -79,6 +84,8 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
+import { isPaymentRequiredError } from "@/lib/model-access-onboarding";
+import { hasAccountPermission } from "@/lib/permissions";
 import {
   applySessionPinProjection,
   notifySessionPinChanged,
@@ -100,12 +107,12 @@ import {
   isAbortError,
   mergeMcpServerOptions,
   selectableMcpServers,
-  selectedAvailableCapabilityToolIds,
   type IntelligenceEffort,
   type McpServerOption,
   type RepoDraft,
   type RepositoryGroup,
 } from "@/lib/session-tools";
+import { useCapabilityToolDefaults } from "@/lib/use-capability-tool-defaults";
 import { upsertWorkspace } from "@/lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
@@ -157,6 +164,12 @@ const AnalyticsManager = lazy(() =>
   })),
 );
 
+const OrganizationOnboardingPanel = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.OrganizationOnboardingPanel,
+  })),
+);
+
 const ManagedAuthPanel = lazy(() =>
   import("@/components/managed-auth-panel").then((module) => ({
     default: module.ManagedAuthPanel,
@@ -184,6 +197,12 @@ const BrowserAccountsLoadingGate = lazy(() =>
 const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
   import("@/components/browser-accounts-runtime").then((module) => ({
     default: module.BrowserAccountsOrganizationOnboardingPanel,
+  })),
+);
+
+const CreditRequiredPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -565,6 +584,10 @@ export function RootRouteComponent() {
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
+  const accessContextRef = useRef(accessContext);
+  useInsertionEffect(() => {
+    accessContextRef.current = accessContext;
+  }, [accessContext]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [managedSelfContext, setManagedSelfContext] = useState<ManagedSelfContext | null>(null);
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
@@ -575,6 +598,10 @@ export function RootRouteComponent() {
   >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
+  const [creditRequired, setCreditRequired] = useState<{
+    workspaceId: string;
+    accountId: string | null;
+  } | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -637,9 +664,9 @@ export function RootRouteComponent() {
   const authPrincipalIdRef = useRef<string | null>(null);
   const accessPrincipalIdRef = useRef<string | null>(null);
   const managedSelfContextIdentityRef = useRef<ManagedSelfContextIdentity | null>(null);
-  // Every available tool is selected when it first appears. Explicit
+  // Every default-enabled tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
+  const seenCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const personalGitHubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
@@ -691,6 +718,7 @@ export function RootRouteComponent() {
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
+  const analyticsSearch = useRouterState({ select: (state) => state.location.searchStr });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
@@ -793,7 +821,7 @@ export function RootRouteComponent() {
       setSelectedPersonalGitHubRepoIds(new Set());
       setSelectedPersonalGitHubRepoRefs({});
       setSelectedCapabilityToolIds(new Set());
-      previousCapabilityToolIds.current = new Set();
+      seenCapabilityToolIds.current = new Set();
       appliedWorkspaceToolDefaultsKey.current = null;
       setGithubAppOpen(false);
       setGithubOrg("");
@@ -904,6 +932,7 @@ export function RootRouteComponent() {
           invalidatePrincipalWorkspaceState();
         }
         authPrincipalIdRef.current = nextPrincipalId;
+        observeSocialLoginResult(nextSession);
         setAuthSession(nextSession);
         setManagedAuthBootstrapComplete(true);
       })
@@ -1113,30 +1142,17 @@ export function RootRouteComponent() {
   const currentResources = repositoryBuild.resources;
   const repositoryValidationError = repositoryBuild.error;
 
-  useEffect(() => {
-    if (!clientConfig) {
-      return;
-    }
-    const availableIds = toolMcpServers.map((server) => server.id);
-    const defaultsKey = `${routedWorkspaceId ?? ""}\u0000${[...workspaceDefaultToolIds]
-      .sort()
-      .join("\u0000")}`;
-    if (appliedWorkspaceToolDefaultsKey.current !== defaultsKey) {
-      appliedWorkspaceToolDefaultsKey.current = defaultsKey;
-      setSelectedCapabilityToolIds(new Set(workspaceDefaultToolIds));
-      previousCapabilityToolIds.current = new Set(availableIds);
-      return;
-    }
-    setSelectedCapabilityToolIds((current) =>
-      selectedAvailableCapabilityToolIds(
-        current,
-        availableIds,
-        previousCapabilityToolIds.current,
-        workspaceDefaultToolIds,
-      ),
-    );
-    previousCapabilityToolIds.current = new Set(availableIds);
-  }, [clientConfig, routedWorkspaceId, toolMcpServers, workspaceDefaultToolIds]);
+  useCapabilityToolDefaults({
+    principalKey: JSON.stringify(principalTransitionIdentity.current),
+    ready: clientConfig !== null,
+    workspaceId: routedWorkspaceId,
+    configuredIds: configuredWorkspaceToolDefaults?.mcpServerIds,
+    availableIds: toolMcpServers.map((server) => server.id),
+    defaultIds: workspaceDefaultToolIds,
+    appliedKey: appliedWorkspaceToolDefaultsKey,
+    seenIds: seenCapabilityToolIds,
+    setSelected: setSelectedCapabilityToolIds,
+  });
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
@@ -1546,6 +1562,17 @@ export function RootRouteComponent() {
           acceptedTransition,
           workspaceId,
         ) && personalGitHubRefreshId.current === refreshId;
+      if (!hasWorkspacePermission(accessContextRef.current, workspaceId, "connections:read")) {
+        setPersonalGitHubStatus(null);
+        setPersonalGitHubRepositories([]);
+        setPersonalGitHubSelection(null);
+        setPersonalGitHubAuthorityCache(null);
+        setSelectedPersonalGitHubRepoIds(new Set());
+        setSelectedPersonalGitHubRepoRefs({});
+        setPersonalGitHubCatalogReady(true);
+        setPersonalGitHubBusy(false);
+        return;
+      }
       setPersonalGitHubBusy(true);
       try {
         const status = await client.personalGitHubStatus(workspaceId);
@@ -1955,9 +1982,17 @@ export function RootRouteComponent() {
             outcomeUnknown,
           });
         }
-        toast.error("Failed to start session", {
-          description: composerSubmissionErrorMessage(problem),
-        });
+        if (isPaymentRequiredError(problem)) {
+          const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+          setCreditRequired({
+            workspaceId,
+            accountId: workspace?.accountId ?? null,
+          });
+        } else {
+          toast.error("Failed to start session", {
+            description: composerSubmissionErrorMessage(problem),
+          });
+        }
       }
       return null;
     } finally {
@@ -2254,6 +2289,7 @@ export function RootRouteComponent() {
       throw new ManagedAuthSessionUnavailableError(mode);
     }
     authPrincipalIdRef.current = nextSession?.user.id ?? null;
+    if (mode === "signin" && nextSession) noteSuccessfulLogin(nextSession.user.id, "email");
     setAuthSession(nextSession);
     setAccessKeyVersion((version) => version + 1);
   }
@@ -2284,6 +2320,7 @@ export function RootRouteComponent() {
         slackLinkPrepareController.phase(),
       ),
     });
+    beginSocialLoginAnalytics(provider);
     await startManagedSocialSignIn(provider);
   }
 
@@ -2755,22 +2792,34 @@ export function RootRouteComponent() {
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
+        billingMode={clientConfig.billingMode ?? "disabled"}
+        codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
+        supergrokEnabled={clientConfig.models.some(
+          (catalogModel) => catalogModel.source === "supergrok",
+        )}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={revalidatePrincipalAccess}
       />
     ) : (
-      <OrganizationOnboardingPanel
-        client={client}
-        activeEmail={authSession?.user.email ?? null}
-        invitation={organizationInvitationContinuation}
-        onUseInvitedAccount={() => {
-          void handleManagedSignOut().catch((error) =>
-            toast.error("Sign out failed", { description: String(error) }),
-          );
-        }}
-        onComplete={revalidatePrincipalAccess}
-      />
+      <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+        <OrganizationOnboardingPanel
+          client={client}
+          billingMode={clientConfig.billingMode ?? "disabled"}
+          codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
+          supergrokEnabled={clientConfig.models.some(
+            (catalogModel) => catalogModel.source === "supergrok",
+          )}
+          activeEmail={authSession?.user.email ?? null}
+          invitation={organizationInvitationContinuation}
+          onUseInvitedAccount={() => {
+            void handleManagedSignOut().catch((error) =>
+              toast.error("Sign out failed", { description: String(error) }),
+            );
+          }}
+          onComplete={revalidatePrincipalAccess}
+        />
+      </Suspense>
     )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
@@ -2782,6 +2831,22 @@ export function RootRouteComponent() {
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />
+      {creditRequired ? (
+        <Suspense fallback={null}>
+          <CreditRequiredPrompt
+            open
+            workspaceId={creditRequired.workspaceId}
+            accountId={creditRequired.accountId}
+            canBuyCredits={
+              Boolean(creditRequired.accountId) &&
+              hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
+            }
+            onOpenChange={(open) => {
+              if (!open) setCreditRequired(null);
+            }}
+          />
+        </Suspense>
+      ) : null}
       {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
         <TanStackRouterDevtools position="bottom-right" />
       ) : null}
@@ -2814,12 +2879,15 @@ export function RootRouteComponent() {
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager
-            analyticsAccountId={accessContext?.defaultAccountId ?? null}
+            analyticsAccountId={
+              routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
+            }
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}
             isPublicAuthRoute={isPublicAuthRoute}
             pathname={pathname}
+            search={analyticsSearch}
           />
         </Suspense>
       ) : null}

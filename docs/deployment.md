@@ -293,6 +293,11 @@ workspace credentials.
 `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` additionally exposes the
 SuperGrok/xAI connected-subscription rail. Workspace scope is the default shared
 connection path; private user scope requires the exact managed-browser human.
+Organization owners and admins can also share subscriptions with their shared
+and Personal workspaces. Migration `0423_organization_supergrok_subscriptions.sql`
+is a maintenance cutover: drain all API/control/turn processes, apply with the
+complete runtime role list, and restart only the matching release. Older workers
+cannot parse the new accepted-work organization scope.
 The same stable environments encryption key protects its OAuth material. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 `OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` optionally overrides the
@@ -305,6 +310,15 @@ models. Drain API/control/turn processes, apply with the complete application
 role list, deploy the matching release, then restart. Pre-0390 workers do not
 understand the new credential/billing branch. No new environment variable is
 required; the stable environments encryption key protects these credentials.
+
+Migration `0422_personal_workspace_organization_codex_inheritance.sql` is a
+maintenance activation for Personal workspace Codex inheritance. Stop all API,
+control-worker, and turn-worker processes and provide every runtime login in
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. Apply the migration, run
+`db:provision-roles`, and start only the matching release. Select
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0422_personal_workspace_organization_codex_inheritance`
+for generated deployment plans. Never restart a pre-0422 binary: its organization
+Codex mutations omit Personal workspace source fences and capacity wakeups.
 
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
@@ -1215,6 +1229,11 @@ content-hashed `/assets/*` responses are served with immutable one-year caching,
 while the HTML shell revalidates. The API compresses JSON responses and leaves
 SSE and other streaming transports uncompressed.
 
+Web assets, the React demo, and the server bundle compile once on BuildKit's
+native build platform. The amd64 and arm64 web images copy those portable
+outputs into their respective Bun runtime images without executing target
+architecture build steps. Web image publication therefore does not need QEMU.
+
 Build local OpenGeni workload images:
 
 ```bash
@@ -1230,6 +1249,16 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 ## Verified public release
 
 `main` is the daily integration branch and remains GitHub's default branch.
+
+Site authoring installs exact registry versions. Stable builds use their source
+SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
+from the same source using `publish-canary.yml`, then set
+`OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
+`site-package-versions-<sha>` artifact. The runtime includes these pins beside
+the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
+sandbox images do not include Site package archives; the local development
+image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
+
 `production` is the official source pointer in this repository; it is not a
 live-cluster deploy. Staging is a manual pin of already-baked
 `canary-sha-<commit>` images from any `main` SHA
@@ -1506,7 +1535,16 @@ package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest. The official BOM does **not** include `opengeni-desktop`.
 Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
-published by `.github/workflows/publish-desktop-image.yml`. OpenGeni defaults to
+published by `.github/workflows/publish-desktop-image.yml` to
+`opengenipublicneuacr.azurecr.io/opengeni-desktop:preview-<source-sha>`.
+The publisher uses the existing `public-release` OIDC identity, verifies the tag's
+immutable digest and source label after registry logout, pulls anonymously, and
+runs the installed artifact runtime doctor while rejecting `.unavailable`.
+The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` and
+`canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
+error-tolerant job, not publication gates.
+Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
+Publication does not update deployment pins or rotate existing sandboxes. OpenGeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override
 Helm `desktop.imageRef` only with another compatible digest
 (`registry/opengeni-desktop@sha256:…`). The chart fails closed when
@@ -1721,9 +1759,20 @@ docker build \
   -f docker/sandbox.Dockerfile \
   -t opengeni-sandbox:local-"${SOURCE_SHA:0:12}" \
   .
+
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$SOURCE_SHA" \
+  -f docker/desktop.Dockerfile \
+  -t opengeni-desktop:local-"${SOURCE_SHA:0:12}" \
+  .
 ```
 
-Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with that stock image.
+Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with a digest-pinned
+stock image that actually contains `/opt/opengeni/artifact-runtime/installation.json`.
+That is `docker/sandbox.Dockerfile` for Docker and `docker/desktop.Dockerfile` for
+Modal Computer/Browser. Do not enable the flag on a desktop digest published
+before the kernel was installed, and do not point Modal at headless
+`opengeni-sandbox` to obtain the kernel.
 Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
@@ -2024,6 +2073,14 @@ The runtime secret must provide values such as:
 Do not commit real secret values.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
+
+The same drained rollout procedure below applies to
+`0418_site_direct_uploads.sql`: it adds the exact upload-table/RLS/grant inventory,
+allows hash-free HTML versions and optional source, and widens stored byte counts.
+Stop old API and both worker roles, supply the complete runtime login list,
+migrate, provision the target roles, then start the matching binary. After this
+cutover, do not restart a pre-0417 binary. Existing Site versions and source remain
+readable; local development data does not need resetting.
 
 Migrations `0404_mcp_oauth_authorization_server.sql` and
 `0405_tool_gateway_approval_capabilities.sql` change the exact application-role
@@ -2989,3 +3046,41 @@ A deployment is not acceptable until it proves:
 Use `bun run deployment:stack`, `bun run deployment:preflight`, provider
 Terraform validation, Helm rendering, and this conformance suite as the merge
 and release gate for deployment changes.
+
+
+### Background-command launch authority (0419)
+
+Migration `0419_background_command_launch_authority.sql` is rolling: nullable
+launch turn/attempt/generation columns and an immutable identity fence let older
+adoption writers remain compatible. New writers stamp the existing accepted
+attempt; terminal commands use that receipt without creating a personal grant.
+Historical managed rows may derive it from their exact retained process, while
+unattributed Connected Machine rows remain service-owned. Deploy the new API and
+worker together to enable command and wait-timeout causal admission; this source
+change does not itself deploy or authorize pre-claim recovery.
+
+### Connection access policies (migration 0424)
+
+Drain every API, control worker, and turn worker before applying
+`0424_model_connection_access.sql`. Restart only the policy-aware binary; older
+workers do not enforce per-connection model restrictions and must not be used as
+rollback images once restrictions are configured. Existing connections retain
+unrestricted models and their prior workspace reach. See
+[model connection access](model-connection-access.md).
+
+## Feedback storage activation
+
+Migration `0425_feedback_submissions.sql` extends the exact runtime table/privilege
+contract. Stop old API and both worker types, migrate, run `db:provision-roles`,
+and start the feedback-aware binary. Do not restart an older binary afterward.
+See [Feedback](feedback.md) for API, privacy, and retention behavior.
+
+## Message-point fork activation
+
+Migration `0429_message_boundary_session_forks.sql` adds the exact runtime
+routine for message-boundary forks. Stop API, control-worker, and turn-worker
+processes before migrating, run `db:provision-roles`, and start only the new
+binary afterward. Do not use an older binary as the rollback image after this
+routine contract changes. Whole-session forks retain their existing signature.
+See [Forking at a message](organization-tenancy.md#forking-at-a-message) for
+boundary validation and compacted-history limitations.

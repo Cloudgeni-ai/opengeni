@@ -24,7 +24,7 @@ function controller(
       personalResourceCount: 1,
       closureUnverified: false,
     },
-    mode: "once",
+    mode: "session",
     visibility: "workspace",
     requiresDecision: false,
     intent: undefined,
@@ -36,11 +36,16 @@ function controller(
 }
 
 describe("PersonalResourceAttachmentControl", () => {
-  test("does not add passive personal-resource copy above the composer", () => {
-    expect(
-      renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller()} compact />),
-    ).toBe("");
-  });
+  test.each(["private", "workspace"] as const)(
+    "adds no authorization UI for healthy %s attachments",
+    (visibility) => {
+      expect(
+        renderToStaticMarkup(
+          <PersonalResourceAttachmentControl controller={controller({ visibility })} compact />,
+        ),
+      ).toBe("");
+    },
+  );
 
   test("keeps actionable recovery states visible", () => {
     const markup = renderToStaticMarkup(
@@ -53,4 +58,18 @@ describe("PersonalResourceAttachmentControl", () => {
     expect(markup).toContain("The selected personal resource is unavailable");
     expect(markup).toContain("Retry");
   });
+});
+
+test.each([
+  [
+    "source_changed",
+    "Access to the selected personal resource changed. Choose an available resource before submitting.",
+  ],
+  ["reloading", "Session authority changed. Reloading personal resources before retrying."],
+  ["reload_failed", "Session authority could not be refreshed. Retry before sending again."],
+  ["reloaded", "Session authority changed. Personal resources were reloaded before retrying."],
+] as const)("renders exact %s status text from the lazy notice projection", (notice, message) => {
+  expect(
+    renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller({ notice })} />),
+  ).toContain(message);
 });

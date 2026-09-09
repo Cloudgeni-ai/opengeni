@@ -30,6 +30,7 @@ export function ArtifactSandbox(props: {
   toolBridge?: PublishedHtmlArtifactToolBridge;
   connectedToolCount?: number;
   sourceFileCount?: number;
+  fill?: boolean;
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [focused, setFocused] = useState(false);
@@ -42,6 +43,7 @@ export function ArtifactSandbox(props: {
         "overflow-hidden rounded-2xl border border-border/80 bg-white shadow-sm",
         focused && "fixed inset-0 z-50 flex flex-col rounded-none border-0 bg-surface shadow-none",
         props.className,
+        props.fill && "flex min-h-0 flex-col",
       )}
     >
       <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
@@ -134,6 +136,7 @@ export function ArtifactSandbox(props: {
         toolBridge={props.toolBridge}
         className={cn(
           "h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
+          props.fill && "h-0 min-h-0 flex-1",
           focused && "min-h-0 flex-1",
         )}
       />

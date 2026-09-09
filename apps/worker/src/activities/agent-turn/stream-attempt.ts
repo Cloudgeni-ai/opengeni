@@ -471,7 +471,7 @@ export async function runTurnStreamAttempt(
       // prepareInput already sanitized the exact durable prefix represented
       // by state.history. Carry its count forward instead of loading and
       // retaining the full active transcript a second time beside runInput.
-      historySink.persistedHistoryCount = prepared.persistedHistoryCount;
+      historySink.seedHistory(prepared.input.input, prepared.persistedHistoryCount);
       preparedHistoryCount = prepared.persistedHistoryCount;
       const historyPositionStartedAt = performance.now();
       let historyPositionOutcome: "completed" | "failed" = "completed";

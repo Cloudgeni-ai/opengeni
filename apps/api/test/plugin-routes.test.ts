@@ -127,7 +127,7 @@ const github: GitHubSkillSourceClient = {
   readBlob: async (_owner, _repository, sha) =>
     new TextEncoder().encode(
       sha === "skill-md"
-        ? "---\nname: Research\ndescription: Research safely.\n---\nUse cited primary sources.\n"
+        ? "---\nname: research\ndescription: Research safely.\n---\nUse cited primary sources.\n"
         : "# Guide\nStay bounded.\n",
     ),
 };

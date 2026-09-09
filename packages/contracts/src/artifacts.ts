@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { ToolGatewayIdentity } from "./tool-catalog";
 
-export const WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES = 4 * 1024 * 1024;
-export const WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES = 4 * 1024 * 1024;
-export const WORKSPACE_ARTIFACT_SOURCE_MAX_FILES = 128;
+export const WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES = 5_000_000_000;
+export const WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES = 5_000_000_000;
+export const WORKSPACE_ARTIFACT_SOURCE_MAX_FILES = Number.MAX_SAFE_INTEGER;
 export const WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX = 128;
 export const WORKSPACE_ARTIFACT_TITLE_MAX_CHARS = 120;
 export const WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS = 2_000;
@@ -110,7 +110,7 @@ export const WorkspaceArtifactVersion = z.object({
   artifactId: z.string().uuid(),
   revision: z.number().int().positive(),
   contentType: z.literal("text/html"),
-  contentSha256: sha256,
+  contentSha256: sha256.nullable(),
   sizeBytes: z.number().int().positive().max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
   sourceSha256: sha256.nullable(),
   sourceSizeBytes: z
@@ -179,6 +179,8 @@ export const WorkspaceArtifactListQuery = z.object({
     .default(WORKSPACE_ARTIFACT_LIST_DEFAULT),
   cursor: z.string().min(1).max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).optional(),
   status: WorkspaceArtifactStatus.optional(),
+  /** Sites created or published by this session, including older versions. */
+  sourceSessionId: z.string().uuid().optional(),
 });
 export type WorkspaceArtifactListQuery = z.infer<typeof WorkspaceArtifactListQuery>;
 
@@ -211,26 +213,42 @@ export const WorkspaceArtifactHtml = z
     }
   });
 
-export const CreateWorkspaceArtifactRequest = z.object({
-  slug: WorkspaceArtifactSlug.optional(),
-  title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
-  description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
-  html: WorkspaceArtifactHtml,
-  source: WorkspaceArtifactSourceBundle.optional(),
-  requestedTools: WorkspaceArtifactRequestedTools.optional(),
-  idempotencyKey: z.string().trim().min(1).max(200),
-});
+export const CreateWorkspaceArtifactRequest = z
+  .object({
+    slug: WorkspaceArtifactSlug.optional(),
+    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS),
+    description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
+    html: WorkspaceArtifactHtml.optional(),
+    uploadId: z.string().uuid().optional(),
+    source: WorkspaceArtifactSourceBundle.optional(),
+    requestedTools: WorkspaceArtifactRequestedTools.optional(),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  })
+  .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
+    message: "Provide either html or uploadId",
+  })
+  .refine((value) => !value.uploadId || value.source === undefined, {
+    message: "Upload source using the prepared source URL",
+  });
 export type CreateWorkspaceArtifactRequest = z.infer<typeof CreateWorkspaceArtifactRequest>;
 
-export const PublishWorkspaceArtifactVersionRequest = z.object({
-  title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
-  description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
-  html: WorkspaceArtifactHtml,
-  source: WorkspaceArtifactSourceBundle.optional(),
-  requestedTools: WorkspaceArtifactRequestedTools.optional(),
-  expectedCurrentVersionId: z.string().uuid(),
-  idempotencyKey: z.string().trim().min(1).max(200),
-});
+export const PublishWorkspaceArtifactVersionRequest = z
+  .object({
+    title: z.string().trim().min(1).max(WORKSPACE_ARTIFACT_TITLE_MAX_CHARS).optional(),
+    description: z.string().max(WORKSPACE_ARTIFACT_DESCRIPTION_MAX_CHARS).nullable().optional(),
+    html: WorkspaceArtifactHtml.optional(),
+    uploadId: z.string().uuid().optional(),
+    source: WorkspaceArtifactSourceBundle.optional(),
+    requestedTools: WorkspaceArtifactRequestedTools.optional(),
+    expectedCurrentVersionId: z.string().uuid(),
+    idempotencyKey: z.string().trim().min(1).max(200),
+  })
+  .refine((value) => (value.html !== undefined) !== (value.uploadId !== undefined), {
+    message: "Provide either html or uploadId",
+  })
+  .refine((value) => !value.uploadId || value.source === undefined, {
+    message: "Upload source using the prepared source URL",
+  });
 export type PublishWorkspaceArtifactVersionRequest = z.infer<
   typeof PublishWorkspaceArtifactVersionRequest
 >;
@@ -263,7 +281,7 @@ export const WorkspaceArtifactContentResponse = z.object({
   artifactId: z.string().uuid(),
   versionId: z.string().uuid(),
   contentType: z.literal("text/html"),
-  contentSha256: sha256,
+  contentSha256: sha256.nullable(),
   html: WorkspaceArtifactHtml,
   source: WorkspaceArtifactSourceBundle,
   requestedTools: WorkspaceArtifactRequestedTools,

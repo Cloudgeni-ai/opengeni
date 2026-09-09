@@ -60,7 +60,12 @@ import {
   notifyDurableOpOwnershipTransferStarted,
   notifyDurableOpOwnershipTransferred,
 } from "../op-correlation";
-import { OpStreamExecClient, type OpStreamJournal } from "./op-stream";
+import {
+  OpStreamExecClient,
+  runnerFailureToControlError,
+  type OpStreamJournal,
+  type OpStreamOutputFrame,
+} from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
 
@@ -333,6 +338,10 @@ export interface SelfhostedSessionDeps {
   adoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
+  captureBackgroundCommandOutput?: (
+    commandId: string,
+    frames: OpStreamOutputFrame[],
+  ) => Promise<void>;
   /** Best-effort fast settlement for the race where an adopted op exits while
    * the adoption transaction is committing. The reconciler remains authority. */
   settleBackgroundCommand?: (input: {
@@ -344,6 +353,7 @@ export interface SelfhostedSessionDeps {
     outcome: "exited" | "lost";
     exitCode: number | null;
     reason: string;
+    failure?: import("@opengeni/contracts").SessionCommandFailure;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -451,6 +461,26 @@ export class SelfhostedSession {
    * durability hook; never retarget an already-admitted operation on reconnect. */
   private readonly opStreamClients = new Map<string, OpStreamExecClient>();
   private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly ownedCommandReaders = new Map<string, () => Promise<void>>();
+  private readonly commandRefreshes = new Map<string, Promise<void>>();
+
+  /** Attach only to operations adopted by this exact live session. Output and
+   * terminal settlement are durable control work, never model observation. */
+  async refreshOwnedCommand(commandId: string): Promise<boolean> {
+    const read = this.ownedCommandReaders.get(commandId);
+    if (!read) return false;
+    let pending = this.commandRefreshes.get(commandId);
+    if (!pending) {
+      pending = read();
+      this.commandRefreshes.set(commandId, pending);
+    }
+    try {
+      await pending;
+    } finally {
+      if (this.commandRefreshes.get(commandId) === pending) this.commandRefreshes.delete(commandId);
+    }
+    return true;
+  }
   private readonly defaultOpStreamClient: OpStreamExecClient | undefined;
   /** Exact host-native root bound for this session/attempt. */
   readonly workspaceRoot: string;
@@ -469,6 +499,7 @@ export class SelfhostedSession {
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
+  private readonly captureBackgroundCommandOutput: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -534,6 +565,7 @@ export class SelfhostedSession {
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
     this.adoptBackgroundCommand = deps.adoptBackgroundCommand;
     this.settleBackgroundCommand = deps.settleBackgroundCommand;
+    this.captureBackgroundCommandOutput = deps.captureBackgroundCommandOutput;
     // A pre-admission tombstone is safe only for a static connection. Dynamic
     // sessions must never route an unknown op id through their constructor's
     // potentially stale connection after a reconnect.
@@ -935,7 +967,7 @@ export class SelfhostedSession {
         allowBackground
           ? Math.min(
               SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
-              Math.max(0, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
+              Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
             )
           : 0,
         args.cmd,
@@ -976,6 +1008,10 @@ export class SelfhostedSession {
         backgroundYieldMs > 0 && this.adoptBackgroundCommand
           ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
               yieldMs: backgroundYieldMs,
+              captureOutput: async (frames) => {
+                if (adoptedCommandId)
+                  await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
+              },
               onYield: async () => {
                 notifyDurableOpOwnershipTransferStarted(opId);
                 const adopted = await this.adoptBackgroundCommand!({
@@ -986,6 +1022,40 @@ export class SelfhostedSession {
                   command,
                 });
                 adoptedCommandId = adopted.commandId;
+                this.ownedCommandReaders.set(adopted.commandId, async () => {
+                  const replay = await client.readExisting(opId, 250, async (frames) => {
+                    await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
+                  });
+                  const terminal = replay.status === "completed" ? replay : replay.terminal;
+                  if (terminal) {
+                    await this.settleBackgroundCommand?.({
+                      commandId: adopted.commandId,
+                      controlWorkspaceId: admission.controlWorkspaceId,
+                      enrollmentId: this.agentId,
+                      connectionInstanceId: admission.connectionInstanceId,
+                      opId,
+                      outcome: "exited",
+                      exitCode: terminal.outcome.response.exitCode,
+                      reason: terminal.outcome.failure
+                        ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                        : "op_exit",
+                      ...(terminal.outcome.failure
+                        ? {
+                            failure: {
+                              code: terminal.outcome.failure.failureCode
+                                .replace(/[^A-Za-z0-9_-]/g, "_")
+                                .slice(0, 128),
+                              detail: terminal.outcome.failure.failureDetail,
+                              retryable: false as const,
+                            },
+                          }
+                        : {}),
+                    });
+                    this.ownedCommandReaders.delete(adopted.commandId);
+                    if (terminal.outcome.failure)
+                      throw runnerFailureToControlError(terminal.outcome.failure);
+                  }
+                });
                 notifyDurableOpOwnershipTransferred(opId);
               },
             })
@@ -1004,7 +1074,20 @@ export class SelfhostedSession {
               opId,
               outcome: "exited",
               exitCode: result.terminal.outcome.response.exitCode,
-              reason: "op_exit",
+              reason: result.terminal.outcome.failure
+                ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                : "op_exit",
+              ...(result.terminal.outcome.failure
+                ? {
+                    failure: {
+                      code: result.terminal.outcome.failure.failureCode
+                        .replace(/[^A-Za-z0-9_-]/g, "_")
+                        .slice(0, 128),
+                      detail: result.terminal.outcome.failure.failureDetail,
+                      retryable: false as const,
+                    },
+                  }
+                : {}),
             }),
           ).catch(() => undefined);
         }
@@ -1042,7 +1125,18 @@ export class SelfhostedSession {
             opId,
             outcome: "exited",
             exitCode: outcome.response.exitCode,
-            reason: "op_exit",
+            reason: outcome.failure
+              ? `op_failure_${outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+              : "op_exit",
+            ...(outcome.failure
+              ? {
+                  failure: {
+                    code: outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128),
+                    detail: outcome.failure.failureDetail,
+                    retryable: false as const,
+                  },
+                }
+              : {}),
           }),
         ).catch(() => undefined);
       }
@@ -1623,6 +1717,7 @@ export class SelfhostedSandboxClient {
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
+  private readonly captureBackgroundCommandOutput: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
   private controlRpcMemo: ControlRpc | undefined;
@@ -1656,6 +1751,7 @@ export class SelfhostedSandboxClient {
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
+    captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
@@ -1686,6 +1782,7 @@ export class SelfhostedSandboxClient {
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
+    this.captureBackgroundCommandOutput = opts.captureBackgroundCommandOutput;
     this.environment = opts.environment;
     this.transientExecEnvironment = opts.transientExecEnvironment;
     this.onOp = opts.onOp;
@@ -1733,6 +1830,9 @@ export class SelfhostedSandboxClient {
         : {}),
       ...(this.settleBackgroundCommand !== undefined
         ? { settleBackgroundCommand: this.settleBackgroundCommand }
+        : {}),
+      ...(this.captureBackgroundCommandOutput
+        ? { captureBackgroundCommandOutput: this.captureBackgroundCommandOutput }
         : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.transientExecEnvironment !== undefined
@@ -1845,6 +1945,7 @@ export interface SelfhostedSessionBuild {
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
   settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
+  captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
   /** The op-stream exec transport (present when the runner advertises it and the
@@ -1903,6 +2004,9 @@ export async function buildSelfhostedBackendSession(
       : {}),
     ...(deps.settleBackgroundCommand !== undefined
       ? { settleBackgroundCommand: deps.settleBackgroundCommand }
+      : {}),
+    ...(deps.captureBackgroundCommandOutput
+      ? { captureBackgroundCommandOutput: deps.captureBackgroundCommandOutput }
       : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),

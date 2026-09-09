@@ -157,7 +157,6 @@ async function fixture(mode: "off" | "suggest" | "automatic" = "automatic") {
 
 async function decision(
   f: Awaited<ReturnType<typeof fixture>>,
-  destination: "preference" | "instruction_policy",
   instructionTarget: {
     kind: "policy";
     scope: "global" | "role";
@@ -186,26 +185,13 @@ async function decision(
   };
   const write = await writeCompanyBrainGovernedProposal(client!.db, {
     attempt: f.writerAttempt,
-    request:
-      destination === "preference"
-        ? {
-            ...common,
-            kind: "promote_task_note_preference" as const,
-            stableKey: `activation.${crypto.randomUUID().replaceAll("-", "")}`,
-            title: "Activation fixture",
-            description: "A governed activation fixture.",
-            precedenceRank: 0,
-            conflictStrategy: "override" as const,
-            conflictsWith: [],
-            expiresAt: null,
-          }
-        : {
-            ...common,
-            kind: "promote_task_note_instruction_policy" as const,
-            target: instructionTarget,
-            expectedCurrentRevisionId: null,
-            expectedActivationVersion: expectedInstructionActivationVersion,
-          },
+    request: {
+      ...common,
+      kind: "promote_task_note_instruction_policy" as const,
+      target: instructionTarget,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: expectedInstructionActivationVersion,
+    },
   });
   if (!write.knowledgeChangeProposalId) throw new Error("missing change proposal");
   const receipt = await evaluateGovernedLearningProposal(client!.db, {
@@ -248,7 +234,7 @@ async function answeredRememberInput(
   const id = crypto.randomUUID();
   const questionId = overrides.questionId ?? `remember:${proposalId}`;
   const what =
-    (overrides.lane ?? "preference") === "preference"
+    (overrides.lane ?? "instruction_policy") === "preference"
       ? "workspace preference"
       : "mandatory workspace rule";
   const questions = [
@@ -558,10 +544,10 @@ async function documentDecision(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("governed-learning activation PostgreSQL authority", () => {
-  test("activates and exactly undoes a preference with convergent replay", async () => {
+  test("activates and exactly undoes an instruction policy with convergent replay", async () => {
     if (!shared || !client) return;
     const f = await fixture();
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     const request = { operationId: crypto.randomUUID(), decisionReceiptId: d.receipt.id };
     const [activation, replay] = await Promise.all([
       activateGovernedLearningDecision(client.db, { caller: f.caller, request }),
@@ -569,7 +555,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     ]);
     expect(replay).toEqual(activation);
     expect(activation).toMatchObject({
-      destination: "preference",
+      destination: "instruction_policy",
       outcome: "activated",
       initiatingHumanSubjectId: f.ownerSubjectId,
       destinationOldRevisionId: null,
@@ -592,7 +578,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     ).toEqual(undo);
     expect(undo).toMatchObject({
       outcome: "undone",
-      destination: "preference",
+      destination: "instruction_policy",
       destinationRestoredRevisionId: null,
       destinationOldVersion: 1,
       destinationNewVersion: 2,
@@ -617,7 +603,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     const db = client.db;
     const admin = shared.admin;
     const f = await fixture();
-    const d = await decision(f, "instruction_policy");
+    const d = await decision(f);
     const activation = await activateGovernedLearningDecision(client.db, {
       caller: f.caller,
       request: { operationId: crypto.randomUUID(), decisionReceiptId: d.receipt.id },
@@ -719,7 +705,6 @@ describe("governed-learning activation PostgreSQL authority", () => {
 
     const nextAutomaticDecision = await decision(
       f,
-      "instruction_policy",
       { kind: "policy", scope: "global", roleKey: null },
       2,
     );
@@ -749,7 +734,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
       destinationNewVersion: 4,
     });
 
-    const unrelatedDecision = await decision(f, "instruction_policy", {
+    const unrelatedDecision = await decision(f, {
       kind: "policy",
       scope: "role",
       roleKey: `overflow-${crypto.randomUUID().slice(0, 8)}`,
@@ -842,7 +827,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("denies stale destination CAS, cross-subject reuse, and direct receipt DML", async () => {
     if (!shared || !client) return;
     const f = await fixture();
-    const d = await decision(f, "instruction_policy");
+    const d = await decision(f);
     const competing = await createWorkspaceInstructionPolicyDraft(client.db, {
       accountId: f.grant.accountId,
       workspaceId: f.grant.workspaceId,
@@ -902,7 +887,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("rechecks source revocation and a changed learning-policy head", async () => {
     if (!client) return;
     const revokedFixture = await fixture();
-    const revoked = await decision(revokedFixture, "preference");
+    const revoked = await decision(revokedFixture);
     await archiveTaskNote(client.db, {
       ...revokedFixture.writerAttempt,
       operationId: crypto.randomUUID(),
@@ -918,7 +903,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     ).rejects.toThrow("unavailable");
 
     const policyFixture = await fixture();
-    const changed = await decision(policyFixture, "preference");
+    const changed = await decision(policyFixture);
     const nextPolicy = await createWorkspaceLearningPolicyRevision(client.db, {
       accountId: policyFixture.grant.accountId,
       workspaceId: policyFixture.grant.workspaceId,
@@ -969,7 +954,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("denies undo after a human supersedes the automatic destination head", async () => {
     if (!client) return;
     const f = await fixture();
-    const d = await decision(f, "instruction_policy");
+    const d = await decision(f);
     const activation = await activateGovernedLearningDecision(client.db, {
       caller: f.caller,
       request: { operationId: crypto.randomUUID(), decisionReceiptId: d.receipt.id },
@@ -1006,7 +991,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("ignores TEMP shadows at the app-role capability boundary", async () => {
     if (!shared || !client) return;
     const f = await fixture();
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     const app = postgres(shared.appUrl, { max: 1, prepare: false });
     try {
       const [row] = await app.begin(async (sql) => {
@@ -1024,7 +1009,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
           )
         `;
       });
-      expect(row?.destination).toBe("preference");
+      expect(row?.destination).toBe("instruction_policy");
     } finally {
       await app.end();
     }
@@ -1033,7 +1018,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("denies a runtime caller that spoofs the service-review GUCs", async () => {
     if (!shared || !client) return;
     const f = await fixture();
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     const [review] = await shared.admin<
       Array<{
         id: string;
@@ -1082,7 +1067,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("human confirmation survives the human-input resume onto a new attempt of the same turn", async () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!, d.noteText);
     // Simulate the worker closing the minting attempt for human input and
     // claiming a new attempt on the same turn and execution generation.
@@ -1123,14 +1108,14 @@ describe("governed-learning activation PostgreSQL authority", () => {
     expect(activation).toMatchObject({
       authorityKind: "human_confirmed",
       humanInputRequestId: answered,
-      destination: "preference",
+      destination: "instruction_policy",
     });
   });
 
-  test("activates a suggest-mode preference only with the exact human's bound `save` answer", async () => {
+  test("activates a suggest-mode instruction policy only with the exact human's bound `save` answer", async () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     expect(d.receipt.outcome).toBe("suggest");
     const proposalId = d.write.knowledgeChangeProposalId!;
     // The automatic controller refuses a non-final receipt.
@@ -1164,7 +1149,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
       ],
     });
     const wrongLane = await answeredRememberInput(f, proposalId, d.noteText, {
-      lane: "instruction_policy",
+      lane: "preference",
     });
     for (const humanInputRequestId of [
       wrongSubject,
@@ -1212,7 +1197,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     ]);
     expect(replay).toEqual(activation);
     expect(activation).toMatchObject({
-      destination: "preference",
+      destination: "instruction_policy",
       outcome: "activated",
       authorityKind: "human_confirmed",
       humanInputRequestId: answered,
@@ -1247,7 +1232,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("human confirmation survives the human-input resume onto the next execution generation", async () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     // The bound question was asked and answered at execution generation 1.
     const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!, d.noteText);
     // Resuming the requires_action turn claims a new attempt at generation 2.
@@ -1267,7 +1252,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     expect(activation).toMatchObject({
       authorityKind: "human_confirmed",
       humanInputRequestId: answered,
-      destination: "preference",
+      destination: "instruction_policy",
       outcome: "activated",
     });
     // The answered row itself may carry a later generation of the same turn:
@@ -1275,7 +1260,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     // interruption answered first, re-freezes the pending row under the next
     // generation. It still confirms the gen-1 decision on this turn.
     const f2 = await fixture("suggest");
-    const d2 = await decision(f2, "preference");
+    const d2 = await decision(f2);
     const resumedAnswer = await answeredRememberInput(
       f2,
       d2.write.knowledgeChangeProposalId!,
@@ -1297,7 +1282,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
     expect(laterRowActivation).toMatchObject({
       authorityKind: "human_confirmed",
       humanInputRequestId: resumedAnswer,
-      destination: "preference",
+      destination: "instruction_policy",
       outcome: "activated",
     });
   });
@@ -1305,7 +1290,7 @@ describe("governed-learning activation PostgreSQL authority", () => {
   test("human confirmation never widens to a different logical turn", async () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
-    const d = await decision(f, "preference");
+    const d = await decision(f);
     const answered = await answeredRememberInput(f, d.write.knowledgeChangeProposalId!, d.noteText);
     // A later turn of the same session is live at a higher generation; the
     // decision and its answer belong to the earlier turn.

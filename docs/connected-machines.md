@@ -99,6 +99,15 @@ ScreenCaptureKit/CGEvent desktop feature as the release build. This is the suppo
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
 
+The Chrome Native Messaging bridge accepts two exact extension origins: the
+development manifest key (`imdmcebcclhibdfolbokjbiibpcnpbel`) and the Chrome Web
+Store item (`phpmmcbeelfkcinjfbbggegjdcdmnnch`). Both the installed native-host
+manifest and the agent's native-host invocation check must include the store
+origin. Older agent releases that only accept the development origin cannot
+connect the store-installed extension; updating the extension alone cannot fix
+that host-side restriction. Store uploads omit the development-only manifest
+`key` field.
+
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
 `placementInstanceId`. When that generation changes, OpenGeni marks the exact

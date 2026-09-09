@@ -1,5 +1,14 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
+export type BundledSkillId =
+  | "builtin:opengeni-skills"
+  | "builtin:opengeni-projects"
+  | "builtin:opengeni-documents"
+  | "builtin:opengeni-spreadsheets"
+  | "builtin:opengeni-presentations"
+  | "builtin:opengeni-sites"
+  | "builtin:opengeni-video-generation";
+
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // Ordinary SDK entries stay framework-agnostic and do not import the contracts
 // runtime; `test/contract-parity.test.ts` pins these types to the contracts
@@ -1304,11 +1313,13 @@ export type ForkSessionResponse = {
 };
 
 export type SessionBackgroundCommandActivity = {
+  unavailableCount?: number | undefined;
   state: "running" | "stopping";
   count: number;
 };
 
 export type SessionBackgroundCommand = {
+  observationStatus?: "unavailable" | undefined;
   id: string;
   workspaceId: string;
   sessionId: string;
@@ -1333,6 +1344,7 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;
   accountId: string;
@@ -1398,11 +1410,15 @@ export type Session = {
   queueHeadPosition: number;
   queueTailPosition: number;
   effectiveControl: EffectiveSessionControl;
+  /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
+  inputWait?: { deadlineAt: string; reason: string } | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
   /** Multi-account Codex (P1): the account the most recent turn ran on (the "Running on:" indicator). */
   codexLastCredentialId?: string | null;
+  /** Accepted current-turn account, separate from future session preferences. */
+  codexCurrentSelection?: { credentialId: string | null; waiting: boolean } | null | undefined;
   /**
    * Frozen at create. `remote_v2` ⇒ Codex remote compaction + Codex-only model
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
@@ -1432,6 +1448,7 @@ export type Session = {
         totalDescendants: number;
         runningDescendants: number;
         queuedDescendants: number;
+        waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
@@ -1452,6 +1469,12 @@ export type Session = {
    * list and lineage reads for `requires_action` sessions; null otherwise.
    */
   requiresActionSince?: string | null | undefined;
+  /** Agent access scope; absent on servers before the agent-access release. */
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label; null when the session carries none. */
+  endUser?: SessionEndUser | null | undefined;
+  /** Memory scope; absent on servers before the agent-access release. */
+  memoryScope?: SessionMemoryScope | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -1468,6 +1491,10 @@ export type SessionListResponse = {
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
+  /** Present only when the server recognized and applied additive list filters. */
+  filtersApplied?: true;
+  /** Server-resolved Site origin filter, when requested. */
+  originSiteId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -1728,7 +1755,16 @@ export type HumanInputOption = {
   description?: string | null | undefined;
 };
 
+export type SkillReviewReference = {
+  sourceOperationId: string;
+  skillId: string;
+  revisionId: string;
+  expectedRevisionId: string | null;
+  expectedScopeVersion: number;
+};
+
 export type HumanInputQuestion = {
+  skillReview?: SkillReviewReference | undefined;
   id: string;
   kind: HumanInputQuestionKind;
   prompt: string;
@@ -1884,6 +1920,7 @@ export const SESSION_EVENT_TYPES = [
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  "codex.account.selection.changed",
   // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
   // Bounded, identity-free deterministic shadow/replay decision.
@@ -2736,6 +2773,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
@@ -2819,6 +2857,8 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
+  bundledSkillIds?: BundledSkillId[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -2838,7 +2878,7 @@ export type CreateSessionRequest = {
   policyRole?: string | undefined;
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
-  skills?: SessionSkill[] | undefined;
+  skills?: SessionSkillInput[] | undefined;
   /** Installed session-selected Skill identities to freeze onto this session at creation. */
   installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
@@ -2883,7 +2923,20 @@ export type CreateSessionRequest = {
   //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
   //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager fan-out).
   sandbox?: "shared" | "new" | { groupId: string } | undefined;
+  // --- Agent access scope, end-user label, memory scope ---------------------
+  // Mirror of the contracts additions that land with the session agent-access
+  // release. Which other sessions the agent may reach; defaults to "workspace"
+  // on the platform (the chat facade defaults to "session").
+  agentAccess?: SessionAgentAccess | undefined;
+  /** Opaque end-user label inside the workspace. Not a subject, not authority. */
+  endUser?: SessionEndUser | undefined;
+  /** Which Memory the agent reads and where it saves; "user" requires `endUser`. */
+  memoryScope?: SessionMemoryScope | undefined;
 };
+
+export type SessionAgentAccess = "session" | "user" | "workspace";
+export type SessionEndUser = { source: string; id: string };
+export type SessionMemoryScope = "workspace" | "user" | "session" | "off";
 
 // --- Access, workspaces, API keys -------------------------------------------
 
@@ -2987,6 +3040,13 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "project_list"
+  | "project_get"
+  | "project_create"
+  | "project_update"
+  | "project_reorder"
+  | "project_delete"
+  | "session_set_project"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -2996,6 +3056,7 @@ export type FirstPartyMcpToolName =
   | "session_get"
   | "session_events"
   | "session_wait"
+  | "command_read"
   | "command_wait"
   | "session_create"
   | "session_send_message"
@@ -3086,6 +3147,7 @@ export type FirstPartyMcpToolName =
   | "sandbox_file_publish"
   | "artifacts_list"
   | "artifacts_get_source"
+  | "artifacts_prepare_upload"
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
@@ -3585,11 +3647,12 @@ export type CodexConnectPoll =
     };
 
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
-export type SuperGrokAccountScope = "workspace" | "user";
+export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
   email?: string | null;
@@ -3620,6 +3683,8 @@ export type SuperGrokRotationSettings = {
 
 /** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
 export type SuperGrokAccountsResponse = {
+  source?: "workspace" | "user" | "organization";
+  organizationId?: string;
   accounts: SuperGrokAccount[];
   activeAccountId: string | null;
   settings: SuperGrokRotationSettings;
@@ -3730,6 +3795,8 @@ export type ClientConfig = {
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
+  /** Client-safe hint for whether the console should offer Stripe checkout. */
+  billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
   analytics: {
@@ -3754,6 +3821,7 @@ export type ClientConfig = {
 /** Client-safe voice-input capability projection. */
 export type ClientVoiceInputConfig = {
   available: boolean;
+  providers?: VoiceInputProviderId[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
@@ -4333,6 +4401,8 @@ export type Workspace = {
   agentInstructions: string | null;
   settings: Record<string, unknown>;
   inferenceControl: {
+    timer?: WorkspacePauseTimer | null | undefined;
+    serverTime?: string | undefined;
     state: "active" | "paused";
     revision: number;
     reason: string | null;
@@ -4371,8 +4441,8 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4421,15 +4491,25 @@ export type UpdateSlackChannelRoutesRequest = {
   routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
 };
 
+export type VoiceInputProviderId =
+  | "supergrok-subscription"
+  | "codex-subscription"
+  | "openai"
+  | "azure-openai";
+
 export type WorkspaceVoiceInputSettings = {
   enabled: boolean;
+  preferredProvider?: VoiceInputProviderId | null | undefined;
+  fallbackEnabled?: boolean | undefined;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4473,6 +4553,13 @@ export type UpdateWorkspaceRequest = {
   agentInstructions?: string | null | undefined;
 };
 
+/**
+ * Organization API key access tier, derived by the server from the key's
+ * permissions: `full` administers the organization, `read` only inventories
+ * shared workspaces and reads their sessions, events, and files.
+ */
+export type OrganizationApiKeyAccess = "full" | "read";
+
 export type ApiKey = {
   id: string;
   accountId: string;
@@ -4481,6 +4568,8 @@ export type ApiKey = {
   description: string | null;
   prefix: string;
   permissions: Permission[];
+  /** Organization keys only; omitted for workspace-scoped keys. */
+  access?: OrganizationApiKeyAccess | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -4505,10 +4594,38 @@ export type CreateOrganizationApiKeyRequest = {
   name: string;
   description?: string | undefined;
   expiresAt?: string | undefined;
+  /** Omitted means `full`. */
+  access?: OrganizationApiKeyAccess | undefined;
 };
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// --- Organization-wide session list (org API key or organization owner) -----------------------
+
+export type ListOrganizationSessionsOptions = {
+  /** Page size, 1..200; the server default is 50. */
+  limit?: number | undefined;
+  /** `nextCursor` from the previous page. */
+  cursor?: string | undefined;
+  /** Keep only sessions labelled with this exact end user. */
+  endUser?: { source: string; id: string } | undefined;
+  /** Keep only sessions in this exact lifecycle state. */
+  status?: SessionStatus | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+/**
+ * One page of `GET /v1/organizations/:organizationId/sessions`. Rows come from
+ * every shared workspace the caller may read, each carrying its
+ * `workspaceId`; personal workspaces are never included and private sessions
+ * stay invisible. A page may be shorter than `limit` while `nextCursor` is
+ * still set, so follow `nextCursor` until it is null.
+ */
+export type OrganizationSessionListResponse = {
+  sessions: Session[];
+  nextCursor: string | null;
 };
 
 // A person (or API key) with access to a workspace. `subjectId` is
@@ -4957,6 +5074,20 @@ export type SessionControlResponse = {
   cancelledTurnCount: number;
 };
 
+export type WorkspacePauseTimer = {
+  id: string;
+  action: "pause" | "resume";
+  dueAt: string;
+  pauseForSeconds: number | null;
+};
+export type WorkspacePauseTimerRequest = {
+  action: "set" | "cancel";
+  pauseInSeconds?: number | undefined;
+  pauseForSeconds?: number | null | undefined;
+  clientEventId: string;
+  expectedRevision: number;
+};
+
 export type WorkspaceInferenceControlResponse = {
   receipt: SessionCommandReceipt;
   state: "active" | "paused";
@@ -4974,7 +5105,7 @@ export type WorkspaceControlEvent = {
   type: "workspace.control.changed";
   scope: "workspace" | "session";
   rootSessionId: string | null;
-  action: "pause" | "resume";
+  action: "pause" | "resume" | "timer_set" | "timer_cancelled";
   automatic: boolean;
   reason: string | null;
   actor: string;
@@ -6168,6 +6299,7 @@ export type CapabilityPackAutomationTemplate = {
   adapterId: string;
   eventTypes: string[];
   sessionTemplate: {
+    bundledSkillIds?: BundledSkillId[] | undefined;
     prompt: string;
     instructions: string | null;
     resources: ResourceRef[];
@@ -6199,6 +6331,12 @@ export type CapabilityPackSkill = {
 };
 
 export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
+/** SKILL.md owns metadata; supplied legacy fields must exactly match it. */
+export type CapabilityPackSkillInput = Omit<CapabilityPackSkill, "name" | "description"> & {
+  name?: string | undefined;
+  description?: string | undefined;
+};
+export type SessionSkillInput = Omit<CapabilityPackSkillInput, "activationMode">;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;
@@ -6290,7 +6428,7 @@ export type RegisterCapabilityPackRequest = {
     | undefined;
   skills?:
     | {
-        name: string;
+        name?: string | undefined;
         description?: string | undefined;
         activationMode?: "workspace_managed" | "session_selected" | undefined;
         files: CapabilityPackSkillFile[];
@@ -6383,6 +6521,7 @@ export type RegisterCapabilityPackRequest = {
         adapterId: string;
         eventTypes: string[];
         sessionTemplate: {
+          bundledSkillIds?: BundledSkillId[] | undefined;
           prompt: string;
           instructions?: string | null | undefined;
           resources?: ResourceRef[] | undefined;
@@ -6421,13 +6560,17 @@ export type WorkspaceRegisteredPack = {
 export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
+  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   id: string;
   accountId: string;
   workspaceId: string;
   packId: string;
   status: PackInstallationStatus;
   version: number;
-  manifestSnapshot: CapabilityPack | null;
+  /** Exact accepted manifest, not a normalized executable Pack. */
+  manifestSnapshot: Record<string, unknown> | null;
   manifestDigest: string | null;
   selectedRigId: string | null;
   installedBySubjectId: string | null;
@@ -6628,6 +6771,7 @@ export type UninstallPackRequest = {
 };
 
 export type UninstallPackResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   packId: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];
@@ -6851,6 +6995,7 @@ export type InstallLibrarySkillRequest = {
 };
 
 export type InstalledSkill = {
+  skillReceipt?: import("./skills").SkillWriteReceipt | undefined;
   capabilityId: string;
   pluginId: string;
   pluginVersionId: string;
@@ -6915,6 +7060,7 @@ export type UninstallSkillRequest = {
 };
 
 export type UninstallSkillResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: CapabilityComponentOwner[];
@@ -7254,6 +7400,9 @@ export type InstallPluginRequest = {
 };
 
 export type InstalledPlugin = {
+  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
+  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   version: string;
   pluginId: string;
@@ -7302,6 +7451,7 @@ export type UninstallPluginRequest = {
 };
 
 export type UninstallPluginResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];
@@ -8122,4 +8272,17 @@ export type EnrollTokenExchangeRequest = {
 /** POST /v1/enrollments/token/exchange response (wraps the credential shape). */
 export type EnrollTokenExchangeResponse = {
   credentials: EnrollmentCredentials;
+};
+
+export type ModelConnectionAccessPolicy = {
+  allowedModels: string[] | null;
+  allowedWorkspaces: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  version: number;
+};
+export type ModelConnectionAccessResponse = {
+  policy: ModelConnectionAccessPolicy;
+  models: Array<{ id: string; label: string }>;
+  workspaces: Array<{ id: string; name: string }>;
+  personalWorkspacesSupported: boolean;
 };

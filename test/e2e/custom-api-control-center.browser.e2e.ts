@@ -281,9 +281,8 @@ describe("custom API control center browser acceptance", () => {
       await loading.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "domcontentloaded",
       });
-      const refresh = loading.getByRole("button", { name: "Refresh", exact: true });
-      await expectVisible(refresh);
-      expect(await refresh.isDisabled()).toBe(true);
+      await expectVisible(loading.locator("[data-capability-catalog-skeleton]"));
+      expect(await loading.getByRole("button", { name: "Refresh", exact: true }).count()).toBe(0);
       await loading.screenshot({ path: `${evidenceDir}pass-5c-loading.png`, fullPage: true });
     } finally {
       await context.close();
@@ -560,6 +559,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       if (state.connectionsUnavailable)
         return json({ message: "Connection data unavailable" }, 503);
@@ -569,6 +571,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ packs: [], installations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
+      return json({ skills: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);

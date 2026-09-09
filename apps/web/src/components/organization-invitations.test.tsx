@@ -35,10 +35,17 @@ mock.module("@/components/ui/dropdown-menu", () => ({
 }));
 
 const {
+  accountMenuAriaLabel,
+  OrganizationInvitationCountBadge,
+  OrganizationInvitationRailNotice,
   OrganizationInvitationsDialog,
   OrganizationInvitationsMenuItem,
+  organizationInvitationNoticeLabel,
+  pendingOrganizationInvitationCue,
   useOrganizationInvitations,
 } = await import("./organization-invitations");
+type OrganizationInvitationsController =
+  import("./organization-invitations").OrganizationInvitationsController;
 const { storeOrganizationInvitationContinuation } =
   await import("@/lib/organization-invitation-continuation");
 
@@ -65,7 +72,7 @@ function invitation(input: {
   status: "pending" | "accepted";
   revision: number;
 }) {
-  const timestamp = "2026-09-08T12:00:00.000Z";
+  const timestamp = new Date(Date.now() + 60 * 60_000).toISOString();
   return {
     ...input,
     targetEmail: "member@example.test",
@@ -323,6 +330,152 @@ describe("global organization invitations", () => {
           'button[aria-label="Organization invitations, 1 pending"]',
         ),
       ).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("names a closed account menu when invitations are pending", () => {
+    expect(pendingOrganizationInvitationCue(0)).toBeNull();
+    expect(pendingOrganizationInvitationCue(1)).toBe("1 organization invitation pending");
+    expect(pendingOrganizationInvitationCue(3)).toBe("3 organization invitations pending");
+    expect(
+      accountMenuAriaLabel({
+        displayName: "Ada",
+        pendingCount: 0,
+      }),
+    ).toBe("Account menu. Ada is active.");
+    expect(
+      accountMenuAriaLabel({
+        displayName: "Ada",
+        pendingCount: 1,
+      }),
+    ).toBe("Account menu. Ada is active. 1 organization invitation pending.");
+    expect(
+      organizationInvitationNoticeLabel([
+        invitation({
+          id: "inv_1",
+          organizationId: "org_1",
+          organizationName: "Acme",
+          status: "pending",
+          revision: 1,
+        }),
+      ]),
+    ).toBe("Join Acme");
+    expect(
+      organizationInvitationNoticeLabel([
+        invitation({
+          id: "inv_1",
+          organizationId: "org_1",
+          organizationName: "Acme",
+          status: "pending",
+          revision: 1,
+        }),
+        invitation({
+          id: "inv_2",
+          organizationId: "org_2",
+          organizationName: "Beta",
+          status: "pending",
+          revision: 1,
+        }),
+      ]),
+    ).toBe("2 organization invitations");
+    expect(
+      organizationInvitationNoticeLabel([
+        invitation({
+          id: "inv_unnamed",
+          organizationId: "org_unnamed",
+          organizationName: "   ",
+          status: "pending",
+          revision: 1,
+        }),
+      ]),
+    ).toBe("Review organization invitation");
+  });
+
+  test("does not render a count badge until invitations are pending", async () => {
+    const idle = document.createElement("div");
+    const pending = document.createElement("div");
+    document.body.append(idle, pending);
+    const idleRoot = createRoot(idle);
+    const pendingRoot = createRoot(pending);
+    try {
+      await act(async () => idleRoot.render(<OrganizationInvitationCountBadge pendingCount={0} />));
+      await act(async () =>
+        pendingRoot.render(<OrganizationInvitationCountBadge pendingCount={2} />),
+      );
+      expect(idle.querySelector('[data-slot="organization-invitation-count"]')).toBeNull();
+      expect(
+        pending.querySelector('[data-slot="organization-invitation-count"]')?.textContent,
+      ).toBe("2");
+    } finally {
+      await act(async () => {
+        idleRoot.unmount();
+        pendingRoot.unmount();
+      });
+      idle.remove();
+      pending.remove();
+    }
+  });
+
+  test("caps the count badge at 9+", async () => {
+    const capped = document.createElement("div");
+    document.body.append(capped);
+    const cappedRoot = createRoot(capped);
+    try {
+      await act(async () =>
+        cappedRoot.render(<OrganizationInvitationCountBadge pendingCount={10} />),
+      );
+      expect(capped.querySelector('[data-slot="organization-invitation-count"]')?.textContent).toBe(
+        "9+",
+      );
+    } finally {
+      await act(async () => cappedRoot.unmount());
+      capped.remove();
+    }
+  });
+
+  test("opens the invitations dialog from the rail notice", async () => {
+    const openDialog = mock(() => undefined);
+    const pending = invitation({
+      id: crypto.randomUUID(),
+      organizationId: crypto.randomUUID(),
+      organizationName: "Acme",
+      status: "pending",
+      revision: 1,
+    });
+    const controller = {
+      open: false,
+      invitations: [pending],
+      pendingCount: 1,
+      loaded: true,
+      loading: false,
+      error: null,
+      acceptingInvitationId: null,
+      announcement: "",
+      continuation: null,
+      canUseInvitedAccount: false,
+      openDialog,
+      setOpen: () => undefined,
+      useInvitedAccount: () => undefined,
+      reload: async () => undefined,
+      accept: async () => undefined,
+    } satisfies OrganizationInvitationsController;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<OrganizationInvitationRailNotice controller={controller} />),
+      );
+      const notice = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Review invitations. 1 organization invitation pending."]',
+      );
+      expect(notice).not.toBeNull();
+      expect(notice?.textContent).toContain("Join Acme");
+      await act(async () => notice!.click());
+      expect(openDialog).toHaveBeenCalledTimes(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();

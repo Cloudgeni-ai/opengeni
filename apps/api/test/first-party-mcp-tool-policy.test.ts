@@ -148,6 +148,72 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("project tools follow existing session permissions and exact selection", () => {
+    const human = (permissions: Permission[]): AccessGrant => ({
+      accountId,
+      workspaceId,
+      subjectId: "user:projects",
+      principalKind: "human_session",
+      permissions,
+    });
+    const projects = (permissions: Permission[]) =>
+      registeredToolNames(buildOpenGeniMcpServer(deps(), human(permissions))).filter(
+        (n) => n.startsWith("project_") || n === "session_set_project",
+      );
+    expect(projects([])).toEqual([]);
+    expect(projects(["sessions:read"])).toEqual(["project_get", "project_list"]);
+    expect(projects(["sessions:create"])).toEqual([
+      "project_create",
+      "project_delete",
+      "project_reorder",
+      "project_update",
+    ]);
+    expect(projects(["sessions:control"])).toEqual(["session_set_project"]);
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(
+          deps(),
+          grant(["sessions:read", "sessions:create"], ["project_list"]),
+        ),
+      ),
+    ).toEqual(["project_list"]);
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      human(["sessions:create", "sessions:read", "sessions:control"]),
+    );
+    expect(
+      registeredToolInputSchema(server, "project_create").safeParse({ name: "  " }).success,
+    ).toBe(false);
+    expect(
+      registeredToolInputSchema(server, "session_set_project").safeParse({
+        sessionId,
+        projectId: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      registeredToolInputSchema(server, "session_create").safeParse({
+        initialMessage: "Work",
+        projectId: crypto.randomUUID(),
+      }).success,
+    ).toBe(true);
+  });
+  test("workspace artifact listing is available to humans without an agent session", () => {
+    const human: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "reader",
+      principalKind: "human_session",
+      permissions: ["artifacts:read"],
+    };
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), human))).toContain("artifacts_list");
+    expect(
+      registeredToolNames(buildOpenGeniMcpServer(deps(), { ...human, permissions: [] })),
+    ).not.toContain("artifacts_list");
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), human))).not.toContain(
+      "artifacts_create",
+    );
+  });
+
   test("session_wait needs caller-session context as well as sessions:read", () => {
     const scoped = grant(["sessions:read"], ["session_wait"]);
     const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;
@@ -216,12 +282,82 @@ describe("first-party MCP tool visibility policy", () => {
       { ...scoped, principalKind: "service" as const },
       { ...scoped, principalKind: "human_session" as const },
       { ...scoped, metadata: {} },
-      { ...scoped, metadata: { sessionId } },
+      { ...scoped, metadata: { sessionId, firstPartyMcpTools: ["session_get"] } },
       { ...scoped, metadata: { ...scoped.metadata, executionGeneration: 0 } },
     ]) {
       await expect(
         callRegisteredTool(buildOpenGeniMcpServer(deps(), caller), "session_get", {}),
       ).rejects.toThrow("requires an explicit sessionId");
+    }
+  });
+
+  test("agent discovery exposes recursive pause scope and receipt-versus-progress guidance", async () => {
+    const names: FirstPartyMcpToolName[] = [
+      "session_pause",
+      "session_send_message",
+      "session_get",
+      "session_events",
+    ];
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:read", "sessions:control"], names),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "session-coordination-guidance-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const descriptions = new Map(tools.map((tool) => [tool.name, tool.description ?? ""]));
+      expect(descriptions.get("session_pause")).toContain("including descendants");
+      expect(descriptions.get("session_pause")).toContain(
+        "pausing an ancestor also stops this caller",
+      );
+      expect(descriptions.get("session_send_message")).toContain("Acceptance is not execution");
+      expect(descriptions.get("session_send_message")).toContain(
+        "match that ID in payload.updateIds",
+      );
+      expect(descriptions.get("session_send_message")).toContain("retain the event turnId");
+      expect(descriptions.get("session_send_message")).toContain(
+        "An unrelated in-flight turn completing does not prove delivery",
+      );
+      expect(
+        registeredToolInputSchema(server, "session_events").safeParse({
+          sessionId,
+          view: "debug",
+          includeTypes: ["system.update.delivered"],
+          payloadMode: "full",
+          after: 0,
+        }).success,
+      ).toBeTrue();
+      expect(descriptions.get("session_send_message")).toContain(
+        "Do not resend an unconsumed message",
+      );
+      expect(descriptions.get("session_get")).toContain(
+        "Queued status and updatedAt are not proof of execution",
+      );
+      const catalog = createAttemptToolEnvironment({
+        scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+        generation: 1,
+        definitions: tools.map((tool) => ({
+          identity: { serverId: "opengeni", toolName: tool.name },
+          modelName: `opengeni__${tool.name}`,
+          description: tool.description!,
+          inputSchema: tool.inputSchema,
+          source: "opengeni" as const,
+          approval: "none" as const,
+          execute: async () => ({ content: [] }),
+        })),
+      }).catalog;
+      const declarations = generateCodemodeDeclarations(catalog);
+      expect(declarations).toContain("pausing an ancestor also stops this caller");
+      expect(declarations).toContain("Acceptance is not execution");
+      expect(declarations).toContain("match that ID in payload.updateIds");
+      expect(declarations).toContain(
+        "An unrelated in-flight turn completing does not prove delivery",
+      );
+    } finally {
+      await Promise.all([client.close(), server.close()]);
     }
   });
 
@@ -267,16 +403,51 @@ describe("first-party MCP tool visibility policy", () => {
       await server.close();
     }
   });
-  test("omission splits the complete safe default catalog across broad and local adapters", () => {
-    const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
-      workspaceMemoryEnabled: true,
-    });
+  test("the signed default selection splits the complete safe default catalog across broad and local adapters", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
+      { workspaceMemoryEnabled: true },
+    );
 
     const broad = registeredToolNames(server);
     expect(broad).toEqual(broadServerTools(DEFAULT_FIRST_PARTY_MCP_TOOLS).sort());
     expect([...broad, ...INTERACTION_ATTEMPT_TOOL_NAMES].sort()).toEqual(
       [...DEFAULT_FIRST_PARTY_MCP_TOOLS].sort(),
     );
+  });
+
+  test("a session-scoped grant without a signed selection registers no session tools", () => {
+    // The hole: a session-scoped bearer minted without the firstPartyMcpTools
+    // claim (the sandbox Codemode bearer has exactly this shape) used to
+    // resolve to the complete deployment default catalog. An omitted claim
+    // must fail closed instead of widening to every authorized default tool.
+    const omitted = grant([...Permission.options]);
+    expect(omitted.metadata?.["sessionId"]).toBe(sessionId);
+    expect(omitted.metadata?.["firstPartyMcpTools"]).toBeUndefined();
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), omitted, { workspaceMemoryEnabled: true }),
+      ),
+    ).toEqual([]);
+    // Exact same grant with the claim keeps its ordinary catalog, so the
+    // difference is the claim alone.
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), grant([...Permission.options], ["set_session_title"])),
+      ),
+    ).toEqual(["set_session_title"]);
+    // A grant without session scope is unaffected: workspace tools that need
+    // no session still register from permissions alone.
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), {
+          ...omitted,
+          principalKind: "human_session",
+          metadata: {},
+        }),
+      ),
+    ).toContain("artifacts_list");
   });
 
   test("an explicit title-only selection does not widen to other authorized tools", () => {
@@ -773,7 +944,7 @@ describe("first-party MCP tool visibility policy", () => {
 
 describe("agent-facing goal_set schema", () => {
   test("does not accept maxAutoContinuations; the ceiling is API/scheduled configuration", async () => {
-    const server = buildOpenGeniMcpServer(deps(), grant(["goals:manage"]));
+    const server = buildOpenGeniMcpServer(deps(), grant(["goals:manage"], ["goal_set"]));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "goal-set-schema-test", version: "1" });
     await server.connect(serverTransport);

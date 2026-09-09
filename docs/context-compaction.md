@@ -185,9 +185,12 @@ The replacement history is:
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
 
-Prior summaries are not kept as user boundaries. Portable retention strips
-images from retained user messages; **remote_v2** keeps `input_image` parts in
-the cleartext suffix (CLI parity). Durable machine inputs participate in the
+Prior summaries are not kept as user boundaries. Both modes preserve images
+in retained messages. Retention budgets charge projected image tokens as well
+as text; a message whose non-text content cannot fit is omitted as a whole.
+Existing text truncation preserves the retained image parts. Uploaded images
+are reconstructed before summarization just as for ordinary inference; only
+the compacted archive-reference catalog remains receipt-only. Durable machine inputs participate in the
 history being summarized like every other canonical model item. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.

@@ -39,12 +39,19 @@ const EXPECTED_CAPS = [
   ["ci.yml", "package-contracts", "Build client packages (contracts + SDK + React)", 21, "run"],
   ["ci.yml", "test-suite", "Real workspace capture acceptance", 13, "run"],
   ["ci.yml", "test-suite", "Recovery integration regressions", 5, "run"],
-  ["ci.yml", "browser-acceptance", "Session pin browser acceptance", 4, "run"],
+  ["ci.yml", "browser-acceptance", "Session pin browser acceptance", 6, "run"],
   ["ci.yml", "browser-acceptance", "Responsive knowledge surfaces browser acceptance", 6, "run"],
   ["ci.yml", "browser-acceptance", "Organization onboarding lifecycle acceptance", 8, "run"],
   ["ci.yml", "browser-acceptance", "Browser account session-set acceptance", 14, "run"],
   ["ci.yml", "browser-acceptance", "Workbench browser acceptance", 4, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
+  [
+    "publish-desktop-image.yml",
+    "ghcr-mirror",
+    "Mirror desktop image to GHCR (best effort)",
+    5,
+    "run",
+  ],
   ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
   ["ci.yml", "browser-acceptance", "Install pinned lane browser runtimes", 17, "action"],
   ["ci.yml", "package-contracts", "Install Chromium for packed WASM package proof", 17, "action"],
@@ -57,9 +64,10 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
   "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
   "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
-  "ci.yml:browser-acceptance": { stepCaps: 53, needed: 54, jobCap: 60 },
+  "ci.yml:browser-acceptance": { stepCaps: 55, needed: 56, jobCap: 60 },
   "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
+  "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
 } as const;
 
 async function loadWorkflows(): Promise<Record<string, Workflow>> {
@@ -79,7 +87,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 15 run plus 3 action steps use static native caps", async () => {
+  test("all jobs and the exact 16 run plus 3 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -119,7 +127,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(15);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(16);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(3);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
@@ -202,6 +210,14 @@ describe("workflow timeout contract", () => {
           "",
         ].join("\n"),
       );
+      const aptRoot = join(dir, "apt");
+      await mkdir(aptRoot);
+      await writeFile(
+        join(aptRoot, "sources.list"),
+        "deb https://dl.google.com/linux/chrome-stable/deb stable main\n",
+      );
+      await writeFile(join(binDir, "sudo"), '#!/bin/bash\nexec "$@" "$TEST_APT_ROOT"\n');
+      await chmod(join(binDir, "sudo"), 0o755);
       await chmod(join(binDir, "timeout"), 0o755);
       await chmod(join(binDir, "bun"), 0o755);
       const proc = Bun.spawn(["bash", "--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
@@ -213,6 +229,9 @@ describe("workflow timeout contract", () => {
           ATTEMPT_TIMEOUT_SECONDS: "360",
           ATTEMPTS: "2",
           KILL_AFTER_SECONDS: "15",
+          PLAYWRIGHT_RUNNER_OS: "Linux",
+          PLAYWRIGHT_ACTION_PATH: resolve(root, ".github/actions/playwright-browsers"),
+          TEST_APT_ROOT: aptRoot,
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -220,6 +239,9 @@ describe("workflow timeout contract", () => {
       const stdout = await new Response(proc.stdout).text();
       expect(await proc.exited).toBe(1);
       expect(await readFile(counter, "utf8")).toBe("2\n");
+      expect(await readFile(join(aptRoot, "sources.list"), "utf8")).toStartWith(
+        "# Disabled for Playwright",
+      );
       expect(stdout).toContain("attempt 1/2");
       expect(stdout).toContain("attempt 2/2");
       expect(stdout).toContain("exceeded 360s and was killed");

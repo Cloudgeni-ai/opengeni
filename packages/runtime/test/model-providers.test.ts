@@ -1191,6 +1191,54 @@ function multiProviderSettings(overrides: Parameters<typeof testSettings>[0] = {
 const FIREWORKS_MODEL = "accounts/fireworks/models/glm-5p2";
 
 describe("buildModelInstance — chat vs responses Model selection per provider api", () => {
+  test("Nemotron reasoning selection reaches the OpenRouter Chat wire", async () => {
+    const settings = testSettings({
+      openrouterApiKey: "test-key",
+      modelProvidersJson: "[]",
+      resolvedOpenRouterModelsJson: undefined,
+    });
+    const { provider, model: configured } = resolveModelProvider(
+      settings,
+      "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+    );
+    for (const effort of ["low", "medium"] as const) {
+      let captured: Record<string, unknown> = {};
+      const client = new OpenAI({
+        apiKey: "test",
+        maxRetries: 0,
+        fetch: async (_input, init) => {
+          captured = JSON.parse(await requestBodyText(init?.body));
+          return new Response(
+            JSON.stringify({
+              id: "chatcmpl-test",
+              object: "chat.completion",
+              created: 0,
+              model: configured.upstreamModelId,
+              choices: [
+                { index: 0, finish_reason: "stop", message: { role: "assistant", content: "OK" } },
+              ],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      const model = buildModelInstance(provider, client, configured.upstreamModelId);
+      await getOrCreateTrace(() =>
+        model.getResponse({
+          input: "Reply OK",
+          modelSettings: { reasoning: { effort } },
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never),
+      );
+      expect(captured.model).toBe(configured.upstreamModelId);
+      expect(captured.reasoning_effort).toBe(effort);
+    }
+  });
+
   const client = new OpenAI({ apiKey: "test" });
 
   test("a chat provider yields an OpenAIChatCompletionsModel", () => {
@@ -2131,8 +2179,8 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
     });
-    // hostedWebSearch off removes only web search; structured human input is a
-    // provider-neutral built-in on every agent.
+    // hostedWebSearch off removes only web search; structured human input
+    // and built-in skill loading are provider-neutral on every agent.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
     expect(
       ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),

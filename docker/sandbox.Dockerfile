@@ -28,6 +28,14 @@ RUN apt-get update \
 
 WORKDIR /src/agent
 ARG TARGETPLATFORM
+# Multi-Arch:same headers must have identical versions. Security mirrors can
+# publish architectures at different times; use bookworm's matching header pair
+# in this build-only stage, without changing the runtime image's packages.
+RUN set -eux; \
+    dpkg --add-architecture "$(xx-info debian-arch)"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"
 RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
 # Cache mounts keep the crates.io registry and the per-target build directory
@@ -79,7 +87,9 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -117,6 +127,13 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-source,target=/root/.bun/install/
     bun install --frozen-lockfile
 COPY . .
 
+# Unreleased local work only. Deployed Sites install exact registry versions.
+ARG OPENGENI_LOCAL_SITE_PACKAGES=false
+RUN if [ "$OPENGENI_LOCAL_SITE_PACKAGES" = true ]; then \
+      bun run --cwd packages/react build:css && \
+      bun scripts/pack-sandbox-site-packages.ts /out/codemode-runtime/site-packages; \
+    fi
+
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
 # programs. The CLI and imported module therefore share source, catalog rules,
 # and transport behavior without resolving mutable registry versions at runtime.
@@ -141,6 +158,7 @@ RUN set -eux; \
       cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
     done; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
+    cp -aL packages/contracts/node_modules/yaml "$runtime/node_modules/yaml"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
     test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
@@ -455,6 +473,7 @@ COPY docker/desktop/opengeni-browserd-up.sh     /usr/local/bin/opengeni-browserd
 COPY docker/desktop/opengeni-browserd-down.sh   /usr/local/bin/opengeni-browserd-down
 RUN set -eux; \
     ln -s /opt/opengeni/codemode-runtime/node_modules /node_modules; \
+    if [ -d /opt/opengeni/codemode-runtime/site-packages ]; then ln -s /opt/opengeni/codemode-runtime/site-packages /opt/opengeni/site-packages; fi; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \

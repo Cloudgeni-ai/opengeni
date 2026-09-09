@@ -97,6 +97,7 @@ import {
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
+import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
@@ -186,13 +187,15 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   app.get("/v1/workspaces/:workspaceId/computer-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
+    const listed = await listComputerSessions(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     return context.json(
-      ComputerSessionListResponse.parse(
-        await listComputerSessions(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-        }),
-      ),
+      ComputerSessionListResponse.parse({
+        ...listed,
+        sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
+      }),
     );
   });
 

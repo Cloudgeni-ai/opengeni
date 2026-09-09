@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 import { LoadErrorState } from "@/components/common";
 import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { canManageWorkspaceSettings } from "@/lib/permissions";
 
 import { useWorkspaceLearningHistory } from "./workspace-learning-loader";
 
@@ -26,7 +26,11 @@ const MODE_COPY: Record<WorkspaceLearningMode, { label: string; description: str
 export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const { client } = context;
-  const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const canEdit = canManageWorkspaceSettings(
+    context.accessContext,
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null,
+    context.managedSelfContext,
+  );
   const history = useWorkspaceLearningHistory(client, workspaceId);
   const activeRevision = history.response?.revisions.find(
     (revision) => revision.id === history.response?.head?.revisionId,
@@ -62,7 +66,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
         operationId: crypto.randomUUID(),
         expectedCurrentRevisionId: history.response?.head?.revisionId ?? null,
         expectedActivationVersion: history.response?.head?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Workspace instructions & Skills",
+        reason: "Updated from Workspace instructions & Skills",
       });
       await history.reload();
       setMessage("Instruction and Skill mode saved. It applies from the next agent run.");
@@ -125,7 +129,8 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
 
       {!canEdit ? (
         <p className="mt-3 text-xs text-status-waiting">
-          Workspace admin access is required to change instruction and Skill autonomy.
+          A workspace administrator or Personal workspace owner can change instruction and Skill
+          autonomy.
         </p>
       ) : null}
       {mutationError ? (

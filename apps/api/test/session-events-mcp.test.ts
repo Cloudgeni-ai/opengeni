@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   appendSessionEvents,
@@ -162,13 +163,119 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session_events MCP model boundary (real PostgreSQL)", () => {
+  test("legacy messages above the database page budget reconstruct through bounded source slices", async () => {
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "legacy projection fixture",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const admin = shared.admin;
+    const text = `HEAD-${"x".repeat(2 * 1024 * 1024)}-TAIL`;
+    // Legacy import bypasses the modern ingress envelope, as the HTTP regression does.
+    await admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      values (${grant.accountId}, ${workspaceId}, ${session.id}, 1, 'agent.message.completed', ${admin.json({ text })})`;
+    type Page = {
+      sourceExact: boolean;
+      sourceLoss: { reason: string; completeTextAvailable: boolean };
+      events: Array<{ text: string }>;
+      nextCursor: string | null;
+    };
+    let page = await callMcpTool<Page>("session_events", { sessionId: session.id });
+    expect(page.sourceExact).toBe(true);
+    expect(page.sourceLoss).toBeUndefined();
+    const parts: string[] = [];
+    for (let count = 0; ; count++) {
+      expect(count).toBeLessThan(400);
+      expect(page.sourceExact).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(page, null, 2))).toBeLessThanOrEqual(16 * 1024);
+      parts.push(...page.events.map((event) => event.text));
+      if (!page.nextCursor) break;
+      page = await callMcpTool<Page>("session_events", {
+        sessionId: session.id,
+        cursor: page.nextCursor,
+      });
+    }
+    expect(parts.join("")).toBe(text);
+    expect(page.nextCursor).toBeNull();
+  }, 180_000);
+  test("compact event-filter schema retains canonical runtime validation", async () => {
+    const schema = (mcp as { _registeredTools: Record<string, { inputSchema: z.ZodType }> })
+      ._registeredTools.session_events!.inputSchema;
+    const wireSchema = z.toJSONSchema(schema) as {
+      properties: Record<string, { items?: { enum?: unknown } }>;
+    };
+    expect(wireSchema.properties.includeTypes!.items?.enum).toBeUndefined();
+    expect(wireSchema.properties.excludeTypes!.items?.enum).toBeUndefined();
+    expect(
+      schema.safeParse({ sessionId, view: "debug", includeTypes: ["turn.completed"] }).success,
+    ).toBe(true);
+    expect(schema.safeParse({ sessionId, view: "debug", includeTypes: ["not.real"] }).success).toBe(
+      false,
+    );
+    await expect(
+      callMcpTool("session_events", { sessionId, view: "debug", includeTypes: ["not.real"] }),
+    ).rejects.toThrow();
+  });
+  test("default and forward reads return complete conversation text; results avoid duplicate finals", async () => {
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "conversation fixture",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const text = "Complete commentary. ".repeat(250);
+    await appendSessionEvents(client.db, workspaceId, session.id, [
+      { type: "agent.message.delta", payload: { text: "raw fragment" } },
+      { type: "user.message", payload: { text: "question" } },
+      { type: "agent.message.completed", payload: { text, phase: "commentary" } },
+      {
+        type: "agent.toolCall.created",
+        payload: { id: "call", name: "test", arguments: { x: 1 } },
+      },
+      { type: "agent.message.completed", payload: { text: "Final answer" } },
+      { type: "turn.completed", payload: { output: "Final answer" } },
+    ]);
+    for (const position of [{}, { after: 0 }]) {
+      const page = await callMcpTool<{
+        view: string;
+        events: Array<{ role: string; text: string }>;
+      }>("session_events", { sessionId: session.id, ...position });
+      expect(page.view).toBe("conversation");
+      expect(page.events.map((event) => event.text)).toEqual(["question", text, "Final answer"]);
+      expect(Buffer.byteLength(JSON.stringify(page, null, 2))).toBeLessThanOrEqual(16 * 1024);
+    }
+    const results = await callMcpTool<{ events: Array<{ text: string }> }>("session_events", {
+      sessionId: session.id,
+      view: "results",
+    });
+    expect(results.events.map((event) => event.text)).toEqual(["Final answer"]);
+    await expect(
+      callMcpTool("session_events", {
+        sessionId: session.id,
+        view: "conversation",
+        payloadMode: "full",
+      }),
+    ).rejects.toThrow("Audit selectors require view=debug");
+  });
+
   test("defaults to a semantic tail and keeps explicit forensic replay exact", async () => {
     const monitoring = await callMcpTool<{
       events: Array<{ sequence: number; type: string }>;
       direction: string;
       nextAfter: number | null;
       nextBefore: number | null;
-    }>("session_events", { sessionId });
+    }>("session_events", { sessionId, view: "debug" });
     expect(monitoring.events.map((event) => [event.sequence, event.type])).toEqual([
       [41, "session.context.compacted"],
       [42, "turn.completed"],
@@ -310,11 +417,18 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
 
     const monitoring = await callMcpTool<{ events: Array<{ id: string; type: string }> }>(
       "session_events",
-      { sessionId: queued.id, direction: "before", limit: 50 },
+      { sessionId: queued.id, view: "debug", direction: "before", limit: 50 },
     );
     expect(JSON.stringify(monitoring)).not.toContain(queuedText);
     expect(monitoring.events.map((event) => event.type)).toContain("turn.queued");
     expect(monitoring.events.some((event) => event.id === accepted.acceptedEventId)).toBeFalse();
+    const conversation = await callMcpTool<{ view: string; events: unknown[] }>("session_events", {
+      sessionId: queued.id,
+      after: 0,
+    });
+    expect(conversation.view).toBe("conversation");
+    expect(conversation.events).toEqual([]);
+    expect(JSON.stringify(conversation)).not.toContain(queuedText);
 
     const forensic = await callMcpTool<{
       events: Array<{ id: string; type: string; payload: { text?: string } }>;

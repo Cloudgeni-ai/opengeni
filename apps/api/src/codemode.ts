@@ -20,6 +20,94 @@ import {
   getCodemodeOperation,
   submitCodemodeOperation,
 } from "@opengeni/db";
+import { getSession } from "@opengeni/db";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveFirstPartyDelegationSecret,
+  type Settings,
+} from "@opengeni/config";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  signDelegatedAccessToken,
+  siteSessionPath,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  type Permission,
+  type Session,
+} from "@opengeni/contracts";
+import { permissionsRequiredByFirstPartyTools } from "./mcp/first-party-tool-permissions";
+
+/** The REST authority a Codemode SDK proxy token may ever carry. */
+export const CODEMODE_SESSION_PROXY_PERMISSION_CEILING = [
+  "workspace:read",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+] as const satisfies readonly Permission[];
+
+/**
+ * Proxy permissions = the session's effective first-party permissions, cut
+ * down to what its exact model-visible tool selection could actually
+ * exercise (plus workspace:read for the context routes), under the fixed
+ * ceiling above. A session whose selection has no session_* tool therefore
+ * gets only workspace:read and every proxied /sessions handler refuses it,
+ * exactly as its MCP surface would.
+ */
+export function codemodeSessionProxyPermissions(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  session: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions">,
+): Permission[] {
+  const sessionPermissions = session.firstPartyMcpPermissions ?? [
+    ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  ];
+  const selection = allowedFirstPartyMcpToolsForSession(settings, session.firstPartyMcpTools);
+  const requiredBySelection = new Set<Permission>([
+    "workspace:read",
+    ...permissionsRequiredByFirstPartyTools(selection),
+  ]);
+  return CODEMODE_SESSION_PROXY_PERMISSION_CEILING.filter(
+    (permission) => requiredBySelection.has(permission) && sessionPermissions.includes(permission),
+  );
+}
+
+/** Reuse normal REST handlers, including their resource/command authorization.
+ * The exact attempt is checked before issuing this internal-only credential. */
+export async function codemodeSessionRequest(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  request: Request,
+  path: string,
+): Promise<Request> {
+  siteSessionPath(path, grant.workspaceId, request.method);
+  const { authority } = await requireActiveCodemodeCatalog(deps, grant);
+  const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
+  const secret = resolveFirstPartyDelegationSecret(deps.settings);
+  if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
+  const permissions = codemodeSessionProxyPermissions(deps.settings, session);
+  const token = await signDelegatedAccessToken(secret, {
+    ...authority,
+    permissions,
+    principalKind: "agent_attempt",
+    exp: Math.floor(Date.now() / 1000) + 60,
+  });
+  const target = new URL(request.url);
+  const rewritten = siteSessionPath(path, authority.workspaceId, request.method);
+  const url = new URL(rewritten, target.origin);
+  const headers = new Headers({
+    authorization: `Bearer ${token}`,
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+  });
+  for (const name of ["content-type", "accept", "last-event-id"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  return new Request(url, {
+    method: request.method,
+    headers,
+    signal: request.signal,
+    ...(request.body ? { body: await request.text() } : {}),
+  });
+}
 
 export type CodemodeGrantAuthority = {
   accountId: string;

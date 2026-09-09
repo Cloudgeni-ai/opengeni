@@ -10,6 +10,15 @@ exists, a live agent may address peer workspace sessions; see
 same-root for agents, and `user_private` still requires the initiating human as
 owner. Nested-agent depth does not restore a parent/child access lock.
 
+## Resource inheritance
+
+A child that omits `resources` inherits only the parent's repositories. Uploaded
+files are not automatically attached to its initial message. Explicit `resources`
+replaces inheritance (including `[]`); include selected file references to attach
+them, or pass a file ID in the task for on-demand retrieval. Shared sandbox files
+remain accessible on disk; this rule controls session attachments, not filesystem
+isolation.
+
 ## Depth and precedence
 
 - A root session has depth `0` and its `rootSessionId` is its own id.

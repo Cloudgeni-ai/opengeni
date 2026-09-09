@@ -18,6 +18,9 @@ import {
   applyCreditLedgerEntry,
   attachOpenSuffixToPendingToolCalls,
   claimSessionWorkForAttempt,
+  childRequiresActionDedupeKey,
+  childRequiresActionResolvedDedupeKey,
+  configureChildLifecycleNotices,
   createDb,
   createFileUpload,
   createScheduledTask,
@@ -33,6 +36,8 @@ import {
   registerWorkspacePack,
   setVariableSetVariable,
   getSession,
+  getSessionTurn,
+  getSessionSystemUpdateOutboxByDedupeKey,
   getSessionGoal,
   getBillingBalance,
   getActiveSessionHistoryItems,
@@ -52,6 +57,7 @@ import {
   requireScheduledTask,
   saveRunState,
   mutateWorkspaceControlInTransaction,
+  mutateSessionControlInTransaction,
   sumUsageQuantity,
   updateSessionMcpServerCredentials,
   updateScheduledTask,
@@ -89,6 +95,7 @@ import {
 } from "../../apps/worker/src/activities/types";
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
+import { reconcilePendingParentSystemUpdates } from "../../apps/worker/src/activities/parent-wake";
 import {
   ScriptedModel,
   functionCall,
@@ -369,123 +376,315 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("a requireApproval session MCP tool pauses for approval and resumes on approve", async () => {
-    // End-to-end through the GENERIC interruption loop: a session MCP server with
-    // requireApproval:true makes its tool raise a run interruption, which the
-    // worker turns into session.requiresAction (tool NOT yet executed); a
-    // user.approvalDecision:approve then resumes the saved run state and the tool
-    // finally runs.
-    const encryptionKey = Buffer.alloc(32, 5);
-    const mcp = startTestMcpServer();
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      environmentsEncryptionKey: encryptionKey.toString("base64"),
-    });
-    try {
-      const grant = await testGrant(dbClient.db);
-      const session = await createOwnedSession(dbClient.db, grant, {
-        initialMessage: "search please",
-        resources: [],
-        tools: [{ kind: "mcp", id: "crm" }],
-        metadata: {},
-        model: "scripted-model",
-        sandboxBackend: "none",
-        mcpServers: [
-          {
-            id: "crm",
-            name: "CRM",
-            url: mcp.url,
-            cacheToolsList: false,
-            requireApproval: true,
-            headersEncrypted: {},
+  test.each(["approve", "reject"] as const)(
+    "a requireApproval session MCP tool survives Pause and resumes on %s exactly once",
+    async (decision) => {
+      // End-to-end through the GENERIC interruption loop: a session MCP server with
+      // requireApproval:true makes its tool raise a run interruption, which the
+      // worker turns into session.requiresAction (tool NOT yet executed); a
+      // a human decision resumes the saved run state. Only approval runs the
+      // harmless local MCP tool. No provider subscription or external write is used.
+      const encryptionKey = Buffer.alloc(32, 5);
+      const mcp = startTestMcpServer();
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: encryptionKey.toString("base64"),
+        childLifecycleNoticesEnabled: true,
+      });
+      try {
+        const grant = await testGrant(dbClient.db);
+        // Root -> parent -> child uses real claimed parent attempts, preserving
+        // the same lineage authority as agent-created sessions.
+        const root = await createOwnedSession(dbClient.db, grant, {
+          initialMessage: "coordinate approval fixture",
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+        });
+        const rootAttemptId = await claimOwnedSessionAttempt(
+          dbClient.db,
+          grant,
+          root.id,
+          "coordinate",
+        );
+        const rootTurnId = (await getSession(dbClient.db, grant.workspaceId, root.id))!
+          .activeTurnId!;
+        const rootTurn = (await getSessionTurn(dbClient.db, grant.workspaceId, rootTurnId))!;
+        const parent = await createOwnedSession(dbClient.db, grant, {
+          initialMessage: "delegate approval fixture",
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          parentSessionId: root.id,
+          createdByActor: {
+            type: "agent_attempt",
+            attemptId: rootAttemptId,
+            sessionId: root.id,
+            turnId: rootTurn.id,
+            executionGeneration: rootTurn.executionGeneration,
           },
-        ],
-      });
-      await appendOwnedEvents(dbClient.db, grant, session.id, [
-        { type: "user.message", payload: { text: "search please" } },
-      ]);
-      const model = new ScriptedModel([
-        {
-          id: "approval-call-1",
-          output: [
-            functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1"),
+        });
+        const parentAttemptId = await claimOwnedSessionAttempt(
+          dbClient.db,
+          grant,
+          parent.id,
+          "delegate",
+        );
+        const parentTurnId = (await getSession(dbClient.db, grant.workspaceId, parent.id))!
+          .activeTurnId!;
+        const parentTurn = (await getSessionTurn(dbClient.db, grant.workspaceId, parentTurnId))!;
+        const session = await createOwnedSession(dbClient.db, grant, {
+          initialMessage: "search please",
+          parentSessionId: parent.id,
+          createdByActor: {
+            type: "agent_attempt",
+            attemptId: parentAttemptId,
+            sessionId: parent.id,
+            turnId: parentTurn.id,
+            executionGeneration: parentTurn.executionGeneration,
+          },
+          resources: [],
+          tools: [{ kind: "mcp", id: "crm" }],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          mcpServers: [
+            {
+              id: "crm",
+              name: "CRM",
+              url: mcp.url,
+              cacheToolsList: false,
+              requireApproval: true,
+              headersEncrypted: {},
+            },
           ],
-        },
-        {
-          id: "approval-call-2",
-          outputText: "found it",
-          chunks: ["found ", "it"],
-        },
-      ]);
-      const activities = createWorkerActivities({
-        settings,
-        db: dbClient.db,
-        bus,
-        runtime: createProductionAgentRuntime({ model }),
-      });
+        });
+        await appendOwnedEvents(dbClient.db, grant, session.id, [
+          { type: "user.message", payload: { text: "search please" } },
+        ]);
+        const model = new ScriptedModel([
+          {
+            id: "approval-call-1",
+            output: [
+              functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1"),
+            ],
+          },
+          {
+            id: "approval-call-2",
+            outputText: decision === "approve" ? "found it" : "request rejected",
+          },
+        ]);
+        const activities = createWorkerActivities({
+          settings,
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime({ model }),
+        });
 
-      // Turn 1: the tool call is gated — the turn pauses instead of running it.
-      const first = await activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        trigger: { kind: "next" },
-        workflowId: "workflow-mcp-approval",
-        workflowRunId: crypto.randomUUID(),
-      });
-      expect(first.status).toBe("requires_action");
-      const afterFirst = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        0,
-        100,
-      );
-      expect(afterFirst.some((event) => event.type === "session.requiresAction")).toBe(true);
-      expect(latestStatus(afterFirst)).toBe("requires_action");
-      // The MCP tool did NOT execute while approval is pending.
-      expect(mcp.calls).toEqual([]);
+        // Turn 1: the tool call is gated — the turn pauses instead of running it.
+        const first = await activities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId: "workflow-mcp-approval",
+          workflowRunId: crypto.randomUUID(),
+        });
+        expect(first.status).toBe("requires_action");
+        const afterFirst = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          100,
+        );
+        expect(afterFirst.some((event) => event.type === "session.requiresAction")).toBe(true);
+        expect(latestStatus(afterFirst)).toBe("requires_action");
+        // The MCP tool did NOT execute while approval is pending.
+        expect(mcp.calls).toEqual([]);
 
-      const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))
-        ?.activeTurnId;
-      expect(activeTurnId).toBeTruthy();
+        const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))
+          ?.activeTurnId;
+        expect(activeTurnId).toBeTruthy();
+        const blockedTurn = (await getSessionTurn(dbClient.db, grant.workspaceId, activeTurnId!))!;
+        const childBoundary = {
+          childSessionId: session.id,
+          turnId: blockedTurn.id,
+          turnGeneration: blockedTurn.executionGeneration,
+        };
+        expect(
+          await getSessionSystemUpdateOutboxByDedupeKey(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            dedupeKey: childRequiresActionDedupeKey(childBoundary),
+          }),
+        ).toMatchObject({
+          targetSessionId: parent.id,
+          kind: "child_requires_action",
+          payload: {
+            childSessionId: session.id,
+            requests: [
+              { kind: "approval", approvalId: "call-appr-1", toolName: "crm__search_documents" },
+            ],
+          },
+        });
 
-      // Turn 2: approve → the saved run resumes and the tool finally runs.
-      const [approvalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        {
-          type: "user.approvalDecision",
-          payload: { approvalId: "call-appr-1", decision: "approve" },
-        },
-      ]);
-      const second = await activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
-        // Distinct workflowId so the resume's event producerId
-        // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
-        // system disambiguates via the Temporal activityId, which is absent here.
-        workflowId: "workflow-mcp-approval-resume",
-        workflowRunId: crypto.randomUUID(),
-      });
-      expect(second.status).toBe("idle");
-      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
-      const afterSecond = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        0,
-        100,
-      );
-      expect(afterSecond.some((event) => event.type === "turn.completed")).toBe(true);
-      expect(latestStatus(afterSecond)).toBe("idle");
-    } finally {
-      mcp.close();
-    }
-  });
+        // The test driver acts as the human; the scripted agent never decides.
+        const decide = (approvalId: string, clientEventId: string) =>
+          acceptSessionApprovalDecision(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+            payload: { approvalId, decision },
+            clientEventId,
+          });
+        expect(await decide("stale-call-id", crypto.randomUUID())).toMatchObject({
+          action: "conflict",
+        });
+        const control = (action: "pause" | "resume") =>
+          withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
+            db.transaction((tx) =>
+              mutateSessionControlInTransaction(tx as unknown as Database, {
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId,
+                sessionId: session.id,
+                actor: { type: "human", subjectId: grant.subjectId },
+                operationKey: crypto.randomUUID(),
+                action,
+              }),
+            ),
+          );
+        await control("pause");
+        const decisionKey = crypto.randomUUID();
+        const accepted = await decide("call-appr-1", decisionKey);
+        if (accepted.action !== "accepted") throw new Error("human decision was not accepted");
+        expect(
+          await getSessionSystemUpdateOutboxByDedupeKey(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            dedupeKey: childRequiresActionResolvedDedupeKey({
+              ...childBoundary,
+              requestId: null,
+              approvalId: "call-appr-1",
+            }),
+          }),
+        ).toMatchObject({
+          targetSessionId: parent.id,
+          kind: "child_requires_action_resolved",
+          payload: {
+            approvalId: "call-appr-1",
+            outcome: decision === "approve" ? "approved" : "rejected",
+            respondedByKind: "human",
+          },
+        });
+        const replay = await decide("call-appr-1", decisionKey);
+        if (replay.action !== "accepted") throw new Error("decision replay was not accepted");
+        expect(replay.event.id).toBe(accepted.event.id);
+        expect(replay.events).toEqual([]);
+        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+          action: "conflict",
+        });
+        expect(
+          await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+            sessionId: session.id,
+            workflowId: "paused-approval-probe",
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "approval", triggerEventId: accepted.event.id },
+          }),
+        ).toMatchObject({ action: "unclaimed" });
+        expect(mcp.calls).toEqual([]);
+        await control("resume");
+
+        // Reconstruct the production runtime as a replacement worker would.
+        const resumeActivities = createWorkerActivities({
+          settings,
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime({ model }),
+        });
+        const approvalTrigger = accepted.event;
+        const second = await resumeActivities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
+          // Distinct workflowId so the resume's event producerId
+          // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
+          // system disambiguates via the Temporal activityId, which is absent here.
+          workflowId: "workflow-mcp-approval-resume",
+          workflowRunId: crypto.randomUUID(),
+        });
+        expect(second.status).toBe("idle");
+        expect(mcp.calls).toEqual(
+          decision === "approve"
+            ? [{ tool: "search_documents", args: { query: "network policy" } }]
+            : [],
+        );
+        const afterSecond = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          100,
+        );
+        expect(afterSecond.some((event) => event.type === "turn.completed")).toBe(true);
+        expect(latestStatus(afterSecond)).toBe("idle");
+        // Human acceptance commits the resolution outbox. Deliver it through
+        // the ordinary control-worker reconciler before checking parent state.
+        expect(
+          await reconcilePendingParentSystemUpdates({
+            db: dbClient.db,
+            bus,
+            settings,
+            observability: createObservability(settings, { component: "worker" }),
+            wakeSessionWorkflow: null,
+          }),
+        ).toMatchObject({ failed: 0 });
+        const parentUpdates = await listOutstandingSessionSystemUpdates(
+          dbClient.db,
+          grant.workspaceId,
+          parent.id,
+        );
+        expect(parentUpdates.filter((update) => update.kind === "child_requires_action")).toEqual(
+          [],
+        );
+        expect(
+          parentUpdates.filter((update) => update.kind === "child_requires_action_resolved"),
+        ).toHaveLength(1);
+        expect(afterSecond.filter((event) => event.type === "user.approvalDecision")).toHaveLength(
+          1,
+        );
+        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+          action: "conflict",
+        });
+        const settledReplay = await decide("call-appr-1", decisionKey);
+        if (settledReplay.action !== "accepted") throw new Error("settled decision replay failed");
+        expect(settledReplay.event.id).toBe(accepted.event.id);
+        expect(
+          await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+            sessionId: session.id,
+            workflowId: "settled-approval-replay",
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "approval", triggerEventId: accepted.event.id },
+          }),
+        ).toMatchObject({ action: "unclaimed" });
+        expect(mcp.calls).toHaveLength(decision === "approve" ? 1 : 0);
+      } finally {
+        configureChildLifecycleNotices({ enabled: false });
+        mcp.close();
+      }
+    },
+  );
 
   test("manager session's first-party MCP token carries its granted permissions end to end", async () => {
     // A manager-style session (created with firstPartyMcpPermissions) calls
@@ -1387,8 +1586,14 @@ describe("worker activities integration", () => {
     });
     const runtime: OpenGeniRuntime = {
       ...baseRuntime,
-      runStream: async () =>
-        ({
+      runStream: async (_agent, prepared) => {
+        // The SDK preserves the exact prepared input under external ownership.
+        // Keep this transport-error fixture faithful to that contract.
+        const original = Array.isArray(prepared.input)
+          ? prepared.input
+          : [{ type: "message", role: "user", content: prepared.input }];
+        state.history = [...original, ...state.history.slice(1)] as typeof state.history;
+        return {
           toStream: () =>
             (async function* () {
               yield {
@@ -1422,7 +1627,8 @@ describe("worker activities integration", () => {
           interruptions: [],
           state,
           finalOutput: "",
-        }) as never,
+        } as never;
+      },
     };
     const activities = createWorkerActivities({
       settings: testSettings({
@@ -2041,7 +2247,17 @@ describe("worker activities integration", () => {
           toStream: () => (async function* () {})(),
           completed: Promise.resolve(),
           interruptions: [],
-          state: { toString: () => "resumed-state" },
+          state: {
+            history: [
+              { type: "message", role: "user", content: "approved" },
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "approved" }],
+              },
+            ],
+            toString: () => "resumed-state",
+          },
           finalOutput: "approved",
         } as never;
       },

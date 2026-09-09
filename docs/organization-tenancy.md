@@ -108,13 +108,18 @@ same-turn recovery reuses once while goal/machine successors do not inherit it.
 The managed web console exposes that exact command for a new session and its
 existing-session Send/Steer composer. It discovers only the current managed
 human's active Variable Set/Rig/Connected Machine authorities through the bounded owner list,
-joins names from the server-issued personal workspace's metadata-only catalogs,
-and never lets an established session switch its fixed resource ids. Shared
-sessions require the version-1 output warning acknowledgement; authority-epoch,
-principal, organization, workspace, session, or source-access changes clear the
-local decision and require an authoritative reload plus reconfirmation. The UI
-does not project an attachment as accepted before the create/Send/Steer command
-commits. Cross-workspace grant/fork UX, standalone management of `once`,
+joins names from target-workspace metadata-only catalogs, and preserves the
+explicit selected-resource boundary. Explicit attachment is consent for the
+owner's work in this session: private and shared sessions submit session-scoped
+authorization without a duration selector or a second approval prompt. Shared
+resource pickers explain that results are visible to people with chat access and
+include the version-1 shared-output acknowledgement. Authority-epoch, principal,
+organization, workspace, session, or selected-source changes still require the
+current authority closure to settle before submission. The browser never requests
+`always`; existing public API `once`/`session`/`always` semantics are unchanged.
+Healthy attachments add no composer-top status or acceptance notice. The UI does not project an
+attachment as accepted before the Create/Send/Steer command commits. Continue
+uses that same human Send path. Cross-workspace grant/fork UX, standalone management of `once`,
 Documents/Connections without an exact runtime adapter, and
 MCP/agent administration remain outside this slice.
 
@@ -249,6 +254,18 @@ remain legitimately ownerless. Rows already durable before 0302 remain the
 existing `bun run db:backfill-session-ownership` seam's job.
 
 ### `getWorkspaceGrant` is not an authority answer
+
+Personal owners may administer their own workspace configuration through
+`requireWorkspaceSettingsGrant` (`packages/core/src/access/index.ts`). This
+request boundary preserves ordinary workspace-admin behavior and otherwise
+requires a verified canonical managed cookie, exact authenticated subject, and
+a live active-organization membership pointing to the requested Personal
+workspace. It covers preferences, custom models/model policy, runtime control,
+and instruction/Skill autonomy, including its revision lifecycle. The returned
+grant is unchanged: no `workspace:admin`, `members:manage`, or `api_keys:manage`
+is added. Workspace deletion and access-management routes do not use this
+exception. The web's matching owner affordance uses the current server-issued
+membership tuple; it is not API authorization.
 
 `getWorkspaceGrant` (`packages/db/src/index.ts`) is a bare
 `workspace_memberships` join. Because a managed personal workspace deliberately
@@ -608,6 +625,16 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
+The stock web console may then show a skippable product step to connect a
+model or buy OpenGeni credits. Connecting selects the model in the human’s
+actor-private new-session draft with its expected revision, preserving the
+other draft fields. It never writes workspace settings or requires
+`workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
+accept still complete immediately. The step does not widen
+`POST /v1/auth/organization-onboarding`, invitation accept, or any worker
+surface. Empty OpenGeni-credit create and failed-session paths prompt the
+owner to buy credits or connect a model instead of a dead-end toast.
+
 ### Additional organization creation (0399)
 
 Migration `0399_additional_managed_organization_creation.sql` adds a separate
@@ -782,9 +809,9 @@ Better Auth handler and Hono API, migrates PostgreSQL through a dedicated
 `opengeni_app`, drives public operations through the SDK, and completes the
 human paths in a production-built web bundle under Chromium. Its process-local
 mail capture is count- and TTL-bounded, one-time readable, and never persists a
-bearer or rendered body. The lane proves ordinary named signup, the exact
-Personal-only owner graph, immediate private-session creation, unregistered
-setup, registered invitation choice, shared grant/revoke, stale and
+bearer or rendered body. The lane proves ordinary named signup, the skippable post-create model-access
+step, the exact Personal-only owner graph, immediate private-session creation,
+unregistered setup, registered invitation choice, shared grant/revoke, stale and
 cross-organization rejection, password reset, delivery refusal/ambiguity, RLS
 posture, accessibility, responsive layout, and browser-error cleanliness.
 
@@ -1352,6 +1379,30 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
+## Forking at a message
+
+The managed-human fork request accepts an optional `sourceEventId`. The stock
+message action row supplies the selected durable user message or completed
+assistant message. Omission keeps the whole-session fork contract. The event id
+is included in the idempotency hash and resolved under the existing quiescent
+source locks to a unique canonical history boundary. Only history through that
+boundary is copied; events are never converted into model input. Runtime setup
+replacement cannot be combined with a message boundary.
+
+The first boundary implementation rejects compacted histories, ambiguous or
+missing message/history matches, and boundaries splitting a tool exchange.
+Those cases remain eligible for the ordinary whole-session fork; there is no
+silent fallback. A committed message fork still replays after compaction or a
+source authorization change. The same actor, visibility, acknowledgement,
+workspace, and grant rules apply to both fork forms.
+
+Migration `0429_message_boundary_session_forks.sql` adds an overload to the exact
+runtime routine contract. Drain API/control/turn workers, migrate, provision the
+runtime role, and start the message-boundary-aware binary. Do not restart an
+older binary after activation. The SQL overload clones the current lifecycle
+body with checked anchors, preserving its authority, locks, receipt ordering,
+and fresh-session configuration while narrowing the history spool.
+
 ## Session-visibility and fork public activation
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
@@ -1527,6 +1578,14 @@ principal transitions make delayed browser outcomes inert.
 `test/session-visibility-contract-surface.test.ts` pins the server caller
 boundary; the web component and Chromium acceptance tests pin the browser
 boundary.
+
+The stock new-session composer reads the server's create capabilities for
+Personal workspaces as well as shared workspaces. When private-session tenancy
+is unavailable, a Personal session uses workspace visibility inside the existing
+owner-only workspace boundary. It does not require the organization Only-me
+setting or claim that session-tenancy activation has happened. When supported,
+it retains the private-session create path.
+
 
 ## Referential integrity
 

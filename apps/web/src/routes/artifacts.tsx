@@ -6,6 +6,7 @@ import type {
   WorkspaceArtifactMutationResponse,
 } from "@opengeni/sdk";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
+import { SiteConversations } from "@/components/artifacts/site-conversations";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
@@ -22,7 +23,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { request } from "@/api";
+import { request, requestResponse } from "@/api";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Badge } from "@/components/ui/badge";
@@ -31,17 +32,6 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import {
-  ARTIFACT_CREATE_PERMISSIONS,
-  ARTIFACT_CREATE_TOOLS,
-  ARTIFACT_EDIT_PERMISSIONS,
-  ARTIFACT_EDIT_TOOLS,
-  applyNewSessionModelPreference,
-  artifactCreateInstructions,
-  artifactCreateOpeningMessage,
-  artifactEditInstructions,
-  artifactEditOpeningMessage,
-} from "@/lib/artifact-authoring";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 
 function formatDate(value: string): string {
@@ -96,26 +86,9 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const { data, error, load } = useArtifacts(workspaceId);
-  const createWithGeni = async () => {
-    const submission = await context.client
-      .getNewSessionDraft(workspaceId)
-      .then((draft) =>
-        applyNewSessionModelPreference(
-          {
-            text: artifactCreateOpeningMessage(),
-            firstPartyMcpPermissions: [...ARTIFACT_CREATE_PERMISSIONS],
-            firstPartyMcpTools: [...ARTIFACT_CREATE_TOOLS],
-          },
-          draft,
-        ),
-      )
-      .catch(() => ({
-        text: artifactCreateOpeningMessage(),
-        firstPartyMcpPermissions: [...ARTIFACT_CREATE_PERMISSIONS],
-        firstPartyMcpTools: [...ARTIFACT_CREATE_TOOLS],
-      }));
-    const created = await context.startSession(workspaceId, submission, {
-      instructions: artifactCreateInstructions(),
+  const startSession = async () => {
+    const created = await context.startSession(workspaceId, {
+      text: "Help me build a workspace Site.",
     });
     if (created)
       await navigate({
@@ -130,7 +103,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         title="Sites"
         description="Interactive pages, dashboards, and tools built for this workspace."
         actions={
-          <Button onClick={() => void createWithGeni()} disabled={context.busy}>
+          <Button onClick={() => void startSession()} disabled={context.busy}>
             <SparklesIcon className="mr-2 size-4" />
             Build a Site
           </Button>
@@ -197,14 +170,19 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
 export function ArtifactDetailRoute({
   workspaceId,
   artifactId,
+  embedded = false,
 }: {
   workspaceId: string;
   artifactId: string;
+  embedded?: boolean;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
-  const [content, setContent] = useState<WorkspaceArtifactContentResponse | null>(null);
+  const [content, setContent] = useState<Pick<
+    WorkspaceArtifactContentResponse,
+    "html" | "versionId" | "requestedTools"
+  > | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
@@ -213,10 +191,16 @@ export function ArtifactDetailRoute({
     try {
       setError(null);
       const basePath = `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`;
-      const [nextDetail, nextContent] = await Promise.all([
-        request<WorkspaceArtifactDetailResponse>(basePath),
-        request<WorkspaceArtifactContentResponse>(`${basePath}/content`),
-      ]);
+      const nextDetail = await request<WorkspaceArtifactDetailResponse>(basePath);
+      const version = nextDetail.artifact.currentVersion;
+      if (!version) throw new Error("Site has no published version");
+      const response = await requestResponse(`${basePath}/html?versionId=${version.id}`);
+      if (!response.ok) throw new Error("Site HTML could not be loaded");
+      const nextContent = {
+        html: await response.text(),
+        versionId: version.id,
+        requestedTools: version.requestedTools,
+      };
       setDetail(nextDetail);
       setContent(nextContent);
     } catch (nextError) {
@@ -227,7 +211,7 @@ export function ArtifactDetailRoute({
   const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
   const siteVersionId = content?.versionId;
   const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
-    if (requestedTools.length === 0 || !siteVersionId) return undefined;
+    if (!siteVersionId) return undefined;
     return createSiteToolBridge({
       workspaceTools: context.client.tools.forWorkspace(workspaceId),
       workspaceId,
@@ -236,34 +220,11 @@ export function ArtifactDetailRoute({
       requestedTools,
     });
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
-  const editWithGeni = async () => {
-    const currentVersion = detail?.artifact.currentVersion;
-    if (!detail || !currentVersion || detail.artifact.status === "archived") return;
+  const startEditSession = async () => {
+    if (!detail || detail.artifact.status === "archived") return;
     const artifact = detail.artifact;
-    const currentVersionId = currentVersion.id;
-    const submission = await context.client
-      .getNewSessionDraft(workspaceId)
-      .then((draft) =>
-        applyNewSessionModelPreference(
-          {
-            text: artifactEditOpeningMessage(artifact.title),
-            firstPartyMcpPermissions: [...ARTIFACT_EDIT_PERMISSIONS],
-            firstPartyMcpTools: [...ARTIFACT_EDIT_TOOLS],
-          },
-          draft,
-        ),
-      )
-      .catch(() => ({
-        text: artifactEditOpeningMessage(artifact.title),
-        firstPartyMcpPermissions: [...ARTIFACT_EDIT_PERMISSIONS],
-        firstPartyMcpTools: [...ARTIFACT_EDIT_TOOLS],
-      }));
-    const created = await context.startSession(workspaceId, submission, {
-      instructions: artifactEditInstructions({
-        artifactId: artifact.id,
-        title: artifact.title,
-        currentVersionId,
-      }),
+    const created = await context.startSession(workspaceId, {
+      text: `Help me edit the Site “${artifact.title}”: /workspaces/${workspaceId}/artifacts/${artifact.id}`,
     });
     if (created)
       await navigate({
@@ -329,6 +290,39 @@ export function ArtifactDetailRoute({
     }
   };
   const archived = detail?.artifact.status === "archived";
+  if (embedded) {
+    if (error)
+      return (
+        <LoadErrorState
+          title="Couldn't load Site"
+          error={asError(error)}
+          onRetry={() => void load()}
+        />
+      );
+    if (!detail || !content)
+      return (
+        <div role="status" className="p-4 text-sm text-fg-muted">
+          Loading Site…
+        </div>
+      );
+    if (archived)
+      return (
+        <div className="p-4 text-sm text-fg-muted">
+          This Site is archived. Open it full-page to restore it.
+        </div>
+      );
+    return (
+      <ArtifactSandbox
+        html={content.html}
+        title={detail.artifact.title}
+        versionLabel={`v${detail.artifact.currentVersion?.revision}`}
+        toolBridge={siteToolBridge}
+        connectedToolCount={content.requestedTools.length}
+        fill
+        className="h-full rounded-none border-0"
+      />
+    );
+  }
   return (
     <ContentPage width="wide">
       <div className="mb-5 border-b border-border pb-5">
@@ -360,6 +354,12 @@ export function ArtifactDetailRoute({
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <SiteConversations
+              key={artifactId}
+              workspaceId={workspaceId}
+              siteId={artifactId}
+              title={detail?.artifact.title ?? "this Site"}
+            />
             {archived ? (
               <Button
                 variant="outline"
@@ -383,7 +383,7 @@ export function ArtifactDetailRoute({
             )}
             <Button
               size="sm"
-              onClick={() => void editWithGeni()}
+              onClick={() => void startEditSession()}
               disabled={!detail || context.busy || archived}
             >
               <SparklesIcon className="mr-2 size-4" />
@@ -424,10 +424,9 @@ export function ArtifactDetailRoute({
                 : undefined
             }
             editDisabled={context.busy || archived}
-            onEdit={() => void editWithGeni()}
+            onEdit={() => void startEditSession()}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
-            sourceFileCount={content.source.files.length}
           />
           <section className="overflow-hidden rounded-2xl border border-border/80 bg-surface/60 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 px-4 py-3.5 sm:px-5">
@@ -440,8 +439,7 @@ export function ArtifactDetailRoute({
               <div className="flex items-center gap-3 text-2xs text-fg-subtle">
                 <span className="inline-flex items-center gap-1">
                   <FilesIcon className="size-3" />
-                  {content.source.files.length} source{" "}
-                  {content.source.files.length === 1 ? "file" : "files"}
+                  {detail.artifact.currentVersion?.sourceSizeBytes ? "Source saved" : "HTML-only"}
                 </span>
                 <span className="inline-flex items-center gap-1">
                   <PlugZapIcon className="size-3" />

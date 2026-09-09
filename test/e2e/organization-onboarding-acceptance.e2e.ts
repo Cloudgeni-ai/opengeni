@@ -224,6 +224,13 @@ async function expectNoAxeViolations(page: Page, include = "body"): Promise<void
     .include(include)
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  if (report.violations.length) {
+    await writeFile(
+      `${EVIDENCE_DIR}/contrast-failure.json`,
+      JSON.stringify(report.violations, null, 2),
+    );
+    await page.screenshot({ path: `${EVIDENCE_DIR}/contrast-failure.png` });
+  }
   expect(
     report.violations.map((violation) => ({
       id: violation.id,
@@ -480,6 +487,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await page.getByRole("button", { name: "Create organization" }).click();
     expect((await setupSettled).ok()).toBe(true);
+    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    expect(await page.getByLabel("Organization name").count()).toBe(0);
+    await page.getByRole("button", { name: "Skip for now" }).click();
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);
@@ -798,6 +808,30 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     });
     expect(changedCompletionReplay.status).toBe(409);
 
+    // Real member journey must not make admin-only fleet/connection reads.
+    const deniedReads: string[] = [];
+    setupPage.on("response", (response) => {
+      if (response.status() === 403) deniedReads.push(new URL(response.url()).pathname);
+    });
+    await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/sessions`);
+    await setupPage.getByRole("heading", { name: "What should the agent do?" }).waitFor();
+
+    expect(await setupPage.locator("body").textContent()).not.toContain(
+      "GitHub account is unavailable",
+    );
+    expect(await setupPage.locator("body").textContent()).not.toContain(
+      "Couldn't load your connected machines",
+    );
+    await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/machines`);
+    await setupPage
+      .getByText("Machines are managed by your workspace admin", { exact: true })
+      .waitFor();
+    expect(await setupPage.getByRole("button", { name: /Connect a machine/ }).count()).toBe(0);
+    expect(deniedReads).toEqual([]);
+    await setupPage.screenshot({
+      path: `${EVIDENCE_DIR}/member-machines-restricted.png`,
+      fullPage: true,
+    });
     expectNoBrowserProblems(ownerProblems);
     expectNoBrowserProblems(setupProblems);
     expect(transport.size()).toBeLessThanOrEqual(80);
@@ -1135,15 +1169,20 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expectNoBrowserProblems(alternateProblems);
     await alternateContext.close();
 
-    const forget = await fetch(`${publicOrigin}/v1/auth/request-password-reset`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: registeredEmail,
-        redirectTo: "/reset-password",
-      }),
+    const resetRequestContext = await browser.newContext();
+    const resetRequestPage = await resetRequestContext.newPage();
+    await resetRequestPage.goto(publicOrigin);
+    await resetRequestPage.getByRole("button", { name: "Forgot password?" }).click();
+    await resetRequestPage.getByLabel("Email", { exact: true }).fill(registeredEmail);
+    expect(await resetRequestPage.getByLabel("Password", { exact: true }).count()).toBe(0);
+    await resetRequestPage.getByRole("button", { name: "Send reset link", exact: true }).click();
+    await resetRequestPage.getByText("If this email has an account,", { exact: false }).waitFor();
+    await expectNoAxeViolations(resetRequestPage, "body");
+    await resetRequestPage.screenshot({
+      path: `${EVIDENCE_DIR}/password-reset-request.png`,
+      fullPage: true,
     });
-    expect(forget.status).toBe(200);
+    await resetRequestContext.close();
     const resetEmail = await takeEmail("password_reset", registeredEmail);
     const resetUrl = new URL(firstUrl(resetEmail));
     expect(resetUrl.pathname.startsWith("/v1/auth/reset-password/")).toBe(true);

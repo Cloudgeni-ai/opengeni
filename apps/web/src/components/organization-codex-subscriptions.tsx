@@ -1,13 +1,18 @@
+import { ConnectionAccessSettings } from "@/components/connection-access-settings";
+import { SubscriptionConnectAction } from "@/components/subscription-connect-action";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   CodexAccount,
   CodexConnectPoll,
   CodexConnectStart,
   OrganizationCodexAccountsResponse,
 } from "@opengeni/sdk";
-import { Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
+import { Loader2Icon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import { SubscriptionAccountRow } from "@/components/subscription-account-row";
+import { ModelConnectionSection } from "@/components/model-connection-section";
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import { CodexDeviceCodePanel } from "@/components/codex-connection";
 import { Button } from "@/components/ui/button";
@@ -17,12 +22,27 @@ function accountDisplay(account: CodexAccount): string {
   return account.label ?? account.email ?? account.plan ?? account.chatgptAccountId ?? "ChatGPT";
 }
 
-export function OrganizationCodexSubscriptions({ organizationId }: { organizationId: string }) {
+export function OrganizationCodexSubscriptions(props: { organizationId: string }) {
   const client = useAppContext().client;
+  return (
+    <OrganizationCodexSubscriptionsWithClient
+      key={props.organizationId}
+      {...props}
+      client={client}
+    />
+  );
+}
+
+/** Isolated product fixture seam; production callers use OrganizationCodexSubscriptions. */
+export function OrganizationCodexSubscriptionsWithClient({
+  organizationId,
+  client,
+}: { organizationId: string } & { client: OpenGeniBrowserClient }) {
   const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
@@ -146,27 +166,30 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
 
   const accounts = data?.accounts ?? [];
   return (
-    <section className="grid gap-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-medium text-fg">
-            <ChatGptMark className="size-4 text-brand" /> Organization Codex subscriptions
-          </h2>
-          <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-            Connect once for the organization. Current and future shared workspaces inherit this
-            pool by default; personal workspaces keep their own subscriptions.
-          </p>
-        </div>
-        {accounts.length > 0 && !pending ? (
-          <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={connect}>
-            <PlusIcon className="size-3.5" /> Connect
-          </Button>
-        ) : null}
-      </div>
-
+    <ModelConnectionSection
+      title="Codex"
+      description="ChatGPT subscription · Shared with your workspaces"
+      mark={<ChatGptMark className="size-4" />}
+      status={
+        loading
+          ? "Loading…"
+          : loadError
+            ? "Unavailable"
+            : pending
+              ? "Awaiting sign-in"
+              : accounts.length === 0
+                ? "Not connected"
+                : accounts.some((account) => account.status === "active")
+                  ? "Connected"
+                  : "Needs attention"
+      }
+    >
+      <p className="text-xs leading-5 text-fg-subtle">
+        Use Codex models with a ChatGPT subscription. Usage is included in the connected plan.
+      </p>
       {accounts.length > 1 ? (
         <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-          <span className="text-xs font-medium">Auto-rotate organization subscriptions</span>
+          <span className="text-xs font-medium">Auto-rotate subscriptions</span>
           <input
             type="checkbox"
             className="size-4 accent-brand"
@@ -196,58 +219,81 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
           userCode={pending.userCode}
           verificationUri={pending.verificationUri}
         />
-      ) : accounts.length === 0 ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-dashed border-border p-4">
-          <p className="text-xs text-fg-muted">No organization Codex subscription is connected.</p>
-          <Button type="button" size="sm" disabled={busy} onClick={connect}>
-            {busy ? (
-              <Loader2Icon className="size-3.5 animate-spin" />
-            ) : (
-              <ChatGptMark className="size-3.5" />
-            )}
-            Connect Codex
-          </Button>
-        </div>
-      ) : (
+      ) : accounts.length === 0 ? null : (
         <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
           {accounts.map((account) => {
             const active = account.id === data?.activeAccountId;
             return (
-              <article key={account.id} className="flex flex-wrap items-center gap-2 px-3 py-2.5">
-                <input
-                  type="radio"
-                  name="organization-codex-active"
-                  className="size-3.5 accent-brand"
-                  checked={active}
-                  disabled={busy}
-                  aria-label={`Use ${accountDisplay(account)} as the organization default`}
-                  onChange={() => {
-                    if (!active) void activate(account.id);
-                  }}
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{accountDisplay(account)}</p>
-                  <p className="truncate text-2xs text-fg-subtle">
-                    {[account.email ?? account.chatgptAccountId, account.plan, account.status]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </p>
+              <SubscriptionAccountRow
+                key={account.id}
+                provider="Codex"
+                name={accountDisplay(account)}
+                label={account.label}
+                email={account.email}
+                plan={account.plan}
+                selected={active}
+                disabled={busy}
+                unavailable={account.status !== "active"}
+                group={`organization-codex-active-${organizationId}`}
+                selectionLabel={`Use ${accountDisplay(account)} as the organization default`}
+                expanded={expandedId === account.id}
+                onExpandedChange={(open) => setExpandedId(open ? account.id : null)}
+                onSelect={() => void activate(account.id)}
+                onRename={(label) => {
+                  setBusy(true);
+                  void client
+                    .requestJson(
+                      "PATCH",
+                      `/v1/organizations/${organizationId}/codex/accounts/${account.id}`,
+                      { label: label || null },
+                    )
+                    .then(refresh)
+                    .catch((error) =>
+                      toast.error(
+                        error instanceof Error ? error.message : "Failed to rename subscription",
+                      ),
+                    )
+                    .finally(() => setBusy(false));
+                }}
+              >
+                <p className="text-xs text-fg-subtle">
+                  {account.status === "active" ? "Connected" : account.status.replaceAll("_", " ")}
+                </p>
+                {account.lastError ? (
+                  <p className="text-xs text-status-waiting">{account.lastError}</p>
+                ) : null}
+                <div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    aria-label={`Disconnect ${accountDisplay(account)}`}
+                    onClick={() => void disconnect(account.id)}
+                  >
+                    <Trash2Icon className="size-3.5" /> Disconnect
+                  </Button>
                 </div>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={busy}
-                  aria-label={`Disconnect ${accountDisplay(account)}`}
-                  onClick={() => void disconnect(account.id)}
-                >
-                  <Trash2Icon className="size-3.5" />
-                </Button>
-              </article>
+                <ConnectionAccessSettings
+                  client={client}
+                  organizationId={organizationId}
+                  kind="codex"
+                  connectionId={account.id}
+                  canManage
+                />
+              </SubscriptionAccountRow>
             );
           })}
         </div>
       )}
-    </section>
+      {!pending && !loading && !loadError ? (
+        <SubscriptionConnectAction
+          provider="Codex"
+          count={accounts.length}
+          busy={busy}
+          onConnect={() => void connect()}
+        />
+      ) : null}
+    </ModelConnectionSection>
   );
 }

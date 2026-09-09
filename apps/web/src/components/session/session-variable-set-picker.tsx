@@ -1,7 +1,14 @@
 import { useVariableSets } from "@opengeni/react";
 import type { Session } from "@opengeni/sdk";
 import { BoxIcon, ChevronDownIcon, Loader2Icon } from "lucide-react";
-import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  type Dispatch,
+  type SetStateAction,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
@@ -14,6 +21,7 @@ import {
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
+import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 
 function selectedVariableSetIds(
   session: Pick<Session, "variableSetIds" | "variableSetId">,
@@ -30,7 +38,16 @@ export type SessionVariableSetPickerSharedState = {
 };
 
 export function SessionVariableSetPicker(props: {
-  session: Pick<Session, "id" | "workspaceId" | "variableSetIds" | "variableSetId" | "tenancy">;
+  session: Pick<
+    Session,
+    | "id"
+    | "workspaceId"
+    | "variableSetIds"
+    | "variableSetId"
+    | "tenancy"
+    | "status"
+    | "activeTurnId"
+  >;
   canControl: boolean;
   canAttach: boolean;
   canUse: boolean;
@@ -39,6 +56,9 @@ export function SessionVariableSetPicker(props: {
   busy?: boolean;
   goalActive?: boolean;
   voiceActive?: boolean;
+  embedded?: boolean;
+  leading?: ReactNode;
+  onClose?: () => void;
   compact?: boolean;
   triggerClassName?: string;
   sharedState: SessionVariableSetPickerSharedState;
@@ -62,7 +82,11 @@ export function SessionVariableSetPicker(props: {
     [legacyVariableSetId, variableSetIds],
   );
   const currentKey = currentIds.join("\u0000");
-  const [open, setOpen] = useState(false);
+  const [open, setLocalOpen] = useState(false);
+  const setOpen = (next: boolean) => {
+    setLocalOpen(next);
+    if (!next) props.onClose?.();
+  };
   const [draftIds, setDraftIds] = useState(currentIds);
   const [error, setError] = useState<string | null>(null);
   const { committedSelection, saving } = props.sharedState;
@@ -94,13 +118,19 @@ export function SessionVariableSetPicker(props: {
   const selectedPersonal = variableSets.variableSets.filter(
     (variableSet) => variableSet.scope === "user" && draftIds.includes(variableSet.id),
   );
-  const canEdit = props.canControl && props.canAttach && !refreshRequired;
+  const workPending = props.busy || sessionHasVariableSetBlockingWork(props.session);
+  const busy = workPending || props.goalActive || props.voiceActive;
+  const canEdit = props.canControl && props.canAttach && !refreshRequired && !busy;
   const canAdd = canEdit && props.canUse && props.canList;
-  const busy = props.busy || props.goalActive || props.voiceActive;
-  const visible = refreshRequired || currentIds.length > 0 || canAdd;
-  if (!visible) return null;
+  const visible =
+    refreshRequired ||
+    currentIds.length > 0 ||
+    (props.canControl && props.canAttach && props.canUse && props.canList);
+  if (!visible && !props.embedded) return null;
 
   const save = async () => {
+    if (saving || busy || !canEdit || !selectedChanged || (draftIds.length > 0 && !props.canUse))
+      return;
     setSharedState((current) => ({ ...current, saving: true }));
     setError(null);
     try {
@@ -152,6 +182,176 @@ export function SessionVariableSetPicker(props: {
     }
   };
 
+  const content = (
+    <>
+      {props.leading ? (
+        <div className="flex items-center gap-2">
+          {props.leading}
+          <span className="text-sm font-medium">Variable sets</span>
+        </div>
+      ) : null}
+      <div>
+        {!props.embedded ? <div className="text-sm font-medium text-fg">Variable Sets</div> : null}
+        <p className="mt-0.5 text-2xs leading-4 text-fg-subtle">
+          Attach, remove, or reorder encrypted environment values while the session is idle.
+        </p>
+      </div>
+
+      {draftIds.length > 0 ? (
+        <SelectedVariableSetList
+          selectedIds={draftIds}
+          variableSets={variableSets.variableSets}
+          disabled={saving || !canEdit || !props.canUse}
+          onChange={setDraftIds}
+        />
+      ) : (
+        <p className="rounded-md border border-dashed border-border px-2.5 py-3 text-center text-xs text-fg-subtle">
+          No Variable Sets attached.
+        </p>
+      )}
+
+      {canAdd && availableVariableSets.length > 0 && draftIds.length < 25 ? (
+        <Select
+          value=""
+          disabled={saving}
+          onChange={(event) => {
+            const variableSetId = event.target.value;
+            if (!variableSetId) return;
+            setDraftIds((current) => [...current, variableSetId]);
+          }}
+          className="h-8 w-full text-xs"
+        >
+          <option value="">Attach Variable Set…</option>
+          {availableVariableSets
+            .filter((variableSet) => variableSet.scope !== "user")
+            .map((variableSet) => (
+              <option key={variableSet.id} value={variableSet.id}>
+                {variableSet.name} ({variableSet.variables.length} vars)
+              </option>
+            ))}
+          {availableVariableSets.some((variableSet) => variableSet.scope === "user") ? (
+            <optgroup label="Only me">
+              {availableVariableSets
+                .filter((variableSet) => variableSet.scope === "user")
+                .map((variableSet) => (
+                  <option key={variableSet.id} value={variableSet.id}>
+                    {variableSet.name} ({variableSet.variables.length} vars)
+                  </option>
+                ))}
+            </optgroup>
+          ) : null}
+        </Select>
+      ) : null}
+
+      {canEdit && !props.canUse && draftIds.length > 0 ? (
+        <div className="flex items-center justify-between gap-3 text-xs text-fg-subtle">
+          <span>
+            Without Variable Set use permission, all attachments must be removed together.
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={saving}
+            onClick={() => setDraftIds([])}
+          >
+            Remove all
+          </Button>
+        </div>
+      ) : null}
+
+      {variableSets.error ? (
+        <div className="flex items-center justify-between gap-3 text-xs text-status-waiting">
+          <span>
+            Available Variable Sets could not be loaded.
+            {canEdit
+              ? props.canUse
+                ? " Attached entries can still be removed."
+                : " The complete attachment selection can still be cleared."
+              : ""}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={variableSets.loading}
+            onClick={() => void variableSets.refresh()}
+          >
+            Retry
+          </Button>
+        </div>
+      ) : null}
+
+      {props.session.tenancy?.visibility === "workspace" && selectedPersonal.length > 0 ? (
+        <p className="text-2xs leading-4 text-fg-subtle">
+          Attached Only-me Variable Sets are available for your work in this session. Results are
+          visible to people who can access this chat.
+        </p>
+      ) : null}
+
+      {!props.canControl ? (
+        <p className="text-2xs text-fg-subtle">
+          Session control permission is required to change Variable Sets.
+        </p>
+      ) : null}
+      {props.goalActive ? (
+        <p className="text-2xs text-fg-subtle">
+          Pause or complete the active goal before changing Variable Sets.
+        </p>
+      ) : props.voiceActive ? (
+        <p className="text-2xs text-fg-subtle">End voice mode before changing Variable Sets.</p>
+      ) : workPending ? (
+        <p className="text-2xs text-fg-subtle">
+          Variable Sets can be changed after the current and queued work finishes.
+        </p>
+      ) : null}
+      {refreshRequired ? (
+        <div className="flex items-center justify-between gap-3 text-xs text-status-waiting">
+          <span>The update committed, but this session must be refreshed before more changes.</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={saving}
+            onClick={() => void refreshCommittedSession()}
+          >
+            Retry refresh
+          </Button>
+        </div>
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-xs text-danger">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="flex justify-end gap-2 border-t border-border/70 pt-3">
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={saving}
+          onClick={() => setOpen(false)}
+        >
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={
+            !selectedChanged || saving || busy || !canEdit || (draftIds.length > 0 && !props.canUse)
+          }
+          onClick={() => void save()}
+        >
+          {saving ? <Loader2Icon className="animate-spin" /> : null}
+          Save
+        </Button>
+      </div>
+    </>
+  );
+  if (props.embedded)
+    return <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-1">{content}</div>;
+
   return (
     <DropdownMenu
       open={open}
@@ -196,169 +396,7 @@ export function SessionVariableSetPicker(props: {
         collisionPadding={12}
         className="flex w-[min(24rem,calc(100vw-1.5rem))] flex-col gap-3 rounded-xl border-border bg-surface p-3 shadow-xl"
       >
-        <div>
-          <div className="text-sm font-medium text-fg">Variable Sets</div>
-          <p className="mt-0.5 text-2xs leading-4 text-fg-subtle">
-            Attach, remove, or reorder encrypted environment values for the next message.
-          </p>
-        </div>
-
-        {draftIds.length > 0 ? (
-          <SelectedVariableSetList
-            selectedIds={draftIds}
-            variableSets={variableSets.variableSets}
-            disabled={saving || !canEdit || !props.canUse}
-            onChange={setDraftIds}
-          />
-        ) : (
-          <p className="rounded-md border border-dashed border-border px-2.5 py-3 text-center text-xs text-fg-subtle">
-            No Variable Sets attached.
-          </p>
-        )}
-
-        {canAdd && availableVariableSets.length > 0 && draftIds.length < 25 ? (
-          <Select
-            value=""
-            disabled={saving}
-            onChange={(event) => {
-              const variableSetId = event.target.value;
-              if (!variableSetId) return;
-              setDraftIds((current) => [...current, variableSetId]);
-            }}
-            className="h-8 w-full text-xs"
-          >
-            <option value="">Attach Variable Set…</option>
-            {availableVariableSets
-              .filter((variableSet) => variableSet.scope !== "user")
-              .map((variableSet) => (
-                <option key={variableSet.id} value={variableSet.id}>
-                  {variableSet.name} ({variableSet.variables.length} vars)
-                </option>
-              ))}
-            {availableVariableSets.some((variableSet) => variableSet.scope === "user") ? (
-              <optgroup label="Only me">
-                {availableVariableSets
-                  .filter((variableSet) => variableSet.scope === "user")
-                  .map((variableSet) => (
-                    <option key={variableSet.id} value={variableSet.id}>
-                      {variableSet.name} ({variableSet.variables.length} vars)
-                    </option>
-                  ))}
-              </optgroup>
-            ) : null}
-          </Select>
-        ) : null}
-
-        {canEdit && !props.canUse && draftIds.length > 0 ? (
-          <div className="flex items-center justify-between gap-3 text-xs text-fg-subtle">
-            <span>
-              Without Variable Set use permission, all attachments must be removed together.
-            </span>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              disabled={saving}
-              onClick={() => setDraftIds([])}
-            >
-              Remove all
-            </Button>
-          </div>
-        ) : null}
-
-        {variableSets.error ? (
-          <div className="flex items-center justify-between gap-3 text-xs text-status-waiting">
-            <span>
-              Available Variable Sets could not be loaded.
-              {canEdit
-                ? props.canUse
-                  ? " Attached entries can still be removed."
-                  : " The complete attachment selection can still be cleared."
-                : ""}
-            </span>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              disabled={variableSets.loading}
-              onClick={() => void variableSets.refresh()}
-            >
-              Retry
-            </Button>
-          </div>
-        ) : null}
-
-        {props.session.tenancy?.visibility === "workspace" && selectedPersonal.length > 0 ? (
-          <p className="text-2xs leading-4 text-fg-subtle">
-            Only-me Variable Sets are used only for messages you send. Other members may see the
-            result, but cannot use your credentials.
-          </p>
-        ) : null}
-
-        {!props.canControl ? (
-          <p className="text-2xs text-fg-subtle">
-            Session control permission is required to change Variable Sets.
-          </p>
-        ) : null}
-        {props.goalActive ? (
-          <p className="text-2xs text-fg-subtle">
-            Pause or complete the active goal before changing Variable Sets.
-          </p>
-        ) : props.voiceActive ? (
-          <p className="text-2xs text-fg-subtle">End voice mode before changing Variable Sets.</p>
-        ) : props.busy ? (
-          <p className="text-2xs text-fg-subtle">
-            Variable Sets can be changed after the current and queued work finishes.
-          </p>
-        ) : null}
-        {refreshRequired ? (
-          <div className="flex items-center justify-between gap-3 text-xs text-status-waiting">
-            <span>
-              The update committed, but this session must be refreshed before more changes.
-            </span>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              disabled={saving}
-              onClick={() => void refreshCommittedSession()}
-            >
-              Retry refresh
-            </Button>
-          </div>
-        ) : null}
-        {error ? (
-          <p role="alert" className="text-xs text-danger">
-            {error}
-          </p>
-        ) : null}
-
-        <div className="flex justify-end gap-2 border-t border-border/70 pt-3">
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={saving}
-            onClick={() => setOpen(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            disabled={
-              !selectedChanged ||
-              saving ||
-              busy ||
-              !canEdit ||
-              (draftIds.length > 0 && !props.canUse)
-            }
-            onClick={() => void save()}
-          >
-            {saving ? <Loader2Icon className="animate-spin" /> : null}
-            Save
-          </Button>
-        </div>
+        {content}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1,6 +1,9 @@
+import { SessionWaitStatus } from "../src/components/session/session-wait-status";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
+import { SessionHeader } from "../src/components/rail/session-header";
+import { sessionStateLabel } from "../src/lib/session-rail";
 import { RowQuickActions } from "../src/components/rail/session-list";
 import {
   SessionRowContent,
@@ -25,14 +28,36 @@ const cases = [
     depth: 0,
     summary: neutral,
     scheduled: true,
-    relativeTime: "1 Aug",
+    relativeTime: "12 Aug",
   },
   { id: "no-metadata", active: false, depth: 0, summary: neutral },
   { id: "selected-child", active: true, depth: 1, summary: neutral, relativeTime: "1h" },
   { id: "unselected-child", active: false, depth: 2, summary: active, relativeTime: "now" },
+  { id: "overflow", active: false, depth: 0, summary: neutral },
 ] as const;
 
 function SessionRailRowMetadataFixture() {
+  const [waitSession, setWaitSession] = useState({
+    id: "waiting",
+    workspaceId: "workspace",
+    title: "Ship the typography PR",
+    initialMessage: "Ship the typography PR",
+    metadata: {},
+    status: "idle",
+    model: "codex/gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    effectiveControl: {
+      state: "active",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+    },
+    inputWait: {
+      deadlineAt: new Date(Date.now() + 600_000).toISOString(),
+      reason: "Waiting for CI",
+    },
+  } as Session);
   const [quickActionSession, setQuickActionSession] = useState({
     id: "quick-actions",
     archived: false,
@@ -70,6 +95,9 @@ function SessionRailRowMetadataFixture() {
                     className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
                   >
                     <SessionRowContent
+                      quickActionSlots={
+                        Number(!quickActionSession.archived) + Number(scenario.depth === 0)
+                      }
                       title={longTitle}
                       stateLabel="Idle"
                       depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}
@@ -78,45 +106,103 @@ function SessionRailRowMetadataFixture() {
                       summary={scenario.summary}
                       scheduled={"scheduled" in scenario ? scenario.scheduled : false}
                       relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
-                      creator={{
-                        kind: "subject",
-                        subjectId: "user:bendik",
-                        label: "Bendik Nyheim",
-                      }}
+                      creator={
+                        scenario.depth > 0
+                          ? null
+                          : {
+                              kind: "subject",
+                              subjectId: "user:bendik",
+                              label: "Bendik Nyheim",
+                            }
+                      }
                     />
                   </a>
                 </HoverCardTrigger>
                 <HoverCardContent side="right" collisionPadding={8}>
                   <SessionRowHoverDetails
-                    title={longTitle}
+                    title={
+                      scenario.id === "overflow"
+                        ? "Long_unbroken_session_title_".repeat(8)
+                        : longTitle
+                    }
                     createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
                     createdBy={{
                       kind: "subject",
                       subjectId: "user:bendik",
-                      label: "Bendik Nyheim",
+                      label:
+                        scenario.id === "overflow"
+                          ? "opengeni-workbench-acceptance-".repeat(6)
+                          : "Bendik Nyheim",
                     }}
                     descendantCount={3}
                     descendantCountTruncated={false}
                   />
                 </HoverCardContent>
               </HoverCard>
-              {scenario.id === "time-only" ? (
-                <RowQuickActions
-                  session={quickActionSession}
-                  onPin={async (session, pinned) => {
-                    const updated = { ...session, pinned };
-                    setQuickActionSession(updated);
-                    return updated;
-                  }}
-                  onArchive={async (session, archived) => {
-                    setQuickActionSession({ ...session, archived });
-                  }}
-                />
-              ) : null}
+              <RowQuickActions
+                session={{
+                  ...quickActionSession,
+                  parentSessionId: scenario.depth > 0 ? "parent" : null,
+                }}
+                onPin={async (session, pinned) => {
+                  const updated = { ...session, pinned };
+                  setQuickActionSession(updated);
+                  return updated;
+                }}
+                onArchive={async (session, archived) => {
+                  setQuickActionSession({ ...session, archived });
+                }}
+              />
             </div>
           ))}
         </div>
       </aside>
+      <section data-testid="wait-preview" className="mt-8 border border-border">
+        <SessionHeader
+          session={waitSession}
+          ancestors={[]}
+          connectionState="live"
+          status={waitSession.status}
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+        />
+        <SessionWaitStatus session={waitSession} />
+        <div data-testid="waiting-row" className="flex h-8 w-[244px] items-center px-3">
+          <SessionRowContent
+            title={waitSession.title!}
+            stateLabel={sessionStateLabel(waitSession)}
+            mobile={false}
+            depthLabel={null}
+            descendantLabel={null}
+            summary={waitSession.inputWait ? active : neutral}
+            scheduled={false}
+          />
+        </div>
+        <div className="flex flex-wrap gap-3 p-4">
+          <button
+            onClick={() =>
+              setWaitSession({
+                ...waitSession,
+                inputWait: {
+                  deadlineAt: new Date(Date.now() - 60_000).toISOString(),
+                  reason: "Waiting for CI",
+                },
+              })
+            }
+          >
+            Recheck due
+          </button>
+          <button
+            onClick={() => setWaitSession({ ...waitSession, inputWait: null, status: "idle" })}
+          >
+            Complete work
+          </button>
+        </div>
+      </section>
     </main>
   );
 }

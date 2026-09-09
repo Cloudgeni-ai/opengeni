@@ -84,6 +84,8 @@ export function buildCompanyBrainContributionReceipt(input: {
   companyProfileIncluded: boolean;
   workspaceMemory: string | null;
   skillActivations: readonly RuntimeSkillActivation[];
+  /** Exact already-bounded index text for server-backed reading, independent of compute. */
+  skillCatalogText?: string;
 }): CompanyBrainContributionReceipt {
   const contributions: CompanyBrainContribution[] = [];
   for (const entry of input.instructionPolicy.entries) {
@@ -108,7 +110,9 @@ export function buildCompanyBrainContributionReceipt(input: {
       }),
     );
   }
-  for (const descriptor of input.preferences?.descriptors ?? []) {
+  for (const descriptor of input.skillCatalogText !== undefined
+    ? []
+    : (input.preferences?.descriptors ?? [])) {
     contributions.push(
       contribution({
         category: "skill_guide_descriptor",
@@ -141,7 +145,19 @@ export function buildCompanyBrainContributionReceipt(input: {
       }),
     );
   }
-  for (const descriptor of composeRuntimeSkills(input.skillActivations).configuredDescriptors) {
+  if (input.skillCatalogText)
+    contributions.push(
+      contribution({
+        category: "skill_guide_descriptor",
+        source: "runtime_skill_catalog",
+        inclusionReason: "authorized_skill_descriptor",
+        authorityScope: "workspace",
+        text: input.skillCatalogText,
+      }),
+    );
+  for (const descriptor of input.skillCatalogText !== undefined
+    ? []
+    : composeRuntimeSkills(input.skillActivations).configuredDescriptors) {
     contributions.push(
       contribution({
         category: "skill_guide_descriptor",

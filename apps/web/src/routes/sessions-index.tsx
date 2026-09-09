@@ -1,3 +1,7 @@
+import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { captureAnalyticsEvent } from "@/lib/analytics-observer";
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
 // THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
@@ -17,13 +21,12 @@ import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
   useChannels,
-  useRigs,
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
-import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
   RealtimeVoiceModelPanel,
@@ -50,6 +53,8 @@ import {
 } from "lucide-react";
 import {
   createElement,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -65,10 +70,9 @@ import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
-import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
+import { ModelPicker } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
-  RepositoryContextPicker,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
 import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
@@ -107,13 +111,14 @@ import {
 import {
   effortOptionsForModel,
   findPickerRow,
+  modelUsesCredits,
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { attachManualRepository } from "@/lib/manual-repositories";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import {
   isPersonalAttachmentConflict,
   newSessionFixedResourceCatalogFailed,
@@ -168,6 +173,12 @@ import type { Channel, SandboxBackend, Session } from "@/types";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
+const EmptyCreditsNotice = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.EmptyCreditsNotice,
+  })),
+);
+
 export function SessionsIndexRoute({
   workspaceId,
   launch = EMPTY_COMPOSER_LAUNCH,
@@ -204,7 +215,7 @@ function SessionsIndexRouteContent({
   );
   const defaultFirstPartyMcpTools = useMemo(
     () =>
-      configuredToolDefaults?.firstPartyMcpTools.filter((tool) =>
+      configuredToolDefaults?.firstPartyMcpTools?.filter((tool) =>
         firstPartyMcpToolPolicy.allowed.includes(tool),
       ) ?? firstPartyMcpToolPolicy.default,
     [configuredToolDefaults, firstPartyMcpToolPolicy],
@@ -273,7 +284,8 @@ function SessionsIndexRouteContent({
   const variableSets = useVariableSets({
     enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
   });
-  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
+  const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
+  const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -282,14 +294,6 @@ function SessionsIndexRouteContent({
   const tenancyCapabilityGeneration = useRef(0);
   useEffect(() => {
     const generation = ++tenancyCapabilityGeneration.current;
-    if (personalWorkspace) {
-      setTenancyCapabilities({
-        activated: true,
-        canCreatePrivate: true,
-        reason: "available",
-      });
-      return;
-    }
     setTenancyCapabilities(null);
     void context.client
       .getSessionTenancyCreateCapabilities(workspaceId)
@@ -314,6 +318,11 @@ function SessionsIndexRouteContent({
         );
       });
   }, [context.client, personalWorkspace, workspaceId]);
+  const createVisibility = newSessionCreateVisibility(
+    personalWorkspace,
+    draft.visibility,
+    tenancyCapabilities?.canCreatePrivate === true,
+  );
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -500,7 +509,7 @@ function SessionsIndexRouteContent({
       : [];
   });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
-  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
+  const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
   const fleetLoadFailed =
@@ -538,7 +547,7 @@ function SessionsIndexRouteContent({
   const personalResourceCatalogRefreshGeneration = useRef(0);
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
     personalResourceCount: selectedPersonalResourceCount,
-    visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+    visibility: createVisibility,
   });
   const refreshPersonalResourceCatalogs = useLatestCallback(async (): Promise<void> => {
     const generation = ++personalResourceCatalogRefreshGeneration.current;
@@ -550,7 +559,7 @@ function SessionsIndexRouteContent({
           : canResolveVariableSetAttachments
             ? resolveVariableSetAttachments()
             : Promise.resolve(),
-        rigs.refresh(),
+        canUseRigs ? rigs.refresh() : Promise.resolve(),
       ]);
     } finally {
       if (personalResourceCatalogRefreshGeneration.current === generation) {
@@ -702,7 +711,7 @@ function SessionsIndexRouteContent({
       options: newSessionDraftOptionsFromSessionDraft(
         draft,
         defaultFirstPartyMcpTools,
-        newSessionCreateVisibility(personalWorkspace, draft.visibility),
+        createVisibility,
       ),
     }),
     [
@@ -714,7 +723,7 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
-      personalWorkspace,
+      createVisibility,
       persistedToolPolicy,
       projectProvenancePresent,
       selectedChannelId,
@@ -826,9 +835,10 @@ function SessionsIndexRouteContent({
   });
   const busy = context.busy || submitting;
   const privateCreateUnavailable =
-    !personalWorkspace &&
-    draft.visibility === "private" &&
-    tenancyCapabilities?.canCreatePrivate !== true;
+    (personalWorkspace && tenancyCapabilities === null) ||
+    (!personalWorkspace &&
+      draft.visibility === "private" &&
+      tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
   const newSessionPolicyValid = Boolean(
     selectedPolicyRow?.selectable &&
@@ -845,6 +855,40 @@ function SessionsIndexRouteContent({
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
+  const startBlocker =
+    modelCatalog.loading || newSessionDraft.loading
+      ? null
+      : modelCatalog.error
+        ? "model_catalog_unavailable"
+        : !newSessionPolicyValid
+          ? !modelCatalog.rows.some((row) => row.selectable)
+            ? "no_model_connected"
+            : selectedPolicyRow &&
+                selectedPolicyRow.billingClass !== "opengeni_credits" &&
+                selectedPolicyRow.catalog.credentialReadiness.status !== "ready"
+              ? "selected_model_not_connected"
+              : "model_policy_unavailable"
+          : privateCreateUnavailable
+            ? "private_session_unavailable"
+            : newSessionDraft.conflict
+              ? "draft_conflict"
+              : attachments.hasUnresolved
+                ? "attachments_pending"
+                : !computeReady
+                  ? "compute_unavailable"
+                  : null;
+  useEffect(() => {
+    const record = () => {
+      if (startBlocker)
+        captureAnalyticsEvent("session_start_blocker_viewed", {
+          workspace_id: workspaceId,
+          reason: startBlocker,
+        });
+    };
+    record();
+    window.addEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, record);
+    return () => window.removeEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, record);
+  }, [startBlocker, workspaceId]);
   // Shared with the bar start control and the mobile “+ → Voice model” panel.
   const voiceSelection = useRealtimeModelSelection({
     client: context.client,
@@ -864,6 +908,11 @@ function SessionsIndexRouteContent({
       realtimeModel: SessionRealtimeModel | null,
       policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
     ): Promise<boolean> => {
+      if (startBlocker)
+        captureAnalyticsEvent("session_start_blocked", {
+          workspace_id: workspaceId,
+          reason: startBlocker,
+        });
       const hasTypedText = message.trim().length > 0;
       const text = hasTypedText
         ? message
@@ -945,6 +994,7 @@ function SessionsIndexRouteContent({
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
+                    tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request }) => {
                     newSessionDraft.captureConflict(error);
@@ -998,6 +1048,7 @@ function SessionsIndexRouteContent({
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",
+                  tenancyCapabilities?.canCreatePrivate === true,
                 ),
                 onFailure: ({ error, request }) => {
                   newSessionDraft.captureConflict(error);
@@ -1219,6 +1270,24 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
+        {modelUsesCredits(selectedPolicyRow?.catalog) &&
+        hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:read") ? (
+          <div className="mt-6">
+            <Suspense fallback={null}>
+              <EmptyCreditsNotice
+                workspaceId={workspaceId}
+                accountId={workspace?.accountId ?? null}
+                canBuyCredits={hasAccountPermission(
+                  context.accessContext,
+                  workspace?.accountId ?? "",
+                  "billing:manage",
+                )}
+                canReadBilling
+              />
+            </Suspense>
+          </div>
+        ) : null}
+
         <div ref={composerRegionRef} className="mt-8">
           <ConsoleComposer
             workspaceId={workspaceId}
@@ -1264,6 +1333,32 @@ function SessionsIndexRouteContent({
                       },
                     }
                   : {})}
+                {...(draft.compute.kind === "sandbox"
+                  ? {
+                      variableSets: {
+                        selectedCount: draft.variableSetIds.length,
+                        panel: (
+                          <ManagedSandboxFields
+                            variableSetsOnly
+                            draft={draft}
+                            onChange={setDraft}
+                            disabled={busy || newSessionDraft.loading}
+                            variableSets={selectableVariableSets}
+                            rigs={selectableRigs}
+                            personalResourceAccess={{
+                              names: selectedPersonalResourceNames,
+                              visibility: createVisibility,
+                            }}
+                            catalogRecovery={{
+                              error: fixedResourceCatalogError,
+                              refreshing: personalResourceCatalogRefreshPending,
+                              onRetry: () => void refreshPersonalResourceCatalogs(),
+                            }}
+                          />
+                        ),
+                      },
+                    }
+                  : {})}
                 voiceModel={{
                   selectedLabel: voiceSelection.selectedModel.label,
                   disabled: busy || newSessionDraft.loading || personalMachineSelected,
@@ -1281,6 +1376,9 @@ function SessionsIndexRouteContent({
             actions={
               <>
                 <SessionModelControl
+                  hasImageAttachments={attachments.attachments.some(
+                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                  )}
                   modelCatalog={modelCatalog}
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
@@ -1324,25 +1422,11 @@ function SessionsIndexRouteContent({
             }
             header={
               <SessionSetupStrip
-                workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
-                showRepos={draft.compute.kind === "sandbox"}
                 channels={channelsQuery.channels}
                 selectedChannelId={selectedChannelId}
                 onChannelChange={selectProject}
                 onCreateProject={() => setProjectDialogOpen(true)}
-                selection={{
-                  mcpServerIds: context.selectedCapabilityToolIds,
-                  firstPartyToolIds: draft.firstPartyMcpTools,
-                }}
-                onToolSelectionChange={(selection) => {
-                  setToolSelectionExplicit(true);
-                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
-                  setDraft((current) => ({
-                    ...current,
-                    firstPartyMcpTools: selection.firstPartyToolIds,
-                  }));
-                }}
               />
             }
           />
@@ -1365,7 +1449,7 @@ function SessionsIndexRouteContent({
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
-              visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+              visibility: createVisibility,
             }}
             fleet={fleet}
             machines={machines}
@@ -1528,42 +1612,22 @@ function RecentSessionRow({
 
 // Setup selections sit above the prompt so the footer remains an action row.
 // Repo stays out of the compute band so that band only shows when rigs /
-// variable sets exist. On mobile, tools and repos remain under “+”.
+// variable sets exist. Tools and repos live under “+” at every width.
 function SessionSetupStrip({
-  workspaceId,
   disabled,
-  showRepos,
   channels,
   selectedChannelId,
   onChannelChange,
   onCreateProject,
-  selection,
-  onToolSelectionChange,
 }: {
-  workspaceId: string;
   disabled: boolean;
-  showRepos: boolean;
   channels: Channel[];
   selectedChannelId: string | null;
   onChannelChange: (channelId: string | null) => void;
   onCreateProject: () => void;
-  selection: SessionToolSelection;
-  onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
-  const context = useAppContext();
-  const firstPartyToolOptions = firstPartySessionToolOptionsFor(
-    clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
-  );
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
-      <SessionToolPicker
-        servers={context.toolMcpServers}
-        firstPartyTools={firstPartyToolOptions}
-        selection={selection}
-        triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
-        disabled={disabled}
-        onChange={onToolSelectionChange}
-      />
+    <div className="flex min-w-0 items-center gap-1.5 border-b border-border/70 px-3 py-2 sm:px-4">
       <SessionFolderPicker
         channels={channels}
         selectedChannelId={selectedChannelId}
@@ -1571,23 +1635,18 @@ function SessionSetupStrip({
         onChange={onChannelChange}
         onCreateProject={onCreateProject}
       />
-      {showRepos ? (
-        <WorkspaceRepositoryPicker
-          workspaceId={workspaceId}
-          disabled={disabled}
-          triggerClassName="min-w-0 shrink-0 overflow-hidden max-sm:hidden"
-        />
-      ) : null}
     </div>
   );
 }
 
 /** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
+  hasImageAttachments,
   modelCatalog,
   policyError,
   disabled,
 }: {
+  hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
@@ -1595,6 +1654,7 @@ function SessionModelControl({
   const context = useAppContext();
   return (
     <ModelPicker
+      hasImageAttachments={hasImageAttachments}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}
@@ -1851,28 +1911,6 @@ function workspaceRepositoryPickerProps(
   };
 }
 
-// The workspace repository picker, wired to the cross-route selection in context.
-// Reused in both compute kinds: the primary clone source on a managed sandbox,
-// and grayed/disabled on a connected machine (which uses its own checkout).
-// Mobile opens the same body from ComposerMobilePlus — hide the bar pill there.
-function WorkspaceRepositoryPicker({
-  workspaceId,
-  disabled,
-  triggerClassName,
-}: {
-  workspaceId: string;
-  disabled: boolean;
-  triggerClassName?: string;
-}) {
-  const context = useAppContext();
-  return (
-    <RepositoryContextPicker
-      {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
-      {...(triggerClassName ? { triggerClassName } : {})}
-    />
-  );
-}
-
 function WorkspaceRepositoryMenuBody({
   workspaceId,
   disabled,
@@ -1912,7 +1950,7 @@ function ComputeTargetControl(props: {
   onComputeChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalResourceAccess: NewSessionPersonalResourceAccess;
-  fleet: ReturnType<typeof useMachines>;
+  fleet: ReturnType<typeof useWorkspaceMachines>;
   machines: MachineView[];
   variableSets: VariableSet[];
   rigs: Rig[];
@@ -2175,10 +2213,7 @@ function ComputeTargetControl(props: {
         />
       )}
       {draft.compute.kind === "machine" ? (
-        <PersonalResourceAccessInline
-          access={props.personalResourceAccess}
-          disabled={props.disabled}
-        />
+        <PersonalResourceAccessInline access={props.personalResourceAccess} />
       ) : null}
     </section>
   );
@@ -2239,6 +2274,8 @@ function ComputeKindButton(props: {
 // ── Managed Sandbox extras: rig + variable set only (repos live in the composer pills) ─
 
 function ManagedSandboxFields(props: {
+  variableSetsOnly?: boolean;
+  leading?: ReactNode;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
@@ -2252,9 +2289,7 @@ function ManagedSandboxFields(props: {
   const personalVariableSets = props.variableSets.filter((resource) => resource.scope === "user");
   const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
   const workspaceVariableSets = props.variableSets.filter((resource) => resource.scope !== "user");
-  const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
-  const hasEnumerableVariableSets =
-    workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
+  const showRigs = !props.variableSetsOnly && (workspaceRigs.length > 0 || personalRigs.length > 0);
   const availableWorkspaceVariableSets = workspaceVariableSets.filter(
     (variableSet) => !draft.variableSetIds.includes(variableSet.id),
   );
@@ -2263,7 +2298,7 @@ function ManagedSandboxFields(props: {
   );
   const hasVariableSetChoices =
     availableWorkspaceVariableSets.length > 0 || availablePersonalVariableSets.length > 0;
-  const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets;
+  const showVariableSets = props.variableSetsOnly === true;
   if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
     return null;
   }
@@ -2271,7 +2306,19 @@ function ManagedSandboxFields(props: {
   return (
     // One flat card: hairline-separated rows, controls right-aligned, no
     // nested boxes and no restating helper text — the controls speak.
-    <div className="mt-5 overflow-hidden rounded-lg border border-border bg-surface/40">
+    <div
+      className={
+        props.variableSetsOnly
+          ? "min-h-0 overflow-y-auto"
+          : "mt-5 overflow-hidden rounded-lg border border-border bg-surface/40"
+      }
+    >
+      {props.leading ? (
+        <div className="flex items-center gap-2 px-1 pb-2">
+          {props.leading}
+          <span className="text-sm font-medium">Variable sets</span>
+        </div>
+      ) : null}
       {props.catalogRecovery.error ? (
         <div
           role="alert"
@@ -2345,11 +2392,11 @@ function ManagedSandboxFields(props: {
       {showVariableSets ? (
         <div
           className={cn(
-            "flex items-center justify-between gap-3 px-3 py-2",
+            "flex flex-col items-stretch gap-3 px-3 py-2",
             showRigs && "border-t border-border/70",
           )}
         >
-          <Label className="flex shrink-0 items-center gap-1.5 self-start pt-1.5 text-xs">
+          <Label className="sr-only">
             <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
             Variable sets
           </Label>
@@ -2405,32 +2452,24 @@ function ManagedSandboxFields(props: {
           </div>
         </div>
       ) : null}
-      <PersonalResourceAccessInline
-        access={props.personalResourceAccess}
-        disabled={props.disabled}
-        embedded
-      />
+      <PersonalResourceAccessInline access={props.personalResourceAccess} embedded />
     </div>
   );
 }
 
 function PersonalResourceAccessInline(props: {
   access: NewSessionPersonalResourceAccess;
-  disabled: boolean;
   embedded?: boolean;
 }) {
   if (props.access.names.length === 0) return null;
-  const content =
-    props.access.visibility === "workspace" ? (
-      <p className="text-2xs leading-4 text-fg-subtle">
-        {props.access.names.join(", ")} will be used only for the message you send. Other members
-        may see the result, but cannot use your private credential or resource.
-      </p>
-    ) : (
-      <p className="text-2xs text-fg-subtle">
-        {props.access.names.join(", ")} will be available only to this session.
-      </p>
-    );
+  const content = (
+    <p className="text-2xs text-fg-subtle">
+      {props.access.names.join(", ")} will be available for your work in this session.
+      {props.access.visibility === "workspace"
+        ? " Results are visible to people who can access this chat."
+        : null}
+    </p>
+  );
   return props.embedded ? (
     <div className="border-t border-border/70 px-3 py-2.5">{content}</div>
   ) : (

@@ -114,6 +114,7 @@ export type TransitionSessionVisibilityResult = {
 };
 
 export type ForkSessionContentInput = {
+  sourceEventId?: string;
   sourceWorkspaceId: string;
   sourceSessionId: string;
   actorSubjectId: string;
@@ -346,8 +347,23 @@ export function canonicalSessionForkHash(
     | "destinationVisibility"
     | "workspaceSharedAcknowledged"
     | "runtimeRequest"
+    | "sourceEventId"
   >,
 ): string {
+  if (input.sourceEventId) {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          version: 4,
+          sourceSessionId: input.sourceSessionId,
+          destinationWorkspaceId: input.destinationWorkspaceId,
+          destinationVisibility: input.destinationVisibility,
+          workspaceSharedAcknowledged: input.workspaceSharedAcknowledged,
+          sourceEventId: input.sourceEventId,
+        }),
+      )
+      .digest("hex");
+  }
   if (input.runtimeRequest) {
     return createHash("sha256")
       .update(
@@ -471,6 +487,9 @@ export async function forkSessionContent(
   if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
     throw new Error("The first session fork contract is same-workspace only");
   }
+  if (input.sourceEventId && input.runtimeRequest) {
+    throw new Error("Message forks cannot replace runtime setup");
+  }
   if (Boolean(input.runtimeRequest) !== Boolean(input.runtimeConfiguration)) {
     throw new Error("A fresh session fork runtime request requires its resolved configuration");
   }
@@ -553,6 +572,7 @@ export async function forkSessionContent(
           ${input.operationKey},
           ${requestHash},
           ${SESSION_TENANCY_ACTIVATION_VERSION}
+          ${input.sourceEventId ? sql`, ${input.sourceEventId}::uuid` : sql``}
         )`,
         );
         const result = rows[0];

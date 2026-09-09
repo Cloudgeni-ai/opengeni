@@ -42,6 +42,7 @@ Then open the smallest source files that answer the question:
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
 - Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
@@ -254,6 +255,19 @@ Describe the backend contract in terms of the OpenAI Agents SDK sandbox client/s
 For sandbox configuration work, read `references/sandbox-configuration.md`. Use it when configuring any sandbox backend (Docker, Modal, local, none, the cloud backends, or a Connected Machine / `selfhosted`), deciding which environment variables enter the sandbox, debugging resource mounts, explaining sandbox preparation profiles and lifecycle hooks, adding a sandbox backend, or checking what claims are safe for docs/marketing.
 
 ## Tools And MCP Discovery
+
+For unified Skills work, start with `docs/design/skills-system.md`. Server-side
+file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
+`skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under
+`apps/worker/src/activities/agent-turn/skill-*.ts`. Distinguish a tested adapter
+from its live registration and persisted lifecycle. Native packaged guidance can
+be read without sandbox staging via `loadNativeToolSkillArtifacts`; do not infer
+embedding selection controls or Connected Machine visibility from that helper.
+`packages/contracts/src/skill-metadata.ts` owns the shared YAML interpretation.
+Every active Skill's name and description come from `SKILL.md` frontmatter;
+database/catalog metadata is a derived projection, never a second edit surface.
+Preserve valid YAML bytes and historical revisions. Legacy conversion and
+activation guards belong to the maintenance cutover, not a permanent fallback.
 
 For tools and MCP work, distinguish:
 

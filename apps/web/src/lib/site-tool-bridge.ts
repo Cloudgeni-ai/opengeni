@@ -8,7 +8,8 @@ import {
 } from "@opengeni/sdk";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
 
-import { ApiError, request } from "@/api";
+import { siteSessionPath } from "@opengeni/sdk/site";
+import { ApiError, request, requestResponse } from "@/api";
 
 type SiteToolCallRequest = ToolGatewayCallRequest & {
   siteArtifactId: string;
@@ -69,6 +70,29 @@ export function createSiteToolBridge(input: {
   };
 
   return {
+    fetch: async (message, signal) => {
+      const path = siteSessionPath(
+        message.path,
+        input.workspaceId,
+        message.method,
+        input.artifactId,
+      );
+      // The host owns auth and tenant selection. Only content negotiation and
+      // event replay headers come from the embedded SDK.
+      const headers = new Headers();
+      headers.set("x-opengeni-site-id", input.artifactId);
+      headers.set("x-opengeni-site-version", input.siteVersionId);
+      for (const [name, value] of message.headers) {
+        if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
+          headers.set(name, value);
+      }
+      return requestResponse(path, {
+        method: message.method,
+        signal,
+        headers: Object.fromEntries(headers),
+        ...(message.body === undefined ? {} : { body: message.body }),
+      });
+    },
     catalog: async ({ signal }) => await loadCatalog({ signal }),
     call: async (toolRequest, { signal }) => {
       requireAllowedIdentity(allowed, toolRequest.identity);

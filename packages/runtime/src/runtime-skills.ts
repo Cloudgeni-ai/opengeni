@@ -1,6 +1,16 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
+import { sitePackageVersions } from "./site-package-versions";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSkillMetadata } from "@opengeni/contracts";
 
 import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
 import {
@@ -13,7 +23,7 @@ import {
   type SkillIndexEntry,
 } from "@openai/agents/sandbox";
 
-import { skillArtifactContentSha256 } from "./skill-library";
+import { buildPortableSkillArtifact, readSkillLibraryArtifact } from "./skill-library";
 
 export type RuntimeSkillArtifactFile = Readonly<{
   path: string;
@@ -102,8 +112,39 @@ const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
   videoGeneration: false,
 });
 
+/**
+ * Packaged guidance is server-readable content, not a sandbox installation.
+ * The caller supplies the effective capability selection; compute backend is
+ * deliberately absent. Reading never stages files into cwd or a user's box.
+ */
+export function loadNativeToolSkillArtifacts(
+  nativeTools: NativeToolSkillSet & Readonly<{ projects?: boolean }>,
+): readonly RuntimeSkillArtifact[] {
+  const directories: string[] = [];
+  if (nativeTools.projects) directories.push("bundled_project_skills");
+  if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
+  if (nativeTools.sites) directories.push("bundled_site_skills");
+  if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
+  return directories.flatMap((directory) => {
+    const root = packagedSkillDirectory(directory);
+    return skillDirNames(root).map((name) => {
+      const artifact = readSkillLibraryArtifact(join(root, name));
+      const files = [...artifact.files];
+      if (name === "opengeni-sites") {
+        const generatedPath = "package-versions.json";
+        const existing = files.findIndex((entry) => entry.path === generatedPath);
+        if (existing !== -1) files.splice(existing, 1);
+        files.push({
+          path: generatedPath,
+          content: JSON.stringify(sitePackageVersions(), null, 2),
+        });
+      }
+      return buildPortableSkillArtifact(files);
+    });
+  });
+}
+
 let stagedBundledArtifactSkillsDir: string | null = null;
-let stagedBundledSiteSkillsDir: string | null = null;
 let stagedBundledVideoSkillsDir: string | null = null;
 
 /**
@@ -132,7 +173,7 @@ export function composeRuntimeSkills(
   const children: Record<string, Entry> = {};
   for (const source of nativeSources) {
     for (const name of source.names) {
-      children[name] = localDir({ src: join(source.directory, name) });
+      children[name] = source.entries?.[name] ?? localDir({ src: join(source.directory, name) });
     }
   }
 
@@ -188,7 +229,7 @@ export function composeRuntimeSkills(
     configuredNames: Object.freeze(
       effectiveActivations.map(({ activation }) => activation.artifact.name),
     ),
-    nativeToolNames: Object.freeze(nativeSources.flatMap((source) => source.names)),
+    nativeToolNames: Object.freeze([...nativeSources.flatMap((source) => source.names)]),
   });
 }
 
@@ -245,13 +286,21 @@ function validateRuntimeSkillActivation(
   }
   assertSafeRuntimeSkillName(activation.artifact.name);
   runtimeSkillDirNode(activation.artifact);
-  const contentSha256 = skillArtifactContentSha256(activation.artifact.files);
+  const artifact = buildPortableSkillArtifact(activation.artifact.files);
+  if (
+    activation.artifact.name !== artifact.name ||
+    (activation.artifact.description != null &&
+      activation.artifact.description !== artifact.description)
+  ) {
+    throw new Error(`Skill metadata must match SKILL.md frontmatter: ${activation.id}`);
+  }
+  const contentSha256 = artifact.contentSha256;
   if (activation.source === "installation" && contentSha256 !== activation.contentSha256) {
     throw new Error(
       `Installed Skill artifact hash mismatch for ${activation.id}: expected ${activation.contentSha256}, got ${contentSha256}`,
     );
   }
-  return Object.freeze({ activation, contentSha256 });
+  return Object.freeze({ activation: { ...activation, artifact }, contentSha256 });
 }
 
 function selectionForActivation({
@@ -283,12 +332,14 @@ function selectionForActivation({
 
 function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
   directory: string;
+  entries?: Record<string, Entry>;
   lazySource: LocalDirLazySkillSource;
   names: string[];
   reason: string;
 }> {
   const sources: Array<{
     directory: string;
+    entries?: Record<string, Entry>;
     lazySource: LocalDirLazySkillSource;
     names: string[];
     reason: string;
@@ -303,10 +354,14 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     });
   }
   if (nativeTools.sites) {
-    const directory = bundledSiteSkillsDir();
+    const directory = packagedSkillDirectory("bundled_site_skills");
+    const site = bundledSkillEntry(join(directory, "opengeni-sites"), {
+      "package-versions.json": file({ content: JSON.stringify(sitePackageVersions(), null, 2) }),
+    });
     sources.push({
       directory,
-      lazySource: localDirLazySkillSource({ src: directory }),
+      entries: { "opengeni-sites": site },
+      lazySource: localDirLazySkillSource({ src: directory, baseDir: directory }),
       names: skillDirNames(directory),
       reason: "bundled Site authoring skill",
     });
@@ -346,16 +401,16 @@ function bundledArtifactSkillsDir(): string {
   return stagedBundledArtifactSkillsDir;
 }
 
-function bundledSiteSkillsDir(): string {
-  const packaged = packagedSkillDirectory("bundled_site_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledSiteSkillsDir) {
-    stagedBundledSiteSkillsDir = stageSkillDirectory(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_site_skills"),
-    );
+/** Compose generated metadata in the manifest, never in the installed application. */
+function bundledSkillEntry(directory: string, overrides: Record<string, Entry> = {}): Dir {
+  const children: Record<string, Entry> = {};
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    children[entry.name] = entry.isDirectory()
+      ? bundledSkillEntry(path)
+      : file({ content: readFileSync(path, "utf8") });
   }
-  return stagedBundledSiteSkillsDir;
+  return dir({ children: { ...children, ...overrides } });
 }
 
 function bundledVideoSkillsDir(): string {
@@ -464,43 +519,6 @@ function compareRuntimeSkillName(left: string, right: string): number {
 }
 
 function runtimeSkillDescription(skill: RuntimeSkillArtifact): string {
-  const explicit = skill.description?.trim();
-  if (explicit) return explicit;
   const markdown = skill.files.find((skillFile) => skillFile.path === "SKILL.md")?.content ?? "";
-  return skillFrontmatterDescription(markdown) ?? "No description provided.";
-}
-
-function skillFrontmatterDescription(markdown: string): string | null {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return null;
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (end === -1) return null;
-  const collected: string[] = [];
-  let inDescription = false;
-  for (const line of lines.slice(1, end)) {
-    const match = line.match(/^description:\s*(.*)$/);
-    if (match) {
-      const inline = match[1]!.trim();
-      if (inline && inline !== ">-" && inline !== ">" && inline !== "|" && inline !== "|-") {
-        return unquoteFrontmatterValue(inline);
-      }
-      inDescription = true;
-      continue;
-    }
-    if (!inDescription) continue;
-    if (/^\s+\S/.test(line)) {
-      collected.push(line.trim());
-      continue;
-    }
-    break;
-  }
-  const blockValue = collected.join(" ").trim();
-  return blockValue || null;
-}
-
-function unquoteFrontmatterValue(value: string): string {
-  if (value.length >= 2 && value[0] === value.at(-1) && (value[0] === '"' || value[0] === "'")) {
-    return value.slice(1, -1);
-  }
-  return value;
+  return readSkillMetadata(markdown).description;
 }

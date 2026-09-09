@@ -24,6 +24,13 @@ ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
+## Conversation UI
+
+Use `SessionConversation` for an existing session, or compose `MessageTimeline`
+and `ChatComposer` with the session hooks. These use the normal SDK through
+your authenticated host routes. For custom or compatible frontends, the backend
+`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
+
 ## Editable Office artifacts
 
 The optional artifact workbench is isolated from the ordinary session and
@@ -645,6 +652,11 @@ intentional changes should regenerate those snapshots and review the diff.
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
+  Top-level assistant tables in `MessageTimeline` can expand beyond the prose
+  column into the actual conversation panel's available space. Small tables,
+  paragraphs, user bubbles, and nested or standalone Markdown keep their normal
+  width; oversized tables retain table-only horizontal scrolling. No host prop
+  or viewport-wide layout override is required.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render
@@ -722,6 +734,16 @@ capability document so every surface degrades to a reason instead of crashing.
 These surfaces pull in [optional peer dependencies](#optional-peer-dependencies)
 — install only the ones for surfaces you actually mount.
 
+`SandboxWorkspace` keeps capture-backed file browsing passive, but an explicit
+live-file open acquires a viewer. Failed opens show the connection error and a
+retry that renegotiates the viewer instead of leaving a waking spinner running.
+When composing `SandboxFiles` directly, pass `workspaceError` alongside
+`liveWorkspaceReady` and supply an `onWakeWorkspace` callback that can retry a
+failed negotiation. Complete PNG, JPEG, GIF, and WebP reads render as read-only
+image previews; truncated reads and other binary formats remain non-editable
+notices. Image previews use the existing bounded file-read path and do not
+publish or retain additional files.
+
 ## Connected Machines (`@opengeni/react/machines`)
 
 Bring-your-own-compute UI: the Machines dashboard, per-machine metrics, the
@@ -789,3 +811,28 @@ with streaming, tool calls, and a worker spawn, plus fleet and scheduled-task
 views and a dark/light toggle. `realtime.html` is the public-package reference
 consumer described above, with deterministic mock and same-origin live modes.
 `bun run demo:build` is part of the repo gate.
+
+### Model selection
+
+`ModelPolicyPicker` opens a flat, searchable list grouped by payment source, with
+the selected model checked in its provider group. Choosing a model applies it and closes the popover.
+Thinking and supported speed controls remain in a fixed footer instead of a
+nested page. Model changes preserve supported reasoning effort and latency;
+unsupported effort falls back to the new model's default, and unsupported speed
+returns to Standard. Thinking uses inline radio choices and is hidden when the
+model has no adjustable reasoning levels. Availability and Codex-only session restrictions still disable choices.
+
+The trigger renders immediately; the searchable popover loads when opened. Hosts
+can translate its search, current-selection, empty-result, attachment-warning, and
+thinking labels through `messages`, and override payment descriptions through
+`messages.billingHints`.
+
+Subscription descriptions appear once per provider group. Free models carry a
+Free badge. Pass `hasImageAttachments` for the current draft to show an image
+compatibility warning only when the selected model cannot view those images.
+
+`MessageTimeline.renderMessageActions(item)` places host-owned controls beside
+Copy and the timestamp for user messages and completed assistant messages.
+The host owns feedback, fork authorization, and mutations; streaming assistant
+messages omit this slot. Use the `group/copy` hover/focus state and preserve
+visible touch targets when styling actions.

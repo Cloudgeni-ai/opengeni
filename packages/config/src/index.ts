@@ -200,7 +200,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
-  "Installed and selected Skills are indexed under .agents/ and may include role-specific guidance.",
+  "Installed and selected Skills appear in the session Skill index; follow its reading instructions and any role-specific guidance.",
   "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
   "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
   "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
@@ -2502,12 +2502,10 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
     capabilities: {
       reasoning: {
         upstream: "supported",
-        // OpenRouter advertises the reasoning controls, but the catalogue does
-        // not publish this model's accepted effort vocabulary. Preserve that
-        // upstream fact without exposing an unverified runnable selector.
-        runnable: false,
-        efforts: [],
-        defaultEffort: null,
+        // OpenRouter /api/v1/models advertises low and medium for this route.
+        runnable: true,
+        efforts: ["low", "medium"],
+        defaultEffort: "medium",
         required: false,
       },
       functionCalling: { upstream: "supported", runnable: true },

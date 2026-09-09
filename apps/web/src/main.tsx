@@ -1,4 +1,5 @@
 import "./lib/crypto-random-uuid";
+import { AppearanceProvider } from "./lib/appearance";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
@@ -22,6 +23,8 @@ if (preloadRecoveryStorage) {
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <AppearanceProvider>
+      <App />
+    </AppearanceProvider>
   </React.StrictMode>,
 );

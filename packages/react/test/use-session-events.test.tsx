@@ -7,17 +7,20 @@ import {
   SESSION_EVENT_BROWSER_MAX_COUNT,
   SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
   SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
-  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
   boundBrowserSessionEventWindow,
   type UseSessionEventsResult,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
 import { buildTimeline, type TimelineItem } from "../src/timeline";
+import {
+  invokeOlderHistoryLoaderWithReceiptCapture,
+  type OlderHistoryLoadReceipt,
+} from "../src/older-history";
 
 registerDom();
 
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
-const SESSION_HISTORY_PAGE_SIZE = 255;
+const SESSION_HISTORY_PAGE_SIZE = 1000;
 
 function event(
   sequence: number,
@@ -205,7 +208,7 @@ describe("useSessionEvents", () => {
       },
     ]);
     expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(946);
+    expect(hook.result.current.events[0]?.sequence).toBe(201);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
     expect(lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE)).toHaveLength(1);
@@ -236,7 +239,7 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
-        if (delayedOlder && options.before === 146) {
+        if (delayedOlder && options.before === 401) {
           const page = listPage(store, options);
           await delayedOlder;
           return page;
@@ -338,11 +341,11 @@ describe("useSessionEvents", () => {
       });
       expect(hook.result.current.lastSequence).toBe(200);
 
-      // The same-sized raw gap can instead contain hundreds of visible
-      // messages. That compact probe crosses the semantic group bound, so the
-      // hook discards it and reloads one latest tail before reopening SSE.
-      store = Array.from({ length: 400 }, (_, index) => event(index + 1));
-      durableHead = 400;
+      // A large raw gap skips the compact probe and reloads one latest tail.
+      // Keep enough history behind that tail for the in-flight older-page
+      // invalidation check below.
+      store = Array.from({ length: 1_400 }, (_, index) => event(index + 1));
+      durableHead = 1_400;
       await suspendAndResume();
 
       expect(listCalls).toEqual([
@@ -360,23 +363,16 @@ describe("useSessionEvents", () => {
           payloadMode: "full",
         },
         {
-          after: 200,
-          limit: 200,
-          compact: true,
-          direction: "after",
-          payloadMode: "full",
-        },
-        {
           before: Number.MAX_SAFE_INTEGER,
           limit: SESSION_HISTORY_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
         },
       ]);
-      expect(streamCalls).toEqual([2, 2, 200, 400]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400]);
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(146);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
+      expect(hook.result.current.events[0]?.sequence).toBe(401);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
 
       let releaseOlder!: () => void;
       delayedOlder = new Promise<void>((resolve) => {
@@ -399,8 +395,8 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       // A foreground replacement is atomic: the prior complete tip remains
       // visible while the bounded latest page is still in flight.
-      expect(hook.result.current.events[0]?.sequence).toBe(146);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
+      expect(hook.result.current.events[0]?.sequence).toBe(401);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
       await actRun(() => releaseTail(listPage(store, listCalls.at(-1))));
       delayedTail = null;
       await actRun(async () => {
@@ -415,18 +411,18 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       });
       expect(listCalls.some((call) => call.after === 400)).toBe(false);
-      expect(streamCalls).toEqual([2, 2, 200, 400, 6_000]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000]);
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
       // Replacement retires navigation against the discarded window. The old
-      // page must not splice 1–145 onto 5746–6000, leaving an inaccessible gap.
+      // page must not splice 1–400 onto 5001–6000, leaving an inaccessible gap.
       expect(hook.result.current.loadingOlder).toBe(false);
       releaseOlder();
       await actRun(() => pendingOlder);
       expect(pendingOlder.committed).toBe(false);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
       expect(hook.result.current.hasOlder).toBe(true);
 
@@ -442,7 +438,7 @@ describe("useSessionEvents", () => {
         compact: true,
         payloadMode: "full",
       });
-      expect(streamCalls).toEqual([2, 2, 200, 400, 6_000, 6_000]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000, 6_000]);
       expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
       expect(headReadCalls).toHaveLength(5);
@@ -625,7 +621,7 @@ describe("useSessionEvents", () => {
         event(index + 301, "agent.message.delta", { text: "middle" }),
       ),
       event(500),
-      ...Array.from({ length: 200 }, (_, index) =>
+      ...Array.from({ length: 900 }, (_, index) =>
         event(index + 501, "agent.message.delta", { text: "tail" }),
       ),
     ];
@@ -655,16 +651,10 @@ describe("useSessionEvents", () => {
     const more = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
     // The older window starts exactly below the kept window and reaches the log
-    // start within the older two-fetch cap.
+    // start within the older fetch cap.
     expect(more).toBe(false);
     expect(listCalls[1]).toEqual({
       before: 500,
-      limit: SESSION_HISTORY_PAGE_SIZE,
-      compact: true,
-      payloadMode: "full",
-    });
-    expect(listCalls[2]).toEqual({
-      before: 245,
       limit: SESSION_HISTORY_PAGE_SIZE,
       compact: true,
       payloadMode: "full",
@@ -810,7 +800,7 @@ describe("useSessionEvents", () => {
     // This synthetic log has no turn boundary in either page, so the initial
     // read stops after one bounded boundary probe and remains explicitly older.
     expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE * 2);
-    expect(hook.result.current.events[0]?.sequence).toBe(39_491);
+    expect(hook.result.current.events[0]?.sequence).toBe(38_001);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       {
@@ -820,7 +810,7 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       },
       {
-        before: 39_746,
+        before: 39_001,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
@@ -955,7 +945,7 @@ describe("useSessionEvents", () => {
       },
     ]);
     expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(19_746);
+    expect(hook.result.current.events[0]?.sequence).toBe(19_001);
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
@@ -1152,7 +1142,7 @@ describe("useSessionEvents", () => {
     }
   });
 
-  test("projects oversized events and flushes pending bytes before the timer can run", async () => {
+  test("preserves oversized events and flushes pending bytes before the timer can run", async () => {
     let releaseStream!: () => void;
     const blocked = new Promise<void>((resolve) => {
       releaseStream = resolve;
@@ -1210,15 +1200,11 @@ describe("useSessionEvents", () => {
         SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
       );
       expect(hook.result.current.lastSequence).toBeLessThan(streamed.length);
-      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(
+      expect(hook.result.current.windowBytes).toBeGreaterThan(
         SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
       );
       const firstPayload = hook.result.current.events[0]!.payload as Record<string, unknown>;
-      expect(firstPayload.truncation).toMatchObject({
-        truncated: true,
-        surface: "browser_legacy_guard",
-        fullEvidence: { available: false, reason: "not_retained" },
-      });
+      expect(firstPayload).toBe(streamed[0]!.payload as Record<string, unknown>);
 
       releaseStream();
       await flush(1);
@@ -1280,6 +1266,28 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
     expect(hook.result.current.lastSequence).toBe(10_051);
 
+    let automatic!: OlderHistoryLoadReceipt;
+    await actRun(async () => {
+      invokeOlderHistoryLoaderWithReceiptCapture(
+        () => {
+          void hook.result.current.loadOlder();
+        },
+        (receipt) => {
+          automatic = receipt;
+        },
+        true,
+      );
+      await automatic;
+    });
+    await flush();
+    expect(automatic.committed).toBe(false);
+    expect(automatic.tailPreserved).toBe(true);
+    expect(hook.result.current.events[0]?.sequence).toBe(52);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
+    expect(hook.result.current.hasNewer).toBe(false);
+    expect(streamCalls).toEqual([0]);
+    listCalls.length = 0;
+
     const more = await actRun(() => hook.result.current.loadOlder());
     await flush(100);
 
@@ -1320,7 +1328,7 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events[0]?.sequence).toBe(4_746);
+    expect(hook.result.current.events[0]?.sequence).toBe(4_001);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([5_000]);
@@ -1458,6 +1466,46 @@ describe("useSessionEvents", () => {
 });
 
 describe("boundBrowserSessionEventWindow", () => {
+  test("preserves complete multibyte message and tool content above the old event limit", () => {
+    const text = `START-${"界🙂 middle ".repeat(30_000)}-END`;
+    const events = [
+      event(1, "user.message", { text }),
+      event(2, "agent.message.completed", { text }),
+      event(3, "agent.toolCall.output", { id: "large-output", output: text }),
+    ];
+    const window = boundBrowserSessionEventWindow(events);
+    expect(window.events).toEqual(events);
+    expect(window.events[1]).toBe(events[1]);
+    expect(window.truncated).toBeFalse();
+    expect(buildTimeline(window.events)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text })]),
+    );
+  });
+
+  test("retains an event larger than the window alone without losing paging progress", () => {
+    const huge = event(2, "agent.message.completed", {
+      text: `START-${"x".repeat(SESSION_EVENT_BROWSER_MAX_BYTES + 1)}-END`,
+    });
+    for (const direction of ["newest", "oldest"] as const) {
+      const events = direction === "newest" ? [event(1), huge] : [huge, event(3)];
+      const window = boundBrowserSessionEventWindow(events, { direction });
+      expect(window.events).toEqual([huge]);
+      expect(window.events[0]).toBe(huge);
+      expect(window.bytes).toBeGreaterThan(SESSION_EVENT_BROWSER_MAX_BYTES);
+      expect(window.truncated).toBeTrue();
+    }
+  });
+
+  test("preserves an oversized compact event and its exact cursor coverage", () => {
+    const compact = event(9, "agent.message.delta", {
+      coalescedUntil: 40_000,
+      text: "界".repeat(100_000),
+    });
+    const window = boundBrowserSessionEventWindow([compact]);
+    expect(window.events[0]).toBe(compact);
+    expect(window.truncated).toBeFalse();
+  });
+
   test("preserves a normal bounded retained receipt while enforcing the browser window", () => {
     const artifactId = "44444444-4444-4444-8444-444444444444";
     const receipt = {
@@ -1509,90 +1557,6 @@ describe("boundBrowserSessionEventWindow", () => {
       ).fullEvidence,
     ).toEqual(receipt);
     expect(window.bytes).toBeLessThanOrEqual(16 * 1024);
-  });
-
-  test("defensively replaces a multi-megabyte legacy event before rendering", () => {
-    const legacy = event(1, "agent.toolCall.output", {
-      id: "call-1",
-      output: `HEAD-${"x".repeat(3 * 1024 * 1024)}-TAIL`,
-    });
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    const payload = retained.payload as Record<string, unknown>;
-    const truncation = payload.truncation as Record<string, unknown>;
-
-    expect(window.truncated).toBeFalse();
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
-    expect(payload.id).toBe("call-1");
-    expect(truncation.surface).toBe("browser_legacy_guard");
-    expect(truncation.fullEvidence).toEqual({
-      available: false,
-      reason: "not_retained",
-    });
-    expect(JSON.stringify(retained)).toContain("HEAD-");
-    expect(JSON.stringify(retained)).toContain("-TAIL");
-  });
-
-  test("canonically bounds oversized multibyte envelope fields before rendering", () => {
-    const legacy = {
-      ...event(7, "agent.toolCall.output", {
-        id: "call-envelope",
-        output: "ok",
-      }),
-      type: `bad\r\ntype-${"界".repeat(100_000)}`,
-      clientEventId: "🙂".repeat(100_000),
-      duplicateReason: "界".repeat(100_000),
-    } as SessionEvent;
-
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    expect(retained.type).toBe("session.event.envelope_omitted");
-    expect(new TextEncoder().encode(JSON.stringify(retained)).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
-    );
-    expect(String(retained.clientEventId)).toEndWith("…[truncated]");
-    expect(String(retained.duplicateReason)).toEndWith("…[truncated]");
-  });
-
-  test("replaces an unserializable legacy payload with explicit bounded non-retention", () => {
-    const circular: Record<string, unknown> = { id: "call-circular" };
-    circular.self = circular;
-    const legacy = event(8, "agent.toolCall.output", circular);
-
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    const payload = retained.payload as Record<string, unknown>;
-    const truncation = payload.truncation as Record<string, unknown>;
-
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
-    expect(payload.id).toBe("call-circular");
-    expect(truncation.reason).toBe("event_not_serializable");
-    expect(truncation.originalBytes).toBeNull();
-    expect(truncation.omittedBytes).toBeNull();
-    expect(truncation.estimatedOriginalTokens).toBeNull();
-    expect(truncation.deliveredBytes).toBe(
-      new TextEncoder().encode(JSON.stringify(retained)).byteLength,
-    );
-    expect(truncation.fullEvidence).toEqual({
-      available: false,
-      reason: "not_retained",
-    });
-  });
-
-  test("preserves compact cursor progress when a legacy compact event is oversized", () => {
-    const legacy = event(9, "agent.message.delta", {
-      coalescedUntil: 40_000,
-      coalescedCount: 39_992,
-      text: `HEAD-${"界".repeat(2 * 1024 * 1024)}-TAIL`,
-    });
-
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    const payload = retained.payload as Record<string, unknown>;
-
-    expect(payload.coalescedUntil).toBe(40_000);
-    expect(payload.coalescedCount).toBe(39_992);
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
   });
 
   test("retains the newest exact byte-bounded suffix independently of the count cap", () => {

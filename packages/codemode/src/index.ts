@@ -36,6 +36,8 @@ import {
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 
+import { siteSessionPath } from "@opengeni/contracts/site-session-http";
+
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
 export type AttemptToolScope = Pick<
@@ -411,7 +413,15 @@ export class CodemodeClient {
     return CodemodeOperation.parse(await response.json());
   }
 
-  private async request(path: string, init: RequestInit): Promise<Response> {
+  /** Server-side Site preview forwarding. The attempt bearer never enters the
+   * page. Validate tenant routing here; ordinary API handlers authorize the
+   * operation under the existing agent proxy permission ceiling. */
+  async sessionRequest(path: string, init: RequestInit): Promise<Response> {
+    siteSessionPath(path, "site-host", init.method ?? "GET");
+    return this.request(`/sdk${path}`, init, false);
+  }
+
+  private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -421,7 +431,7 @@ export class CodemodeClient {
         authorization: `Bearer ${token}`,
       },
     });
-    if (!response.ok) {
+    if (!response.ok && throwOnError) {
       let message = `Codemode request failed with HTTP ${response.status}`;
       let errorOptions: {
         code?: string;

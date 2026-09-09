@@ -1,4 +1,7 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
+import { executeCommandReadWithRefresh } from "./command-read-refresh";
+import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
+export { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
@@ -281,6 +284,7 @@ import {
 } from "./runtime-skills";
 export {
   composeRuntimeSkills,
+  loadNativeToolSkillArtifacts,
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
@@ -295,6 +299,7 @@ export {
 import {
   joinPersistentAgentInstructionLayers,
   buildModelContextSnapshotFromRequest,
+  buildProviderRequestSnapshot,
   type PersistentAgentInstructionInspection,
   type PersistentAgentInstructionLayerDraft,
 } from "./model-context-inspector";
@@ -302,6 +307,8 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   withModelRequestCapture,
+  type ModelRequestCapture,
+  nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
@@ -1930,6 +1937,10 @@ export type BuildAgentOptions = {
    * executable tool catalog.
    */
   skillActivations?: readonly RuntimeSkillActivation[];
+  /** Server-backed Skill descriptors, independent of sandbox capabilities. */
+  skillCatalog?: readonly SkillCatalogDescriptor[];
+  /** Shared reader serves configured Skills; filesystem discovery remains for repo Skills only. */
+  serverSkillReading?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2018,7 +2029,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Use remember lane=preference for reusable conditional guidance (a Skill), lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
+    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Reusable conditional guidance belongs in Skills. Skill changes use the shared file lifecycle governed by Learning mode, not Knowledge evidence or confidence. Follow Skill management guidance only when it is present in the Skill index. Use remember lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2140,9 +2151,13 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
+    if (options.skillCatalog)
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
+    if (options.skillCatalog)
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
       layers.push({
@@ -2160,10 +2175,7 @@ export function inspectPersistentAgentInstructions(
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
   }
-  return {
-    layers,
-    composed: joinPersistentAgentInstructionLayers(layers),
-  };
+  return { layers, composed: joinPersistentAgentInstructionLayers(layers) };
 }
 
 /**
@@ -2584,19 +2596,26 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
-    editableArtifacts: editableArtifactToolsAvailable,
-    // Sites guidance is bundled capability metadata, not eager tool authority.
-    // Tool discovery/execution remains governed by the lazy attempt gateway.
-    sites: (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
-    // A connected machine owns its filesystem, and its session deliberately
-    // does not materialize host-local lazy entries. Advertising this bundled
-    // skill there makes load_skill report a path that does not exist. Keep the
-    // executable tools (whose descriptions contain the full short workflow),
-    // but expose the filesystem-backed helper only where it can be delivered.
-    videoGeneration:
-      Boolean(options.videoGeneration) && options.activeSandboxBackend !== "selfhosted",
-  });
+  const skillComposition = composeRuntimeSkills(
+    options.serverSkillReading ? [] : (options.skillActivations ?? []),
+    {
+      editableArtifacts: !options.serverSkillReading && editableArtifactToolsAvailable,
+      // Sites guidance is bundled capability metadata, not eager tool authority.
+      // Tool discovery/execution remains governed by the lazy attempt gateway.
+      sites:
+        !options.serverSkillReading &&
+        (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
+      // A connected machine owns its filesystem, and its session deliberately
+      // does not materialize host-local lazy entries. Advertising this bundled
+      // skill there makes load_skill report a path that does not exist. Keep the
+      // executable tools (whose descriptions contain the full short workflow),
+      // but expose the filesystem-backed helper only where it can be delivered.
+      videoGeneration:
+        !options.serverSkillReading &&
+        Boolean(options.videoGeneration) &&
+        options.activeSandboxBackend !== "selfhosted",
+    },
+  );
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
@@ -2816,7 +2835,7 @@ type ApprovalCapableAgent = {
  * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
  * unprefixed tool name.
  *
- * CLONE SURVIVAL (mirrors `installCodexToolSearch`): the sandbox runtime
+ * CLONE SURVIVAL (also used by `installLazyToolRuntime`): the sandbox runtime
  * resolves tools not on the agent we build here but on a FRESH clone —
  * `prepareSandboxAgent` calls `agent.clone(...)`, and `SandboxAgent.clone`
  * reconstructs from a FIXED field list (name/tools/mcpServers/…), so an
@@ -3529,6 +3548,8 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Live exact-owner control refresh; API remains read/observation authority. */
+  refreshOwnedCommand?: (commandId: string) => Promise<boolean>;
   accountId?: string;
   workspaceId?: string;
   // Worker-asserted session scope for first-party MCP calls; enables
@@ -4046,6 +4067,9 @@ export async function prepareAgentTools(
           undefined,
           firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
             ? inputWaitYield
+            : undefined,
+          firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
+            ? options.refreshOwnedCommand
             : undefined,
         );
         return {
@@ -6344,6 +6368,7 @@ export class PrefixedMcpServer implements MCPServer {
     >,
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
+    private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6646,9 +6671,23 @@ export class PrefixedMcpServer implements MCPServer {
     const completeWait =
       unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
     try {
-      const projectedOutput = this.inner.callToolResult
-        ? await this.inner.callToolResult(unprefixed, args, meta, options)
-        : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
+      const physicalCall = async (callArgs: Record<string, unknown>) => {
+        const projected = this.inner.callToolResult
+          ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
+          : mcpContentAsResult(await this.inner.callTool(unprefixed, callArgs, meta, options));
+        return projected;
+      };
+      const projectedOutput =
+        this.refreshOwnedCommand && (unprefixed === "command_read" || unprefixed === "command_wait")
+          ? await executeCommandReadWithRefresh({
+              toolName: unprefixed,
+              args: args ?? {},
+              ...(options?.signal ? { signal: options.signal } : {}),
+              refresh: this.refreshOwnedCommand,
+              call: async (callArgs) =>
+                AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
+            })
+          : await physicalCall(args ?? {});
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -6921,6 +6960,9 @@ export async function prepareRunInput(
     });
   }
   const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
+  // Pre-fix serialized states have no ownership field. Establish application
+  // ownership before reading history and choosing the durable append boundary.
+  state._historyOwnership = "external";
   const interruptions = state.getInterruptions();
   const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
   const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);
@@ -7071,7 +7113,7 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // environments can use the exact pinned package hint.
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
-  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
+  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
@@ -7115,11 +7157,10 @@ function measuredModelInputFilter(
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
-): ((request: import("@openai/agents").ModelRequest) => Promise<void>) | undefined {
+): ModelRequestCapture | undefined {
   if (!onCapture) return undefined;
-  let requestIndex = 0;
-  return async (request) => {
-    requestIndex += 1;
+  const capture: ModelRequestCapture = async (request) => {
+    const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
       buildModelContextSnapshotFromRequest({
         request,
@@ -7131,6 +7172,18 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  capture.nextProviderRequestIndex = () => nextModelContextCaptureIndex(agent);
+  capture.onProviderRequest = async (provider, body, unavailableReason, index) => {
+    await onCapture(
+      buildProviderRequestSnapshot({
+        provider,
+        body,
+        ...(unavailableReason ? { unavailableReason } : {}),
+        requestIndex: index ?? nextModelContextCaptureIndex(agent),
+      }),
+    );
+  };
+  return capture;
 }
 
 function installNonLazyModelRequestCapture(agent: Agent<any, any>): void {
@@ -10039,6 +10092,7 @@ export function repositoryCloneCommand(
     '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
+    '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
     "    exit 1",
     "  fi",
     // origin/HEAD is best-effort: workspace capture diffs the branch against it

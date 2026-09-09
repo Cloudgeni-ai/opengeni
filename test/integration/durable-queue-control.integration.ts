@@ -547,7 +547,12 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(repair.failed).toBe(0);
         expect(repair.exhaustedBatchLimit).toBe(false);
         expect(repair.claimed).toBeGreaterThanOrEqual(1);
-        expect(repair.delivered).toBe(repair.claimed);
+        expect(repair.signaled).toBe(repair.claimed);
+        expect(repair.unconfirmed).toBe(0);
+        // Signal acceptance can race the actual claim. Every receipt must be
+        // either acknowledged or truthfully pending; the model/turn checks
+        // below establish that this specific session actually executed.
+        expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
         await waitFor(
           async () => {
@@ -1430,7 +1435,7 @@ function sessionWorkflowClient(
         ],
         signal: input.interruptionRequested ? "sessionControl" : "queueChanged",
       });
-      await markSessionWorkflowWakeDelivered(db, {
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

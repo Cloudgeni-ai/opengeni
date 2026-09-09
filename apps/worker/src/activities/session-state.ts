@@ -160,6 +160,7 @@ export function createSessionStateActivities(
           workflowId,
           trigger: input.trigger,
           error: input.error ?? "Agent turn admission failed before attempt claim.",
+          ...(input.preClaimFailure ? { admissionFailure: input.preClaimFailure } : {}),
         });
         if (failed.action === "terminal") return { action: "terminal" };
         if (failed.action === "stale") return { action: "stale" };
@@ -540,14 +541,12 @@ export function createSessionStateActivities(
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
     }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
-    if (settled.action === "stale") {
+    if (settled.action === "stale" || !settled.notifyParent) {
       return;
     }
-    // The workflow reaches markSessionIdle exactly when it has decided to stop
-    // for now (no queued turn, no goal continuation): the terminal-for-now
-    // point for a spawned worker, whatever the cause (goal completed, agent or
-    // system paused goal, goalless work finished, idle control settlement). Wake
-    // the parent here, deduped per idle episode so the manager is nudged once.
+    // The idle transaction distinguishes parked wait/goal obligations from
+    // completed work. Only a terminal idle boundary may notify the parent;
+    // workflow closure while waiting retains its durable wake without a result.
     await notifyParentOfChildIdleFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,

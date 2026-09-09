@@ -5,10 +5,13 @@ import { SessionChannelProjectionAuthority } from "./session-pins";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
+  applySessionArchiveProjection,
+  compareSessionArchiveOrder,
   authoritativeSessionContinuation,
   authoritativeSessionContinuationChannels,
   emptySessionContinuation,
   mergeSessionContinuation,
+  projectSessionArchiveMembership,
   rebaseSessionContinuation,
   reconcileRetainedSessionContinuationChannel,
   sessionPageKey,
@@ -17,6 +20,206 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test("combines archive pages without losing microseconds, including offset timestamps", () => {
+    const latest = { ...row("a-latest"), archivedAt: "2026-09-08T12:00:00.123456Z" };
+    const older = { ...row("z-older"), archivedAt: "2026-09-08T12:00:00.123455Z" };
+    const tied = { ...row("b-tied"), archivedAt: "2026-09-08T14:00:00.123456+02:00" };
+    const millisecond = { ...row("z-millisecond"), archivedAt: "2026-09-08T12:00:00.123Z" };
+    expect(
+      [older, millisecond, latest, tied]
+        .sort(compareSessionArchiveOrder)
+        .map((session) => session.id),
+    ).toEqual(["b-tied", "a-latest", "z-older", "z-millisecond"]);
+  });
+
+  test("same-version receipts preserve exact archive timestamps but newer decisions replace them", () => {
+    const exact = {
+      ...row("root"),
+      archived: true,
+      archiveVersion: 4,
+      archivedAt: "2026-09-08T12:00:00.123456Z",
+    };
+    const rounded = { ...exact, archivedAt: "2026-09-08T12:00:00.123Z" };
+    expect(applySessionArchiveProjection(exact, rounded).archivedAt).toBe(exact.archivedAt);
+    expect(applySessionArchiveProjection(rounded, exact).archivedAt).toBe(exact.archivedAt);
+    expect(applySessionArchiveProjection(exact, { ...rounded, archiveVersion: 5 }).archivedAt).toBe(
+      rounded.archivedAt,
+    );
+    expect(
+      applySessionArchiveProjection(exact, {
+        ...rounded,
+        archiveVersion: 5,
+        archived: false,
+        archivedAt: null,
+      }).archivedAt,
+    ).toBeNull();
+  });
+
+  test("sorts archives by filing time, ignoring activity, with deterministic ties", () => {
+    const older = {
+      ...row("older"),
+      archivedAt: "2026-09-01T12:00:00Z",
+      updatedAt: "2026-09-08T12:00:00Z",
+      status: "running",
+    } as Session;
+    const latest = {
+      ...row("latest"),
+      archivedAt: "2026-09-08T12:00:00Z",
+      updatedAt: "2026-08-01T12:00:00Z",
+      status: "idle",
+    } as Session;
+    const tied = { ...latest, id: "z-tied", archivedAt: "2026-09-08T14:00:00+02:00" } as Session;
+    expect(
+      [older, row("legacy"), latest, tied]
+        .sort(compareSessionArchiveOrder)
+        .map((session) => session.id),
+    ).toEqual(["z-tied", "latest", "older", "legacy"]);
+  });
+  test("keeps cached descendants with their root across archive and restore", () => {
+    const root = {
+      ...row("root"),
+      rootSessionId: "root",
+      archived: false,
+      archiveVersion: 1,
+    } as Session;
+    const child = {
+      ...row("child"),
+      rootSessionId: "root",
+      parentSessionId: "root",
+      archived: false,
+    } as Session;
+    const archived = { ...root, archived: true, archiveVersion: 2 };
+    expect(
+      projectSessionArchiveMembership(
+        [root, child],
+        new Map([[root.id, archived]]),
+        true,
+        "workspace-a",
+      ).find((session) => session.id === child.id)?.archived,
+    ).toBe(true);
+    expect(
+      projectSessionArchiveMembership(
+        [root, child],
+        new Map([[root.id, archived]]),
+        false,
+        "workspace-a",
+      ),
+    ).toEqual([]);
+    const staleArchivedChild = { ...child, archived: true };
+    const restored = { ...root, archiveVersion: 3 };
+    expect(
+      projectSessionArchiveMembership(
+        [archived, staleArchivedChild],
+        new Map([[root.id, restored]]),
+        false,
+        "workspace-a",
+      ).find((session) => session.id === child.id)?.archived,
+    ).toBe(false);
+    expect(
+      projectSessionArchiveMembership(
+        [archived, staleArchivedChild],
+        new Map([[root.id, restored]]),
+        false,
+        "workspace-a",
+      ).map((session) => session.id),
+    ).toEqual(["root", "child"]);
+  });
+
+  test("archive receipts preserve independently newer pin and attention state", () => {
+    const current = {
+      ...row("root"),
+      archived: false,
+      archiveVersion: 1,
+      pinned: true,
+      pinVersion: 9,
+      activelyWorking: true,
+      attentionVersion: 7,
+    } as Session;
+    const receipt = {
+      ...current,
+      archived: true,
+      archiveVersion: 2,
+      pinned: false,
+      pinVersion: 8,
+      activelyWorking: false,
+      attentionVersion: 6,
+    } as Session;
+    expect(applySessionArchiveProjection(current, receipt)).toMatchObject({
+      archived: true,
+      archiveVersion: 2,
+      pinned: true,
+      pinVersion: 9,
+      activelyWorking: true,
+      attentionVersion: 7,
+    });
+  });
+
+  test("projects successful archive moves across stale active and archived pages", () => {
+    const active = {
+      ...row("active"),
+      archived: false,
+      archiveVersion: 2,
+      pinned: true,
+      pinVersion: 3,
+    } as Session;
+    const archived = {
+      ...row("archived"),
+      archived: true,
+      archiveVersion: 5,
+    } as Session;
+    const archivedWrite = {
+      ...active,
+      archived: true,
+      archivedAt: "2026-09-04T12:00:00.000Z",
+      archiveVersion: 3,
+      pinned: false,
+      pinVersion: 4,
+    } as Session;
+    const restoredWrite = {
+      ...archived,
+      archived: false,
+      archivedAt: null,
+      archiveVersion: 6,
+    } as Session;
+    const overrides = new Map([
+      [active.id, archivedWrite],
+      [archived.id, restoredWrite],
+    ]);
+
+    expect(
+      projectSessionArchiveMembership([active], overrides, false, "workspace-a").map(
+        (session) => session.id,
+      ),
+    ).toEqual(["archived"]);
+    expect(
+      projectSessionArchiveMembership([archived], overrides, true, "workspace-a").map(
+        (session) => session.id,
+      ),
+    ).toEqual(["active"]);
+    expect(
+      projectSessionArchiveMembership([archived], overrides, false, "workspace-b").map(
+        (session) => session.id,
+      ),
+    ).toEqual([]);
+  });
+
+  test("keeps a newer archive revision over an older retained override", () => {
+    const current = {
+      ...row("current"),
+      archived: false,
+      archiveVersion: 8,
+      channelId: "channel-new",
+    } as Session;
+    const staleOverride = {
+      ...current,
+      archived: true,
+      archiveVersion: 7,
+      channelId: "channel-old",
+    } as Session;
+
+    expect(applySessionArchiveProjection(current, staleOverride)).toBe(current);
+  });
+
   test("rejects a delayed page after the workspace or search changes", () => {
     const first = { key: sessionPageKey("workspace-a", ""), generation: 0 };
     const second = advanceSessionPageIdentity(first, sessionPageKey("workspace-a", "needle"));

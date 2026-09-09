@@ -44,9 +44,30 @@ GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const { PrimaryNav, WorkspaceShortcutLinks } = await import("./primary-nav");
+const originalMatchMedia = window.matchMedia;
+window.matchMedia = (query) => {
+  const media = originalMatchMedia.call(window, query);
+  Object.defineProperty(media, "matches", { get: () => window.innerHeight < 720 });
+  return media;
+};
 const railShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
+describe("rail overflow boundaries", () => {
+  test("contains scrolling session controls below an opaque, non-shrinking footer", () => {
+    expect(railShell).toContain(
+      "isolate flex h-full min-h-0 flex-col overflow-hidden bg-surface/40",
+    );
+    expect(railShell).toMatch(
+      /data-rail-scroll-viewport\s+className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"/,
+    );
+    expect(railShell).toMatch(
+      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border bg-surface pt-2"/,
+    );
+  });
+});
+
 afterAll(() => {
+  window.matchMedia = originalMatchMedia;
   mock.restore();
   GlobalRegistrator.unregister();
 });
@@ -69,53 +90,57 @@ async function render(node: ReactNode) {
   return { container, root };
 }
 
-function exploreDisclosure(container: HTMLElement): HTMLButtonElement {
+function moreDisclosure(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Explore",
+    (candidate) => candidate.textContent?.trim() === "More",
   );
-  if (!button) throw new Error("Missing Explore disclosure");
+  if (!button) throw new Error("Missing More disclosure");
   return button;
 }
 
-function showLessButton(container: HTMLElement): HTMLButtonElement {
+function lessButton(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Show less",
+    (candidate) => candidate.textContent?.trim() === "Less",
   );
-  if (!button) throw new Error("Missing Show less control");
+  if (!button) throw new Error("Missing Less control");
   return button;
 }
 
 describe("session-first rail density", () => {
-  test("defaults desktop shortcuts open and remembers when the user collapses them", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
+  test("shows all shortcuts on tall screens regardless of the saved compact choice", async () => {
+    window.localStorage.setItem("opengeni.rail.nav", "false");
+    const rendered = await render(<PrimaryNav />);
+    try {
+      expect(rendered.container.textContent).toContain("For you");
+      expect(rendered.container.textContent).toContain("Plugins");
+      expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
+        4,
+      );
+      expect(rendered.container.querySelector("button[aria-expanded]")).toBeNull();
+    } finally {
+      await act(async () => rendered.root.unmount());
+    }
+  });
+
+  test("offers More and Less on short screens and remembers the compact-screen choice", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 600 });
     const first = await render(<PrimaryNav />);
     try {
-      expect(first.container.textContent).not.toContain("Explore");
-      expect(first.container.textContent).toContain("Plugins");
-      expect(first.container.textContent).toContain("Agent Knowledge");
-      expect(first.container.textContent).toContain("Schedules");
-      expect(first.container.textContent).toContain("Sites");
-      expect(first.container.textContent).not.toContain("Documents");
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(4);
-
-      await act(async () => showLessButton(first.container).click());
-      expect(exploreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
+      expect(moreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
+      await act(async () => moreDisclosure(first.container).click());
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(4);
+      expect(lessButton(first.container).getAttribute("aria-expanded")).toBe("true");
+      await act(async () => lessButton(first.container).click());
       expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
     } finally {
       await act(async () => first.root.unmount());
-      first.container.remove();
     }
-
     const persisted = await render(<PrimaryNav />);
     try {
-      expect(exploreDisclosure(persisted.container).getAttribute("aria-expanded")).toBe("false");
-      expect(persisted.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        0,
-      );
+      expect(moreDisclosure(persisted.container).getAttribute("aria-expanded")).toBe("false");
     } finally {
       await act(async () => persisted.root.unmount());
-      persisted.container.remove();
     }
   });
 
@@ -156,10 +181,10 @@ describe("session-first rail density", () => {
     pathname = "/workspaces/workspace-1/plugins";
     const rendered = await render(<PrimaryNav />);
     try {
-      const disclosure = exploreDisclosure(rendered.container);
+      const disclosure = moreDisclosure(rendered.container);
       expect(disclosure.getAttribute("aria-expanded")).toBe("false");
       expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("Explore, current section Plugins");
+      expect(disclosure.getAttribute("aria-label")).toBe("More, current section Plugins");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         0,
       );
@@ -170,13 +195,14 @@ describe("session-first rail density", () => {
   });
 
   test("identifies For you when the compact disclosure hides its link", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
     window.localStorage.setItem("opengeni.rail.nav", "false");
     pathname = "/workspaces/workspace-1/priority";
     const rendered = await render(<PrimaryNav />);
     try {
-      const disclosure = exploreDisclosure(rendered.container);
+      const disclosure = moreDisclosure(rendered.container);
       expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("Explore, current section For you");
+      expect(disclosure.getAttribute("aria-label")).toBe("More, current section For you");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();

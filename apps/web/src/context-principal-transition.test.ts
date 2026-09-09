@@ -66,6 +66,8 @@ describe("principal transition contract", () => {
       "setManualRepos([])",
       "setSelectedRepoIds(new Set())",
       "setSelectedCapabilityToolIds(new Set())",
+      "seenCapabilityToolIds.current = new Set()",
+      "appliedWorkspaceToolDefaultsKey.current = null",
       "setWorkspaceStateOwnerId(workspaceId)",
       "sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId)",
     ]) {
@@ -180,7 +182,7 @@ describe("principal transition contract", () => {
 
   test("mutation callers do not toast, refresh, or announce stale results", () => {
     expect(workspaceSettingsSource).toContain(
-      "const updated = await context.setWorkspaceInferenceControl(workspaceId, action)",
+      "await context.setWorkspaceInferenceControl(workspaceId, action)",
     );
     expect(transcriptionSettingsSource).toContain(
       "const updated = await context.updateWorkspaceSettings(workspaceId",

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
-  activatePreferenceRegistryRevision,
+  applySkillLifecycle,
   activateWorkspaceInstructionPolicyRevision,
   claimSessionWorkForAttempt,
   createDb,
@@ -24,6 +24,7 @@ import {
   provisionRoles,
   withWorkspaceRls,
   type DbClient,
+  type Database,
 } from "../src";
 import * as schema from "../src/schema";
 
@@ -44,6 +45,35 @@ type AttemptFixture = WorkspaceFixture & {
   attemptId: string;
   executionGeneration: number;
 };
+
+async function saveSnapshotSkill(
+  db: Database,
+  input: Parameters<typeof createPreferenceRegistryProposal>[1],
+) {
+  const content = `---\nname: ${input.stableKey}\ndescription: ${JSON.stringify(input.description)}\n---\n${input.content}`;
+  const saved = await applySkillLifecycle(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      actor: { kind: "human", subjectId: input.actorSubjectId, principalKind: "human_session" },
+    },
+    {
+      operation: "save",
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      scope: input.scope,
+      stableKey: input.stableKey,
+      title: input.stableKey,
+      description: input.description,
+      files: [{ path: "SKILL.md", content }],
+      reason: "Canonical accepted-attempt snapshot fixture",
+    },
+  );
+  return { id: saved.skillId, scopeVersion: 1, content };
+}
 
 beforeAll(async () => {
   const explicitAdminUrl = process.env.OPENGENI_POLICY_GOVERNANCE_TEST_ADMIN_URL;
@@ -481,7 +511,7 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       roleKey: null,
       content: "WORKSPACE_STATE_POLICY_BODY_MUST_NOT_PROJECT",
     });
-    const proposal = await createPreferenceRegistryProposal(client.db, {
+    const proposal = await saveSnapshotSkill(client.db, {
       ...workspace,
       actorSubjectId: subjectId,
       principalKind: "human_session",
@@ -504,17 +534,6 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       order by revision desc
       limit 1
     `;
-    await activatePreferenceRegistryRevision(client.db, {
-      ...workspace,
-      actorSubjectId: subjectId,
-      principalKind: "human_session",
-      preferenceId: proposal.id,
-      revisionId: revision!.id,
-      expectedCurrentRevisionId: null,
-      expectedScopeVersion: proposal.scopeVersion,
-      authorizeScope: (scope) => expect(scope).toBe("user"),
-      reason: "Activate workspace state inspection preference",
-    });
 
     const session = await createPolicySession(workspace, {
       label: "workspace state accepted attempt",
@@ -679,7 +698,7 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       roleKey: null,
       content: "CLAIM_CHARTER",
     });
-    const proposal = await createPreferenceRegistryProposal(client.db, {
+    const proposal = await saveSnapshotSkill(client.db, {
       ...workspace,
       actorSubjectId: subjectId,
       principalKind: "human_session",
@@ -702,17 +721,6 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       order by revision desc
       limit 1
     `;
-    await activatePreferenceRegistryRevision(client.db, {
-      ...workspace,
-      actorSubjectId: subjectId,
-      principalKind: "human_session",
-      preferenceId: proposal.id,
-      revisionId: revision!.id,
-      expectedCurrentRevisionId: null,
-      expectedScopeVersion: proposal.scopeVersion,
-      authorizeScope: (scope) => expect(scope).toBe("user"),
-      reason: "Activate the claim snapshot preference",
-    });
 
     const session = await createSession(client.db, {
       ...workspace,
@@ -765,7 +773,12 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       expect.objectContaining({ revisionId: charter.id, kind: "charter", scope: "global" }),
     ]);
     expect(snapshotRows[0]!.preferenceDescriptors).toEqual([
-      expect.objectContaining({ stableKey: "claim-review-style", scope: "user" }),
+      expect.objectContaining({
+        id: proposal.id,
+        revisionId: revision!.id,
+        stableKey: "claim-review-style",
+        scope: "user",
+      }),
     ]);
   });
 
@@ -773,7 +786,7 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
     if (!shared || !client) return;
     const workspace = await freshWorkspace("policy-causal-preference");
     const causalHumanSubjectId = "causal-human";
-    const proposal = await createPreferenceRegistryProposal(client.db, {
+    const proposal = await saveSnapshotSkill(client.db, {
       ...workspace,
       actorSubjectId: causalHumanSubjectId,
       principalKind: "human_session",
@@ -797,17 +810,6 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       limit 1
     `;
     expect(revision?.id).toBeTruthy();
-    await activatePreferenceRegistryRevision(client.db, {
-      ...workspace,
-      actorSubjectId: causalHumanSubjectId,
-      principalKind: "human_session",
-      preferenceId: proposal.id,
-      revisionId: revision!.id,
-      expectedCurrentRevisionId: null,
-      expectedScopeVersion: proposal.scopeVersion,
-      authorizeScope: (scope) => expect(scope).toBe("user"),
-      reason: "Activate causal-human review preference",
-    });
 
     const continuationSession = await createPolicySession(workspace, {
       label: "service continuation",
@@ -845,6 +847,6 @@ describe("migration 0157 session policy role and exact-attempt snapshots", () =>
       continuationAttempt,
       snapshot.descriptors[0]!.retrievalHandle,
     );
-    expect(full.content).toBe("Lead with concrete evidence, then list only actionable findings.");
+    expect(full.content).toBe(proposal.content);
   });
 });

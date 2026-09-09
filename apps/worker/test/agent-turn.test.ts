@@ -3400,6 +3400,28 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(2);
   });
 
+  test("rotation yields to durable recovery without internal retries or a fresh memo", async () => {
+    let establishes = 0;
+    const failure = new SandboxLeaseTransitionError(
+      "group-1",
+      7,
+      "rotation_in_progress",
+      "modal",
+      "sb-1",
+      "warm",
+    );
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw failure;
+      },
+      { backoffMs: 1 },
+    );
+    await expect(provisioner.get()).rejects.toBe(failure);
+    await expect(provisioner.get()).rejects.toBe(failure);
+    expect(establishes).toBe(1);
+  });
+
   test("command-readiness timeout creates at most one sandbox for the turn", async () => {
     let establishes = 0;
     let failures = 0;
@@ -4386,6 +4408,8 @@ describe("Codex credential lease deadline fence", () => {
   });
 
   test("does not accept a successful heartbeat that returns after the prior deadline", async () => {
+    let now = performance.now();
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
     let resolveHeartbeat!: (value: Date | null) => void;
     const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
       () =>
@@ -4408,12 +4432,12 @@ describe("Codex credential lease deadline fence", () => {
       lease.held = true;
       lease.holderId = "holder-1";
       lease.generation = 1;
-      const priorDeadline = performance.now() + 1;
+      const priorDeadline = now + 1_000;
       lease.confirmedUntilMs = priorDeadline;
 
       const renewal = lease.renew("timer");
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(heartbeat).toHaveBeenCalledTimes(1);
+      now = priorDeadline + 1;
       resolveHeartbeat(new Date());
       await renewal;
 
@@ -4422,6 +4446,7 @@ describe("Codex credential lease deadline fence", () => {
       expect(lease.confirmedUntilMs).toBe(priorDeadline);
     } finally {
       heartbeat.mockRestore();
+      clock.mockRestore();
     }
   });
 

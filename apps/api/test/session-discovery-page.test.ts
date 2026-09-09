@@ -10,6 +10,24 @@ function uuid(index: number): string {
 }
 
 describe("sessions_list legacy bounded detail=full discovery projection", () => {
+  test("Site-bound chronological cursors preserve origin in their versioned wire format", () => {
+    const cursor = {
+      orderBy: "createdAt" as const,
+      sortRank: null,
+      sortRevision: "0",
+      sortAt: "2026-09-08T12:00:00.123456Z",
+      id: uuid(1),
+      snapshotAt: "2026-09-08T13:00:00.123456Z",
+      snapshotRevision: "0",
+      updatedAfter: null,
+      filterHash: null,
+      originSiteId: uuid(2),
+    };
+    const encoded = encodeSessionDiscoveryCursor(cursor);
+    expect(JSON.parse(Buffer.from(encoded, "base64url").toString()).v).toBe(4);
+    expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
+  });
+
   test("stays deterministic and within the exact envelope at 1, 20, and 100 rows", () => {
     let previousBytes = 0;
     for (const count of [1, 20, 100]) {
@@ -209,11 +227,12 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
     expect(previewBudget).toEqual({
       bytes: 13 * Buffer.byteLength(preview, "utf8"),
       maxBytes: 16_384,
-      omittedCount: 75,
+      omittedCount: 73,
       truncated: true,
       omissionReason: "aggregatePreviewBudget",
       drillDownTool: "session_events",
       drillDownInput: {
+        view: "debug",
         includeTypes: ["user.message", "agent.message.completed"],
         direction: "before",
         limit: 1,
@@ -224,7 +243,7 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
     expect(previewBudget.bytes).toBe(15_600);
     expect(Math.ceil(previewBudget.bytes / 4)).toBe(3_900);
     expect(Math.ceil(previewBudget.maxBytes / 4)).toBe(4_096);
-    expect(result.sessions).toHaveLength(88);
+    expect(result.sessions).toHaveLength(86);
     expect(result.sessions[12]!.latestMessage).toMatchObject({
       preview,
       previewTruncated: false,
@@ -238,6 +257,7 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
       previewDrillDownTool: "session_events",
       previewDrillDownInput: {
         sessionId: uuid(14),
+        view: "debug",
         includeTypes: ["agent.message.completed"],
         direction: "before",
         limit: 1,
@@ -246,8 +266,9 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
       },
     });
     expect(result.sessions[13]!.latestMessage).not.toHaveProperty("text");
-    expect(result.responseTruncated).toBeFalse();
-    expect(result.hasMore).toBeFalse();
+    expect(result.responseTruncated).toBeTrue();
+    expect(result.hasMore).toBeTrue();
+    expect(decodeSessionDiscoveryCursor(result.nextCursor!).id).toBe(uuid(86));
     expect(result.bytes).toBe(Buffer.byteLength(serialized, "utf8"));
     expect(result.bytes).toBeLessThanOrEqual(result.maxBytes);
 

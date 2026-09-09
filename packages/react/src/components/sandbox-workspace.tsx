@@ -781,7 +781,20 @@ export function useSandboxWorkspaceTabs(
             }
             workspaceWaking={!liveWorkspaceExpected && !captureAvailable && workspaceWaking}
             liveWorkspaceReady={liveWorkspaceExpected}
-            onWakeWorkspace={() => requestWarmIntent("warmFiles")}
+            workspaceError={
+              caps.error ??
+              (caps.viewerCapReached
+                ? new Error(
+                    "The live workspace viewer limit has been reached. Close another viewer and retry.",
+                  )
+                : filesWarmRequested && caps.state === "on-demand" && !fileSystemOn
+                  ? new Error("This machine does not currently expose a live file system.")
+                  : null)
+            }
+            onWakeWorkspace={() => {
+              if (filesWarmRequested) caps.renegotiate();
+              else requestWarmIntent("warmFiles");
+            }}
             {...(requestedFilePath
               ? {
                   requestedPath: requestedFilePath,
@@ -943,6 +956,8 @@ export function useSandboxWorkspaceTabs(
     caps.state,
     caps.error,
     caps.viewerCapReached,
+    caps.renegotiate,
+    filesWarmRequested,
     requestWarmIntent,
     createLinkedComputer,
   ]);

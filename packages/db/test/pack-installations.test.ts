@@ -10,6 +10,8 @@ import postgres from "postgres";
 
 import {
   adoptPackComponentReferences,
+  applySkillLifecycle,
+  listSkillRecords,
   bootstrapWorkspace,
   createDb,
   deferPackInstallationOperation,
@@ -35,6 +37,8 @@ import {
   resolvePackComponentReferences,
   resolvePackInlineSkillReferences,
   uninstallPortableSkill,
+  skillFilesContentHash,
+  type SkillSourceReleaseReceipt,
   type DbClient,
   type InstallPortableSkillInput,
 } from "../src";
@@ -112,6 +116,72 @@ afterAll(async () => {
 }, 60_000);
 
 describe("Pack installation ownership", () => {
+  test("final Pack removal explicitly preserves a customized canonical Skill", async () => {
+    if (!available || !client) return;
+    const skill = skillInput(`custom-pack-${crypto.randomUUID().slice(0, 8)}`);
+    const installed = await installPortableSkill(client.db, skill);
+    const manifest = pack(`custom-pack-${crypto.randomUUID()}`, [
+      {
+        key: "skills/custom",
+        kind: "skill",
+        capabilityId: skill.capabilityId,
+        contentSha256: skill.contentSha256,
+        required: true,
+      },
+    ]);
+    const packInstallation = await installPack(manifest, crypto.randomUUID());
+    await uninstallPortableSkill(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      capabilityId: skill.capabilityId,
+      expectedInstallationVersion: installed.installationVersion,
+    });
+    const files = [
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: customized-pack\ndescription: Customized Pack behavior\n---\nCustomized Pack behavior",
+      },
+    ];
+    const customized = await applySkillLifecycle(
+      client.db,
+      {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        actor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
+      },
+      {
+        operation: "save",
+        operationId: crypto.randomUUID(),
+        skillId: installed.skillReceipt.skillId,
+        expectedRevisionId: installed.skillReceipt.revisionId,
+        expectedScopeVersion: 1,
+        title: "Customized Skill",
+        description: "Keep after source removal",
+        files,
+        reason: "Customize installed Skill",
+      },
+    );
+    const released = await uninstallPack(
+      manifest.id,
+      packInstallation.version,
+      crypto.randomUUID(),
+    );
+    expect(released.skillReleases).toEqual([
+      expect.objectContaining({
+        skillId: customized.skillId,
+        revisionId: customized.revisionId,
+        disposition: "preserved",
+        eventId: null,
+        warning: expect.stringContaining("remains active"),
+      }),
+    ]);
+    expect(await listSkillRecords(client.db, first, { skillId: customized.skillId })).toEqual([
+      expect.objectContaining({ files }),
+    ]);
+    expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([]);
+  }, 60_000);
+
   test("composes multiple Packs, preserves shared components, and removes the final owner", async () => {
     if (!available || !client) return;
     const skill = skillInput("shared-release-operator");
@@ -204,6 +274,16 @@ describe("Pack installation ownership", () => {
     expect(await previewPackComponentRelease(client.db, first.workspaceId, installedB.id)).toEqual([
       expect.objectContaining({ retainedByOtherOwners: false }),
     ]);
+    await expect(
+      releasePackComponents(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        packInstallationId: installedB.id,
+      }),
+    ).rejects.toThrow("requires a trusted human session actor");
+    expect(await previewPackComponentRelease(client.db, first.workspaceId, installedB.id)).toEqual([
+      expect.objectContaining({ retainedByOtherOwners: false }),
+    ]);
 
     const uninstallB = await uninstallPack(
       packB.id,
@@ -211,6 +291,13 @@ describe("Pack installation ownership", () => {
       "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
     );
     expect(uninstallB.retainedComponents).toEqual([]);
+    expect(uninstallB.skillReleases).toEqual([
+      expect.objectContaining({
+        skillId: installedSkill.skillReceipt.skillId,
+        disposition: "deactivated",
+        eventId: expect.any(String),
+      }),
+    ]);
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([]);
     const uninstallReplay = await preparePackUninstallOperation(client.db, {
       accountId: first.accountId,
@@ -225,6 +312,7 @@ describe("Pack installation ownership", () => {
     if (!("installation" in uninstallReplay)) {
       expect(uninstallReplay.replayResult).toMatchObject({
         status: "uninstalled",
+        skillReleases: uninstallB.skillReleases,
       });
     }
   }, 60_000);
@@ -310,7 +398,7 @@ describe("Pack installation ownership", () => {
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({
         capabilityId: skill.capabilityId,
-        contentSha256: skill.contentSha256,
+        contentSha256: skillFilesContentHash(skill.files),
       }),
     ]);
     await uninstallPack(
@@ -707,6 +795,7 @@ describe("Pack installation ownership", () => {
     const foreignSkillInput = skillInput(`owner-foreign-${crypto.randomUUID().slice(0, 8)}`);
     const foreignSkill = await installPortableSkill(client.db, {
       ...foreignSkillInput,
+      skillActor: { kind: "human", subjectId: second.subjectId, principalKind: "human_session" },
       accountId: second.accountId,
       workspaceId: second.workspaceId,
       subjectId: second.subjectId,
@@ -788,6 +877,7 @@ async function installPackForGrant(
     references: manifest.components,
   });
   await finalizePackComponentOwnership(client.db, {
+    skillActor: { kind: "human", subjectId: grant.subjectId, principalKind: "human_session" },
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     packInstallationId: prepared.installation.id,
@@ -810,7 +900,7 @@ async function uninstallPack(
   packId: string,
   expectedInstallationVersion: number,
   idempotencyKey: string,
-): Promise<{ retainedComponents: string[] }> {
+): Promise<{ retainedComponents: string[]; skillReleases?: SkillSourceReleaseReceipt[] }> {
   if (!client) throw new Error("database client unavailable");
   const requestDigest = uninstallRequestDigest(packId, expectedInstallationVersion);
   const prepared = await preparePackUninstallOperation(client.db, {
@@ -832,6 +922,7 @@ async function uninstallPack(
     };
   }
   const released = await releasePackComponents(client.db, {
+    skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
     accountId: first.accountId,
     workspaceId: first.workspaceId,
     packInstallationId: prepared.installation.id,
@@ -846,6 +937,7 @@ async function uninstallPack(
     result: {
       status: "uninstalled",
       retainedComponents: released.retainedComponents,
+      skillReleases: released.skillReleases ?? [],
     },
   });
   return released;
@@ -867,6 +959,7 @@ function skillInput(slug: string): InstallPortableSkillInput {
   const content = `---\nname: ${slug}\ndescription: Verify ${slug} safely.\n---\n# ${slug}\n`;
   const contentSha256 = sha256(content);
   return {
+    skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
     accountId: first.accountId,
     workspaceId: first.workspaceId,
     subjectId: first.subjectId,

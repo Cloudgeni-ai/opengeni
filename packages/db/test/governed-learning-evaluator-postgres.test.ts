@@ -159,7 +159,7 @@ async function proposal(f: Awaited<ReturnType<typeof fixture>>, confidenceBps = 
   const write = await writeCompanyBrainGovernedProposal(client!.db, {
     attempt: f.writerAttempt,
     request: {
-      kind: "promote_task_note_preference",
+      kind: "promote_task_note_instruction_policy",
       operationId: crypto.randomUUID(),
       noteId: note.note.id,
       expectedNoteVersion: 1,
@@ -168,13 +168,9 @@ async function proposal(f: Awaited<ReturnType<typeof fixture>>, confidenceBps = 
       displayName: "Governed evaluator fixture",
       predicateKey: "ways.evaluator-fixture",
       confidenceBps,
-      stableKey: `evaluator.${crypto.randomUUID().replaceAll("-", "")}`,
-      title: "Evaluator fixture",
-      description: "An inert evaluator fixture.",
-      precedenceRank: 0,
-      conflictStrategy: "override",
-      conflictsWith: [],
-      expiresAt: null,
+      target: { kind: "policy", scope: "global", roleKey: null },
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
       reason: "Create reviewable evidence without activation.",
     },
   });
@@ -258,11 +254,11 @@ describe("governed-learning evaluator PostgreSQL authority", () => {
         request: { ...p.request, claimId: crypto.randomUUID() },
       }),
     ).rejects.toThrow("conflicted");
-    const [activePreference] = await shared.admin<{ count: number }[]>`
-      select count(*)::int as count from preference_registry_events where type = 'activated'
-        and preference_id = ${p.destinationProposalId}
+    const [activePolicy] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_instruction_policy_activation_events
+        where workspace_id = ${f.grant.workspaceId}
     `;
-    expect(activePreference?.count).toBe(0);
+    expect(activePolicy?.count).toBe(0);
   });
 
   test("derives current confidence, conflict, and stale outcomes in deterministic order", async () => {

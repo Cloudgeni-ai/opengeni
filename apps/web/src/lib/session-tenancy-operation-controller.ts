@@ -64,6 +64,7 @@ export class SessionTenancyOperationController {
     input: {
       visibility: SessionVisibility;
       workspaceSharedAcknowledged: boolean;
+      sourceEventId?: string;
     },
     createIdempotencyKey: () => string,
   ): PendingSessionForkAttempt {

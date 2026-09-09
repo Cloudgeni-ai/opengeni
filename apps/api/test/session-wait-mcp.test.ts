@@ -6,6 +6,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  listOutstandingSessionSystemUpdates,
   settleConnectedMachineSessionBackgroundCommand,
   type DbClient,
 } from "@opengeni/db";
@@ -15,7 +16,11 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import type { AccessGrant } from "@opengeni/contracts";
+import {
+  CommandReadResult,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { SESSION_EVENT_MCP_MAX_BYTES } from "../src/mcp/session-view";
@@ -52,14 +57,14 @@ type SessionWaitResult = {
   maxBytes: number;
 };
 type CommandWaitResult = {
-  command: { id: string; state: string; exitCode: number | null };
+  commandId: string;
+  state: string;
+  exitCode: number | null;
+  completionObservedAt: string | null;
   terminal: boolean;
   waitedMs: number;
   timedOut: boolean;
   aborted: boolean;
-  ownPendingUpdates: number;
-  ownPendingUpdateKinds: string[];
-  outputLocator?: { eventType: string; commandId: string };
 };
 
 let shared: SharedTestDatabase;
@@ -129,6 +134,7 @@ async function callCommandWait(
   args: Record<string, unknown>,
   extra: Record<string, unknown> = {},
   server: unknown = mcp,
+  name: "command_read" | "command_wait" = "command_wait",
 ): Promise<CommandWaitResult> {
   const tool = (
     server as {
@@ -137,8 +143,8 @@ async function callCommandWait(
         { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
       >;
     }
-  )._registeredTools?.["command_wait"];
-  if (!tool) throw new Error("MCP tool not registered: command_wait");
+  )._registeredTools?.[name];
+  if (!tool) throw new Error(`MCP tool not registered: ${name}`);
   const result = await tool.handler(args, extra);
   const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
   if (!text) throw new Error("MCP tool returned no text: command_wait");
@@ -221,7 +227,12 @@ beforeAll(async () => {
   // session whose pending machine input the wait also watches.
   grant = {
     ...workspaceGrant,
-    metadata: { ...(workspaceGrant.metadata ?? {}), sessionId: selfSessionId },
+    metadata: {
+      ...(workspaceGrant.metadata ?? {}),
+      sessionId: selfSessionId,
+      // A session-scoped grant registers only its signed selection.
+      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    },
   };
   mcp = buildOpenGeniMcpServer(fakeDeps(bus), grant);
 }, 180_000);
@@ -236,6 +247,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
     const sessionScoped = buildOpenGeniMcpServer(fakeDeps(new MemoryEventBus()), grant);
     expect(registeredToolNames(sessionScoped)).toContain("session_wait");
     expect(registeredToolNames(sessionScoped)).toContain("command_wait");
+    expect(registeredToolNames(sessionScoped)).toContain("command_read");
 
     const { sessionId: _omitted, ...metadataWithoutSession } = (grant.metadata ?? {}) as Record<
       string,
@@ -248,6 +260,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
     expect(registeredToolNames(noSession)).toContain("session_events");
     expect(registeredToolNames(noSession)).not.toContain("session_wait");
     expect(registeredToolNames(noSession)).not.toContain("command_wait");
+    expect(registeredToolNames(noSession)).not.toContain("command_read");
 
     // The bootstrap grant carries admin-equivalent permissions that imply
     // sessions:read, so the denial case uses an explicit unrelated permission.
@@ -257,6 +270,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
     });
     expect(registeredToolNames(noRead)).not.toContain("session_wait");
     expect(registeredToolNames(noRead)).not.toContain("command_wait");
+    expect(registeredToolNames(noRead)).not.toContain("command_read");
     expect(registeredToolNames(noRead)).not.toContain("session_events");
   });
 
@@ -698,12 +712,16 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
         turnId: turn!.id,
         attemptId,
         executionGeneration,
-        firstPartyMcpTools: ["session_wait", "command_wait"],
+        firstPartyMcpTools: ["session_wait", "command_read", "command_wait"],
       },
     };
     const attemptBus = new MemoryEventBus();
     const attemptServer = buildOpenGeniMcpServer(fakeDeps(attemptBus), attemptGrant);
-    expect(registeredToolNames(attemptServer)).toEqual(["session_wait", "command_wait"]);
+    expect(registeredToolNames(attemptServer)).toEqual([
+      "session_wait",
+      "command_read",
+      "command_wait",
+    ]);
 
     const pending = callSessionWait(
       { targets: [{ sessionId: childOfClaim, afterSequence: 0 }], maxWaitSeconds: 20 },
@@ -738,7 +756,16 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       opId,
       command: "printf done",
     });
-    const commandPending = callCommandWait({ commandId, maxWaitSeconds: 20 }, {}, attemptServer);
+    const runningRead = await callCommandWait({ commandId }, {}, attemptServer, "command_read");
+    expect(CommandReadResult.safeParse(runningRead).success).toBe(true);
+    expect(runningRead).toMatchObject({
+      commandId,
+      state: "running",
+      terminal: false,
+      completionObservedAt: null,
+      timedOut: false,
+    });
+    const commandPending = callCommandWait({ commandId, waitSeconds: 20 }, {}, attemptServer);
     await Bun.sleep(300);
     const commandSettlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
       accountId,
@@ -759,25 +786,29 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
     expect(commandResult).toMatchObject({
       terminal: true,
       timedOut: false,
-      ownPendingUpdates: 1,
-      ownPendingUpdateKinds: ["background_command_result"],
-      command: { id: commandId, state: "exited", exitCode: 0 },
-      outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+      commandId,
+      state: "exited",
+      exitCode: 0,
     });
+    expect(commandResult.completionObservedAt).not.toBeNull();
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, workspaceId, claimSessionId)).filter(
+        (update) => update.kind === "background_command_result",
+      ),
+    ).toHaveLength(0);
     expect(commandResult.waitedMs).toBeGreaterThanOrEqual(200);
 
     const immediateCommandResult = await callCommandWait(
-      { commandId, maxWaitSeconds: 20 },
+      { commandId, waitSeconds: 20 },
       {},
       attemptServer,
     );
     expect(immediateCommandResult).toMatchObject({
       terminal: true,
       timedOut: false,
-      ownPendingUpdates: 1,
-      ownPendingUpdateKinds: ["background_command_result"],
+      completionObservedAt: commandResult.completionObservedAt,
     });
-    expect(immediateCommandResult.waitedMs).toBe(0);
+    expect(immediateCommandResult.waitedMs).toBeLessThan(1_000);
 
     let authorizationCalls = 0;
     const revokingDeps = fakeDeps(attemptBus);
@@ -808,7 +839,7 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       command: "printf revoked",
     });
     const revokedExpectation = expect(
-      callCommandWait({ commandId: revokedCommandId, maxWaitSeconds: 20 }, {}, revokingServer),
+      callCommandWait({ commandId: revokedCommandId, waitSeconds: 20 }, {}, revokingServer),
     ).rejects.toThrow();
     await Bun.sleep(300);
     const revokedSettlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
@@ -849,7 +880,9 @@ describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory ev
       {},
       attemptServer,
     );
-    expect(own.ownPendingUpdates).toBe(3);
+    // The observed command is suppressed; the unauthorized command and child
+    // completion remain outstanding.
+    expect(own.ownPendingUpdates).toBe(2);
     expect(own.changed).toEqual([]);
 
     // A Slack-private session outside this attempt's root is refused: the

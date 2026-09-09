@@ -1,3 +1,6 @@
+diff --git a/node_modules/@openai/agents-core/.bun-tag-13b9d251eacb7a57 b/.bun-tag-13b9d251eacb7a57
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -11,6 +14,12 @@ diff --git a/node_modules/@openai/agents-core/.bun-tag-7c21d377cb19cf3e b/.bun-t
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@openai/agents-core/.bun-tag-ac46de758592501 b/.bun-tag-ac46de758592501
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@openai/agents-core/.bun-tag-c0c42b29c1e5d144 b/.bun-tag-c0c42b29c1e5d144
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@openai/agents-core/.bun-tag-dadebcd64451c0aa b/.bun-tag-dadebcd64451c0aa
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.d.ts b/dist/index.d.ts
@@ -31,7 +40,7 @@ index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f
  export { HostedTool, attachClientToolSearchExecutor, ComputerTool, computerTool, ShellTool, shellTool, ApplyPatchTool, applyPatchTool, HostedMCPTool, hostedMcpTool, FunctionTool, FunctionToolResult, FunctionToolTimeoutBehavior, ToolTimeoutErrorFunction, Tool, tool, toolNamespace, invokeFunctionTool, getClientToolSearchExecutor, getToolSearchRuntimeToolKey, ToolExecuteArgument, ToolEnabledFunction, ToolOptionsWithGuardrails, ToolAllowedCaller, ToolAllowedCallers, } from './tool';
  export type { ClientToolSearchExecutor, ClientToolSearchExecutorArgs, ClientToolSearchExecutorResult, ComputerOnSafetyCheckFunction, ComputerSafetyCheck, ComputerSafetyCheckResult, ShellToolEnvironment, ShellToolLocalEnvironment, ShellToolLocalSkill, ShellToolHostedEnvironment, ShellToolContainerAutoEnvironment, ShellToolContainerReferenceEnvironment, ShellToolContainerSkill, ShellToolSkillReference, ShellToolInlineSkill, ShellToolInlineSkillSource, ShellToolContainerNetworkPolicy, ShellToolContainerNetworkPolicyAllowlist, ShellToolContainerNetworkPolicyDisabled, ShellToolContainerNetworkPolicyDomainSecret, ToolInputParameters, ToolOutputSchema, ToolOptions, ToolNamespaceOptions, ToolOutputCustomData, FunctionToolCustomDataContext, FunctionToolCustomDataExtractor, ComputerToolCustomDataContext, ComputerToolCustomDataExtractor, ApplyPatchToolCustomDataContext, ApplyPatchToolCustomDataExtractor, } from './tool';
 diff --git a/dist/mcpServers.js b/dist/mcpServers.js
-index af947813fbe90ec3c275f6a1fd5e0793fb2ed720..60e27cc668b0b83b350619002ca3aed5d8f5cf1b 100644
+index af947813fbe90ec3c275f6a1fd5e0793fb2ed720..40b75986657cc1399b69942373da7818bcb44fa8 100644
 --- a/dist/mcpServers.js
 +++ b/dist/mcpServers.js
 @@ -62,6 +62,9 @@ class ServerWorker {
@@ -175,7 +184,7 @@ index af947813fbe90ec3c275f6a1fd5e0793fb2ed720..60e27cc668b0b83b350619002ca3aed5
  function isAbortError(error) {
      const code = error.code;
 diff --git a/dist/mcpServers.mjs b/dist/mcpServers.mjs
-index b3a030614725c7d9500483e4778d1d0e0a6085c9..78c69a6fc05adb6fc6d44994d9907c3b7573afbe 100644
+index b3a030614725c7d9500483e4778d1d0e0a6085c9..81008cafbf666a847559ed7ca59931e7e6b22ab4 100644
 --- a/dist/mcpServers.mjs
 +++ b/dist/mcpServers.mjs
 @@ -58,6 +58,9 @@ class ServerWorker {
@@ -318,6 +327,50 @@ index b3a030614725c7d9500483e4778d1d0e0a6085c9..78c69a6fc05adb6fc6d44994d9907c3b
  }
  function isAbortError(error) {
      const code = error.code;
+diff --git a/dist/result.js b/dist/result.js
+index a3687830087af5e2e925618e5fae1881eea64e5a..24536bf157233fb814a6221be5517b41b0bb9b57 100644
+--- a/dist/result.js
++++ b/dist/result.js
+@@ -58,7 +58,7 @@ class RunResultBase {
+      * This can be used as inputs for the next agent run.
+      */
+     get history() {
+-        return (0, items_1.getTurnInput)(this.input, this.newItems, this.state._reasoningItemIdPolicy);
++        return (0, items_1.getTurnInput)(this.input, this.newItems, this.state._reasoningItemIdPolicy, this.state._historyOwnership);
+     }
+     /**
+      * The new items generated during the agent run. These include things like new messages, tool
+@@ -69,7 +69,7 @@ class RunResultBase {
+      * For the output including the agents, use the `newItems` property.
+      */
+     get output() {
+-        return (0, items_1.getTurnInput)([], this.newItems, this.state._reasoningItemIdPolicy);
++        return (0, items_1.getTurnInput)([], this.newItems, this.state._reasoningItemIdPolicy, this.state._historyOwnership);
+     }
+     /**
+      * A copy of the original input items.
+diff --git a/dist/result.mjs b/dist/result.mjs
+index 64732062d6cdeac0336ea0b3c53c8dd665475410..49be36016f362cdfb9e3257e464122265c07568c 100644
+--- a/dist/result.mjs
++++ b/dist/result.mjs
+@@ -22,7 +22,7 @@ class RunResultBase {
+      * This can be used as inputs for the next agent run.
+      */
+     get history() {
+-        return getTurnInput(this.input, this.newItems, this.state._reasoningItemIdPolicy);
++        return getTurnInput(this.input, this.newItems, this.state._reasoningItemIdPolicy, this.state._historyOwnership);
+     }
+     /**
+      * The new items generated during the agent run. These include things like new messages, tool
+@@ -33,7 +33,7 @@ class RunResultBase {
+      * For the output including the agents, use the `newItems` property.
+      */
+     get output() {
+-        return getTurnInput([], this.newItems, this.state._reasoningItemIdPolicy);
++        return getTurnInput([], this.newItems, this.state._reasoningItemIdPolicy, this.state._historyOwnership);
+     }
+     /**
+      * A copy of the original input items.
 diff --git a/dist/run.d.ts b/dist/run.d.ts
 index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b909715db5c1a 100644
 --- a/dist/run.d.ts
@@ -398,7 +451,7 @@ index 7863d754f4d6a5e1bfb99b8cde39417796533741..abe4b6f6c6e9ac8824a0b5d0ae1b9097
      /**
       * Error handlers keyed by error kind.
 diff --git a/dist/run.js b/dist/run.js
-index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b3c49303d 100644
+index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..6dc487efcc73c9275e8e859ae10e1e30a1591fb3 100644
 --- a/dist/run.js
 +++ b/dist/run.js
 @@ -99,6 +99,20 @@ class LazyDefaultModelProvider {
@@ -466,7 +519,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              toolNameCollisionPolicy,
              tracing: tracingConfig,
          };
-@@ -235,24 +258,39 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -235,24 +258,40 @@ class Runner extends lifecycle_1.RunHooks {
          // When the server tracks conversation history we defer to it for previous turns so local session
          // persistence can focus solely on the new delta being generated in this process.
          const session = effectiveOptions.session;
@@ -513,11 +566,12 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              }
          }
 -        const sessionPersistence = (0, sessionPersistence_1.createSessionPersistenceTracker)({
++        if (resumingFromState) input._historyOwnership = historyOwnership;
 +        const sessionPersistence = historyOwnership === 'external' ? undefined : (0, sessionPersistence_1.createSessionPersistenceTracker)({
              session,
              hasCallModelInputFilter,
              persistInput: sessionPersistence_1.saveStreamInputToSession,
-@@ -414,11 +452,13 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -414,11 +453,13 @@ class Runner extends lifecycle_1.RunHooks {
          const hasSandboxOverride = typeof options.sandbox !== 'undefined';
          const hasToolExecutionOverride = typeof options.toolExecution !== 'undefined';
          const hasToolNotFoundBehaviorOverride = typeof options.toolNotFoundBehavior !== 'undefined';
@@ -531,7 +585,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              !hasToolNameCollisionPolicyOverride &&
              !hasTracingOverride) {
              return this.config;
-@@ -432,6 +472,9 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -432,6 +473,9 @@ class Runner extends lifecycle_1.RunHooks {
              ...(hasToolNotFoundBehaviorOverride
                  ? { toolNotFoundBehavior: options.toolNotFoundBehavior }
                  : {}),
@@ -541,7 +595,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              ...(hasToolNameCollisionPolicyOverride
                  ? { toolNameCollisionPolicy: options.toolNameCollisionPolicy }
                  : {}),
-@@ -454,7 +497,10 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -454,7 +498,10 @@ class Runner extends lifecycle_1.RunHooks {
                      ? options.context
                      : new runContext_1.RunContext(options.context), input, startingAgent, options.maxTurns === undefined
                      ? constants_1.DEFAULT_MAX_TURNS
@@ -553,7 +607,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -546,7 +592,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -546,7 +593,7 @@ class Runner extends lifecycle_1.RunHooks {
              let persistenceCheckpoint;
              let approvedToolCheckpointCompacted = false;
              let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(state);
@@ -562,7 +616,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              let completedResultPersisted = false;
              const completeResult = (result) => {
                  completedResult = result;
-@@ -554,7 +600,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -554,7 +601,7 @@ class Runner extends lifecycle_1.RunHooks {
              };
              const persistNonStreamingResult = async (result) => {
                  const hasUnpersistedItems = result.newItems.length > state._currentTurnPersistedItemCount;
@@ -571,7 +625,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                  const persistenceOptions = approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
                          !hasUnpersistedItems &&
-@@ -663,7 +709,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -663,7 +710,7 @@ class Runner extends lifecycle_1.RunHooks {
                              });
                              approvedToolCheckpointCompacted = true;
                              approvedToolCheckpointModelResponseCount =
@@ -580,7 +634,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                          }
                          if (options.signal?.aborted) {
                              persistenceCheckpoint = new result_1.RunResult(state);
-@@ -743,7 +789,9 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -743,7 +790,9 @@ class Runner extends lifecycle_1.RunHooks {
                          sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                          const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                          const preparedCall = await this.#prepareModelCall(state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -591,7 +645,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                          await guardrailTracker.throwIfError();
                          state._lastTurnResponse = await (0, modelRetry_1.getResponseWithRetry)(preparedCall.model, {
                              systemInstructions: preparedCall.modelInput.instructions,
-@@ -772,7 +820,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -772,7 +821,7 @@ class Runner extends lifecycle_1.RunHooks {
                                  allTurnItems: preparedCall.turnInput,
                              });
                          }
@@ -600,7 +654,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                          state._context.usage.add(state._lastTurnResponse.usage);
                          recordUsage(state._lastTurnResponse.usage);
                          state._noActiveAgentRun = false;
-@@ -784,6 +832,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -784,6 +833,7 @@ class Runner extends lifecycle_1.RunHooks {
                          }
                          const processedResponse = await (0, modelOutputs_1.processModelResponseAsync)(state._lastTurnResponse, state._currentAgent, preparedCall.tools, preparedCall.handoffs, state, [...preparedCall.turnInput, ...state._generatedItems], options.toolNotFoundBehavior, {
                              allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
@@ -608,7 +662,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                          });
                          state._lastProcessedResponse = processedResponse;
                          await guardrailTracker.awaitCompletion();
-@@ -960,7 +1009,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -960,7 +1010,7 @@ class Runner extends lifecycle_1.RunHooks {
          let suppressStreamInputPersistence = false;
          let approvedToolCheckpointCompacted = false;
          let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
@@ -617,7 +671,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
          let currentTurnSpan;
          const parentUsageRecorder = (0, usageTracking_1.getRunnerParentUsageRecorder)(this);
          const recordUsage = (usage) => {
-@@ -971,7 +1020,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -971,7 +1021,7 @@ class Runner extends lifecycle_1.RunHooks {
          (0, usageTracking_1.setRunStateUsageRecorder)(result.state, recordUsage);
          const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
              const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
@@ -626,7 +680,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              const persistenceOptions = overrideOptions ??
                  (approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
-@@ -1104,7 +1153,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1104,7 +1154,7 @@ class Runner extends lifecycle_1.RunHooks {
                          });
                          approvedToolCheckpointCompacted = true;
                          approvedToolCheckpointModelResponseCount =
@@ -635,7 +689,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                      }
                      // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
                      // The counter will be reset when _currentTurn is incremented (starting a new turn)
-@@ -1190,7 +1239,9 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1190,7 +1240,9 @@ class Runner extends lifecycle_1.RunHooks {
                      sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                      const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                      const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -646,7 +700,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                      await guardrailTracker.throwIfError();
                      // Initial request and session-persistence ordering remain unchanged.
                      // Once a logical turn is established, do not start another model
-@@ -1326,9 +1377,10 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1326,9 +1378,10 @@ class Runner extends lifecycle_1.RunHooks {
                      if (serverConversationTracker) {
                          result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
                      }
@@ -658,7 +712,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
                      });
                      result.state._lastProcessedResponse = processedResponse;
                      // Record the items emitted directly from the model response so we do not
-@@ -1473,7 +1525,10 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1473,7 +1526,10 @@ class Runner extends lifecycle_1.RunHooks {
                      ? options.context
                      : new runContext_1.RunContext(options.context), input, agent, options.maxTurns === undefined
                      ? constants_1.DEFAULT_MAX_TURNS
@@ -670,7 +724,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -1587,7 +1642,7 @@ class Runner extends lifecycle_1.RunHooks {
+@@ -1587,7 +1643,7 @@ class Runner extends lifecycle_1.RunHooks {
              !(artifacts.toolsExplicitlyProvided &&
                  artifacts.serializedTools.length === 0 &&
                  artifacts.serializedHandoffs.length === 0);
@@ -680,7 +734,7 @@ index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..26c81179a25bda6743ea371438d1ec8b
          // is intentional when a filter removes everything.
          sessionInputUpdate?.(sourceItems, persistedItems);
 diff --git a/dist/run.mjs b/dist/run.mjs
-index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf332ae94df 100644
+index 20a7ddd8049b4404585cee04fa32eec2a8453103..9c009a70c607d523eaf4e660772b6b746acd2ca5 100644
 --- a/dist/run.mjs
 +++ b/dist/run.mjs
 @@ -59,6 +59,20 @@ class LazyDefaultModelProvider {
@@ -748,7 +802,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              toolNameCollisionPolicy,
              tracing: tracingConfig,
          };
-@@ -195,24 +218,39 @@ export class Runner extends RunHooks {
+@@ -195,24 +218,40 @@ export class Runner extends RunHooks {
          // When the server tracks conversation history we defer to it for previous turns so local session
          // persistence can focus solely on the new delta being generated in this process.
          const session = effectiveOptions.session;
@@ -795,11 +849,12 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              }
          }
 -        const sessionPersistence = createSessionPersistenceTracker({
++        if (resumingFromState) input._historyOwnership = historyOwnership;
 +        const sessionPersistence = historyOwnership === 'external' ? undefined : createSessionPersistenceTracker({
              session,
              hasCallModelInputFilter,
              persistInput: saveStreamInputToSession,
-@@ -374,11 +412,13 @@ export class Runner extends RunHooks {
+@@ -374,11 +413,13 @@ export class Runner extends RunHooks {
          const hasSandboxOverride = typeof options.sandbox !== 'undefined';
          const hasToolExecutionOverride = typeof options.toolExecution !== 'undefined';
          const hasToolNotFoundBehaviorOverride = typeof options.toolNotFoundBehavior !== 'undefined';
@@ -813,7 +868,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              !hasToolNameCollisionPolicyOverride &&
              !hasTracingOverride) {
              return this.config;
-@@ -392,6 +432,9 @@ export class Runner extends RunHooks {
+@@ -392,6 +433,9 @@ export class Runner extends RunHooks {
              ...(hasToolNotFoundBehaviorOverride
                  ? { toolNotFoundBehavior: options.toolNotFoundBehavior }
                  : {}),
@@ -823,7 +878,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              ...(hasToolNameCollisionPolicyOverride
                  ? { toolNameCollisionPolicy: options.toolNameCollisionPolicy }
                  : {}),
-@@ -414,7 +457,10 @@ export class Runner extends RunHooks {
+@@ -414,7 +458,10 @@ export class Runner extends RunHooks {
                      ? options.context
                      : new RunContext(options.context), input, startingAgent, options.maxTurns === undefined
                      ? DEFAULT_MAX_TURNS
@@ -835,7 +890,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -506,7 +552,7 @@ export class Runner extends RunHooks {
+@@ -506,7 +553,7 @@ export class Runner extends RunHooks {
              let persistenceCheckpoint;
              let approvedToolCheckpointCompacted = false;
              let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(state);
@@ -844,7 +899,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              let completedResultPersisted = false;
              const completeResult = (result) => {
                  completedResult = result;
-@@ -514,7 +560,7 @@ export class Runner extends RunHooks {
+@@ -514,7 +561,7 @@ export class Runner extends RunHooks {
              };
              const persistNonStreamingResult = async (result) => {
                  const hasUnpersistedItems = result.newItems.length > state._currentTurnPersistedItemCount;
@@ -853,7 +908,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                  const persistenceOptions = approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
                          !hasUnpersistedItems &&
-@@ -623,7 +669,7 @@ export class Runner extends RunHooks {
+@@ -623,7 +670,7 @@ export class Runner extends RunHooks {
                              });
                              approvedToolCheckpointCompacted = true;
                              approvedToolCheckpointModelResponseCount =
@@ -862,7 +917,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                          }
                          if (options.signal?.aborted) {
                              persistenceCheckpoint = new RunResult(state);
-@@ -703,7 +749,9 @@ export class Runner extends RunHooks {
+@@ -703,7 +750,9 @@ export class Runner extends RunHooks {
                          sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                          const artifacts = await prepareAgentArtifacts(state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                          const preparedCall = await this.#prepareModelCall(state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -873,7 +928,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                          await guardrailTracker.throwIfError();
                          state._lastTurnResponse = await getResponseWithRetry(preparedCall.model, {
                              systemInstructions: preparedCall.modelInput.instructions,
-@@ -732,7 +780,7 @@ export class Runner extends RunHooks {
+@@ -732,7 +781,7 @@ export class Runner extends RunHooks {
                                  allTurnItems: preparedCall.turnInput,
                              });
                          }
@@ -882,7 +937,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                          state._context.usage.add(state._lastTurnResponse.usage);
                          recordUsage(state._lastTurnResponse.usage);
                          state._noActiveAgentRun = false;
-@@ -744,6 +792,7 @@ export class Runner extends RunHooks {
+@@ -744,6 +793,7 @@ export class Runner extends RunHooks {
                          }
                          const processedResponse = await processModelResponseAsync(state._lastTurnResponse, state._currentAgent, preparedCall.tools, preparedCall.handoffs, state, [...preparedCall.turnInput, ...state._generatedItems], options.toolNotFoundBehavior, {
                              allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
@@ -890,7 +945,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                          });
                          state._lastProcessedResponse = processedResponse;
                          await guardrailTracker.awaitCompletion();
-@@ -920,7 +969,7 @@ export class Runner extends RunHooks {
+@@ -920,7 +970,7 @@ export class Runner extends RunHooks {
          let suppressStreamInputPersistence = false;
          let approvedToolCheckpointCompacted = false;
          let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
@@ -899,7 +954,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
          let currentTurnSpan;
          const parentUsageRecorder = getRunnerParentUsageRecorder(this);
          const recordUsage = (usage) => {
-@@ -931,7 +980,7 @@ export class Runner extends RunHooks {
+@@ -931,7 +981,7 @@ export class Runner extends RunHooks {
          setRunStateUsageRecorder(result.state, recordUsage);
          const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
              const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
@@ -908,7 +963,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              const persistenceOptions = overrideOptions ??
                  (approvedToolCheckpointRequiresLocalInputCompaction
                      ? approvedToolCheckpointCompacted &&
-@@ -1064,7 +1113,7 @@ export class Runner extends RunHooks {
+@@ -1064,7 +1114,7 @@ export class Runner extends RunHooks {
                          });
                          approvedToolCheckpointCompacted = true;
                          approvedToolCheckpointModelResponseCount =
@@ -917,7 +972,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                      }
                      // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
                      // The counter will be reset when _currentTurn is incremented (starting a new turn)
-@@ -1150,7 +1199,9 @@ export class Runner extends RunHooks {
+@@ -1150,7 +1200,9 @@ export class Runner extends RunHooks {
                      sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
                      const artifacts = await prepareAgentArtifacts(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
                      const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
@@ -928,7 +983,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                      await guardrailTracker.throwIfError();
                      // Initial request and session-persistence ordering remain unchanged.
                      // Once a logical turn is established, do not start another model
-@@ -1286,9 +1337,10 @@ export class Runner extends RunHooks {
+@@ -1286,9 +1338,10 @@ export class Runner extends RunHooks {
                      if (serverConversationTracker) {
                          result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
                      }
@@ -940,7 +995,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
                      });
                      result.state._lastProcessedResponse = processedResponse;
                      // Record the items emitted directly from the model response so we do not
-@@ -1433,7 +1485,10 @@ export class Runner extends RunHooks {
+@@ -1433,7 +1486,10 @@ export class Runner extends RunHooks {
                      ? options.context
                      : new RunContext(options.context), input, agent, options.maxTurns === undefined
                      ? DEFAULT_MAX_TURNS
@@ -952,7 +1007,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
              if (isResumedState) {
                  state._agentToolInvocation = undefined;
                  if (options.maxTurns !== undefined) {
-@@ -1547,7 +1602,7 @@ export class Runner extends RunHooks {
+@@ -1547,7 +1603,7 @@ export class Runner extends RunHooks {
              !(artifacts.toolsExplicitlyProvided &&
                  artifacts.serializedTools.length === 0 &&
                  artifacts.serializedHandoffs.length === 0);
@@ -962,7 +1017,7 @@ index 20a7ddd8049b4404585cee04fa32eec2a8453103..8edc9b84bbd4e2f4f1c3f33bbab2fbf3
          // is intentional when a filter removes everything.
          sessionInputUpdate?.(sourceItems, persistedItems);
 diff --git a/dist/runState.d.ts b/dist/runState.d.ts
-index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db504028641 100644
+index 9bbf67c71a80f110ab841d4553397633a6df4faf..b943474af1750b4112e550886216943c7ac43e98 100644
 --- a/dist/runState.d.ts
 +++ b/dist/runState.d.ts
 @@ -16,6 +16,7 @@ import { AgentInputItem, UnknownContext } from './types';
@@ -996,7 +1051,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db5
  declare const pendingSessionHistoryTransactionSchema: z.ZodObject<{
      operationId: z.ZodString;
      transactionKind: z.ZodEnum<{
-@@ -4224,6 +4241,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4224,6 +4241,11 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * Responses from the model so far.
       */
      _modelResponses: ModelResponse[];
@@ -1004,10 +1059,11 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db5
 +    _modelResponseCount: number;
 +    /** Active raw-response retention policy for this run. */
 +    _modelResponseRetention: 'all' | 'last';
++    _historyOwnership: 'sdk' | 'external';
      /**
       * Conversation identifier when the server manages conversation history.
       */
-@@ -4383,7 +4404,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4383,7 +4405,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * Persisted sandbox session metadata for sandbox-agent resume.
       */
      _sandbox: z.infer<typeof sandboxStateSchema> | undefined;
@@ -1019,7 +1075,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db5
      /**
       * Updates server-managed conversation identifiers as a single operation.
       */
-@@ -4392,6 +4416,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4392,6 +4417,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * Updates runtime options for converting run items into turn input.
       */
      setReasoningItemIdPolicy(policy?: ReasoningItemIdPolicy): void;
@@ -1028,7 +1084,7 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db5
      /**
       * Updates the agent span associated with the current run.
       */
-@@ -4511,8 +4537,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+@@ -4511,8 +4538,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
       * This method is used to deserialize a run state from a string that was serialized using the
       * `toString` method.
       */
@@ -1040,10 +1096,18 @@ index 9bbf67c71a80f110ab841d4553397633a6df4faf..b48ffd840dbe24d03509cd995cf59db5
      }): Promise<RunState<TContext, TAgent>>;
  }
 diff --git a/dist/runState.js b/dist/runState.js
-index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a3c49f6ad 100644
+index deb9514cf094157893778976e2ef03e7fefe0965..53c353de1386c4b3ec4cef1e6ee89286fc74ee7e 100644
 --- a/dist/runState.js
 +++ b/dist/runState.js
-@@ -500,6 +500,15 @@ class RunState {
+@@ -430,6 +430,7 @@ exports.SerializedRunState = zod_1.z.object({
+     }),
+     toolUseTracker: zod_1.z.record(zod_1.z.string(), zod_1.z.array(zod_1.z.string())),
+     maxTurns: zod_1.z.number().nullable(),
++    historyOwnership: zod_1.z.enum(['sdk', 'external']).optional(),
+     currentAgentSpan: SerializedSpan.nullable().optional(),
+     noActiveAgentRun: zod_1.z.boolean(),
+     inputGuardrailResults: zod_1.z.array(inputGuardrailResultSchema),
+@@ -500,6 +501,15 @@ class RunState {
       * Responses from the model so far.
       */
      _modelResponses;
@@ -1059,13 +1123,14 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
      /**
       * Conversation identifier when the server manages conversation history.
       */
-@@ -661,11 +670,17 @@ class RunState {
+@@ -661,11 +671,18 @@ class RunState {
       * Persisted sandbox session metadata for sandbox-agent resume.
       */
      _sandbox = undefined;
 -    constructor(context, originalInput, startingAgent, maxTurns) {
 +    constructor(context, originalInput, startingAgent, maxTurns, options = {}) {
          this._context = context;
++        this._historyOwnership = options.historyOwnership ?? 'sdk';
          this._agentToolInvocation = undefined;
 -        this._originalInput = structuredClone(originalInput);
 +        this._originalInput = options.historyOwnership === 'external' && Array.isArray(originalInput)
@@ -1079,7 +1144,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
          this._currentAgentSpan = undefined;
          this._currentAgent = startingAgent;
          this.#startingAgent = startingAgent;
-@@ -706,6 +721,26 @@ class RunState {
+@@ -706,6 +723,26 @@ class RunState {
      setReasoningItemIdPolicy(policy) {
          this._reasoningItemIdPolicy = policy;
      }
@@ -1106,7 +1171,24 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
      /**
       * Updates the agent span associated with the current run.
       */
-@@ -1040,13 +1075,18 @@ class RunState {
+@@ -824,7 +861,7 @@ class RunState {
+      * This can be used as inputs for the next agent run.
+      */
+     get history() {
+-        return (0, items_2.getTurnInput)(this._originalInput, this._generatedItems, this._reasoningItemIdPolicy);
++        return (0, items_2.getTurnInput)(this._originalInput, this._generatedItems, this._reasoningItemIdPolicy, this._historyOwnership);
+     }
+     /**
+      * Returns all interruptions if the current step is an interruption otherwise returns an empty array.
+@@ -973,6 +1010,7 @@ class RunState {
+                 agentIdentityKeys: agentIdentity.byAgent,
+             }),
+             maxTurns: this._maxTurns,
++            historyOwnership: this._historyOwnership,
+             currentAgentSpan: this._currentAgentSpan?.toJSON(),
+             noActiveAgentRun: this._noActiveAgentRun,
+             currentTurnInProgress: this._currentTurnInProgress,
+@@ -1040,13 +1078,18 @@ class RunState {
       * This method is used to deserialize a run state from a string that was serialized using the
       * `toString` method.
       */
@@ -1127,7 +1209,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
          });
      }
  }
-@@ -1837,6 +1877,19 @@ function selectSerializedRuntimeTools(args) {
+@@ -1837,6 +1880,19 @@ function selectSerializedRuntimeTools(args) {
      const callId = (0, toolSearch_1.resolveToolSearchCallId)(toolSearchCall);
      throw new errors_1.UserError(`RunState cannot resume custom client tool_search call ${callId} for agent ${agent.name} because the registered execute callback returned runtime tools [${formatRuntimeToolKeys(actualRuntimeToolKeys)}] but the serialized state expects [${formatRuntimeToolKeys(expectedRuntimeToolKeys)}].`);
  }
@@ -1147,7 +1229,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
  async function getConfiguredAgentTools(args) {
      const { agent, context, configuredToolsByAgent } = args;
      const existing = configuredToolsByAgent.get(agent);
-@@ -2074,6 +2127,11 @@ function assertDeferredFunctionCallProvenance(args) {
+@@ -2074,6 +2130,11 @@ function assertDeferredFunctionCallProvenance(args) {
      }
  }
  async function rehydrateToolSearchRuntimeTools(state, options) {
@@ -1159,7 +1241,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
      const deferredFunctionCallExpectations = assertUnambiguousFunctionCallIds(state, options.agentMap, options.serializedProcessedResponse);
      const configuredToolsByAgent = new Map();
      const capabilitySnapshotsByAgent = new Map();
-@@ -2204,6 +2262,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
+@@ -2204,6 +2265,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
          const pendingCall = occurrencesByOutput.get(item).pendingCall;
          const toolSearchTool = (0, toolSearch_2.getClientToolSearchHelper)(snapshot.availableTools);
          const hasCustomExecutor = Boolean(toolSearchTool && (0, tool_1.getClientToolSearchExecutor)(toolSearchTool));
@@ -1174,7 +1256,16 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
          if (expectedRuntimeToolKeys.size === 0) {
              rehydrationRecords.set(item, {
                  pendingCall,
-@@ -2408,6 +2474,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2359,7 +2428,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+     // Find the current agent from the initial agent
+     //
+     const currentAgent = resolveSerializedAgent(stateJson.currentAgent, agentMap);
+-    const state = new RunState(context, '', initialAgent, stateJson.maxTurns);
++    const state = new RunState(context, '', initialAgent, stateJson.maxTurns, { historyOwnership: stateJson.historyOwnership });
+     state._currentAgent = currentAgent;
+     state._currentTurn = stateJson.currentTurn;
+     state._currentTurnInProgress = stateJson.currentTurnInProgress ?? false;
+@@ -2408,6 +2477,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      state._currentStep = stateJson.currentStep;
      state._originalInput = stateJson.originalInput;
      state._modelResponses = stateJson.modelResponses.map(deserializeModelResponse);
@@ -1183,7 +1274,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
      state._lastTurnResponse = stateJson.lastModelResponse
          ? deserializeModelResponse(stateJson.lastModelResponse)
          : undefined;
-@@ -2436,6 +2504,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2436,6 +2507,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      const capabilitySnapshotsByAgent = await rehydrateToolSearchRuntimeTools(state, {
          agentMap,
          schemaVersion,
@@ -1191,7 +1282,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
          serializedProcessedResponse: stateJson.lastProcessedResponse,
          prepareCurrentAgentForLegacyApprovals: !schemaVersionSupportsV116State(schemaVersion) &&
              shouldRestoreSerializedContext &&
-@@ -2447,6 +2516,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2447,6 +2519,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
              executionTools: currentCapabilitySnapshot.availableTools,
              executionHandoffs: currentCapabilitySnapshot.handoffs,
              executionFunctionToolsByCallId: currentCapabilitySnapshot.functionToolsByCallId,
@@ -1199,7 +1290,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
          })
          : undefined;
      restorePendingAgentToolRunAliases(state, stateJson.pendingAgentToolRunAliases ?? {});
-@@ -3066,9 +3136,27 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+@@ -3066,9 +3139,27 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
                      (0, toolIdentity_1.getFunctionToolStateKeyForCall)(functionCall.toolCall) ?? functionCall.tool.name,
                  ]);
              }
@@ -1229,7 +1320,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
                      agent: currentAgent,
                      baseAgentTools,
                      serializedTool: functionCall.tool,
-@@ -3076,6 +3164,7 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+@@ -3076,6 +3167,7 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
                      toolIdentity,
                      allowSerializedExecutionToolPlaceholder,
                  });
@@ -1237,7 +1328,7 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
              if (!resolvedTool) {
                  throw new errors_1.UserError(`Tool ${toolIdentity} not found`);
              }
-@@ -3086,7 +3175,8 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+@@ -3086,7 +3178,8 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
                  availableFunctionTools: [
                      ...new Set([...tools.values(), resolvedTool]),
                  ],
@@ -1248,10 +1339,18 @@ index deb9514cf094157893778976e2ef03e7fefe0965..53c1504545a208b28503e6648d9b768a
          })),
          functionToolsNotFound: serializedProcessedResponse.functionToolsNotFound ?? [],
 diff --git a/dist/runState.mjs b/dist/runState.mjs
-index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b25f43496 100644
+index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..72c2b05e66a67e3108890095b8f44dfbe0a450d0 100644
 --- a/dist/runState.mjs
 +++ b/dist/runState.mjs
-@@ -455,6 +455,15 @@ export class RunState {
+@@ -385,6 +385,7 @@ export const SerializedRunState = z.object({
+     }),
+     toolUseTracker: z.record(z.string(), z.array(z.string())),
+     maxTurns: z.number().nullable(),
++    historyOwnership: z.enum(['sdk', 'external']).optional(),
+     currentAgentSpan: SerializedSpan.nullable().optional(),
+     noActiveAgentRun: z.boolean(),
+     inputGuardrailResults: z.array(inputGuardrailResultSchema),
+@@ -455,6 +456,15 @@ export class RunState {
       * Responses from the model so far.
       */
      _modelResponses;
@@ -1267,13 +1366,14 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
      /**
       * Conversation identifier when the server manages conversation history.
       */
-@@ -616,11 +625,17 @@ export class RunState {
+@@ -616,11 +626,18 @@ export class RunState {
       * Persisted sandbox session metadata for sandbox-agent resume.
       */
      _sandbox = undefined;
 -    constructor(context, originalInput, startingAgent, maxTurns) {
 +    constructor(context, originalInput, startingAgent, maxTurns, options = {}) {
          this._context = context;
++        this._historyOwnership = options.historyOwnership ?? 'sdk';
          this._agentToolInvocation = undefined;
 -        this._originalInput = structuredClone(originalInput);
 +        this._originalInput = options.historyOwnership === 'external' && Array.isArray(originalInput)
@@ -1287,7 +1387,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
          this._currentAgentSpan = undefined;
          this._currentAgent = startingAgent;
          this.#startingAgent = startingAgent;
-@@ -661,6 +676,26 @@ export class RunState {
+@@ -661,6 +678,26 @@ export class RunState {
      setReasoningItemIdPolicy(policy) {
          this._reasoningItemIdPolicy = policy;
      }
@@ -1314,7 +1414,24 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
      /**
       * Updates the agent span associated with the current run.
       */
-@@ -995,13 +1030,18 @@ export class RunState {
+@@ -779,7 +816,7 @@ export class RunState {
+      * This can be used as inputs for the next agent run.
+      */
+     get history() {
+-        return getTurnInput(this._originalInput, this._generatedItems, this._reasoningItemIdPolicy);
++        return getTurnInput(this._originalInput, this._generatedItems, this._reasoningItemIdPolicy, this._historyOwnership);
+     }
+     /**
+      * Returns all interruptions if the current step is an interruption otherwise returns an empty array.
+@@ -928,6 +965,7 @@ export class RunState {
+                 agentIdentityKeys: agentIdentity.byAgent,
+             }),
+             maxTurns: this._maxTurns,
++            historyOwnership: this._historyOwnership,
+             currentAgentSpan: this._currentAgentSpan?.toJSON(),
+             noActiveAgentRun: this._noActiveAgentRun,
+             currentTurnInProgress: this._currentTurnInProgress,
+@@ -995,13 +1033,18 @@ export class RunState {
       * This method is used to deserialize a run state from a string that was serialized using the
       * `toString` method.
       */
@@ -1335,7 +1452,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
          });
      }
  }
-@@ -1791,6 +1831,19 @@ function selectSerializedRuntimeTools(args) {
+@@ -1791,6 +1834,19 @@ function selectSerializedRuntimeTools(args) {
      const callId = resolveToolSearchCallId(toolSearchCall);
      throw new UserError(`RunState cannot resume custom client tool_search call ${callId} for agent ${agent.name} because the registered execute callback returned runtime tools [${formatRuntimeToolKeys(actualRuntimeToolKeys)}] but the serialized state expects [${formatRuntimeToolKeys(expectedRuntimeToolKeys)}].`);
  }
@@ -1355,7 +1472,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
  async function getConfiguredAgentTools(args) {
      const { agent, context, configuredToolsByAgent } = args;
      const existing = configuredToolsByAgent.get(agent);
-@@ -2028,6 +2081,11 @@ function assertDeferredFunctionCallProvenance(args) {
+@@ -2028,6 +2084,11 @@ function assertDeferredFunctionCallProvenance(args) {
      }
  }
  async function rehydrateToolSearchRuntimeTools(state, options) {
@@ -1367,7 +1484,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
      const deferredFunctionCallExpectations = assertUnambiguousFunctionCallIds(state, options.agentMap, options.serializedProcessedResponse);
      const configuredToolsByAgent = new Map();
      const capabilitySnapshotsByAgent = new Map();
-@@ -2158,6 +2216,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
+@@ -2158,6 +2219,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
          const pendingCall = occurrencesByOutput.get(item).pendingCall;
          const toolSearchTool = getClientToolSearchHelper(snapshot.availableTools);
          const hasCustomExecutor = Boolean(toolSearchTool && getClientToolSearchExecutor(toolSearchTool));
@@ -1382,7 +1499,16 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
          if (expectedRuntimeToolKeys.size === 0) {
              rehydrationRecords.set(item, {
                  pendingCall,
-@@ -2362,6 +2428,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2313,7 +2382,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+     // Find the current agent from the initial agent
+     //
+     const currentAgent = resolveSerializedAgent(stateJson.currentAgent, agentMap);
+-    const state = new RunState(context, '', initialAgent, stateJson.maxTurns);
++    const state = new RunState(context, '', initialAgent, stateJson.maxTurns, { historyOwnership: stateJson.historyOwnership });
+     state._currentAgent = currentAgent;
+     state._currentTurn = stateJson.currentTurn;
+     state._currentTurnInProgress = stateJson.currentTurnInProgress ?? false;
+@@ -2362,6 +2431,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      state._currentStep = stateJson.currentStep;
      state._originalInput = stateJson.originalInput;
      state._modelResponses = stateJson.modelResponses.map(deserializeModelResponse);
@@ -1391,7 +1517,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
      state._lastTurnResponse = stateJson.lastModelResponse
          ? deserializeModelResponse(stateJson.lastModelResponse)
          : undefined;
-@@ -2390,6 +2458,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2390,6 +2461,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
      const capabilitySnapshotsByAgent = await rehydrateToolSearchRuntimeTools(state, {
          agentMap,
          schemaVersion,
@@ -1399,7 +1525,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
          serializedProcessedResponse: stateJson.lastProcessedResponse,
          prepareCurrentAgentForLegacyApprovals: !schemaVersionSupportsV116State(schemaVersion) &&
              shouldRestoreSerializedContext &&
-@@ -2401,6 +2470,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+@@ -2401,6 +2473,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
              executionTools: currentCapabilitySnapshot.availableTools,
              executionHandoffs: currentCapabilitySnapshot.handoffs,
              executionFunctionToolsByCallId: currentCapabilitySnapshot.functionToolsByCallId,
@@ -1407,7 +1533,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
          })
          : undefined;
      restorePendingAgentToolRunAliases(state, stateJson.pendingAgentToolRunAliases ?? {});
-@@ -3020,9 +3090,27 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+@@ -3020,9 +3093,27 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
                      getFunctionToolStateKeyForCall(functionCall.toolCall) ?? functionCall.tool.name,
                  ]);
              }
@@ -1437,7 +1563,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
                      agent: currentAgent,
                      baseAgentTools,
                      serializedTool: functionCall.tool,
-@@ -3030,6 +3118,7 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+@@ -3030,6 +3121,7 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
                      toolIdentity,
                      allowSerializedExecutionToolPlaceholder,
                  });
@@ -1445,7 +1571,7 @@ index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..16f39eb40400119728c86cb32bcf013b
              if (!resolvedTool) {
                  throw new UserError(`Tool ${toolIdentity} not found`);
              }
-@@ -3040,7 +3129,8 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
+@@ -3040,7 +3132,8 @@ async function deserializeProcessedResponse(agentMap, state, serializedProcessed
                  availableFunctionTools: [
                      ...new Set([...tools.values(), resolvedTool]),
                  ],
@@ -1617,6 +1743,166 @@ index 773f1fc48bf8758d642bd51f8c062efbf08f5c45..2cd3fb151bcdfcf8405989ef89e295b9
          const consumedExactClones = new WeakSet();
          const injectedExactCloneIndexes = new Set();
          // Preserve a pointer to the original object backing each filtered clone so downstream
+diff --git a/dist/runner/errorHandlers.js b/dist/runner/errorHandlers.js
+index 34b7185f6e951e4dcaa7792ed47d74d36b1959a0..2311a3a21e73ea57ac3d78f8c4bc78f9e09ff524 100644
+--- a/dist/runner/errorHandlers.js
++++ b/dist/runner/errorHandlers.js
+@@ -22,8 +22,8 @@ exports.attachRunStateToError = attachRunStateToError;
+ const buildRunData = (state) => ({
+     input: state._originalInput,
+     newItems: state._generatedItems,
+-    history: (0, items_2.getTurnInput)(state._originalInput, state._generatedItems, state._reasoningItemIdPolicy),
+-    output: (0, items_2.getTurnInput)([], state._generatedItems, state._reasoningItemIdPolicy),
++    history: (0, items_2.getTurnInput)(state._originalInput, state._generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
++    output: (0, items_2.getTurnInput)([], state._generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
+     rawResponses: state._modelResponses,
+     lastAgent: state._currentAgent,
+     state,
+diff --git a/dist/runner/errorHandlers.mjs b/dist/runner/errorHandlers.mjs
+index b58e7fa7fbc06067c04b9e445da8fd4fb41e67d2..260a0209721a8ab25717c9d3ea1fa2d681874870 100644
+--- a/dist/runner/errorHandlers.mjs
++++ b/dist/runner/errorHandlers.mjs
+@@ -18,8 +18,8 @@ export const attachRunStateToError = (error, state) => {
+ const buildRunData = (state) => ({
+     input: state._originalInput,
+     newItems: state._generatedItems,
+-    history: getTurnInput(state._originalInput, state._generatedItems, state._reasoningItemIdPolicy),
+-    output: getTurnInput([], state._generatedItems, state._reasoningItemIdPolicy),
++    history: getTurnInput(state._originalInput, state._generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
++    output: getTurnInput([], state._generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
+     rawResponses: state._modelResponses,
+     lastAgent: state._currentAgent,
+     state,
+diff --git a/dist/runner/guardrails.js b/dist/runner/guardrails.js
+index cc56f3794e989b1567fbb1e5dcfeffb5732b36fd..9700fdb91833220401295860affc521b6d64e364 100644
+--- a/dist/runner/guardrails.js
++++ b/dist/runner/guardrails.js
+@@ -154,7 +154,7 @@ async function runOutputGuardrails(state, runnerOutputGuardrails, output) {
+         return;
+     }
+     const agentOutput = state._currentAgent.processFinalOutput(output);
+-    const runOutput = (0, items_1.getTurnInput)([], state._generatedItems, state._reasoningItemIdPolicy);
++    const runOutput = (0, items_1.getTurnInput)([], state._generatedItems, state._reasoningItemIdPolicy, state._historyOwnership);
+     const guardrailArgs = {
+         agent: state._currentAgent,
+         agentOutput,
+diff --git a/dist/runner/guardrails.mjs b/dist/runner/guardrails.mjs
+index ca6b0be3abc532535ee6551d67aa78a3e422c35e..27fd02eed0953900dea4474c7d7c9f99e81b676d 100644
+--- a/dist/runner/guardrails.mjs
++++ b/dist/runner/guardrails.mjs
+@@ -146,7 +146,7 @@ export async function runOutputGuardrails(state, runnerOutputGuardrails, output)
+         return;
+     }
+     const agentOutput = state._currentAgent.processFinalOutput(output);
+-    const runOutput = getTurnInput([], state._generatedItems, state._reasoningItemIdPolicy);
++    const runOutput = getTurnInput([], state._generatedItems, state._reasoningItemIdPolicy, state._historyOwnership);
+     const guardrailArgs = {
+         agent: state._currentAgent,
+         agentOutput,
+diff --git a/dist/runner/items.d.ts b/dist/runner/items.d.ts
+index b3a5d5a6851462da91a0dcf8218d886d18c60a7c..cd0360aaec3e41d4c21ff637b32cc2a11c4fc6ea 100644
+--- a/dist/runner/items.d.ts
++++ b/dist/runner/items.d.ts
+@@ -26,7 +26,7 @@ export declare function extractOutputItemsFromRunItems(items: RunItem[], reasoni
+ export declare function dropOrphanToolCalls(items: AgentInputItem[], options?: {
+     pruningIndexes?: Set<number>;
+ }): AgentInputItem[];
+-export declare function prepareModelInputItems(originalInput: string | AgentInputItem[], generatedItems: RunItem[], reasoningItemIdPolicy?: ReasoningItemIdPolicy): AgentInputItem[];
++export declare function prepareModelInputItems(originalInput: string | AgentInputItem[], generatedItems: RunItem[], reasoningItemIdPolicy?: ReasoningItemIdPolicy, historyOwnership?: 'sdk' | 'external'): AgentInputItem[];
+ /**
+  * Constructs the model input array for the current turn by combining the original turn input with
+  * any new run items (excluding tool approval placeholders). This helps ensure that repeated calls
+@@ -34,5 +34,5 @@ export declare function prepareModelInputItems(originalInput: string | AgentInpu
+  *
+  * See: https://platform.openai.com/docs/guides/conversation-state?api-mode=responses.
+  */
+-export declare function getTurnInput(originalInput: string | AgentInputItem[], generatedItems: RunItem[], reasoningItemIdPolicy?: ReasoningItemIdPolicy): AgentInputItem[];
++export declare function getTurnInput(originalInput: string | AgentInputItem[], generatedItems: RunItem[], reasoningItemIdPolicy?: ReasoningItemIdPolicy, historyOwnership?: 'sdk' | 'external'): AgentInputItem[];
+ export declare function trimToLatestCompaction(items: AgentInputItem[]): AgentInputItem[];
+diff --git a/dist/runner/items.js b/dist/runner/items.js
+index 305b91659cb1ce59b708dac7f62011958844a4dd..05e3d4a351e9b5aec1c2cedca05c5e83c394b108 100644
+--- a/dist/runner/items.js
++++ b/dist/runner/items.js
+@@ -453,13 +453,15 @@ function dropReasoningItemsPrecedingDroppedCalls(items, droppedIndexes, pruningI
+     const excluded = new Set([...droppedIndexes, ...dropReasoning]);
+     return items.filter((_item, index) => !excluded.has(index));
+ }
+-function prepareModelInputItems(originalInput, generatedItems, reasoningItemIdPolicy) {
++function prepareModelInputItems(originalInput, generatedItems, reasoningItemIdPolicy, historyOwnership) {
+     const callerItems = toAgentInputList(originalInput);
+-    const preparedGeneratedItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy);
+-    return trimToLatestCompaction([...callerItems, ...preparedGeneratedItems]);
++    const preparedGeneratedItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy, historyOwnership);
++    const items = [...callerItems, ...preparedGeneratedItems];
++    return historyOwnership === 'external' ? items : trimToLatestCompaction(items);
+ }
+-function getContinuationOutputItems(generatedItems, reasoningItemIdPolicy) {
+-    const generatedOutputItems = trimToLatestCompaction(extractOutputItemsFromRunItems(generatedItems, reasoningItemIdPolicy));
++function getContinuationOutputItems(generatedItems, reasoningItemIdPolicy, historyOwnership) {
++    const extracted = extractOutputItemsFromRunItems(generatedItems, reasoningItemIdPolicy);
++    const generatedOutputItems = historyOwnership === 'external' ? extracted : trimToLatestCompaction(extracted);
+     return dropOrphanToolCalls(generatedOutputItems);
+ }
+ /**
+@@ -469,12 +471,10 @@ function getContinuationOutputItems(generatedItems, reasoningItemIdPolicy) {
+  *
+  * See: https://platform.openai.com/docs/guides/conversation-state?api-mode=responses.
+  */
+-function getTurnInput(originalInput, generatedItems, reasoningItemIdPolicy) {
+-    const outputItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy);
+-    return trimToLatestCompaction([
+-        ...toAgentInputList(originalInput),
+-        ...outputItems,
+-    ]);
++function getTurnInput(originalInput, generatedItems, reasoningItemIdPolicy, historyOwnership) {
++    const outputItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy, historyOwnership);
++    const items = [...toAgentInputList(originalInput), ...outputItems];
++    return historyOwnership === 'external' ? items : trimToLatestCompaction(items);
+ }
+ function trimToLatestCompaction(items) {
+     for (let index = items.length - 1; index >= 0; index -= 1) {
+diff --git a/dist/runner/items.mjs b/dist/runner/items.mjs
+index b3c07db6c803fd46c739ec253eaf4d102291faa6..8cc1a0389fbcb9f394d3bf2c4eca5841b99f4ab5 100644
+--- a/dist/runner/items.mjs
++++ b/dist/runner/items.mjs
+@@ -402,13 +402,15 @@ function dropReasoningItemsPrecedingDroppedCalls(items, droppedIndexes, pruningI
+     const excluded = new Set([...droppedIndexes, ...dropReasoning]);
+     return items.filter((_item, index) => !excluded.has(index));
+ }
+-export function prepareModelInputItems(originalInput, generatedItems, reasoningItemIdPolicy) {
++export function prepareModelInputItems(originalInput, generatedItems, reasoningItemIdPolicy, historyOwnership) {
+     const callerItems = toAgentInputList(originalInput);
+-    const preparedGeneratedItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy);
+-    return trimToLatestCompaction([...callerItems, ...preparedGeneratedItems]);
++    const preparedGeneratedItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy, historyOwnership);
++    const items = [...callerItems, ...preparedGeneratedItems];
++    return historyOwnership === 'external' ? items : trimToLatestCompaction(items);
+ }
+-function getContinuationOutputItems(generatedItems, reasoningItemIdPolicy) {
+-    const generatedOutputItems = trimToLatestCompaction(extractOutputItemsFromRunItems(generatedItems, reasoningItemIdPolicy));
++function getContinuationOutputItems(generatedItems, reasoningItemIdPolicy, historyOwnership) {
++    const extracted = extractOutputItemsFromRunItems(generatedItems, reasoningItemIdPolicy);
++    const generatedOutputItems = historyOwnership === 'external' ? extracted : trimToLatestCompaction(extracted);
+     return dropOrphanToolCalls(generatedOutputItems);
+ }
+ /**
+@@ -418,12 +420,10 @@ function getContinuationOutputItems(generatedItems, reasoningItemIdPolicy) {
+  *
+  * See: https://platform.openai.com/docs/guides/conversation-state?api-mode=responses.
+  */
+-export function getTurnInput(originalInput, generatedItems, reasoningItemIdPolicy) {
+-    const outputItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy);
+-    return trimToLatestCompaction([
+-        ...toAgentInputList(originalInput),
+-        ...outputItems,
+-    ]);
++export function getTurnInput(originalInput, generatedItems, reasoningItemIdPolicy, historyOwnership) {
++    const outputItems = getContinuationOutputItems(generatedItems, reasoningItemIdPolicy, historyOwnership);
++    const items = [...toAgentInputList(originalInput), ...outputItems];
++    return historyOwnership === 'external' ? items : trimToLatestCompaction(items);
+ }
+ export function trimToLatestCompaction(items) {
+     for (let index = items.length - 1; index >= 0; index -= 1) {
 diff --git a/dist/runner/modelOutputs.d.ts b/dist/runner/modelOutputs.d.ts
 index 3a4f8b679c3c4a9dadf24d0a03fa713ca14d0579..424262b4204e5141e5964895ce220c9bd150db60 100644
 --- a/dist/runner/modelOutputs.d.ts
@@ -1831,6 +2117,62 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..4ff195c2cfe634b56b942a675491b1f2
          if (resolved.type === 'not_found') {
              if (toolNotFoundBehavior !== 'return_error_to_model') {
                  throwFunctionToolNotFound(resolved.toolName, agent);
+diff --git a/dist/runner/turnPreparation.js b/dist/runner/turnPreparation.js
+index 614a7400173bbd735b7d789592d902172898d0cf..8dde349e682a079c7e91518d6ef49de618a2d46c 100644
+--- a/dist/runner/turnPreparation.js
++++ b/dist/runner/turnPreparation.js
+@@ -38,7 +38,7 @@ async function prepareTurn(options) {
+     const { parallelGuardrailPromise } = await runInputGuardrailsForTurn(state, inputGuardrailDefs, isResumingFromInterruption, guardrailHandlers);
+     const turnInput = serverConversationTracker
+         ? serverConversationTracker.prepareInput(input, generatedItems, getManagedConversationSupplementalItems(state))
+-        : (0, items_2.prepareModelInputItems)(input, generatedItems, state._reasoningItemIdPolicy);
++        : (0, items_2.prepareModelInputItems)(input, generatedItems, state._reasoningItemIdPolicy, state._historyOwnership);
+     if (state._noActiveAgentRun) {
+         state._currentAgent.emit('agent_start', state._context, state._currentAgent, turnInput);
+         emitAgentStart?.(state._context, state._currentAgent, turnInput);
+diff --git a/dist/runner/turnPreparation.mjs b/dist/runner/turnPreparation.mjs
+index c0440c807d64e1076e1cca967dc1a144934a13c8..b17843d51508bff6d4ae26075646418d8a048780 100644
+--- a/dist/runner/turnPreparation.mjs
++++ b/dist/runner/turnPreparation.mjs
+@@ -31,7 +31,7 @@ export async function prepareTurn(options) {
+     const { parallelGuardrailPromise } = await runInputGuardrailsForTurn(state, inputGuardrailDefs, isResumingFromInterruption, guardrailHandlers);
+     const turnInput = serverConversationTracker
+         ? serverConversationTracker.prepareInput(input, generatedItems, getManagedConversationSupplementalItems(state))
+-        : prepareModelInputItems(input, generatedItems, state._reasoningItemIdPolicy);
++        : prepareModelInputItems(input, generatedItems, state._reasoningItemIdPolicy, state._historyOwnership);
+     if (state._noActiveAgentRun) {
+         state._currentAgent.emit('agent_start', state._context, state._currentAgent, turnInput);
+         emitAgentStart?.(state._context, state._currentAgent, turnInput);
+diff --git a/dist/runner/turnResolution.js b/dist/runner/turnResolution.js
+index 3233fc509f3feea735f9696380a86a0326c5b50b..30edcf291238ea10b46a8d026ea851b48d82e0a5 100644
+--- a/dist/runner/turnResolution.js
++++ b/dist/runner/turnResolution.js
+@@ -425,8 +425,8 @@ function buildTurnRunErrorData(state, agent, originalInput, preStepItems, newIte
+     return {
+         input: originalInput,
+         newItems: generatedItems,
+-        history: (0, items_2.getTurnInput)(originalInput, generatedItems, state._reasoningItemIdPolicy),
+-        output: (0, items_2.getTurnInput)([], generatedItems, state._reasoningItemIdPolicy),
++        history: (0, items_2.getTurnInput)(originalInput, generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
++        output: (0, items_2.getTurnInput)([], generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
+         rawResponses: state._modelResponses,
+         lastAgent: agent,
+         state,
+diff --git a/dist/runner/turnResolution.mjs b/dist/runner/turnResolution.mjs
+index e4b43a344a81c50b1dce9b9e9adba292f711c7e0..20f71ccc6c7113ceea4db70cea1e731476b05feb 100644
+--- a/dist/runner/turnResolution.mjs
++++ b/dist/runner/turnResolution.mjs
+@@ -386,8 +386,8 @@ function buildTurnRunErrorData(state, agent, originalInput, preStepItems, newIte
+     return {
+         input: originalInput,
+         newItems: generatedItems,
+-        history: getTurnInput(originalInput, generatedItems, state._reasoningItemIdPolicy),
+-        output: getTurnInput([], generatedItems, state._reasoningItemIdPolicy),
++        history: getTurnInput(originalInput, generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
++        output: getTurnInput([], generatedItems, state._reasoningItemIdPolicy, state._historyOwnership),
+         rawResponses: state._modelResponses,
+         lastAgent: agent,
+         state,
 diff --git a/dist/sandbox/manifest.js b/dist/sandbox/manifest.js
 index c7f81e3d0e9bdc08c475371c1cd6ccd508722a69..ba577c045f4fc776fe72382b4cae41f658e3c096 100644
 --- a/dist/sandbox/manifest.js
@@ -2122,7 +2464,7 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
 diff --git a/dist/tracing/provider.js b/dist/tracing/provider.js
-index cbb32c71706cde4fae21cb80eca21c4d6194ba98..3fca31233c74369bd285a33b148972524628657c 100644
+index cbb32c71706cde4fae21cb80eca21c4d6194ba98..82ed11cc3f279eabf5c99133b31fe50aadedf278 100644
 --- a/dist/tracing/provider.js
 +++ b/dist/tracing/provider.js
 @@ -356,14 +356,9 @@ class TraceProvider {
@@ -2154,7 +2496,7 @@ index cbb32c71706cde4fae21cb80eca21c4d6194ba98..3fca31233c74369bd285a33b14897252
      const symbol = Symbol.for('openai.agents.core.traceProvider');
      try {
 diff --git a/dist/tracing/provider.mjs b/dist/tracing/provider.mjs
-index 99b8962bc8a73330e8c6b7080a75fff64b39ae2f..7dac6b2fbf0a7914af6e750e54685254de1f3bd8 100644
+index 99b8962bc8a73330e8c6b7080a75fff64b39ae2f..352b3b33d60e90c641f9d06403d520930dd4f089 100644
 --- a/dist/tracing/provider.mjs
 +++ b/dist/tracing/provider.mjs
 @@ -319,14 +319,9 @@ export class TraceProvider {

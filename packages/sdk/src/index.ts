@@ -1,3 +1,4 @@
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
 export { OpenGeniClient } from "./artifact-client";
 export {
   OpenGeniToolCallError,
@@ -21,6 +22,7 @@ export type {
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
+  SessionListPageOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
@@ -366,6 +368,17 @@ export type {
 } from "./memory-slack-delivery";
 export { normalizePreferenceRegistryStableKey } from "./preference-registry";
 export type {
+  SkillFile,
+  SkillScope,
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SkillPublicationReceipt,
+  SkillSourceReleaseReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
+export type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
   CorrectPreferenceRegistryRequest,
@@ -460,9 +473,11 @@ export type {
   OrganizationAdministrationMember,
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
+  OrganizationApiKeyAccess,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
+  OrganizationSessionListResponse,
   OrganizationPrivateSessionSettings,
   OrganizationRecoveryApproval,
   OrganizationRecoveryCapabilities,
@@ -789,6 +804,7 @@ export type {
   UpdatePrReviewRepositoryBindingRequest,
   ListPrReviewConfigurationResponse,
   ListApiKeysResponse,
+  ListOrganizationSessionsOptions,
   ListConnectionsResponse,
   ListPacksResponse,
   ListSlackUserLinkAccessRequestsResponse,
@@ -910,6 +926,8 @@ export type {
   SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  WorkspacePauseTimer,
+  WorkspacePauseTimerRequest,
   SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
@@ -1168,6 +1186,7 @@ export type {
   WorkspaceSettings,
   WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
+  VoiceInputProviderId,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
   MetricSample,
@@ -1206,3 +1225,10 @@ export type {
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,
 } from "./types";
+
+export type {
+  FeedbackSentiment,
+  CreateFeedbackRequest,
+  Feedback,
+  FeedbackSubmissionResponse,
+} from "./feedback";

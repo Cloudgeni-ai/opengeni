@@ -1425,3 +1425,32 @@ describe("SDK / contracts parity", () => {
     ).toBe(true);
   });
 });
+
+test("workspace timer wire types match contracts", async () => {
+  const { WorkspacePauseTimer, WorkspacePauseTimerRequest } = await import("@opengeni/contracts");
+  const request: import("../src/types").WorkspacePauseTimerRequest = {
+    action: "set",
+    pauseInSeconds: 1800,
+    pauseForSeconds: 7200,
+    expectedRevision: 4,
+    clientEventId: "timer-parity",
+  };
+  const contractRequest: import("@opengeni/contracts").WorkspacePauseTimerRequest = request;
+  const sdkRequest: import("../src/types").WorkspacePauseTimerRequest =
+    WorkspacePauseTimerRequest.parse(contractRequest);
+  expect(sdkRequest).toEqual(request);
+  const contractTimer = WorkspacePauseTimer.parse({
+    id: crypto.randomUUID(),
+    action: "pause",
+    dueAt: new Date().toISOString(),
+    pauseForSeconds: 7200,
+  });
+  const sdkTimer: import("../src/types").WorkspacePauseTimer = contractTimer;
+  const timer: import("@opengeni/contracts").WorkspacePauseTimer = sdkTimer;
+  expect(timer).toEqual(contractTimer);
+  for (const seconds of [-1, 1, 59, 2592001, 1.5]) {
+    expect(
+      WorkspacePauseTimerRequest.safeParse({ ...request, pauseInSeconds: seconds }).success,
+    ).toBe(false);
+  }
+});

@@ -9,6 +9,7 @@ import {
 } from "./human-input-form";
 
 export type HumanInputSurfaceProps = {
+  loadSkillReview?: HumanInputFormProps["loadSkillReview"];
   requests: SessionHumanInputRequest[];
   onSubmit: (requestId: string, response: SubmitHumanInputResponseRequest) => void | Promise<void>;
   respondingRequestId?: string | null | undefined;
@@ -28,6 +29,7 @@ export type HumanInputSurfaceProps = {
 export function HumanInputSurface({
   requests,
   onSubmit,
+  loadSkillReview,
   respondingRequestId = null,
   error,
   messages,
@@ -68,6 +70,7 @@ export function HumanInputSurface({
 
   const formProps: HumanInputFormProps = {
     request: active,
+    loadSkillReview,
     submitting: respondingRequestId !== null,
     error: error ?? null,
     progressLabel,

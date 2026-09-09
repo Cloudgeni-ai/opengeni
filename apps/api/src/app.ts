@@ -1,9 +1,14 @@
+import { registerFeedbackRoutes } from "./routes/feedback";
+import { codemodeSessionRequest } from "./codemode";
+import { SiteSessionPathError } from "@opengeni/contracts";
+import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
   resolveFirstPartyMcpToolPolicy,
+  resolveVoiceInputProviderRegistry,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
@@ -42,6 +47,7 @@ import {
   getWorkspace,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
+  resolveSessionMemoryAgentScope,
   rlsContextForWorkspace,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
@@ -189,6 +195,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
@@ -449,6 +456,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      "X-OpenGeni-Site-Id",
+      "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
     ],
     exposeHeaders: [
@@ -871,6 +880,9 @@ export function createAppComposition(deps: AppDependencies): {
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
+          providers: resolveVoiceInputProviderRegistry(deps.settings).map(
+            (provider) => provider.id,
+          ),
           available: (await transcription?.available()) ?? false,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
@@ -895,6 +907,7 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
+        billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
@@ -1021,10 +1034,22 @@ export function createAppComposition(deps: AppDependencies): {
         }
       }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+      // The bound session's frozen Memory selector (migration 0427) decides
+      // which Memory tools the attempt receives and which typed layers they
+      // read and write. A missing row resolves to no Memory tools.
+      const sessionMemory =
+        typeof boundSessionId === "string"
+          ? ((await resolveSessionMemoryAgentScope(routeDeps.db, workspaceId, boundSessionId)) ?? {
+              mode: "off" as const,
+              endUserSubjectId: null,
+              rootSessionId: null,
+            })
+          : null;
       const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
         workspaceMemoryPromptMode,
+        sessionMemory,
       });
       await mcp.connect(transport);
       // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
@@ -1127,6 +1152,25 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
+  app.all("/v1/workspaces/:workspaceId/codemode/sdk/*", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    const url = new URL(c.req.url);
+    const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
+    let forwarded: Request;
+    try {
+      forwarded = await codemodeSessionRequest(
+        routeDeps,
+        grant,
+        c.req.raw,
+        url.pathname.slice(prefix.length) + url.search,
+      );
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
+    return app.fetch(forwarded);
+  });
+
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, routeDeps, workspaceId);
@@ -1220,15 +1264,18 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerFeedbackRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerConnectionAuthorityRoutes(app, routeDeps);
@@ -1410,6 +1457,12 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
 }
 
 function codemodeHttpError(error: unknown): HTTPException {
+  if (error instanceof SiteSessionPathError) {
+    // The proxied Site/SDK surface is an explicit allowlist; a route outside
+    // it (tool policy, visibility, forks, Steer, control, ...) does not exist
+    // for this caller rather than being a server fault.
+    return new HTTPException(404, { message: error.message, cause: error });
+  }
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, {
       message: "session not found",
@@ -1957,6 +2010,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
     label: "/v1/workspaces/:workspaceId/inference-control",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pause-timer$/,
+    label: "/v1/workspaces/:workspaceId/pause-timer",
   },
   {
     pattern:
@@ -2511,6 +2568,20 @@ const routeLabelPatterns: Array<{
 ];
 
 export function routeLabel(pathname: string): string {
+  if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
+    return "/v1/workspaces/:workspaceId/transcriptions";
+  const transcription = pathname.match(
+    /^\/v1\/workspaces\/[^/]+\/transcription-recordings(?:\/[^/]+(\/(?:finalize|process-next)|\/chunks\/\d+)?)?$/,
+  );
+  if (transcription) {
+    const base = "/v1/workspaces/:workspaceId/transcription-recordings";
+    if (pathname.split("/").length === 5) return base;
+    return (
+      base +
+      "/:recordingId" +
+      (transcription[1]?.startsWith("/chunks/") ? "/chunks/:chunkNumber" : (transcription[1] ?? ""))
+    );
+  }
   for (const candidate of routeLabelPatterns) {
     const match = pathname.match(candidate.pattern);
     if (match) {
