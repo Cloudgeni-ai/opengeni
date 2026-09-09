@@ -1,10 +1,14 @@
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { fromPostgresLosslessJson, toPostgresLosslessJson } from "../src/lossless-json";
 
+let database: Awaited<ReturnType<typeof acquireBlankTestDatabase>>;
+beforeAll(async () => {
+  database = await acquireBlankTestDatabase("ordered-model-history");
+}, 600_000);
+
 test("ordered history survives PostgreSQL, nested schemas and legacy updates without read-time repair", async () => {
-  const database = await acquireBlankTestDatabase("ordered-model-history");
   if (!database) throw new Error("PostgreSQL is required for ordered-history verification");
   const sql = postgres(database.databaseUrl, { max: 1 });
   try {
@@ -17,7 +21,9 @@ test("ordered history survives PostgreSQL, nested schemas and legacy updates wit
     const migration = await Bun.file(
       new URL("../drizzle/0434_ordered_model_history.sql", import.meta.url),
     ).text();
-    await expect(sql.unsafe(migration)).rejects.toThrow("pending trigger events");
+    await expect((async () => await sql.unsafe(migration))()).rejects.toThrow(
+      "pending trigger events",
+    );
     const runner = await Bun.file(new URL("../src/migrate.ts", import.meta.url)).text();
     expect(runner).toContain('file === "0434_ordered_model_history.sql"');
     expect(runner).toContain("SET CONSTRAINTS ALL IMMEDIATE;");
