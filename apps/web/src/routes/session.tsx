@@ -1,4 +1,3 @@
-import { SessionWaitStatus } from "@/components/session/session-wait-status";
 import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -151,6 +150,12 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
+const LazySessionWaitStatus = lazy(() =>
+  import("@/components/session/session-wait-status").then((module) => ({
+    default: module.SessionWaitStatus,
+  })),
+);
+
 const MessageForkDialog = lazy(() =>
   import("@/components/session/session-tenancy-control").then((module) => ({
     default: module.SessionTenancyRouteControl,
@@ -2143,7 +2148,13 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      <SessionWaitStatus session={props.session} />
+      {props.session.inputWait &&
+      props.session.status === "idle" &&
+      props.session.effectiveControl.state === "active" ? (
+        <Suspense fallback={null}>
+          <LazySessionWaitStatus session={props.session} />
+        </Suspense>
+      ) : null}
 
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
