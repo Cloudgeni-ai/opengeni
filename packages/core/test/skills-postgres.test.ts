@@ -29,6 +29,17 @@ import {
   deleteWorkspaceIfQuiescent,
   createWorkspace,
   withWorkspaceRls,
+  supersedePreferenceRegistry,
+  upsertKnowledgeProvider,
+  upsertKnowledgeSource,
+  appendKnowledgeSourceAclVersion,
+  upsertKnowledgeSourceObject,
+  appendKnowledgeDocumentVersion,
+  upsertKnowledgeEntity,
+  upsertKnowledgeFact,
+  appendKnowledgeClaim,
+  appendKnowledgeClaimEvidence,
+  createKnowledgeChangeProposal,
   type Database,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -57,6 +68,133 @@ async function expectDatabaseGuard(operation: Promise<unknown>, message: string)
     expect(messages.join("\n")).toContain(message);
   }
   expect(rejected).toBe(true);
+}
+
+async function seedOrgScopedCompanyBrainReceipt(
+  db: Database,
+  admin: postgres.Sql,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    preferenceId: string;
+    revisionId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+  },
+) {
+  const scope = { kind: "organization" as const, workspaceId: null, subjectId: null };
+  const actor = {
+    kind: "human" as const,
+    subjectId: input.actorSubjectId,
+    initiatingHumanSubjectId: input.actorSubjectId,
+  };
+  const ctx = { accountId: input.accountId, workspaceId: input.workspaceId, actor };
+  const label = `receipt-${crypto.randomUUID()}`;
+  const provider = await upsertKnowledgeProvider(db, {
+    ...ctx,
+    scope,
+    operationId: crypto.randomUUID(),
+    providerKey: label,
+    externalTenantId: label,
+  });
+  const source = await upsertKnowledgeSource(db, {
+    ...ctx,
+    scope,
+    operationId: crypto.randomUUID(),
+    providerId: provider.id,
+    externalSourceId: label,
+    sourceKind: "test",
+  });
+  const acl = await appendKnowledgeSourceAclVersion(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    sourceId: source.id,
+    audience: scope,
+    expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+    expectedAclGeneration: 0,
+    aclVersion: "v1",
+    agentAccess: true,
+    reasonCode: "receipt-fixture",
+  });
+  const object = await upsertKnowledgeSourceObject(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    sourceId: source.id,
+    externalObjectId: label,
+  });
+  const contentHash = createHash("sha256").update(label).digest("hex");
+  const version = await appendKnowledgeDocumentVersion(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    objectId: object.id,
+    expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+    expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+    expectedVersionGeneration: 0,
+    externalVersionId: "v1",
+    contentSha256: contentHash,
+    ingestionKey: `${label}-ingestion`,
+    aclVersionId: acl.id,
+    aclGeneration: acl.generation,
+    reasonCode: "receipt-fixture",
+  });
+  const entity = await upsertKnowledgeEntity(db, {
+    ...ctx,
+    scope,
+    operationId: crypto.randomUUID(),
+    entityType: "ways-of-working",
+    normalizedKey: label,
+    displayName: "Company-brain receipt fixture",
+  });
+  const fact = await upsertKnowledgeFact(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    subjectEntityId: entity.id,
+    predicateKey: "ways.company-brain-receipt",
+    object: { kind: "text", value: "Historical company-brain preference proposal" },
+  });
+  const claim = await appendKnowledgeClaim(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    factId: fact.id,
+    origin: "inferred",
+    confidenceBps: 9000,
+    effectiveAt: new Date(Date.now() - 1000).toISOString(),
+    extractionMethod: "test",
+  });
+  const evidence = await appendKnowledgeClaimEvidence(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    claimId: claim.id,
+    documentVersionId: version.id,
+    polarity: "supports",
+    contentHash,
+  });
+  const proposal = await createKnowledgeChangeProposal(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    claimId: claim.id,
+    evidenceId: evidence.id,
+    targetKind: "preference",
+    targetScope: "organization",
+    targetKey: "legacy-company-brain",
+    content: "Historical company-brain preference proposal",
+  });
+  const [event] =
+    await admin`SELECT id FROM preference_registry_events WHERE preference_id=${input.preferenceId} AND type='proposal_created'`;
+  if (!event) throw new Error("expected proposal_created event");
+  const receiptId = crypto.randomUUID();
+  await admin`INSERT INTO company_brain_preference_proposal_receipts (
+      id, account_id, workspace_id, operation_id, input_hash, knowledge_proposal_id,
+      preference_id, revision_id, creation_event_id, session_id, turn_id, attempt_id,
+      execution_generation, actor_subject_id, initiating_human_subject_id)
+    VALUES (
+      ${receiptId}, ${input.accountId}, ${input.workspaceId}, ${crypto.randomUUID()}, ${contentHash},
+      ${proposal.id}, ${input.preferenceId}, ${input.revisionId}, ${event.id},
+      ${input.sessionId}, ${input.turnId}, ${input.attemptId}, 1,
+      ${input.actorSubjectId}, ${input.actorSubjectId})`;
+  return { receiptId, proposalId: proposal.id };
 }
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_SKILLS_TEST_ADMIN_URL;
@@ -1099,6 +1237,25 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       .admin`SELECT pg_get_functiondef('workspace_instruction_policy_reject_mutation()'::regprocedure) AS definition`;
     expect(instruction!.definition).toContain("workspace instruction-policy history is immutable");
     await expect(
+      supersedePreferenceRegistry(client.db, {
+        accountId: human.accountId,
+        workspaceId: human.workspaceId,
+        actorSubjectId: human.actor.subjectId,
+        principalKind: "human_session",
+        preferenceId: organization.skillId,
+        replacementPreferenceId: restored.skillId,
+        expectedCurrentRevisionId: organization.revisionId,
+        expectedScopeVersion: 1,
+        authorizeScope: () => undefined,
+        reason: "Org cannot supersede a workspace Skill",
+      }),
+    ).rejects.toThrow("same scope tier");
+    // Same-workspace supersede is a valid lifecycle, but IfQuiescent finalizes
+    // session activity with SET CONSTRAINTS ALL IMMEDIATE, so deferred
+    // related_preference_id/superseded_by cannot outlive the statement. Do not
+    // plant that pair on the workspace under IfQuiescent; cross-tier remains
+    // rejected above and synthetic corruption still fail-closes below.
+    await expect(
       shared!.admin.begin(async (tx) => {
         await tx`INSERT INTO preference_registry_events(
           account_id, preference_id, type, version, old_revision_id, related_preference_id, actor_subject_id, reason)
@@ -1106,6 +1263,9 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
             ${sibling.skillId}, ${human.actor.subjectId}, 'Cross-account related Skill')`;
       }),
     ).rejects.toThrow();
+    // Synthetic corruption rollback only: Skill save and supersedePreferenceRegistry cannot
+    // create org→workspace related_preference_id. This plants an invalid cross-tier
+    // superseded_by via lifecycle GUCs to prove the deferred FK fail-closes.
     await expect(
       shared!.admin.begin(async (tx) => {
         const [orgHead] =
@@ -1184,6 +1344,27 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       shared!
         .admin`DELETE FROM skill_config_conversion_receipts WHERE workspace_id=${human.workspaceId}`.execute(),
     ).rejects.toThrow("immutable");
+    // Workspace-scoped knowledge_change_proposals still RESTRICT workspace
+    // delete (pre-Skill residual, not widened). Bind the historical receipt to
+    // an organization-scoped proposal so 0431 CASCADE can remove it.
+    const companyBrain = await seedOrgScopedCompanyBrainReceipt(client.db, shared!.admin, {
+      accountId: human.accountId,
+      workspaceId: human.workspaceId,
+      actorSubjectId: human.actor.subjectId,
+      preferenceId: authored.skillId,
+      revisionId: authored.revisionId,
+      sessionId: snapshotSessionId,
+      turnId,
+      attemptId,
+    });
+    expect(
+      await shared!
+        .admin`SELECT id FROM company_brain_preference_proposal_receipts WHERE id=${companyBrain.receiptId}`,
+    ).toHaveLength(1);
+    await expect(
+      shared!
+        .admin`DELETE FROM company_brain_preference_proposal_receipts WHERE id=${companyBrain.receiptId}`.execute(),
+    ).rejects.toThrow("immutable");
     await shared!
       .admin`update sessions set status='idle', active_turn_id=null where id=${snapshotSessionId}`;
     await shared!
@@ -1248,6 +1429,14 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       await shared!
         .admin`SELECT source_id FROM skill_config_conversion_receipts WHERE workspace_id=${human.workspaceId}`,
     ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM company_brain_preference_proposal_receipts WHERE id=${companyBrain.receiptId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM knowledge_change_proposals WHERE id=${companyBrain.proposalId}`,
+    ).toHaveLength(1);
     expect(
       await shared!
         .admin`SELECT id FROM preference_registry_preferences WHERE id=${sibling.skillId}`,
