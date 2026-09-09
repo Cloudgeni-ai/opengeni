@@ -1,5 +1,18 @@
 # @opengeni/react
 
+## 4.0.2
+
+### Patch Changes
+
+- 39adecb: Let top-level assistant tables expand into available chat panel space while keeping surrounding text at its normal reading width. Tables remain contained when a side panel opens or the conversation is narrow, and keep horizontal scrolling when content still cannot fit.
+- 1b0f4f2: Expose unavailable background command observations separately from command lifecycle state, and render that uncertainty in command and session status.
+- 87fbd92: Preserve full session messages and tool output through database paging, compact
+  event delivery, SSE, browser rendering, and copying. Remove browser per-event
+  preview truncation while retaining history pagination and backpressure. Events
+  larger than a page or loaded-window byte target are delivered intact on their own.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/sdk@4.0.2
+
 ## 4.0.1
 
 ### Patch Changes
