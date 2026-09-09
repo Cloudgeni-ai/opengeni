@@ -9,8 +9,17 @@ const typedHandleLossSessions = new WeakSet<object>();
 export function markTypedExecHandleLoss(session: object): void {
   typedHandleLossSessions.add(session);
 }
-export function hasTypedExecHandleLoss(session: object): boolean {
-  return typedHandleLossSessions.has(session);
+export function hasTypedExecHandleLoss(
+  session: object | null | undefined,
+  providerSessionId?: number,
+): boolean {
+  if (!session) return false;
+  if (typedHandleLossSessions.has(session)) return true;
+  const routed = session as { retainedProcessHasTypedHandleLoss?: (id: number) => boolean };
+  return (
+    providerSessionId !== undefined &&
+    routed.retainedProcessHasTypedHandleLoss?.(providerSessionId) === true
+  );
 }
 
 const EXEC_BANNER_HEADER_MAX_CHARS = 16 * 1024;

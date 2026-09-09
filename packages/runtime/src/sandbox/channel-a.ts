@@ -2388,9 +2388,7 @@ export class SandboxChannelAService {
     // Capture the pinned source contract before the write settles and removes
     // its retained route. Guarded adapters throw on handle loss; their returned
     // output may legitimately contain the same text as a legacy loss banner.
-    const typedHandleLoss =
-      hasTypedExecHandleLoss(this.session) ||
-      this.session.retainedProcessHasTypedHandleLoss?.(execSessionId) === true;
+    const typedHandleLoss = hasTypedExecHandleLoss(this.session, execSessionId);
     const out = await this.withPtyHandleConflict("write", () =>
       write({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 }),
     );

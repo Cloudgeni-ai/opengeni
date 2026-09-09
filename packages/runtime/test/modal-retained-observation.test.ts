@@ -6,11 +6,98 @@ import {
   ModalProcessObservationUnavailableError,
 } from "../src/sandbox/providers/modal";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import type { Tool } from "@openai/agents";
 import { ChannelAConflictError, SandboxChannelAService } from "../src/sandbox/channel-a";
 
 // Exercise the pinned SDK process map, exec yielding, and terminal output. Only
 // the remote transport is replaced; two adapters share one physical command.
 describe("Modal retained-command observation", () => {
+  test.each([
+    [0, false],
+    [1, false],
+    [0, true],
+    [1, true],
+  ] as const)(
+    "model shell polling preserves earlier output with exit %i (routed=%s)",
+    async (exitCode, useRouting) => {
+      let finish!: (code: number) => void;
+      const exited = new Promise<number>((resolve) => {
+        finish = resolve;
+      });
+      let output!: ReadableStreamDefaultController<string>;
+      const owner = installOpenGeniModalSnapshotPolicy(
+        new ModalSandboxSession({
+          state: {
+            sandboxId: "sb-shell-output",
+            manifest: new Manifest({ root: "/workspace" }),
+            environment: {},
+            workspacePersistence: "tar",
+          },
+          sandbox: {
+            exec: async () => ({
+              stdout: new ReadableStream<string>({
+                start(controller) {
+                  output = controller;
+                  output.enqueue("earlier output|");
+                },
+              }),
+              stderr: new ReadableStream({
+                start(controller) {
+                  controller.close();
+                },
+              }),
+              wait: () => exited,
+            }),
+          },
+          modal: { version: () => "0.9.0" },
+          app: {},
+        } as never),
+      );
+      const proofs: unknown[] = [];
+      const routed = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: owner, sandboxId: null, kind: "modal" }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        settleProcess: async ({ proof }) => {
+          proofs.push(proof);
+        },
+      });
+      const session = useRouting ? routed : owner;
+      const controller = createTurnToolCancellationController();
+      const tools = controller.wrapTools(
+        [
+          {
+            type: "function",
+            name: "exec_command",
+            invoke: async () => {
+              const initial = await session.execCommand({ cmd: "print-output", yieldTimeMs: 1 });
+              output.enqueue("session not found: 1");
+              output.close();
+              finish(exitCode);
+              return initial;
+            },
+          },
+          {
+            type: "function",
+            name: "write_stdin",
+            invoke: async () =>
+              await session.writeStdin({ sessionId: 1, chars: "", yieldTimeMs: 10 }),
+          },
+        ] as never,
+        session,
+      ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+      const result = await tools
+        .find((tool) => tool.name === "exec_command")!
+        .invoke({} as never, JSON.stringify({ cmd: "print-output", yield_time_ms: 1000 }));
+      expect(result).toContain(`Process exited with code ${exitCode}`);
+      expect(result).toContain("earlier output|session not found: 1");
+      if (useRouting)
+        expect(proofs).toEqual([{ outcome: "exited", exitCode, reason: "provider_exit_banner" }]);
+    },
+  );
+
   test.each([undefined, {}, { has: () => true }])(
     "rejects unsupported SDK process-map shape before observing",
     async (activeProcesses) => {
