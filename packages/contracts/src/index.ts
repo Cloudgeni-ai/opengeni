@@ -1,25 +1,13 @@
+import { SkillReviewReference } from "./skills";
+export * from "./skills";
+export * from "./bundled-skills";
+import { BundledSkillSelection } from "./bundled-skills";
+import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
+import { readSkillMetadata } from "./skill-metadata";
+import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
-export const HostMcpCreateSelections = z
-  .array(
-    z
-      .object({
-        serverId: z.string().min(1).max(256),
-        delegationId: z
-          .string()
-          .uuid()
-          .transform((value) => value.toLowerCase()),
-        generation: z.number().int().positive().safe(),
-      })
-      .strict(),
-  )
-  .max(128)
-  .superRefine((values, ctx) => {
-    if (new Set(values.map((value) => value.serverId)).size !== values.length)
-      ctx.addIssue({ code: "custom", message: "Duplicate host server selection" });
-  });
-export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
@@ -4105,11 +4093,6 @@ export const McpServerConnectionRef = z
     connectionId: z.string().min(1).optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
-    /** Opt-in durable reference. A live execution validator is mandatory. */
-    hostBinding: z
-      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
-      .strict()
-      .optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
     /** Provider host or tenant domain. */
@@ -4131,12 +4114,6 @@ export const McpServerConnectionRef = z
         path: ["connectionId"],
       });
     }
-    if (reference.hostBinding && reference.authoritySource !== "host")
-      context.addIssue({
-        code: "custom",
-        path: ["hostBinding"],
-        message: "Durable binding requires host authority",
-      });
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -4430,39 +4407,7 @@ export type McpCredentialResolution =
       authorizationUrl?: string;
     };
 
-/** Non-turn authority captured by the authenticated API gateway, never by caller JSON. */
-export type McpGatewayCredentialAuthority = {
-  kind: "external_user" | "organization_service";
-  subjectId: string;
-  permissions: AccessGrant["permissions"];
-};
-
-export type McpGatewayCredentialsRequest = Pick<
-  McpCredentialsRequest,
-  | "accountId"
-  | "workspaceId"
-  | "destinationUrl"
-  | "credentialTarget"
-  | "serverId"
-  | "toolName"
-  | "connectionRef"
-  | "forceRefresh"
-> & {
-  surface: "workspace_gateway";
-  requestId: string;
-  authority: McpGatewayCredentialAuthority;
-};
-
-export type McpGatewayCredentialResolution =
-  | (Omit<Extract<McpCredentialResolution, { status: "ok" }>, "sessionId"> & { requestId: string })
-  | (Omit<Extract<McpCredentialResolution, { status: "auth_needed" }>, "sessionId"> & {
-      requestId: string;
-    });
-
 export type ConnectionCredentialsPort = {
-  /** Restrict an optional remote adapter to explicit host refs. Omission keeps
-   * existing in-process host override and legacy-reference behavior. */
-  mcpAuthoritySource?: "host";
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
   // that leg only.
@@ -4481,11 +4426,6 @@ export type ConnectionCredentialsPort = {
    * used by model-visible MCP tools and the exact-attempt Codemode projection.
    */
   mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
-  /** Explicit opt-in for authenticated pre-session discovery and invocation.
-   * Does not call the turn-based mcpCredentials fallback or grant durable use. */
-  mcpGatewayCredentials?(
-    input: McpGatewayCredentialsRequest,
-  ): Promise<McpGatewayCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -6849,45 +6789,56 @@ export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
 
 /**
  * How far a live agent attempt on a session may reach across the workspace,
- * under ordinary resource authorization. `workspace` is the platform default.
- * `user` limits outgoing reach to the same canonical {@link SessionScopeSubjectId};
- * `session` limits it to the own root tree. Target task scope does not restrict
- * incoming access; private ownership remains enforced. Humans and API keys
+ * and how far peer attempts may reach into it. `workspace` is the platform
+ * default. `user` limits both directions to sessions carrying the same
+ * {@link SessionEndUser} label; `session` limits both to the own root tree.
+ * The most restrictive side of a caller/target pair wins. Humans and API keys
  * are unaffected: this is an agent-to-agent fence enforced only in the core
  * session-authorization seam.
  */
 export const SessionAgentAccess = z.enum(["session", "user", "workspace"]);
 export type SessionAgentAccess = z.infer<typeof SessionAgentAccess>;
 
+export const SESSION_END_USER_SOURCE_MAX_CHARS = 200;
+export const SESSION_END_USER_ID_MAX_CHARS = 1_024;
+
+const NUL_CHARACTER = String.fromCharCode(0);
+const UNPAIRED_SURROGATE_PATTERN =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+
+function opaqueEndUserSegment(maxChars: number) {
+  return z
+    .string()
+    .min(1)
+    .max(maxChars)
+    .refine((value) => !value.includes(NUL_CHARACTER), "must not contain NUL")
+    .refine((value) => !UNPAIRED_SURROGATE_PATTERN.test(value), "must be well-formed UTF-16");
+}
+
 /**
- * Server-derived canonical user for the session's agent-reach boundary.
- * This is an output/filter value, never caller-supplied creation authority.
- * Human visibility remains an independent resource authorization check.
+ * Opaque end-user label attached to a session by the embedding product. It
+ * shares the external-identity shape (`source` + product-owned `id`) so a
+ * later join is by pair. It is NOT a subject and grants NO authority: it only
+ * scopes `agentAccess: "user"` reach, `memoryScope: "user"` Memory rows, and
+ * the session-list `endUserSource`/`endUserId` filter.
  */
-export const SessionScopeSubjectId = z
-  .string()
-  .min(1)
-  .max(1024)
-  .regex(/^(?:user:|external_user:).+/);
-export type SessionScopeSubjectId = z.infer<typeof SessionScopeSubjectId>;
+export const SessionEndUser = z
+  .object({
+    source: opaqueEndUserSegment(SESSION_END_USER_SOURCE_MAX_CHARS),
+    id: opaqueEndUserSegment(SESSION_END_USER_ID_MAX_CHARS),
+  })
+  .strict();
+export type SessionEndUser = z.infer<typeof SessionEndUser>;
 
 /**
  * The typed Workspace Memory selector an agent reads and writes. `workspace`
- * is shared memory; `user` adds a private layer
+ * is today's shared memory; `user` and `session` are ADDITIVE private layers
  * (the agent still reads workspace facts and saves to its narrowest scope);
  * `off` registers no Memory tools for the session. `user` requires an
- * authenticated canonical user on the active turn. Use task notes for task-local data.
+ * end-user label.
  */
-export const SessionMemoryScope = z.enum(["workspace", "user", "off"]);
+export const SessionMemoryScope = z.enum(["workspace", "user", "session", "off"]);
 export type SessionMemoryScope = z.infer<typeof SessionMemoryScope>;
-
-/** Read old persisted selectors without promoting task-local data or authority.
- * New requests must use SessionMemoryScope directly and reject `session`.
- * Historical Memory rows remain retained; task notes own new task-local facts. */
-export function storedSessionMemoryScope(value: unknown): SessionMemoryScope {
-  if (value === "session") return "off";
-  return SessionMemoryScope.parse(value ?? "workspace");
-}
 
 /**
  * The calling agent attempt's own access scope, resolved by OpenGeni from the
@@ -6898,7 +6849,7 @@ export const SessionAgentAccessViewer = z
   .object({
     callerRootSessionId: z.string().uuid(),
     agentAccess: SessionAgentAccess,
-    scopeSubjectId: SessionScopeSubjectId.nullable(),
+    endUser: SessionEndUser.nullable(),
   })
   .strict();
 export type SessionAgentAccessViewer = z.infer<typeof SessionAgentAccessViewer>;
@@ -9069,6 +9020,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     })
     .strict();
   return {
+    bundledSkillIds: BundledSkillSelection.optional(),
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
       : z.string().min(1),
@@ -9451,7 +9403,6 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
   connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-  selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
   agentConfig: ScheduledTaskAgentConfigInput,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -9531,7 +9482,6 @@ export const UpdateScheduledTaskRequest =
     action: ScheduledTaskAction.optional(),
     targetSessionId: z.string().uuid().nullable().optional(),
     connectionAuthorities: McpConnectionAuthoritySelections.optional(),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     agentConfig: ScheduledTaskAgentConfigInput.optional(),
     status: ScheduledTaskStatus.optional(),
     variableSetId: z.string().uuid().nullable().optional(),
@@ -9649,87 +9599,57 @@ export const SignedJsonAutomationEnvelope = z
   .strict();
 export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEnvelope>;
 
-const AutomationSessionSkill = z
-  .object({
-    name: z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-    description: z.string().min(1).max(2048).optional(),
-    files: z
-      .array(
-        z.object({
-          path: z
-            .string()
-            .min(1)
-            .max(512)
-            .refine(
-              (path) =>
-                !path.startsWith("/") &&
-                !path.includes("\\") &&
-                path
-                  .split("/")
-                  .every((segment) => segment.length > 0 && segment !== "." && segment !== ".."),
-              "automation skill file path must be a safe relative POSIX path",
-            ),
-          content: z.string().max(256 * 1024),
-        }),
-      )
-      .min(1)
-      .max(64),
-  })
-  .superRefine((skill, context) => {
-    if (!skill.files.some((file) => file.path === "SKILL.md")) {
-      context.addIssue({
-        code: "custom",
-        path: ["files"],
-        message: "automation skill must include a top-level SKILL.md file",
-      });
-    }
-  });
-
-export const AutomationSessionTemplate = z
-  .object({
-    prompt: z
-      .string()
-      .trim()
-      .min(1)
-      .max(64 * 1024),
-    instructions: z
-      .string()
-      .trim()
-      .min(1)
-      .max(64 * 1024)
-      .nullable()
-      .default(null),
-    resources: z.array(ResourceRef).max(100).default([]),
-    skills: z.array(AutomationSessionSkill).max(32).default([]),
-    tools: z.array(ToolRef).max(128).default([]),
-    firstPartyMcpTools: z.array(FirstPartyMcpToolName).max(128).default([]),
-    firstPartyMcpPermissions: z.array(Permission).max(128).default([]),
-    model: z.string().trim().min(1).max(512).nullable().default(null),
-    reasoningEffort: ReasoningEffort.nullable().default(null),
-    sandboxBackend: SandboxBackend.nullable().default(null),
-    policyRole: z.string().trim().min(1).max(128).nullable().default(null),
-    metadata: AutomationBoundedJson.default({}),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    let bytes = Number.POSITIVE_INFINITY;
-    try {
-      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-    } catch {
-      // Fail through the size issue below.
-    }
-    if (bytes > AUTOMATION_SESSION_TEMPLATE_MAX_BYTES) {
-      context.addIssue({
-        code: "custom",
-        message: `automation session template exceeds ${AUTOMATION_SESSION_TEMPLATE_MAX_BYTES} UTF-8 bytes`,
-      });
-    }
-  });
+export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      bundledSkillIds: BundledSkillSelection.optional(),
+      prompt: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64 * 1024),
+      instructions: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64 * 1024)
+        .nullable()
+        .default(null),
+      resources: z.array(ResourceRef).max(100).default([]),
+      // Resolve the shared contract after module initialization, rather than
+      // maintaining a second, weaker Skill definition for scheduled dispatch.
+      skills: z.lazy(() => SessionSkills).default([]),
+      tools: z.array(ToolRef).max(128).default([]),
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName).max(128).default([]),
+      firstPartyMcpPermissions: z.array(Permission).max(128).default([]),
+      model: z.string().trim().min(1).max(512).nullable().default(null),
+      reasoningEffort: ReasoningEffort.nullable().default(null),
+      sandboxBackend: SandboxBackend.nullable().default(null),
+      policyRole: z.string().trim().min(1).max(128).nullable().default(null),
+      metadata: AutomationBoundedJson.default({}),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      let bytes = Number.POSITIVE_INFINITY;
+      try {
+        bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+      } catch {
+        // Fail through the size issue below.
+      }
+      if (bytes > AUTOMATION_SESSION_TEMPLATE_MAX_BYTES) {
+        context.addIssue({
+          code: "custom",
+          message: `automation session template exceeds ${AUTOMATION_SESSION_TEMPLATE_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+    }),
+);
 export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
+
+/** Stored labels are projections, not assertions supplied by a new caller. */
+export const StoredAutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.preprocess(projectStoredTemplateSkillMetadata, AutomationSessionTemplate),
+);
 
 export const AutomationNormalizedEvent = z
   .object({
@@ -9744,29 +9664,36 @@ export const AutomationNormalizedEvent = z
   .strict();
 export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
 
-export const AutomationAcceptedExecution = z
-  .object({
-    version: z.literal(1),
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sourceId: z.string().uuid(),
-    sourceVersion: z.number().int().positive(),
-    triggerId: z.string().uuid(),
-    triggerRevision: z.number().int().positive(),
-    eventId: z.string().uuid(),
-    adapterId: AutomationAdapterId,
-    occurrenceKey: z.string().min(1).max(1024),
-    initialMessage: z
-      .string()
-      .min(1)
-      .max(256 * 1024),
-    sessionTemplate: AutomationSessionTemplate,
-    serviceSubjectId: z.string().min(1).max(512),
-    serviceLabel: z.string().min(1).max(200),
-    provenance: AutomationBoundedJson,
-  })
-  .strict();
+export const AutomationAcceptedExecution = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sourceId: z.string().uuid(),
+      sourceVersion: z.number().int().positive(),
+      triggerId: z.string().uuid(),
+      triggerRevision: z.number().int().positive(),
+      eventId: z.string().uuid(),
+      adapterId: AutomationAdapterId,
+      occurrenceKey: z.string().min(1).max(1024),
+      initialMessage: z
+        .string()
+        .min(1)
+        .max(256 * 1024),
+      sessionTemplate: AutomationSessionTemplate,
+      serviceSubjectId: z.string().min(1).max(512),
+      serviceLabel: z.string().min(1).max(200),
+      provenance: AutomationBoundedJson,
+    })
+    .strict(),
+);
 export type AutomationAcceptedExecution = z.infer<typeof AutomationAcceptedExecution>;
+export const StoredAutomationAcceptedExecution = /* @__PURE__ */ defineSkillContractSchema(() =>
+  AutomationAcceptedExecution.extend({
+    sessionTemplate: StoredAutomationSessionTemplate,
+  }),
+);
 
 export const CreateAutomationSourceRequest = z
   .object({
@@ -9808,65 +9735,71 @@ export const AutomationSource = z.object({
 });
 export type AutomationSource = z.infer<typeof AutomationSource>;
 
-export const CreateAutomationTriggerRequest = z
-  .object({
-    sourceId: z.string().uuid(),
-    name: z.string().trim().min(1).max(200),
-    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
-    configuration: AutomationBoundedJson.default({}),
-    parameters: AutomationBoundedJson.default({}),
-    sessionTemplate: AutomationSessionTemplate,
-    status: AutomationTriggerStatus.default("active"),
-    packInstallationId: z.string().uuid().nullable().default(null),
-    packTemplateId: z.string().trim().min(1).max(128).nullable().default(null),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if ((value.packInstallationId === null) !== (value.packTemplateId === null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["packTemplateId"],
-        message: "packInstallationId and packTemplateId must be supplied together",
-      });
-    }
-  });
+export const CreateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      sourceId: z.string().uuid(),
+      name: z.string().trim().min(1).max(200),
+      eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
+      configuration: AutomationBoundedJson.default({}),
+      parameters: AutomationBoundedJson.default({}),
+      sessionTemplate: AutomationSessionTemplate,
+      status: AutomationTriggerStatus.default("active"),
+      packInstallationId: z.string().uuid().nullable().default(null),
+      packTemplateId: z.string().trim().min(1).max(128).nullable().default(null),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if ((value.packInstallationId === null) !== (value.packTemplateId === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["packTemplateId"],
+          message: "packInstallationId and packTemplateId must be supplied together",
+        });
+      }
+    }),
+);
 export type CreateAutomationTriggerRequest = z.infer<typeof CreateAutomationTriggerRequest>;
 
-export const UpdateAutomationTriggerRequest = z
-  .object({
-    expectedRevision: z.number().int().positive(),
-    name: z.string().trim().min(1).max(200).optional(),
-    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
-    configuration: AutomationBoundedJson.optional(),
-    parameters: AutomationBoundedJson.optional(),
-    sessionTemplate: AutomationSessionTemplate.optional(),
-    status: AutomationTriggerStatus.optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).some((key) => key !== "expectedRevision"), {
-    message: "automation trigger update is empty",
-  });
+export const UpdateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      expectedRevision: z.number().int().positive(),
+      name: z.string().trim().min(1).max(200).optional(),
+      eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
+      configuration: AutomationBoundedJson.optional(),
+      parameters: AutomationBoundedJson.optional(),
+      sessionTemplate: AutomationSessionTemplate.optional(),
+      status: AutomationTriggerStatus.optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).some((key) => key !== "expectedRevision"), {
+      message: "automation trigger update is empty",
+    }),
+);
 export type UpdateAutomationTriggerRequest = z.infer<typeof UpdateAutomationTriggerRequest>;
 
-export const AutomationTrigger = z.object({
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sourceId: z.string().uuid(),
-  name: z.string(),
-  adapterId: AutomationAdapterId,
-  eventTypes: z.array(z.string()),
-  configuration: z.record(z.string(), z.unknown()),
-  parameters: z.record(z.string(), z.unknown()),
-  sessionTemplate: AutomationSessionTemplate,
-  status: AutomationTriggerStatus,
-  revision: z.number().int().positive(),
-  packInstallationId: z.string().uuid().nullable(),
-  packTemplateId: z.string().nullable(),
-  createdBySubjectId: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const AutomationTrigger = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sourceId: z.string().uuid(),
+    name: z.string(),
+    adapterId: AutomationAdapterId,
+    eventTypes: z.array(z.string()),
+    configuration: z.record(z.string(), z.unknown()),
+    parameters: z.record(z.string(), z.unknown()),
+    sessionTemplate: AutomationSessionTemplate,
+    status: AutomationTriggerStatus,
+    revision: z.number().int().positive(),
+    packInstallationId: z.string().uuid().nullable(),
+    packTemplateId: z.string().nullable(),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type AutomationTrigger = z.infer<typeof AutomationTrigger>;
 
 export const AutomationRun = z.object({
@@ -9908,18 +9841,20 @@ export const TriggerAutomationManuallyRequest = z
   .strict();
 export type TriggerAutomationManuallyRequest = z.infer<typeof TriggerAutomationManuallyRequest>;
 
-export const CapabilityPackAutomationTemplate = z
-  .object({
-    id: z.string().min(1).max(128),
-    name: z.string().min(1).max(200),
-    description: z.string().min(1).max(4096),
-    adapterId: AutomationAdapterId,
-    eventTypes: z.array(z.string().min(1).max(256)).min(1).max(64),
-    sessionTemplate: AutomationSessionTemplate,
-    configuration: AutomationBoundedJson.default({}),
-    connectionRequirement: z.string().min(1).max(128).nullable().default(null),
-  })
-  .strict();
+export const CapabilityPackAutomationTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(128),
+      name: z.string().min(1).max(200),
+      description: z.string().min(1).max(4096),
+      adapterId: AutomationAdapterId,
+      eventTypes: z.array(z.string().min(1).max(256)).min(1).max(64),
+      sessionTemplate: AutomationSessionTemplate,
+      configuration: AutomationBoundedJson.default({}),
+      connectionRequirement: z.string().min(1).max(128).nullable().default(null),
+    })
+    .strict(),
+);
 export type CapabilityPackAutomationTemplate = z.infer<typeof CapabilityPackAutomationTemplate>;
 
 export const CapabilityPackConnectorAuthModel = z.enum([
@@ -9966,107 +9901,146 @@ export type CapabilityPackScheduledTaskTemplate = z.infer<
   typeof CapabilityPackScheduledTaskTemplate
 >;
 
+// Construct canonical Skill validators synchronously, but let browser bundlers
+// discard their entire dependency graph (including YAML) for unrelated imports.
+// Each transitive schema initializer needs a pure factory boundary: annotating
+// only the leaf still retains it through eager parent Zod calls.
+function defineSkillContractSchema<Schema>(factory: () => Schema): Schema {
+  return factory();
+}
+
 // One file inside a pack skill directory. Paths are workspace-relative POSIX
 // paths inside the skill directory (for example "SKILL.md" or
 // "references/runbook.md"); content is UTF-8 text carried inline in the pack
 // manifest, which is also how registered packs persist it (the manifest JSONB
 // row in workspace_packs is the storage of record for pack skills).
 export const CapabilityPackSkillFile = z.object({
-  path: z.string().min(1).max(512).refine(isSafePackSkillRelativePath, {
+  path: z.string().min(1).max(512).refine(isSafeSkillRelativePath, {
     message: "skill file path must be a safe relative POSIX path without '..' segments",
   }),
   content: z.string().max(256 * 1024),
 });
 export type CapabilityPackSkillFile = z.infer<typeof CapabilityPackSkillFile>;
 
-// A skill delivered by a capability pack. The name doubles as the skill
-// directory under the sandbox skill index (skills/<name>), so it must be a
-// single safe path segment. Every skill must ship a top-level SKILL.md.
-export const CapabilityPackSkill = z
-  .object({
-    name: z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
-        message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
-      }),
-    description: z.string().min(1).max(2048).optional(),
-    // Workspace-managed Skills are available to every session in the
-    // workspace. Session-selected Skills remain installed and inspectable, but
-    // enter model context only when their immutable definition is attached to
-    // a session explicitly. This is the hard contamination boundary for Packs
-    // that guide implementation agents rather than customer-facing agents.
-    activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
-    files: z.array(CapabilityPackSkillFile).min(1).max(64),
-  })
-  .superRefine((skill, ctx) => {
-    const seen = new Set<string>();
-    skill.files.forEach((file, index) => {
-      if (seen.has(file.path)) {
+// A skill delivered by a capability pack. Files own metadata. Optional legacy
+// name/description inputs are consistency assertions, never competing values.
+export const CapabilityPackSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      name: z.string().min(1).max(64).optional(),
+      description: z.string().min(1).max(1024).optional(),
+      // Workspace-managed Skills are available to every session in the
+      // workspace. Session-selected Skills remain installed and inspectable, but
+      // enter model context only when their immutable definition is attached to
+      // a session explicitly. This is the hard contamination boundary for Packs
+      // that guide implementation agents rather than customer-facing agents.
+      activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
+      files: z.array(CapabilityPackSkillFile).min(1).max(128),
+    })
+    .transform((skill, ctx) => {
+      const main = skill.files.find((file) => file.path === "SKILL.md");
+      if (!main) {
         ctx.addIssue({
           code: "custom",
-          message: `duplicate skill file path: ${file.path}`,
-          path: ["files", index, "path"],
+          message: "skill must include a top-level SKILL.md file",
+          path: ["files"],
         });
+        return z.NEVER;
       }
-      seen.add(file.path);
-    });
-    if (!skill.files.some((file) => file.path === "SKILL.md")) {
-      ctx.addIssue({
-        code: "custom",
-        message: "skill must include a top-level SKILL.md file",
-        path: ["files"],
-      });
-    }
-  });
+      let metadata: ReturnType<typeof readSkillMetadata>;
+      try {
+        validateSkillTextFiles(skill.files);
+        metadata = readSkillMetadata(main.content);
+      } catch (error) {
+        ctx.addIssue({
+          code: "custom",
+          message: error instanceof Error ? error.message : "Invalid Skill frontmatter",
+          path: ["files"],
+        });
+        return z.NEVER;
+      }
+      for (const key of ["name", "description"] as const) {
+        if (skill[key] !== undefined && skill[key] !== metadata[key])
+          ctx.addIssue({
+            code: "custom",
+            message: `Skill ${key} must match SKILL.md frontmatter`,
+            path: [key],
+          });
+      }
+      return { ...skill, ...metadata };
+    }),
+);
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
+export type CapabilityPackSkillInput = z.input<typeof CapabilityPackSkill>;
 
 // Inline skill content fixed onto one session at creation. It intentionally
 // uses the exact same validated directory shape as a pack skill, but has a
 // different semantic owner and lifecycle. Session readers can inspect it; it
 // is configuration, never a secret store. Pack activation policy is consumed
 // at admission and cannot become part of the session-owned artifact.
-export const SessionSkill = CapabilityPackSkill.transform(
-  ({ activationMode: _activationMode, ...skill }) => skill,
+export const SessionSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
+  CapabilityPackSkill.transform(({ activationMode: _activationMode, ...skill }) => skill),
 );
 export type SessionSkill = z.infer<typeof SessionSkill>;
+export type SessionSkillInput = z.input<typeof SessionSkill>;
 
-export const SessionSkills = z
-  .array(SessionSkill)
-  .max(32)
-  .transform((skills, ctx) => {
-    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
-    for (const skill of skills) {
-      const key = skill.name.toLowerCase();
-      const fingerprint = JSON.stringify({
-        description: skill.description ?? null,
-        files: [...skill.files]
-          .sort((left, right) => left.path.localeCompare(right.path))
-          .map(({ path, content }) => ({ path, content })),
-      });
-      const existing = selected.get(key);
-      if (!existing) {
-        selected.set(key, { fingerprint, skill });
-        continue;
-      }
-      if (existing.fingerprint !== fingerprint) {
-        ctx.addIssue({
-          code: "custom",
-          message: `conflicting session skill definitions: ${skill.name}`,
+export const SessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .array(SessionSkill)
+    .max(32)
+    .transform((skills, ctx) => {
+      const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+      for (const skill of skills) {
+        const key = skill.name.toLowerCase();
+        const fingerprint = JSON.stringify({
+          description: skill.description ?? null,
+          files: [...skill.files]
+            .sort((left, right) => left.path.localeCompare(right.path))
+            .map(({ path, content }) => ({ path, content })),
         });
+        const existing = selected.get(key);
+        if (!existing) {
+          selected.set(key, { fingerprint, skill });
+          continue;
+        }
+        if (existing.fingerprint !== fingerprint) {
+          ctx.addIssue({
+            code: "custom",
+            message: `conflicting session skill definitions: ${skill.name}`,
+          });
+        }
       }
-    }
-    return [...selected.values()].map(({ skill }) => skill);
-  });
+      return [...selected.values()].map(({ skill }) => skill);
+    }),
+);
 
-function isSafePackSkillRelativePath(path: string): boolean {
-  if (path.startsWith("/") || path.includes("\\")) {
-    return false;
-  }
-  return path
-    .split("/")
-    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+/** No header synthesis: stored files must still pass the canonical contract. */
+export const StoredSessionSkills = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.preprocess(projectStoredSkillMetadata, SessionSkills),
+);
+
+function projectStoredSkillMetadata(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map((skill: unknown) => {
+    if (!skill || typeof skill !== "object" || Array.isArray(skill)) return skill;
+    const {
+      name: _name,
+      description: _description,
+      ...definition
+    } = skill as Record<string, unknown>;
+    return definition;
+  });
+}
+
+function projectStoredTemplateSkillMetadata(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const template = value as Record<string, unknown>;
+  return {
+    ...template,
+    ...(template.skills !== undefined
+      ? { skills: projectStoredSkillMetadata(template.skills) }
+      : {}),
+  };
 }
 
 const CapabilityPackVariableSet = z
@@ -10150,165 +10124,196 @@ export const CapabilityPackRigRequirement = z
   .strict();
 export type CapabilityPackRigRequirement = z.infer<typeof CapabilityPackRigRequirement>;
 
-export const CapabilityPack = z.preprocess(
-  (input) => {
-    if (!input || typeof input !== "object" || Array.isArray(input)) {
-      return input;
-    }
-    const record = input as Record<string, unknown>;
-    if (record.variableSet !== undefined) {
+export const CapabilityPack = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.preprocess(
+    (input) => {
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return input;
+      }
+      const record = input as Record<string, unknown>;
+      if (record.variableSet !== undefined) {
+        return record;
+      }
+      if (record.environment !== undefined) {
+        const { environment: _environment, ...rest } = record;
+        return { ...rest, variableSet: record.environment };
+      }
+      if (record.requiredVariables !== undefined) {
+        const { requiredVariables: _requiredVariables, ...rest } = record;
+        return {
+          ...rest,
+          variableSet: {
+            description: "Required variables",
+            requiredVariables: record.requiredVariables,
+            required:
+              Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
+          },
+        };
+      }
       return record;
-    }
-    if (record.environment !== undefined) {
-      const { environment: _environment, ...rest } = record;
-      return { ...rest, variableSet: record.environment };
-    }
-    if (record.requiredVariables !== undefined) {
-      const { requiredVariables: _requiredVariables, ...rest } = record;
-      return {
-        ...rest,
-        variableSet: {
-          description: "Required variables",
-          requiredVariables: record.requiredVariables,
-          required: Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
-        },
-      };
-    }
-    return record;
-  },
-  z
-    .object({
-      id: z
-        .string()
-        .min(1)
-        .max(100)
-        .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
-      name: z.string().min(1).max(200),
-      description: z.string().min(1).max(4096),
-      role: z.string().min(1).max(128),
-      category: z.string().min(1).max(128),
-      version: z.string().min(1).max(128),
-      // Legacy manifest compatibility. V2 installation resolves this image to
-      // an explicit Rig requirement; the Pack no longer changes workspace
-      // runtime settings directly.
-      sandboxImage: z.string().trim().min(1).max(512).optional(),
-      // Optional provider-native immutable identities for the exact logical
-      // sandboxImage above. These avoid re-importing a private registry image on
-      // every provider while preserving sandboxImage as the cross-provider image
-      // provenance and lease-conflict identity.
-      sandboxProviderImages: z
-        .object({
-          modal: z
-            .object({
-              imageId: z
-                .string()
-                .trim()
-                .regex(/^im-[A-Za-z0-9]{22}$/),
-            })
-            .strict()
-            .optional(),
-        })
-        .strict()
-        .optional(),
-      // Legacy inline Skills are migrated into immutable Skill components by
-      // the V2 Pack installer. They are not loaded directly by V2 runtime.
-      skills: z
-        .array(CapabilityPackSkill)
-        .max(32)
-        .superRefine((skills, ctx) => {
-          const seen = new Set<string>();
-          skills.forEach((skill, index) => {
-            const key = skill.name.toLowerCase();
-            if (seen.has(key)) {
-              ctx.addIssue({
-                code: "custom",
-                message: `duplicate pack skill name: ${skill.name}`,
-                path: [index, "name"],
-              });
-            }
-            seen.add(key);
-          });
-        })
-        .default([]),
-      components: z.array(CapabilityPackComponentReference).max(128).default([]),
-      rig: CapabilityPackRigRequirement.optional(),
-      tools: z.array(ToolRef).default([]),
-      connectors: z.array(CapabilityPackConnector).default([]),
-      knowledge: z.array(CapabilityPackKnowledge).default([]),
-      scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-      automationTemplates: z.array(CapabilityPackAutomationTemplate).max(64).optional(),
-      variableSet: CapabilityPackVariableSet.optional(),
-      metadata: z.record(z.string(), z.unknown()).default({}),
-    })
-    .superRefine((pack, ctx) => {
-      const componentKeys = new Set<string>();
-      pack.components.forEach((component, index) => {
-        if (componentKeys.has(component.key)) {
-          ctx.addIssue({
-            code: "custom",
-            message: `duplicate Pack component key: ${component.key}`,
-            path: ["components", index, "key"],
-          });
-        }
-        componentKeys.add(component.key);
-      });
-      pack.skills.forEach((skill, index) => {
-        const key = `inline-skill/${skill.name.toLowerCase()}`;
-        if (componentKeys.has(key)) {
-          ctx.addIssue({
-            code: "custom",
-            message: `Pack component key conflicts with inline Skill ${skill.name}: ${key}`,
-            path: ["skills", index, "name"],
-          });
-        }
-        componentKeys.add(key);
-      });
-      const automationTemplateIds = new Set<string>();
-      pack.automationTemplates?.forEach((template, index) => {
-        if (automationTemplateIds.has(template.id)) {
-          ctx.addIssue({
-            code: "custom",
-            message: `duplicate Pack automation template id: ${template.id}`,
-            path: ["automationTemplates", index, "id"],
-          });
-        }
-        automationTemplateIds.add(template.id);
-      });
-      if (!pack.sandboxProviderImages?.modal) {
-        return;
-      }
-      if (!pack.sandboxImage) {
-        ctx.addIssue({
-          code: "custom",
-          message: "sandboxProviderImages.modal requires sandboxImage",
-          path: ["sandboxProviderImages", "modal"],
+    },
+    z
+      .object({
+        id: z
+          .string()
+          .min(1)
+          .max(100)
+          .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+        name: z.string().min(1).max(200),
+        description: z.string().min(1).max(4096),
+        role: z.string().min(1).max(128),
+        category: z.string().min(1).max(128),
+        version: z.string().min(1).max(128),
+        // Legacy manifest compatibility. V2 installation resolves this image to
+        // an explicit Rig requirement; the Pack no longer changes workspace
+        // runtime settings directly.
+        sandboxImage: z.string().trim().min(1).max(512).optional(),
+        // Optional provider-native immutable identities for the exact logical
+        // sandboxImage above. These avoid re-importing a private registry image on
+        // every provider while preserving sandboxImage as the cross-provider image
+        // provenance and lease-conflict identity.
+        sandboxProviderImages: z
+          .object({
+            modal: z
+              .object({
+                imageId: z
+                  .string()
+                  .trim()
+                  .regex(/^im-[A-Za-z0-9]{22}$/),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict()
+          .optional(),
+        // Legacy inline Skills are migrated into immutable Skill components by
+        // the V2 Pack installer. They are not loaded directly by V2 runtime.
+        skills: z
+          .array(CapabilityPackSkill)
+          .max(32)
+          .superRefine((skills, ctx) => {
+            const seen = new Set<string>();
+            skills.forEach((skill, index) => {
+              const key = skill.name.toLowerCase();
+              if (seen.has(key)) {
+                ctx.addIssue({
+                  code: "custom",
+                  message: `duplicate pack skill name: ${skill.name}`,
+                  path: [index, "name"],
+                });
+              }
+              seen.add(key);
+            });
+          })
+          .default([]),
+        components: z.array(CapabilityPackComponentReference).max(128).default([]),
+        rig: CapabilityPackRigRequirement.optional(),
+        tools: z.array(ToolRef).default([]),
+        connectors: z.array(CapabilityPackConnector).default([]),
+        knowledge: z.array(CapabilityPackKnowledge).default([]),
+        scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+        automationTemplates: z.array(CapabilityPackAutomationTemplate).max(64).optional(),
+        variableSet: CapabilityPackVariableSet.optional(),
+        metadata: z.record(z.string(), z.unknown()).default({}),
+      })
+      .superRefine((pack, ctx) => {
+        const componentKeys = new Set<string>();
+        pack.components.forEach((component, index) => {
+          if (componentKeys.has(component.key)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `duplicate Pack component key: ${component.key}`,
+              path: ["components", index, "key"],
+            });
+          }
+          componentKeys.add(component.key);
         });
-        return;
-      }
-      if (!/@sha256:[0-9a-f]{64}$/i.test(pack.sandboxImage)) {
-        ctx.addIssue({
-          code: "custom",
-          message:
-            "sandboxProviderImages.modal requires sandboxImage to be pinned by an OCI sha256 digest",
-          path: ["sandboxImage"],
+        pack.skills.forEach((skill, index) => {
+          const key = `inline-skill/${skill.name.toLowerCase()}`;
+          if (componentKeys.has(key)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `Pack component key conflicts with inline Skill ${skill.name}: ${key}`,
+              path: ["skills", index, "name"],
+            });
+          }
+          componentKeys.add(key);
         });
-      }
-    }),
+        const automationTemplateIds = new Set<string>();
+        pack.automationTemplates?.forEach((template, index) => {
+          if (automationTemplateIds.has(template.id)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `duplicate Pack automation template id: ${template.id}`,
+              path: ["automationTemplates", index, "id"],
+            });
+          }
+          automationTemplateIds.add(template.id);
+        });
+        if (!pack.sandboxProviderImages?.modal) {
+          return;
+        }
+        if (!pack.sandboxImage) {
+          ctx.addIssue({
+            code: "custom",
+            message: "sandboxProviderImages.modal requires sandboxImage",
+            path: ["sandboxProviderImages", "modal"],
+          });
+          return;
+        }
+        if (!/@sha256:[0-9a-f]{64}$/i.test(pack.sandboxImage)) {
+          ctx.addIssue({
+            code: "custom",
+            message:
+              "sandboxProviderImages.modal requires sandboxImage to be pinned by an OCI sha256 digest",
+            path: ["sandboxImage"],
+          });
+        }
+      }),
+  ),
 );
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
 
+/** Execution view only; never replace the stored manifest or its digest with it. */
+export const StoredCapabilityPack = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.preprocess((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const pack = value as Record<string, unknown>;
+    return {
+      ...pack,
+      ...(pack.skills !== undefined ? { skills: projectStoredSkillMetadata(pack.skills) } : {}),
+      ...(Array.isArray(pack.automationTemplates)
+        ? {
+            automationTemplates: pack.automationTemplates.map((entry: unknown) => {
+              if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+              const template = entry as Record<string, unknown>;
+              return {
+                ...template,
+                sessionTemplate: projectStoredTemplateSkillMetadata(template.sessionTemplate),
+              };
+            }),
+          }
+        : {}),
+    };
+  }, CapabilityPack),
+);
+
 // Registering a pack stores the manifest itself; the request body is a full
 // CapabilityPack manifest.
-export const RegisterCapabilityPackRequest = CapabilityPack;
+export const RegisterCapabilityPackRequest = /* @__PURE__ */ defineSkillContractSchema(
+  () => CapabilityPack,
+);
 export type RegisterCapabilityPackRequest = z.infer<typeof RegisterCapabilityPackRequest>;
 
-export const WorkspaceRegisteredPack = z.object({
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  pack: CapabilityPack,
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const WorkspaceRegisteredPack = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    pack: CapabilityPack,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type WorkspaceRegisteredPack = z.infer<typeof WorkspaceRegisteredPack>;
 
 export const PackInstallationStatus = z.enum([
@@ -10320,13 +10325,19 @@ export const PackInstallationStatus = z.enum([
 export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
 
 export const PackInstallation = z.object({
+  skillWrites: z.array(SkillWriteReceipt).optional(),
+  skillPublications: z.array(SkillPublicationReceipt).optional(),
+  skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   packId: z.string().min(1),
   status: PackInstallationStatus,
   version: z.number().int().positive(),
-  manifestSnapshot: CapabilityPack.nullable(),
+  // Exact accepted audit data, including historical fields and legacy Skills.
+  // Execution must explicitly parse StoredCapabilityPack; response validation
+  // must not project metadata, apply defaults, or change manifestDigest input.
+  manifestSnapshot: z.record(z.string(), z.unknown()).nullable(),
   manifestDigest: z
     .string()
     .regex(/^[0-9a-f]{64}$/)
@@ -10675,6 +10686,7 @@ export type UninstallPackRequest = z.infer<typeof UninstallPackRequest>;
 
 export const UninstallPackResult = z
   .object({
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     packId: z.string().min(1),
     status: z.enum(["not_installed", "uninstalled"]),
     retainedComponents: z.array(z.string().min(1).max(512)).max(160),
@@ -10702,8 +10714,6 @@ export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
 
 export const SocialConnection = z.object({
   id: z.string().uuid(),
-  /** Present on version-aware deployments; required for observed reconnect. */
-  version: z.number().int().positive().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   provider: SocialProvider,
@@ -11036,7 +11046,6 @@ export const OAuthStartRequest = z
     resource: z.string().url().optional(),
     requestedScopes: z.array(z.string().min(1)).default([]),
     returnPath: z.string().min(1).optional(),
-    returnUrl: z.string().min(1).max(4096).optional(),
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
     oauthClient: z
@@ -11372,6 +11381,7 @@ export const InstallLibrarySkillRequest = z
 export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
 
 export const InstalledSkill = z.object({
+  skillReceipt: SkillWriteReceipt.optional(),
   capabilityId: z.string().min(1),
   pluginId: z.string().uuid(),
   pluginVersionId: z.string().uuid(),
@@ -11444,6 +11454,7 @@ export const UninstallSkillRequest = z.object({
 export type UninstallSkillRequest = z.infer<typeof UninstallSkillRequest>;
 
 export const UninstallSkillResult = z.object({
+  skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
   capabilityId: z.string().min(1),
   status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
   remainingOwners: z.array(CapabilityComponentOwner),
@@ -12044,6 +12055,9 @@ export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
 export const InstalledPlugin = z
   .object({
+    skillWrites: z.array(SkillWriteReceipt).optional(),
+    skillPublications: z.array(SkillPublicationReceipt).optional(),
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     pluginKey: z.string().min(1),
     version: z.string().min(1),
     pluginId: z.string().uuid(),
@@ -12107,6 +12121,7 @@ export type UninstallPluginRequest = z.infer<typeof UninstallPluginRequest>;
 
 export const UninstallPluginResult = z
   .object({
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     pluginKey: z.string().min(1),
     status: z.enum(["not_installed", "uninstalled"]),
     retainedComponents: z.array(z.string().min(1)),
@@ -12124,6 +12139,7 @@ export const SessionBackgroundCommandActivity = z
   .object({
     state: z.enum(["running", "stopping"]),
     count: z.number().int().positive(),
+    unavailableCount: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
@@ -12149,6 +12165,7 @@ export const SessionBackgroundCommand = z
     sessionId: z.string().uuid(),
     provider: SessionBackgroundCommandProvider,
     state: SessionBackgroundCommandState,
+    observationStatus: z.literal("unavailable").optional(),
     commandPreview: z.string().max(512),
     cancelRequestedAt: z.string().nullable(),
     exitCode: z.number().int().nullable(),
@@ -12229,206 +12246,209 @@ export type CancelSessionBackgroundCommandResult = z.infer<
   typeof CancelSessionBackgroundCommandResult
 >;
 
-export const Session = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  accountId: z.string().uuid(),
-  status: SessionStatus,
-  /** Additive list projection. Detail reads may omit it. */
-  backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
-  /** Current non-deleted schedules targeting this session, including paused schedules. */
-  hasSchedules: z.boolean().optional(),
-  initialMessage: z.string(),
-  title: z.string().nullable(),
-  titleSource: z.enum(["user", "agent"]).nullable(),
-  // Per-session agent persona/system instructions supplied at create. Org-visible
-  // metadata (exposed like title/goal), never a secret and never a timeline event.
-  // null when the session carried none.
-  instructions: z.string().nullable(),
-  // Immutable prompt-policy role binding. This is separate from human
-  // workspace membership roles and from memory selectors. Null keeps the
-  // compatibility fallback to a normalized metadata.role value.
-  policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
-  /** Agent-to-agent reach declared at create; see {@link SessionAgentAccess}. */
-  agentAccess: SessionAgentAccess.default("workspace"),
-  /** Opaque product label; null when the create carried none. */
-  scopeSubjectId: SessionScopeSubjectId.nullable().default(null),
-  /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
-  memoryScope: SessionMemoryScope.default("workspace"),
-  resources: z.array(ResourceRef),
-  skills: SessionSkills.default([]),
-  tools: z.array(ToolRef),
-  // Origin and optimistic-concurrency fence for the durable session policy.
-  toolPolicy: SessionToolPolicy,
-  toolPolicyVersion: z.number().int().positive(),
-  // Secret-safe current resolution, computed at an API/read or execution
-  // boundary from IDs only. Optional because internal DB readers need not load
-  // the workspace runtime registry.
-  effectiveToolPolicy: SessionEffectiveToolPolicy.optional(),
-  metadata: z.record(z.string(), z.unknown()),
-  /** Additive public tenancy projection; omitted by legacy/internal readers. */
-  tenancy: SessionTenancyPublicProjection.optional(),
-  /** Frozen creator fact used only for creation attribution/idempotent repair. */
-  createdBy: TurnInitiator,
-  createdByContext: TurnInitiatorContext,
-  // Read projection: latest turn.started policy, or creation policy before any turn starts.
-  // Accepted/queued turns and actor composer drafts retain their own explicit policy.
-  model: z.string(),
-  reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode,
-  sandboxBackend: SandboxBackend,
-  // The OS the session's box runs. Defaults to 'linux' (today's only OS).
-  sandboxOs: SandboxOs,
-  // The shared-sandbox group the session's box belongs to. Equals the session's
-  // own id for a singleton group (today's 1:1 default); equals the parent's
-  // group when spawned shared (both sessions run in ONE box).
-  sandboxGroupId: z.string().uuid(),
-  // The first-class swappable-sandbox POINTER (bring-your-own-compute M2). NULL
-  // resolves to the session's own group sandbox (the backward-compat default);
-  // a swap sets it to the target sandbox row. active_epoch is the second epoch
-  // ABOVE the lease epoch, bumped on every swap so the routing proxy can fence a
-  // stale in-flight op and retry against the new active sandbox.
-  activeSandboxId: z.string().uuid().nullable(),
-  activeEpoch: z.number().int().nonnegative(),
-  // The explicit connected-machine project root selected for this session.
-  // Null means the enrolled agent's launch workspace root.
-  workingDir: z.string().nullable().default(null),
-  // Ordered low-to-high precedence. The legacy singular aliases below expose
-  // the final (highest-precedence) entry for older clients.
-  variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).default([]),
-  variableSetId: z.string().uuid().nullable().default(null),
-  /** @deprecated use variableSetId */
-  environmentId: z.string().uuid().nullable().default(null),
-  // The rig this session rides (M3 runtime binding). Both are resolved and
-  // FROZEN at session create: rigId names the rig, rigVersionId pins the exact
-  // active version the session's box/env/setup/doctrine are built from for the
-  // session's whole life (a later promote does NOT move an existing session).
-  // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
-  rigId: z.string().uuid().nullable().default(null),
-  rigVersionId: z.string().uuid().nullable().default(null),
-  // Workspace channel this session is filed under (rail organization only;
-  // a session tree is grouped by its ROOT session's channel). Null = unfiled.
-  channelId: z.string().uuid().nullable().default(null),
-  // Non-default first-party MCP token permissions (manager-style sessions);
-  // null means the fixed worker default set.
-  firstPartyMcpPermissions: z.array(Permission).nullable(),
-  // Exact model-visible OpenGeni selection. The default omits connector-wide
-  // tools; [] intentionally selects none.
-  firstPartyMcpTools: z.array(FirstPartyMcpToolName),
-  // Per-session third-party MCP servers, metadata only. Credential values are
-  // write-only and never appear here.
-  mcpServers: z.array(SessionMcpServerMetadata).default([]),
-  // The manager session that spawned this one via session_create (set only
-  // when the creating grant carried a worker-signed sessionId claim); null for
-  // direct API creates and scheduled-task runs. When set, this session's
-  // terminal-for-now transitions wake the parent.
-  parentSessionId: z.string().uuid().nullable(),
-  // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
-  // snapshots are immutable and govern only future descendant creation.
-  rootSessionId: z.string().uuid(),
-  nestedAgentDepth: NestedAgentDepthValue,
-  maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
-  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
-  nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
-  nestedAgentDepthPolicySessionId: z.string().uuid().nullable(),
-  // Workspace-scoped CREATE idempotency key the session was created under (the
-  // dedup target collapsing double-submit/retry races to one session); null
-  // when the create carried no key.
-  createIdempotencyKey: z.string().nullable(),
-  temporalWorkflowId: z.string().nullable(),
-  activeTurnId: z.string().uuid().nullable(),
-  // Provider-reported input tokens of the latest authoritative terminal
-  // response. Null after a context transition or whenever that latest response
-  // supplied no usable count, so an older response can never drive compaction.
-  lastInputTokens: z.number().int().nonnegative().nullable(),
-  queueVersion: z.number().int().nonnegative(),
-  queueHeadPosition: z.number().int(),
-  queueTailPosition: z.number().int(),
-  effectiveControl: EffectiveSessionControl,
-  /** Current out-of-turn wait, independent of goals. Omitted by older servers.
-   * An elapsed deadline means the recheck is due, not proof it has started. */
-  inputWait: z
-    .object({
-      deadlineAt: z.string().datetime({ offset: true }),
-      reason: z.string(),
-    })
-    .nullable()
-    .optional(),
-  lastSequence: z.number().int().nonnegative(),
-  // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
-  // manually PINNED to (null ⇒ follow the workspace active pointer).
-  // codexLastCredentialId: the account the most recent turn actually ran on (the
-  // "Running on:" indicator's source). Both are credential-row ids, null until set.
-  codexPinnedCredentialId: z.string().uuid().nullable(),
-  codexLastCredentialId: z.string().uuid().nullable(),
-  /** Detail-read projection of the accepted current turn; never a future-account prediction. */
-  codexCurrentSelection: z
-    .object({
-      credentialId: z.string().nullable(),
-      waiting: z.boolean(),
-    })
-    .nullable()
-    .optional(),
-  // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
-  // model admission for the life of the session; portable ⇒ plaintext compaction
-  // and free mid-session provider switching (today's behavior).
-  codexCompactionMode: CodexCompactionMode,
-  /** Personal (authenticated subject) workspace pin state, never workspace-global. */
-  pinned: z.boolean().default(false),
-  /** Stable pin ordering key; null when this subject has not pinned the session. */
-  pinnedAt: z.string().nullable().default(null),
-  /** Optimistic pin-state revision; zero represents an absent pin relation. */
-  pinVersion: z.number().int().nonnegative().default(0),
-  /** Personal explicit acknowledgment state; opening the session never clears it. */
-  unread: z.boolean().default(false),
-  /** Personal power-user label for work the member intends to continue. */
-  activelyWorking: z.boolean().default(false),
-  /** Optimistic revision for unread/actively-working state. */
-  attentionVersion: z.number().int().nonnegative().default(0),
-  /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
-  archived: z.boolean().default(false),
-  archivedAt: z.string().nullable().default(null),
-  /** Optimistic archive-state revision; zero represents an absent personal relation. */
-  archiveVersion: z.number().int().nonnegative().default(0),
-  /**
-   * Server-authoritative hierarchy summary populated on session-list reads.
-   * Detail reads may omit it. The rail uses this instead of guessing a tree
-   * from whichever global recency page happened to be loaded.
-   */
-  treeStats: z
-    .object({
-      directChildren: z.number().int().nonnegative(),
-      totalDescendants: z.number().int().nonnegative(),
-      runningDescendants: z.number().int().nonnegative(),
-      queuedDescendants: z.number().int().nonnegative(),
-      waitingDescendants: z.number().int().nonnegative().optional(),
-      attentionDescendants: z.number().int().nonnegative(),
-      pausedDescendants: z.number().int().nonnegative(),
-      /** Historical failed lifecycle states, including already-reviewed failures. */
-      failedDescendants: z.number().int().nonnegative(),
-      unreadDescendants: z.number().int().nonnegative().optional(),
-      /** Failed descendants whose latest durable event this viewer has not acknowledged. */
-      unreadFailedDescendants: z.number().int().nonnegative().optional(),
-      activelyWorkingDescendants: z.number().int().nonnegative().optional(),
-      /**
-       * Earliest moment one of the counted `attentionDescendants` entered
-       * `requires_action` (the oldest still-open `requires_action` turn among
-       * those descendants). Null when none is waiting; omitted by older servers.
-       */
-      attentionSince: z.string().nullable().optional(),
-      /** Counts are lower bounds rather than exact totals when true. */
-      truncated: z.boolean().default(false),
-    })
-    .optional(),
-  /**
-   * When this session's own open turn entered `requires_action`. Populated by
-   * list and lineage reads for sessions whose status is `requires_action`;
-   * null otherwise and omitted by older servers or detail reads.
-   */
-  requiresActionSince: z.string().nullable().optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    bundledSkillIds: BundledSkillSelection.optional(),
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    status: SessionStatus,
+    /** Additive list projection. Detail reads may omit it. */
+    backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
+    /** Current non-deleted schedules targeting this session, including paused schedules. */
+    hasSchedules: z.boolean().optional(),
+    initialMessage: z.string(),
+    title: z.string().nullable(),
+    titleSource: z.enum(["user", "agent"]).nullable(),
+    // Per-session agent persona/system instructions supplied at create. Org-visible
+    // metadata (exposed like title/goal), never a secret and never a timeline event.
+    // null when the session carried none.
+    instructions: z.string().nullable(),
+    // Immutable prompt-policy role binding. This is separate from human
+    // workspace membership roles and from memory selectors. Null keeps the
+    // compatibility fallback to a normalized metadata.role value.
+    policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
+    /** Agent-to-agent reach declared at create; see {@link SessionAgentAccess}. */
+    agentAccess: SessionAgentAccess.default("workspace"),
+    /** Opaque product label; null when the create carried none. */
+    endUser: SessionEndUser.nullable().default(null),
+    /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
+    memoryScope: SessionMemoryScope.default("workspace"),
+    resources: z.array(ResourceRef),
+    skills: SessionSkills.default([]),
+    tools: z.array(ToolRef),
+    // Origin and optimistic-concurrency fence for the durable session policy.
+    toolPolicy: SessionToolPolicy,
+    toolPolicyVersion: z.number().int().positive(),
+    // Secret-safe current resolution, computed at an API/read or execution
+    // boundary from IDs only. Optional because internal DB readers need not load
+    // the workspace runtime registry.
+    effectiveToolPolicy: SessionEffectiveToolPolicy.optional(),
+    metadata: z.record(z.string(), z.unknown()),
+    /** Additive public tenancy projection; omitted by legacy/internal readers. */
+    tenancy: SessionTenancyPublicProjection.optional(),
+    /** Frozen creator fact used only for creation attribution/idempotent repair. */
+    createdBy: TurnInitiator,
+    createdByContext: TurnInitiatorContext,
+    // Read projection: latest turn.started policy, or creation policy before any turn starts.
+    // Accepted/queued turns and actor composer drafts retain their own explicit policy.
+    model: z.string(),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode,
+    sandboxBackend: SandboxBackend,
+    // The OS the session's box runs. Defaults to 'linux' (today's only OS).
+    sandboxOs: SandboxOs,
+    // The shared-sandbox group the session's box belongs to. Equals the session's
+    // own id for a singleton group (today's 1:1 default); equals the parent's
+    // group when spawned shared (both sessions run in ONE box).
+    sandboxGroupId: z.string().uuid(),
+    // The first-class swappable-sandbox POINTER (bring-your-own-compute M2). NULL
+    // resolves to the session's own group sandbox (the backward-compat default);
+    // a swap sets it to the target sandbox row. active_epoch is the second epoch
+    // ABOVE the lease epoch, bumped on every swap so the routing proxy can fence a
+    // stale in-flight op and retry against the new active sandbox.
+    activeSandboxId: z.string().uuid().nullable(),
+    activeEpoch: z.number().int().nonnegative(),
+    // The explicit connected-machine project root selected for this session.
+    // Null means the enrolled agent's launch workspace root.
+    workingDir: z.string().nullable().default(null),
+    // Ordered low-to-high precedence. The legacy singular aliases below expose
+    // the final (highest-precedence) entry for older clients.
+    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).default([]),
+    variableSetId: z.string().uuid().nullable().default(null),
+    /** @deprecated use variableSetId */
+    environmentId: z.string().uuid().nullable().default(null),
+    // The rig this session rides (M3 runtime binding). Both are resolved and
+    // FROZEN at session create: rigId names the rig, rigVersionId pins the exact
+    // active version the session's box/env/setup/doctrine are built from for the
+    // session's whole life (a later promote does NOT move an existing session).
+    // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
+    rigId: z.string().uuid().nullable().default(null),
+    rigVersionId: z.string().uuid().nullable().default(null),
+    // Workspace channel this session is filed under (rail organization only;
+    // a session tree is grouped by its ROOT session's channel). Null = unfiled.
+    channelId: z.string().uuid().nullable().default(null),
+    // Non-default first-party MCP token permissions (manager-style sessions);
+    // null means the fixed worker default set.
+    firstPartyMcpPermissions: z.array(Permission).nullable(),
+    // Exact model-visible OpenGeni selection. The default omits connector-wide
+    // tools; [] intentionally selects none.
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+    // Per-session third-party MCP servers, metadata only. Credential values are
+    // write-only and never appear here.
+    mcpServers: z.array(SessionMcpServerMetadata).default([]),
+    // The manager session that spawned this one via session_create (set only
+    // when the creating grant carried a worker-signed sessionId claim); null for
+    // direct API creates and scheduled-task runs. When set, this session's
+    // terminal-for-now transitions wake the parent.
+    parentSessionId: z.string().uuid().nullable(),
+    // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
+    // snapshots are immutable and govern only future descendant creation.
+    rootSessionId: z.string().uuid(),
+    nestedAgentDepth: NestedAgentDepthValue,
+    maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+    effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+    nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+    nestedAgentDepthPolicySessionId: z.string().uuid().nullable(),
+    // Workspace-scoped CREATE idempotency key the session was created under (the
+    // dedup target collapsing double-submit/retry races to one session); null
+    // when the create carried no key.
+    createIdempotencyKey: z.string().nullable(),
+    temporalWorkflowId: z.string().nullable(),
+    activeTurnId: z.string().uuid().nullable(),
+    // Provider-reported input tokens of the latest authoritative terminal
+    // response. Null after a context transition or whenever that latest response
+    // supplied no usable count, so an older response can never drive compaction.
+    lastInputTokens: z.number().int().nonnegative().nullable(),
+    queueVersion: z.number().int().nonnegative(),
+    queueHeadPosition: z.number().int(),
+    queueTailPosition: z.number().int(),
+    effectiveControl: EffectiveSessionControl,
+    /** Current out-of-turn wait, independent of goals. Omitted by older servers.
+     * An elapsed deadline means the recheck is due, not proof it has started. */
+    inputWait: z
+      .object({
+        deadlineAt: z.string().datetime({ offset: true }),
+        reason: z.string(),
+      })
+      .nullable()
+      .optional(),
+    lastSequence: z.number().int().nonnegative(),
+    // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
+    // manually PINNED to (null ⇒ follow the workspace active pointer).
+    // codexLastCredentialId: the account the most recent turn actually ran on (the
+    // "Running on:" indicator's source). Both are credential-row ids, null until set.
+    codexPinnedCredentialId: z.string().uuid().nullable(),
+    codexLastCredentialId: z.string().uuid().nullable(),
+    /** Detail-read projection of the accepted current turn; never a future-account prediction. */
+    codexCurrentSelection: z
+      .object({
+        credentialId: z.string().nullable(),
+        waiting: z.boolean(),
+      })
+      .nullable()
+      .optional(),
+    // Frozen at session create. remote_v2 ⇒ Codex remote compaction + Codex-only
+    // model admission for the life of the session; portable ⇒ plaintext compaction
+    // and free mid-session provider switching (today's behavior).
+    codexCompactionMode: CodexCompactionMode,
+    /** Personal (authenticated subject) workspace pin state, never workspace-global. */
+    pinned: z.boolean().default(false),
+    /** Stable pin ordering key; null when this subject has not pinned the session. */
+    pinnedAt: z.string().nullable().default(null),
+    /** Optimistic pin-state revision; zero represents an absent pin relation. */
+    pinVersion: z.number().int().nonnegative().default(0),
+    /** Personal explicit acknowledgment state; opening the session never clears it. */
+    unread: z.boolean().default(false),
+    /** Personal power-user label for work the member intends to continue. */
+    activelyWorking: z.boolean().default(false),
+    /** Optimistic revision for unread/actively-working state. */
+    attentionVersion: z.number().int().nonnegative().default(0),
+    /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
+    archived: z.boolean().default(false),
+    archivedAt: z.string().nullable().default(null),
+    /** Optimistic archive-state revision; zero represents an absent personal relation. */
+    archiveVersion: z.number().int().nonnegative().default(0),
+    /**
+     * Server-authoritative hierarchy summary populated on session-list reads.
+     * Detail reads may omit it. The rail uses this instead of guessing a tree
+     * from whichever global recency page happened to be loaded.
+     */
+    treeStats: z
+      .object({
+        directChildren: z.number().int().nonnegative(),
+        totalDescendants: z.number().int().nonnegative(),
+        runningDescendants: z.number().int().nonnegative(),
+        queuedDescendants: z.number().int().nonnegative(),
+        waitingDescendants: z.number().int().nonnegative().optional(),
+        attentionDescendants: z.number().int().nonnegative(),
+        pausedDescendants: z.number().int().nonnegative(),
+        /** Historical failed lifecycle states, including already-reviewed failures. */
+        failedDescendants: z.number().int().nonnegative(),
+        unreadDescendants: z.number().int().nonnegative().optional(),
+        /** Failed descendants whose latest durable event this viewer has not acknowledged. */
+        unreadFailedDescendants: z.number().int().nonnegative().optional(),
+        activelyWorkingDescendants: z.number().int().nonnegative().optional(),
+        /**
+         * Earliest moment one of the counted `attentionDescendants` entered
+         * `requires_action` (the oldest still-open `requires_action` turn among
+         * those descendants). Null when none is waiting; omitted by older servers.
+         */
+        attentionSince: z.string().nullable().optional(),
+        /** Counts are lower bounds rather than exact totals when true. */
+        truncated: z.boolean().default(false),
+      })
+      .optional(),
+    /**
+     * When this session's own open turn entered `requires_action`. Populated by
+     * list and lineage reads for sessions whose status is `requires_action`;
+     * null otherwise and omitted by older servers or detail reads.
+     */
+    requiresActionSince: z.string().nullable().optional(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type Session = z.infer<typeof Session>;
 
 /**
@@ -12436,9 +12456,11 @@ export type Session = z.infer<typeof Session>;
  * execution pointer and is correctly null while the first turn is queued;
  * embedders use this immutable identity to correlate their preallocated run.
  */
-export const CreateSessionResponse = Session.extend({
-  initialTurnId: z.string().uuid().nullable(),
-});
+export const CreateSessionResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  Session.extend({
+    initialTurnId: z.string().uuid().nullable(),
+  }),
+);
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
 
 export type SessionSummary = Session;
@@ -12451,15 +12473,17 @@ export type SessionSummary = Session;
  * explicit. Pins are filtered by the same parent/search predicates as ordinary
  * rows.
  */
-export const SessionListResponse = z.object({
-  pinned: z.array(Session),
-  filtersApplied: z.literal(true).optional(),
-  originSiteId: z.string().uuid().optional(),
-  /** True when older matching pins were omitted from this bounded page. */
-  pinnedTruncated: z.boolean().optional(),
-  sessions: z.array(Session),
-  nextCursor: z.string().nullable(),
-});
+export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    pinned: z.array(Session),
+    filtersApplied: z.literal(true).optional(),
+    originSiteId: z.string().uuid().optional(),
+    /** True when older matching pins were omitted from this bounded page. */
+    pinnedTruncated: z.boolean().optional(),
+    sessions: z.array(Session),
+    nextCursor: z.string().nullable(),
+  }),
+);
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
 /**
@@ -12467,14 +12491,23 @@ export type SessionListResponse = z.infer<typeof SessionListResponse>;
  * `endUserId` must be supplied together; `status` keeps only sessions in that
  * exact lifecycle state.
  */
-export const ListOrganizationSessionsQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  cursor: z.string().min(1).optional(),
-  scopeSubjectId: SessionScopeSubjectId.optional(),
-  endUserSource: z.never().optional(),
-  endUserId: z.never().optional(),
-  status: SessionStatus.optional(),
-});
+export const ListOrganizationSessionsQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    cursor: z.string().min(1).optional(),
+    endUserSource: z.string().trim().min(1).max(200).optional(),
+    endUserId: z.string().trim().min(1).max(1024).optional(),
+    status: SessionStatus.optional(),
+  })
+  .superRefine((value, context) => {
+    if ((value.endUserSource === undefined) !== (value.endUserId === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "endUserSource and endUserId must be supplied together",
+        path: ["endUserId"],
+      });
+    }
+  });
 export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessionsQuery>;
 
 /**
@@ -12487,10 +12520,12 @@ export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessi
  * `nextCursor` is still set (the server bounds how many workspaces one request
  * visits), so callers follow `nextCursor` until it is null.
  */
-export const OrganizationSessionListResponse = z.object({
-  sessions: z.array(Session),
-  nextCursor: z.string().nullable(),
-});
+export const OrganizationSessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    sessions: z.array(Session),
+    nextCursor: z.string().nullable(),
+  }),
+);
 export type OrganizationSessionListResponse = z.infer<typeof OrganizationSessionListResponse>;
 
 // Recursive: the TS type is declared first so the schema annotation can carry
@@ -12500,20 +12535,24 @@ export type LineageNode = {
   session: SessionSummary;
   children: LineageNode[];
 };
-export const LineageNode: z.ZodType<LineageNode> = z.lazy(() =>
-  z.object({
-    session: Session,
-    children: z.array(LineageNode),
-  }),
+export const LineageNode: z.ZodType<LineageNode> = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.lazy(() =>
+    z.object({
+      session: Session,
+      children: z.array(LineageNode),
+    }),
+  ),
 );
 
-export const SessionLineageResponse = z.object({
-  /** Current schedule relationship for the requested session. */
-  sessionHasSchedules: z.boolean().optional(),
-  ancestors: z.array(Session),
-  children: z.array(LineageNode),
-  truncated: z.boolean().default(false),
-});
+export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    /** Current schedule relationship for the requested session. */
+    sessionHasSchedules: z.boolean().optional(),
+    ancestors: z.array(Session),
+    children: z.array(LineageNode),
+    truncated: z.boolean().default(false),
+  }),
+);
 export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
@@ -14787,228 +14826,236 @@ export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
-export const CreateSessionRequest = withVariableSetIdAlias(
-  {
-    /**
-     * Optional UUID preallocated by an embedding host. This lets the host durably
-     * link its own projection before OpenGeni admits the initial turn. Replays
-     * must pair it with the same idempotency key; OpenGeni never derives host
-     * identity or authorization from the UUID.
-     */
-    requestedSessionId: z.string().uuid().optional(),
-    /** Explicit external-owner grants for the direct initial turn only. */
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
-    /** Top-level omission is workspace-visible. Agent-child omission inherits
-     * the exact parent visibility; cross-visibility child creation is rejected.
-     * Top-level private creation is an activated managed-cookie owning-human
-     * capability, while a private child uses an exact live-parent-attempt
-     * database capability. Both commit atomically. */
-    visibility: SessionVisibility.default("workspace"),
-    /** Agent-to-agent reach. Top-level omission is the platform default
-     * `workspace`. An agent-created child inherits its parent's value on
-     * omission and may only narrow it (workspace > user > session); a wider
-     * explicit child value is rejected. Never widens human or API-key access. */
-    agentAccess: SessionAgentAccess.default("workspace"),
-    /** Identity is established by authenticated native/asUser authority, never a body label. */
-    scopeSubjectId: z.never().optional(),
-    endUser: z.never().optional(),
-    /** Typed Memory selector. `user` requires an end-user label (own or
-     * inherited; 422 otherwise). A child inherits its parent's value on
-     * omission and may only narrow it (workspace > user > session > off). */
-    memoryScope: SessionMemoryScope.default("workspace"),
-    initialMessage: z.string().min(1).optional(),
-    // Creates the durable session shell without fabricating a user message or
-    // starting an underlying agent turn. Realtime can then become the first
-    // interaction and use the ordinary Send/Steer path when it delegates.
-    startMode: z.literal("realtime").optional(),
-    // Model-visible application context attached to the initial user message.
-    // Standard timeline rendering omits it, while full event/audit reads retain
-    // it. This is ordinary user-role content, not secret or privileged input.
-    modelContext: z.string().trim().min(1).max(32768).optional(),
-    // Per-session agent persona/system instructions (org-visible metadata, NOT a
-    // secret). Rides the SAME system-level instructions channel the per-workspace
-    // agentInstructions rides, composed AFTER the workspace persona so it refines
-    // it for this one session — how a host delivers per-agent-type prompts without
-    // leaking them into the user-visible timeline (it is NEVER emitted as an
-    // event, unlike goal/initialMessage). Trimmed, non-empty, and bounded by the
-    // shared durable session-instruction contract. Absent ⇒ byte-identical to
-    // today.
-    instructions: z.string().trim().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-    // Immutable prompt-policy role binding for matching one activated role
-    // policy. This never derives from or grants a human workspace membership
-    // role. Existing callers may continue to use normalized metadata.role as a
-    // compatibility fallback by omitting this field.
-    policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
-    // For an agent-created child, omission inherits the trusted immediate
-    // parent's repositories only; files require explicit selection. An explicit
-    // array, including [], is
-    // authoritative. Top-level omission remains []. Presence is resolved from
-    // the raw request because this Zod default erases absent-vs-empty.
-    resources: z.array(ResourceRef).default([]),
-    // Inline skills are fixed onto the session. Child omission inherits the
-    // trusted parent's selection; an explicit array, including [], wins.
-    skills: SessionSkills.default([]),
-    // Immutable workspace Skill identities to copy onto this session at
-    // creation. This is the explicit opt-in path for session-selected Pack
-    // Skills: installation alone never exposes them to model context. Child
-    // omission still inherits the parent's already-materialized session Skills.
-    installedSkillIds: z
-      .array(z.string().min(1).max(512))
-      .max(32)
-      .refine((ids) => new Set(ids).size === ids.length, {
-        message: "installed Skill identities must be unique",
-      })
-      .optional(),
-    // The same child omission rule applies to selected MCP tool refs. Top-level
-    // omission still applies workspace-default capability MCP tools; explicit []
-    // suppresses those defaults (the first-party OpenGeni server remains added).
-    tools: z.array(ToolRef).default([]),
-    metadata: z.record(z.string(), z.unknown()).default({}),
-    model: z.string().min(1).optional(),
-    reasoningEffort: ReasoningEffort.optional(),
-    latencyMode: LatencyMode.optional(),
-    sandboxBackend: SandboxBackend.optional(),
-    // The enrolled machine (a sandbox id) to run this session on; seeds the
-    // active-sandbox pointer at creation so the FIRST turn routes to the chosen
-    // machine (race-free: the pointer is committed before the worker turn
-    // workflow can read it). An invalid/unowned/offline target fails the create.
-    targetSandboxId: z.string().uuid().optional(),
-    // The working directory the targeted machine runs the session under. It may
-    // be absolute or relative to the machine's persisted Hello root; the server
-    // stores the resolved absolute value. Tilde is rejected because the control
-    // plane has no authenticated home-directory fact. Only valid WITH
-    // targetSandboxId; omitted selects the reported root.
-    workingDir: z.string().min(1).optional(),
-    // Ordered low-to-high precedence. A legacy singular selection is normalized
-    // into one entry by withVariableSetIdAlias; when both are present the
-    // singular value must match the final (highest-precedence) entry.
-    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
-    variableSetId: z.string().uuid().optional(),
-    environmentId: z.string().uuid().optional(),
-    // The rig to bind this session to (M3). Its ACTIVE version is resolved and
-    // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
-    // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
-    // An id that does not name a rig in the workspace is a 422.
-    rigId: z.string().uuid().nullable().optional(),
-    // The workspace channel to file this session under (rail organization only).
-    // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
-    // workspace is a 422.
-    channelId: z.string().uuid().nullable().optional(),
-    goal: GoalSpec.optional(),
-    clientEventId: SessionOperationKey.optional(),
-    // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
-    // create calls carrying the same key to a single session (partial unique
-    // index on (workspace_id, create_idempotency_key)). Distinct from
-    // clientEventId, whose uniqueness is per-session and so cannot dedup the
-    // creation of a brand-new session. Absent means no create-dedup (each call
-    // is an independent create).
-    idempotencyKey: z.string().min(1).max(200).optional(),
-    // The exact actor-private pre-session draft revision represented by this
-    // create. An ordinary create consumes only this revision. A realtime create
-    // preserves the editable draft and atomically updates only successful-create
-    // selection history. A newer sibling draft survives, while every failed
-    // pre-initialization create leaves the submitted draft intact.
-    expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
-    // A child may lower its inherited limit freely; an increase requires
-    // workspace:admin and is checked again at the DB transaction boundary.
-    maxNestedAgentDepth: NestedAgentDepthValue.optional(),
-    // Permissions the session's first-party MCP token should carry. A top-level
-    // omission uses the deployment's worker default; a child omission inherits
-    // the creating session's effective grant. An explicit set is capped at
-    // creation: every requested permission must be held by the creating grant.
-    // A goal-bearing session whose explicit/effective set omits goals:manage is
-    // rejected; creation never silently expands a child beyond that set.
-    firstPartyMcpPermissions: z.array(Permission).optional(),
-    // Exact model-visible selection from the broad first-party OpenGeni MCP
-    // catalog. Omission selects the safe non-connector default; [] intentionally
-    // exposes none.
-    // This does not grant authority: every registered tool is permission-gated.
-    firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
-    // Third-party MCP servers attached only to this session. For an agent-created
-    // child, omission snapshots its trusted immediate parent's server definitions,
-    // policies, connection refs, and encrypted credentials. Explicit arrays,
-    // including [], are authoritative; non-empty explicit arrays require attach
-    // permission. Credential headers are write-only: create responses and events
-    // expose only SessionMcpServerMetadata.
-    mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
-    /** Explicit personal-connection grants for the initial accepted turn. */
-    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-    /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
-    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
-    // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
-    // today's behavior (a context-dependent default resolved server-side: from
-    // inside a session → "shared" with the creator's box, top-level → "new"),
-    // except a named targetSandboxId is always an own-box create ("new") because
-    // a machine target is a different compute home. Explicit "shared"/{groupId}
-    // plus a machine target is a 422.
-    //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
-    //                from the worker-signed sessionId claim, never caller-supplied);
-    //                top-level "shared" is a 422.
-    //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
-    //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
-    //                fan-out). Validated workspace-scoped (cross-workspace → 404).
-    // A shared spawn inherits the box's (backend, os) — it is literally the same
-    // box; the child cannot pick its own backend. Cross-workspace sharing is
-    // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
-    // ENV-AWARE: the box's variable set is fixed at creation, so a share requires
-    // the SAME variableSetId as the creator's box. On a mismatch the inherited
-    // default silently falls back to an own box; an explicit "shared"/{groupId}
-    // request 422s at create (instead of the first turn dying on the SDK's
-    // manifest-env guard).
-    sandbox: z
-      .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
-      .optional(),
-  },
-  { rejectKeys: ["turnInstructions"] },
-).superRefine((value, context) => {
-  if (value.startMode !== "realtime" && value.initialMessage === undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["initialMessage"],
-      message: "initialMessage is required unless startMode is realtime",
-    });
-  }
-  if (value.startMode === "realtime" && value.initialMessage !== undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["initialMessage"],
-      message: "initialMessage must be omitted when startMode is realtime",
-    });
-  }
-  if (value.startMode === "realtime" && value.modelContext !== undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["modelContext"],
-      message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
-    });
-  }
-  if (value.startMode === "realtime" && value.connectionAuthorities.length > 0) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["connectionAuthorities"],
-      message:
-        "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
-    });
-  }
-  if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["personalResourceAttachment"],
-      message:
-        "personalResourceAttachment requires an accepted initial turn and is not supported by realtime session staging",
-    });
-  }
-  if (value.personalResourceAttachment?.expectedAuthorityEpoch !== undefined) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
-      message: "new-session attachment authority epoch is derived by the server",
-    });
-  }
-  // memoryScope "user" requires an end-user label, but an agent-created child
-  // inherits its parent's label on omission, so that rule is enforced by the
-  // core create resolver (422) after inheritance rather than at parse time.
-});
+export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
+  withVariableSetIdAlias(
+    {
+      /** Omission inherits/defaults; [] disables bundles. Children may only narrow. */
+      bundledSkillIds: BundledSkillSelection.optional(),
+      /**
+       * Optional UUID preallocated by an embedding host. This lets the host durably
+       * link its own projection before OpenGeni admits the initial turn. Replays
+       * must pair it with the same idempotency key; OpenGeni never derives host
+       * identity or authorization from the UUID.
+       */
+      requestedSessionId: z.string().uuid().optional(),
+      /** Top-level omission is workspace-visible. Agent-child omission inherits
+       * the exact parent visibility; cross-visibility child creation is rejected.
+       * Top-level private creation is an activated managed-cookie owning-human
+       * capability, while a private child uses an exact live-parent-attempt
+       * database capability. Both commit atomically. */
+      visibility: SessionVisibility.default("workspace"),
+      /** Agent-to-agent reach. Top-level omission is the platform default
+       * `workspace`. An agent-created child inherits its parent's value on
+       * omission and may only narrow it (workspace > user > session); a wider
+       * explicit child value is rejected. Never widens human or API-key access. */
+      agentAccess: SessionAgentAccess.default("workspace"),
+      /** Opaque product label for the human this session serves. A child
+       * inherits its parent's label; naming a different pair is rejected. */
+      endUser: SessionEndUser.optional(),
+      /** Typed Memory selector. `user` requires an end-user label (own or
+       * inherited; 422 otherwise). A child inherits its parent's value on
+       * omission and may only narrow it (workspace > user > session > off). */
+      memoryScope: SessionMemoryScope.default("workspace"),
+      initialMessage: z.string().min(1).optional(),
+      // Creates the durable session shell without fabricating a user message or
+      // starting an underlying agent turn. Realtime can then become the first
+      // interaction and use the ordinary Send/Steer path when it delegates.
+      startMode: z.literal("realtime").optional(),
+      // Model-visible application context attached to the initial user message.
+      // Standard timeline rendering omits it, while full event/audit reads retain
+      // it. This is ordinary user-role content, not secret or privileged input.
+      modelContext: z.string().trim().min(1).max(32768).optional(),
+      // Per-session agent persona/system instructions (org-visible metadata, NOT a
+      // secret). Rides the SAME system-level instructions channel the per-workspace
+      // agentInstructions rides, composed AFTER the workspace persona so it refines
+      // it for this one session — how a host delivers per-agent-type prompts without
+      // leaking them into the user-visible timeline (it is NEVER emitted as an
+      // event, unlike goal/initialMessage). Trimmed, non-empty, and bounded by the
+      // shared durable session-instruction contract. Absent ⇒ byte-identical to
+      // today.
+      instructions: z.string().trim().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      // Immutable prompt-policy role binding for matching one activated role
+      // policy. This never derives from or grants a human workspace membership
+      // role. Existing callers may continue to use normalized metadata.role as a
+      // compatibility fallback by omitting this field.
+      policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
+      // For an agent-created child, omission inherits the trusted immediate
+      // parent's repositories only; files require explicit selection. An explicit
+      // array, including [], is
+      // authoritative. Top-level omission remains []. Presence is resolved from
+      // the raw request because this Zod default erases absent-vs-empty.
+      resources: z.array(ResourceRef).default([]),
+      // Inline skills are fixed onto the session. Child omission inherits the
+      // trusted parent's selection; an explicit array, including [], wins.
+      skills: SessionSkills.default([]),
+      // Immutable workspace Skill identities to copy onto this session at
+      // creation. This is the explicit opt-in path for session-selected Pack
+      // Skills: installation alone never exposes them to model context. Child
+      // omission still inherits the parent's already-materialized session Skills.
+      installedSkillIds: z
+        .array(z.string().min(1).max(512))
+        .max(32)
+        .refine((ids) => new Set(ids).size === ids.length, {
+          message: "installed Skill identities must be unique",
+        })
+        .optional(),
+      // The same child omission rule applies to selected MCP tool refs. Top-level
+      // omission still applies workspace-default capability MCP tools; explicit []
+      // suppresses those defaults (the first-party OpenGeni server remains added).
+      tools: z.array(ToolRef).default([]),
+      metadata: z.record(z.string(), z.unknown()).default({}),
+      model: z.string().min(1).optional(),
+      reasoningEffort: ReasoningEffort.optional(),
+      latencyMode: LatencyMode.optional(),
+      sandboxBackend: SandboxBackend.optional(),
+      // The enrolled machine (a sandbox id) to run this session on; seeds the
+      // active-sandbox pointer at creation so the FIRST turn routes to the chosen
+      // machine (race-free: the pointer is committed before the worker turn
+      // workflow can read it). An invalid/unowned/offline target fails the create.
+      targetSandboxId: z.string().uuid().optional(),
+      // The working directory the targeted machine runs the session under. It may
+      // be absolute or relative to the machine's persisted Hello root; the server
+      // stores the resolved absolute value. Tilde is rejected because the control
+      // plane has no authenticated home-directory fact. Only valid WITH
+      // targetSandboxId; omitted selects the reported root.
+      workingDir: z.string().min(1).optional(),
+      // Ordered low-to-high precedence. A legacy singular selection is normalized
+      // into one entry by withVariableSetIdAlias; when both are present the
+      // singular value must match the final (highest-precedence) entry.
+      variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+      variableSetId: z.string().uuid().optional(),
+      environmentId: z.string().uuid().optional(),
+      // The rig to bind this session to (M3). Its ACTIVE version is resolved and
+      // FROZEN onto the session at create. Omitted ⇒ inherit the workspace default;
+      // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
+      // An id that does not name a rig in the workspace is a 422.
+      rigId: z.string().uuid().nullable().optional(),
+      // The workspace channel to file this session under (rail organization only).
+      // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+      // workspace is a 422.
+      channelId: z.string().uuid().nullable().optional(),
+      goal: GoalSpec.optional(),
+      clientEventId: SessionOperationKey.optional(),
+      // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
+      // create calls carrying the same key to a single session (partial unique
+      // index on (workspace_id, create_idempotency_key)). Distinct from
+      // clientEventId, whose uniqueness is per-session and so cannot dedup the
+      // creation of a brand-new session. Absent means no create-dedup (each call
+      // is an independent create).
+      idempotencyKey: z.string().min(1).max(200).optional(),
+      // The exact actor-private pre-session draft revision represented by this
+      // create. An ordinary create consumes only this revision. A realtime create
+      // preserves the editable draft and atomically updates only successful-create
+      // selection history. A newer sibling draft survives, while every failed
+      // pre-initialization create leaves the submitted draft intact.
+      expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+      // A child may lower its inherited limit freely; an increase requires
+      // workspace:admin and is checked again at the DB transaction boundary.
+      maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+      // Permissions the session's first-party MCP token should carry. A top-level
+      // omission uses the deployment's worker default; a child omission inherits
+      // the creating session's effective grant. An explicit set is capped at
+      // creation: every requested permission must be held by the creating grant.
+      // A goal-bearing session whose explicit/effective set omits goals:manage is
+      // rejected; creation never silently expands a child beyond that set.
+      firstPartyMcpPermissions: z.array(Permission).optional(),
+      // Exact model-visible selection from the broad first-party OpenGeni MCP
+      // catalog. Omission selects the safe non-connector default; [] intentionally
+      // exposes none.
+      // This does not grant authority: every registered tool is permission-gated.
+      firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+      // Third-party MCP servers attached only to this session. For an agent-created
+      // child, omission snapshots its trusted immediate parent's server definitions,
+      // policies, connection refs, and encrypted credentials. Explicit arrays,
+      // including [], are authoritative; non-empty explicit arrays require attach
+      // permission. Credential headers are write-only: create responses and events
+      // expose only SessionMcpServerMetadata.
+      mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+      /** Explicit personal-connection grants for the initial accepted turn. */
+      connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+      /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
+      personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+      // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
+      // today's behavior (a context-dependent default resolved server-side: from
+      // inside a session → "shared" with the creator's box, top-level → "new"),
+      // except a named targetSandboxId is always an own-box create ("new") because
+      // a machine target is a different compute home. Explicit "shared"/{groupId}
+      // plus a machine target is a 422.
+      //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
+      //                from the worker-signed sessionId claim, never caller-supplied);
+      //                top-level "shared" is a 422.
+      //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
+      //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
+      //                fan-out). Validated workspace-scoped (cross-workspace → 404).
+      // A shared spawn inherits the box's (backend, os) — it is literally the same
+      // box; the child cannot pick its own backend. Cross-workspace sharing is
+      // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
+      // ENV-AWARE: the box's variable set is fixed at creation, so a share requires
+      // the SAME variableSetId as the creator's box. On a mismatch the inherited
+      // default silently falls back to an own box; an explicit "shared"/{groupId}
+      // request 422s at create (instead of the first turn dying on the SDK's
+      // manifest-env guard).
+      sandbox: z
+        .union([
+          z.literal("shared"),
+          z.literal("new"),
+          z.object({
+            groupId: z.string().uuid(),
+          }),
+        ])
+        .optional(),
+    },
+    { rejectKeys: ["turnInstructions"] },
+  ).superRefine((value, context) => {
+    if (value.startMode !== "realtime" && value.initialMessage === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["initialMessage"],
+        message: "initialMessage is required unless startMode is realtime",
+      });
+    }
+    if (value.startMode === "realtime" && value.initialMessage !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["initialMessage"],
+        message: "initialMessage must be omitted when startMode is realtime",
+      });
+    }
+    if (value.startMode === "realtime" && value.modelContext !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["modelContext"],
+        message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
+      });
+    }
+    if (value.startMode === "realtime" && value.connectionAuthorities.length > 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["connectionAuthorities"],
+        message:
+          "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
+      });
+    }
+    if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["personalResourceAttachment"],
+        message:
+          "personalResourceAttachment requires an accepted initial turn and is not supported by realtime session staging",
+      });
+    }
+    if (value.personalResourceAttachment?.expectedAuthorityEpoch !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+        message: "new-session attachment authority epoch is derived by the server",
+      });
+    }
+    // memoryScope "user" requires an end-user label, but an agent-created child
+    // inherits its parent's label on omission, so that rule is enforced by the
+    // core create resolver (422) after inheritance rather than at parse time.
+  }),
+);
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
 export const SessionTenancyCreateCapabilities = z.object({
@@ -15039,6 +15086,7 @@ export const HumanInputQuestion = z
     prompt: z.string().min(1).max(4096),
     label: z.string().min(1).max(128).nullable().optional(),
     helpText: z.string().max(2048).nullable().optional(),
+    skillReview: SkillReviewReference.optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
     // Retained on the wire for older hosts. OpenGeni's stock runtime and
@@ -15218,7 +15266,6 @@ export const SessionUserMessagePayload = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact logical turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
@@ -15268,7 +15315,6 @@ export const SteerSessionMessageRequest = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact steered turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
