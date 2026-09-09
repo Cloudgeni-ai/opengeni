@@ -20,6 +20,8 @@ A managed sandbox is a fresh box OpenGeni provisions for the session. Backends a
 
 Sandboxes are swappable within a session, and a session's files can be recovered from a snapshot or archive after the box is gone. A session can also run with no compute attached when the task needs only model and tool calls.
 
+Modal commands keep their output and exit status in a journal inside the running sandbox, so another worker can read a yielded command through its original handle. Custom Modal images must include `python3`; the stock images already do. The journal is not a process checkpoint: recovering workspace files into a new sandbox does not resume an old process, and an unavailable journal is not evidence that a command finished successfully.
+
 ## Connected Machines
 
 A Connected Machine is a computer you enroll: a laptop, a workstation, a build server, a GPU box. When a session targets it, the agent runs there directly. There is no cloud box behind it.

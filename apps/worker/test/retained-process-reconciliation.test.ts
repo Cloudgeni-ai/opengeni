@@ -68,6 +68,25 @@ const SETTINGS = testSettings({
   sandboxIdleGraceMs: 45_000,
   sandboxLeaseReaperPeriodMs: 30_000,
 });
+
+test("Modal journal capture uses the same page identity across fresh reconciler reads", async () => {
+  const processId = crypto.randomUUID();
+  const result = "Command journal: 123:0:5\nProcess running with session ID 123\nOutput:\nhello";
+  const ids: string[] = [];
+  await expect(
+    captureRetainedProbeOutput(processId, result, async (_value, id) => {
+      ids.push(id);
+      throw new Error("persistence unavailable");
+    }),
+  ).rejects.toThrow("persistence unavailable");
+  await captureRetainedProbeOutput(processId, result, async (_value, id) => {
+    ids.push(id);
+  });
+  await captureRetainedProbeOutput(processId, result, async (_value, id) => {
+    ids.push(id);
+  });
+  expect(ids).toEqual(["modal:123:0:5", "modal:123:0:5", "modal:123:0:5"]);
+});
 const MODAL_PROVIDER_BINDING = {
   key: '{"version":1,"serverUrl":"https://modal.test","workspaceName":"opengeni-test","environment":"test"}',
   binding: {

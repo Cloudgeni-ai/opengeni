@@ -95,6 +95,7 @@ import {
   OpStreamExecClient,
   defaultSelfhostedRetryClock,
   stripExecBanner,
+  modalCommandReceipt,
   parseExecBannerExitCode,
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
@@ -1684,6 +1685,7 @@ type RetainedProcessProbeClient = {
 };
 
 type RetainedProcessProbeSession = {
+  acknowledgeCommandOutput?: (result: string) => Promise<void>;
   writeStdin?: (args: {
     sessionId: number;
     chars: string;
@@ -1723,7 +1725,7 @@ export async function captureRetainedProbeOutput(
 ): Promise<void> {
   const pending = pendingRetainedProbeOutput.get(processId) ?? {
     result,
-    chunkId: crypto.randomUUID(),
+    chunkId: modalCommandReceipt(result)?.chunkId ?? crypto.randomUUID(),
   };
   pendingRetainedProbeOutput.set(processId, pending);
   await capture(pending.result, pending.chunkId);
@@ -1900,7 +1902,10 @@ export async function probeRetainedProcessAtProvider(
     }
     return { status: "deferred", reason: "provider_error" };
   }
-  if (captureOutput) await captureRetainedProbeOutput(process.id, result, captureOutput);
+  if (captureOutput) {
+    await captureRetainedProbeOutput(process.id, result, captureOutput);
+    if (typeof result === "string") await session.acknowledgeCommandOutput?.(result);
+  }
   const observation = classifyRetainedProcessPollResult(result, process.providerSessionId);
   if (
     observation.status === "deferred" &&
@@ -1919,7 +1924,10 @@ export async function probeRetainedProcessAtProvider(
           maxOutputTokens: 2_000,
         }),
       );
-      if (captureOutput) await captureRetainedProbeOutput(process.id, interrupted, captureOutput);
+      if (captureOutput) {
+        await captureRetainedProbeOutput(process.id, interrupted, captureOutput);
+        if (typeof interrupted === "string") await session.acknowledgeCommandOutput?.(interrupted);
+      }
       return classifyRetainedProcessPollResult(interrupted, process.providerSessionId);
     } catch (error) {
       if (isProviderSandboxNotFoundError(client.backendId, error)) {

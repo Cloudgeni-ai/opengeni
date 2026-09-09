@@ -14,6 +14,7 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
+import { installModalCommandJournal } from "./modal-command-journal";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -520,6 +521,9 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
+  installModalCommandJournal(
+    mutable as unknown as Parameters<typeof installModalCommandJournal>[0],
+  );
   installModalPendingExecCancellation(mutable);
 
   const persistWorkspace = mutable.persistWorkspace.bind(session);
@@ -715,6 +719,10 @@ export const modalProvider: ProviderRegistration = {
     const imageSelector = resolveModalImageSelector(settings);
     if (imageSelector) {
       options.image = imageSelector;
+    } else {
+      // Durable exec uses the standard-library runner shipped by stock images.
+      // The SDK's bare Debian fallback does not contain Python.
+      options.image = ModalImageSelector.fromTag("python:3.12-slim");
     }
     if (settings.modalTokenId) {
       options.tokenId = settings.modalTokenId;

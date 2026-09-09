@@ -1412,11 +1412,13 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-Repeated retained-process Modal binding-missing or binding-mismatch observations
-may be quarantined for a 24-hour recheck after five claimed probes, but the
-process, admission, PTY, and holder remain capture blockers. Quarantine never
-becomes exit/loss proof and never authorizes capture, rotation, provider
-termination, or replay.
+Modal's `providers/modal-command-runner.ts` retains pipe/PTY output and status
+outside `/workspace`. Readers acknowledge stable pages after durable capture.
+Custom images require Python3; missing journals never prove exit.
+
+After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
+recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
+never authorizes exit/loss, capture, rotation, termination, or replay.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and

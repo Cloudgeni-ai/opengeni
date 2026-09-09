@@ -110,6 +110,8 @@ export type ChannelAEditor = {
   deleteFile?(op: unknown): Promise<unknown>;
 };
 export type ChannelASession = {
+  /** Commit a provider output page only after durable capture succeeds. */
+  acknowledgeCommandOutput?(result: string): Promise<void>;
   exec?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
   /** Internal control-plane read. Routing sessions can bypass mutation
    * admission without leaking private marker fields into provider arguments. */

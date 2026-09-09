@@ -28,6 +28,7 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { modalCommandReceipt } from "../providers/modal-command-journal";
 import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import {
@@ -77,6 +78,7 @@ export interface ActivePointer {
  * target may or may not implement it, and the proxy reflects that at call-time.
  */
 export interface RoutableBackendSession {
+  acknowledgeCommandOutput?(result: string): Promise<void>;
   refreshOwnedCommand?(commandId: string): Promise<boolean>;
   state?: unknown;
   commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
@@ -1261,7 +1263,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         : stripExecBanner(banner);
       if (chunk)
         (record.pendingOutput ??= []).push({
-          chunkId: crypto.randomUUID(),
+          chunkId: modalCommandReceipt(banner)?.chunkId ?? crypto.randomUUID(),
           chunk,
           stream: "stdout",
           streamFidelity: "merged",
@@ -1284,6 +1286,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       record.pendingOutput.shift();
     }
+    if (typeof result === "string") await record.backend.session.acknowledgeCommandOutput?.(result);
   }
 
   /**

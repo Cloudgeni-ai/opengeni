@@ -1,3 +1,4 @@
+export { modalCommandReceipt } from "./providers/modal-command-journal";
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
