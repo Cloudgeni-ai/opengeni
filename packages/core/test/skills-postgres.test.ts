@@ -1713,7 +1713,7 @@ describe("one chat Skill confirmation", () => {
     const f = await fixture("suggest");
     await saveSkill(client.db, f.input);
     const migration = await Bun.file(
-      new URL("../../db/drizzle/0434_skill_chat_confirmation.sql", import.meta.url),
+      new URL("../../db/drizzle/0435_skill_chat_confirmation.sql", import.meta.url),
     ).text();
     const runtimeRole = decodeURIComponent(new URL(shared.appUrl).username);
     await expect(
@@ -1721,7 +1721,7 @@ describe("one chat Skill confirmation", () => {
         await tx`select set_config('opengeni.migration_application_roles',${JSON.stringify([runtimeRole])},true)`;
         await tx.unsafe(migration);
       }),
-    ).rejects.toThrow("0434 requires drained application sessions");
+    ).rejects.toThrow("0435 requires drained application sessions");
     expect(
       (
         await readSkill(

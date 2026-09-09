@@ -9,10 +9,10 @@ DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_ro
 BEGIN
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' OR jsonb_array_length(roles) NOT BETWEEN 1 AND 16
     OR EXISTS (SELECT 1 FROM jsonb_array_elements(roles) r WHERE jsonb_typeof(r) <> 'string' OR length(btrim(r #>> '{}')) NOT BETWEEN 1 AND 63)
-  THEN RAISE EXCEPTION '0434 requires explicit application database roles' USING ERRCODE = '55000'; END IF;
+  THEN RAISE EXCEPTION '0435 requires explicit application database roles' USING ERRCODE = '55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON a.usename = r.value
     WHERE a.datname = current_database() AND a.pid <> pg_backend_pid())
-  THEN RAISE EXCEPTION '0434 requires drained application sessions' USING ERRCODE = '55000'; END IF;
+  THEN RAISE EXCEPTION '0435 requires drained application sessions' USING ERRCODE = '55000'; END IF;
 END $drain$;
 
 -- Historical answers receive no human-authorization proof.

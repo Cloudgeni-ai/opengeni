@@ -57,7 +57,7 @@ the same Skill management authority; there is no per-agent or per-Skill ACL.
 Learning reads the current workspace policy under a shared lock: Off refuses
 durable writes, Suggest saves an inactive revision, and Automatic activates a
 valid revision directly. No active policy defaults to Suggest, matching the
-workspace Learning default. Migration 0434 adds this response path without rewriting the published 0433 cutover. It defaults historical answers to untrusted and preserves the existing lifecycle function grants. This is a maintenance cutover: drain every API, control-worker and turn-worker, supply their exact runtime database roles, apply 0434, and start only the new binaries. Never restart a pre-0434 runtime: an old API can answer a new typed Skill question without activating the revision. Require approval uses one in-chat decision, not a
+workspace Learning default. Migration 0435 adds this response path without rewriting the published 0433 cutover. It defaults historical answers to untrusted and preserves the existing lifecycle function grants. This is a maintenance cutover: drain every API, control-worker and turn-worker, supply their exact runtime database roles, apply 0435, and start only the new binaries. Never restart a pre-0434 runtime: an old API can answer a new typed Skill question without activating the revision. Require approval uses one in-chat decision, not a
 second review queue: pending agent receipts carry an immutable `skillReview`
 reference. `request_human_input` displays that revision's complete text folder
 through the existing scoped content API. The verified initiating human chooses

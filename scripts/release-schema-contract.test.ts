@@ -151,7 +151,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
     );
     const skillChatConfirmation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0434_skill_chat_confirmation.sql",
+      (migration) => migration.path === "0435_skill_chat_confirmation.sql",
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -163,7 +163,7 @@ describe("release schema contract", () => {
         (unifiedSkillLifecycle ? 1 : 0) +
         (skillChatConfirmation ? 1 : 0),
       latestMigration: skillChatConfirmation
-        ? "0434_skill_chat_confirmation.sql"
+        ? "0435_skill_chat_confirmation.sql"
         : unifiedSkillLifecycle
           ? "0433_unified_skill_lifecycle.sql"
           : xaiDisconnectPins
@@ -177,7 +177,7 @@ describe("release schema contract", () => {
                   : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0434_skill_chat_confirmation.sql",
+      path: "0435_skill_chat_confirmation.sql",
       deploymentMode: "maintenance",
     });
     expect(
@@ -4422,7 +4422,7 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
     "0430_session_personal_variable_set_continuations.sql",
     "0431_retained_provider_commands.sql",
     "0432_xai_disconnect_session_pins.sql",
-    "0434_skill_chat_confirmation.sql",
+    "0435_skill_chat_confirmation.sql",
   ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
