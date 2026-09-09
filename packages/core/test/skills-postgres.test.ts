@@ -26,6 +26,8 @@ import {
   preparePluginPackageInstall,
   finalizePluginPackageInstall,
   deleteWorkspace,
+  deleteWorkspaceIfQuiescent,
+  createWorkspace,
   withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
@@ -1132,19 +1134,38 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect((await readSkill(client.db, human, restored.skillId))?.revisionId).toBe(
       restored.revisionId,
     );
-    const firstDelete = withWorkspaceRls(client.db, human.workspaceId, (tx) =>
-      deleteWorkspace(tx, human.workspaceId),
+    expect(
+      await deleteWorkspaceIfQuiescent(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+      }),
+    ).toEqual({ status: "only_workspace" });
+    const keeper = await createWorkspace(client.db, {
+      accountId: human.accountId,
+      name: "Skill deletion keeper",
+    });
+    const authorized = deleteWorkspaceIfQuiescent(client.db, {
+      accountId: human.accountId,
+      workspaceId: human.workspaceId,
+    });
+    const raced = await Promise.allSettled([
+      authorized,
+      deleteWorkspaceIfQuiescent(client.db, {
+        accountId: human.accountId,
+        workspaceId: human.workspaceId,
+      }),
+    ]);
+    const authorizedResults = raced.map((result) =>
+      result.status === "fulfilled" ? result.value.status : result.reason,
     );
-    const secondDelete = withWorkspaceRls(client.db, human.workspaceId, (tx) =>
-      deleteWorkspace(tx, human.workspaceId),
-    );
-    const raced = await Promise.allSettled([firstDelete, secondDelete]);
-    expect(raced.filter((result) => result.status === "fulfilled").length).toBeGreaterThanOrEqual(
-      1,
-    );
+    expect(authorizedResults).toEqual(expect.arrayContaining(["deleted"]));
+    expect(
+      authorizedResults.every((status) => status === "deleted" || status === "not_found"),
+    ).toBe(true);
     expect(
       await shared!.admin`SELECT id FROM workspaces WHERE id=${human.workspaceId}`,
     ).toHaveLength(0);
+    expect(await shared!.admin`SELECT id FROM workspaces WHERE id=${keeper.id}`).toHaveLength(1);
     expect(
       await shared!
         .admin`SELECT id FROM preference_registry_preferences WHERE id IN (${restored.skillId}, ${authored.skillId})`,
