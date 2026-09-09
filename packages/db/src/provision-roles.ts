@@ -2100,6 +2100,14 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'guard_workspace_owned_skill_head_delete()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     EXECUTE format(
       'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM %I',
       owner_role,

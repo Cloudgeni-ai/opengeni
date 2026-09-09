@@ -33,6 +33,10 @@ describe("unified Skill migration boundary", () => {
     expect(migration).toContain("Skill head changed");
     expect(migration).toContain("Learning is Off");
     expect(migration).toContain("skill_guard_legacy_revision");
+    expect(migration).toContain("guard_workspace_owned_skill_head_delete");
+    expect(migration).toContain("preference_registry_preferences_scope_workspace_id_fkey");
+    expect(migration).toContain("Skill parent cascade tenant context mismatch");
+    expect(migration).toContain("company_brain_pref_receipts_workspace_fk");
   });
   test("registers read-only tables and exact runtime capability", () => {
     for (const table of ["skill_source_bindings", "skill_write_receipts"]) {

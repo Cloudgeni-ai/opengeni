@@ -703,3 +703,143 @@ DO $retired_preference_search_path$
 BEGIN
   EXECUTE format('ALTER FUNCTION preference_registry_create_knowledge_proposal_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text) SET search_path = pg_catalog, %I, pg_temp',current_schema());
 END $retired_preference_search_path$;
+
+-- Approved workspace Skill retention (2026-09-09): deleting a workspace deletes
+-- that workspace's owned Skills and history. Organization/personal Skills and
+-- other workspaces stay. Runtime history stays immutable while the workspace
+-- exists. Instruction-policy tables already cascade and are not widened here.
+-- Nested parent-cascade is the only delete path; direct deletes stay forbidden.
+-- Cross-scope superseded_by/related_preference_id/corrects_revision_id keep
+-- surviving audit bytes/IDs by remaining restrictive at commit.
+CREATE OR REPLACE FUNCTION preference_registry_reject_history_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN RETURN OLD; END IF;
+  RAISE EXCEPTION 'preference registry history is immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION opengeni_private.guard_workspace_owned_skill_head_delete()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE old_account text := current_setting('opengeni.account_id', true);
+  old_workspace text := current_setting('opengeni.workspace_id', true);
+BEGIN
+  IF TG_OP <> 'DELETE' OR pg_trigger_depth() <= 1 OR OLD.scope <> 'workspace' THEN
+    RAISE EXCEPTION 'preference registry heads cannot be deleted' USING ERRCODE = '55000';
+  END IF;
+  IF (nullif(old_account, '') IS NOT NULL AND old_account::uuid IS DISTINCT FROM OLD.account_id)
+    OR (nullif(old_workspace, '') IS NOT NULL AND old_workspace::uuid IS DISTINCT FROM OLD.scope_workspace_id)
+  THEN
+    RAISE EXCEPTION 'Skill parent cascade tenant context mismatch' USING ERRCODE = '42501';
+  END IF;
+  RETURN OLD;
+END $$;
+DO $skill_head_delete_search_path$
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.guard_workspace_owned_skill_head_delete() SET search_path = pg_catalog, %I, pg_temp',
+    current_schema()
+  );
+END $skill_head_delete_search_path$;
+REVOKE ALL ON FUNCTION opengeni_private.guard_workspace_owned_skill_head_delete() FROM PUBLIC;
+
+DROP TRIGGER preference_registry_preferences_lifecycle_only ON preference_registry_preferences;
+CREATE TRIGGER preference_registry_preferences_lifecycle_only
+  BEFORE UPDATE ON preference_registry_preferences
+  FOR EACH ROW EXECUTE FUNCTION preference_registry_guard_head_mutation();
+CREATE TRIGGER preference_registry_preferences_guard_delete
+  BEFORE DELETE ON preference_registry_preferences
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_workspace_owned_skill_head_delete();
+
+ALTER TABLE preference_registry_preferences DROP CONSTRAINT preference_registry_preferences_scope_workspace_id_fkey;
+ALTER TABLE preference_registry_preferences ADD CONSTRAINT preference_registry_preferences_scope_workspace_id_fkey
+  FOREIGN KEY (scope_workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE;
+
+ALTER TABLE preference_registry_revisions DROP CONSTRAINT preference_registry_revisions_preference_fk;
+ALTER TABLE preference_registry_revisions ADD CONSTRAINT preference_registry_revisions_preference_fk
+  FOREIGN KEY (account_id, preference_id) REFERENCES preference_registry_preferences(account_id, id) ON DELETE CASCADE;
+ALTER TABLE preference_registry_events DROP CONSTRAINT preference_registry_events_preference_fk;
+ALTER TABLE preference_registry_events ADD CONSTRAINT preference_registry_events_preference_fk
+  FOREIGN KEY (account_id, preference_id) REFERENCES preference_registry_preferences(account_id, id) ON DELETE CASCADE;
+
+ALTER TABLE preference_registry_preferences DROP CONSTRAINT preference_registry_preferences_active_revision_fk;
+ALTER TABLE preference_registry_preferences ADD CONSTRAINT preference_registry_preferences_active_revision_fk
+  FOREIGN KEY (id, active_revision_id) REFERENCES preference_registry_revisions(preference_id, id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE preference_registry_preferences DROP CONSTRAINT preference_registry_preferences_superseded_by_fk;
+ALTER TABLE preference_registry_preferences ADD CONSTRAINT preference_registry_preferences_superseded_by_fk
+  FOREIGN KEY (account_id, superseded_by_preference_id)
+  REFERENCES preference_registry_preferences(account_id, id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE preference_registry_revisions DROP CONSTRAINT preference_registry_revisions_corrects_revision_id_fkey;
+ALTER TABLE preference_registry_revisions ADD CONSTRAINT preference_registry_revisions_corrects_revision_id_fkey
+  FOREIGN KEY (corrects_revision_id) REFERENCES preference_registry_revisions(id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE preference_registry_events DROP CONSTRAINT preference_registry_events_old_revision_fk;
+ALTER TABLE preference_registry_events ADD CONSTRAINT preference_registry_events_old_revision_fk
+  FOREIGN KEY (preference_id, old_revision_id) REFERENCES preference_registry_revisions(preference_id, id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE preference_registry_events DROP CONSTRAINT preference_registry_events_new_revision_fk;
+ALTER TABLE preference_registry_events ADD CONSTRAINT preference_registry_events_new_revision_fk
+  FOREIGN KEY (preference_id, new_revision_id) REFERENCES preference_registry_revisions(preference_id, id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE preference_registry_events DROP CONSTRAINT preference_registry_events_related_fk;
+ALTER TABLE preference_registry_events ADD CONSTRAINT preference_registry_events_related_fk
+  FOREIGN KEY (account_id, related_preference_id) REFERENCES preference_registry_preferences(account_id, id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE skill_source_bindings DROP CONSTRAINT skill_source_bindings_workspace_id_fkey;
+ALTER TABLE skill_source_bindings ADD CONSTRAINT skill_source_bindings_workspace_id_fkey
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE;
+ALTER TABLE skill_source_bindings DROP CONSTRAINT skill_source_bindings_plugin_id_fkey;
+ALTER TABLE skill_source_bindings ADD CONSTRAINT skill_source_bindings_plugin_id_fkey
+  FOREIGN KEY (plugin_id) REFERENCES capability_plugins(id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE skill_source_bindings DROP CONSTRAINT skill_source_bindings_skill_facet_id_fkey;
+ALTER TABLE skill_source_bindings ADD CONSTRAINT skill_source_bindings_skill_facet_id_fkey
+  FOREIGN KEY (skill_facet_id) REFERENCES capability_skill_facets(facet_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE skill_source_bindings DROP CONSTRAINT skill_source_bindings_account_id_preference_id_fkey;
+ALTER TABLE skill_source_bindings ADD CONSTRAINT skill_source_bindings_account_id_preference_id_fkey
+  FOREIGN KEY (account_id, preference_id) REFERENCES preference_registry_preferences(account_id, id) ON DELETE CASCADE;
+ALTER TABLE skill_write_receipts DROP CONSTRAINT skill_write_receipts_workspace_id_fkey;
+ALTER TABLE skill_write_receipts ADD CONSTRAINT skill_write_receipts_workspace_id_fkey
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE;
+ALTER TABLE skill_write_receipts DROP CONSTRAINT skill_write_receipts_activation_event_id_fkey;
+ALTER TABLE skill_write_receipts ADD CONSTRAINT skill_write_receipts_activation_event_id_fkey
+  FOREIGN KEY (activation_event_id) REFERENCES preference_registry_events(id)
+  ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+
+DO $company_brain_skill_delete$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT c.conname
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid=c.conrelid
+    JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum = ANY (c.conkey) AND NOT a.attisdropped
+    WHERE t.relname='company_brain_preference_proposal_receipts' AND c.contype='f'
+      AND a.attname IN ('workspace_id','preference_id','revision_id','creation_event_id','session_id','turn_id','attempt_id')
+  LOOP
+    EXECUTE format('ALTER TABLE company_brain_preference_proposal_receipts DROP CONSTRAINT %I', r.conname);
+  END LOOP;
+END $company_brain_skill_delete$;
+ALTER TABLE company_brain_preference_proposal_receipts
+  ADD CONSTRAINT company_brain_pref_receipts_workspace_fk
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+  ADD CONSTRAINT company_brain_pref_receipts_preference_fk
+    FOREIGN KEY (preference_id) REFERENCES preference_registry_preferences(id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT company_brain_pref_receipts_revision_fk
+    FOREIGN KEY (revision_id) REFERENCES preference_registry_revisions(id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT company_brain_pref_receipts_creation_event_fk
+    FOREIGN KEY (creation_event_id) REFERENCES preference_registry_events(id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT company_brain_pref_receipts_session_fk
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT company_brain_pref_receipts_turn_fk
+    FOREIGN KEY (turn_id) REFERENCES session_turns(id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+  ADD CONSTRAINT company_brain_pref_receipts_attempt_fk
+    FOREIGN KEY (attempt_id) REFERENCES session_turn_attempts(id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;

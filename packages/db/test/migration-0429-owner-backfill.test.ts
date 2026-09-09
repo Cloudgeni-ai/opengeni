@@ -11,6 +11,8 @@ import { readSkillMetadata } from "@opengeni/contracts";
 import { createDb } from "../src/database";
 import { listSkillDescriptors, listSkillRecords } from "../src/skills";
 import { migrateLegacySkillConfigurations } from "../src/skill-config-migration";
+import { deleteWorkspace } from "../src/index";
+import { withWorkspaceRls } from "../src/database";
 
 const cutover = "0429_unified_skill_lifecycle.sql";
 const windowTables = [
@@ -135,6 +137,15 @@ describe("0429 owner-only Skill backfill", () => {
           values(${accountId},${workspaceId},${facetInstallationId},'direct',${ownerId},true)`;
         fixtures.push({ accountId, workspaceId, pluginId, facetId, installationId, ownerId });
       }
+      // Installed-only workspaces were deletable before this cutover.
+      await expect(
+        admin.begin(async (tx) => {
+          expect(
+            await tx`DELETE FROM workspaces WHERE id=${fixtures[1]!.workspaceId} RETURNING id`,
+          ).toHaveLength(1);
+          throw new Error("retain installed-only fixture for migration");
+        }),
+      ).rejects.toThrow("retain installed-only fixture");
       const seedLegacy = async (
         scope: string,
         content: string,
@@ -469,6 +480,116 @@ describe("0429 owner-only Skill backfill", () => {
           await migrateLegacySkillConfigurations(tx);
         }),
       ).rejects.toThrow("maintenance owner window");
+      const installedOnly = fixtures[1]!;
+      const mixed = fixtures[0]!;
+      const [installedHead] =
+        await admin`SELECT id,active_revision_id FROM preference_registry_preferences
+        WHERE scope_workspace_id=${installedOnly.workspaceId}`;
+      expect(installedHead).toBeDefined();
+      const workspaceAuthored = legacyRows.find((row) => row.scope === "workspace")!;
+      const organizationSkill = legacyRows.find((row) => row.scope === "organization")!;
+      const userSkill = legacyRows.find((row) => row.scope === "user")!;
+      const [orgBytes] =
+        await admin`SELECT h.id,h.stable_key,h.scope,r.content FROM preference_registry_preferences h
+        JOIN preference_registry_revisions r ON r.id=h.active_revision_id WHERE h.id=${organizationSkill.id}`;
+      const [userBytes] =
+        await admin`SELECT h.id,h.stable_key,h.scope,r.content FROM preference_registry_preferences h
+        JOIN preference_registry_revisions r ON r.id=h.active_revision_id WHERE h.id=${userSkill.id}`;
+      await expect(
+        admin`DELETE FROM preference_registry_preferences WHERE id=${installedHead!.id}`.execute(),
+      ).rejects.toThrow("cannot be deleted");
+      await expect(
+        admin`DELETE FROM preference_registry_revisions WHERE preference_id=${installedHead!.id}`.execute(),
+      ).rejects.toThrow("immutable");
+      await expect(
+        admin`DELETE FROM preference_registry_events WHERE preference_id=${installedHead!.id}`.execute(),
+      ).rejects.toThrow("immutable");
+      const fkActions =
+        await admin`SELECT c.conname, c.confdeltype, c.condeferred FROM pg_constraint c
+        JOIN pg_class t ON t.oid=c.conrelid WHERE c.contype='f' AND c.conname IN (
+          'preference_registry_preferences_scope_workspace_id_fkey',
+          'preference_registry_revisions_preference_fk',
+          'preference_registry_events_related_fk',
+          'preference_registry_preferences_superseded_by_fk',
+          'company_brain_pref_receipts_workspace_fk',
+          'skill_write_receipts_workspace_id_fkey'
+        ) ORDER BY c.conname`;
+      expect(fkActions).toEqual([
+        {
+          conname: "company_brain_pref_receipts_workspace_fk",
+          confdeltype: "c",
+          condeferred: false,
+        },
+        {
+          conname: "preference_registry_events_related_fk",
+          confdeltype: "a",
+          condeferred: true,
+        },
+        {
+          conname: "preference_registry_preferences_scope_workspace_id_fkey",
+          confdeltype: "c",
+          condeferred: false,
+        },
+        {
+          conname: "preference_registry_preferences_superseded_by_fk",
+          confdeltype: "a",
+          condeferred: true,
+        },
+        {
+          conname: "preference_registry_revisions_preference_fk",
+          confdeltype: "c",
+          condeferred: false,
+        },
+        {
+          conname: "skill_write_receipts_workspace_id_fkey",
+          confdeltype: "c",
+          condeferred: false,
+        },
+      ]);
+      const deletionClient = createDb(ownerUrl, { max: 1 });
+      try {
+        await withWorkspaceRls(deletionClient.db, installedOnly.workspaceId, (tx) =>
+          deleteWorkspace(tx, installedOnly.workspaceId),
+        );
+        expect(
+          await admin`SELECT id FROM workspaces WHERE id=${installedOnly.workspaceId}`,
+        ).toHaveLength(0);
+        expect(
+          await admin`SELECT id FROM preference_registry_preferences WHERE id=${installedHead!.id}`,
+        ).toHaveLength(0);
+        expect(
+          await admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${installedHead!.id}`,
+        ).toHaveLength(0);
+        expect(
+          await admin`SELECT id FROM preference_registry_events WHERE preference_id=${installedHead!.id}`,
+        ).toHaveLength(0);
+        expect(
+          await admin`SELECT preference_id FROM skill_source_bindings WHERE workspace_id=${installedOnly.workspaceId}`,
+        ).toHaveLength(0);
+        expect(
+          await admin`SELECT id FROM capability_plugins WHERE id=${installedOnly.pluginId}`,
+        ).toHaveLength(0);
+        await withWorkspaceRls(deletionClient.db, mixed.workspaceId, (tx) =>
+          deleteWorkspace(tx, mixed.workspaceId),
+        );
+      } finally {
+        await deletionClient.close();
+      }
+      expect(await admin`SELECT id FROM workspaces WHERE id=${mixed.workspaceId}`).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM preference_registry_preferences WHERE id=${workspaceAuthored.id}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${workspaceAuthored.id}`,
+      ).toHaveLength(0);
+      const [orgAfter] =
+        await admin`SELECT h.id,h.stable_key,h.scope,r.content FROM preference_registry_preferences h
+        JOIN preference_registry_revisions r ON r.id=h.active_revision_id WHERE h.id=${organizationSkill.id}`;
+      const [userAfter] =
+        await admin`SELECT h.id,h.stable_key,h.scope,r.content FROM preference_registry_preferences h
+        JOIN preference_registry_revisions r ON r.id=h.active_revision_id WHERE h.id=${userSkill.id}`;
+      expect(orgAfter).toEqual(orgBytes);
+      expect(userAfter).toEqual(userBytes);
       // Conversion archives are private workspace-owned evidence, not a reason
       // to retain a deleted workspace or grant its runtime access to old text.
       const archiveWorkspaceId = crypto.randomUUID();
