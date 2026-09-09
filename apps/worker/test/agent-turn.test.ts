@@ -4408,6 +4408,8 @@ describe("Codex credential lease deadline fence", () => {
   });
 
   test("does not accept a successful heartbeat that returns after the prior deadline", async () => {
+    let now = performance.now();
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
     let resolveHeartbeat!: (value: Date | null) => void;
     const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
       () =>
@@ -4430,12 +4432,12 @@ describe("Codex credential lease deadline fence", () => {
       lease.held = true;
       lease.holderId = "holder-1";
       lease.generation = 1;
-      const priorDeadline = performance.now() + 1;
+      const priorDeadline = now + 1_000;
       lease.confirmedUntilMs = priorDeadline;
 
       const renewal = lease.renew("timer");
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(heartbeat).toHaveBeenCalledTimes(1);
+      now = priorDeadline + 1;
       resolveHeartbeat(new Date());
       await renewal;
 
@@ -4444,6 +4446,7 @@ describe("Codex credential lease deadline fence", () => {
       expect(lease.confirmedUntilMs).toBe(priorDeadline);
     } finally {
       heartbeat.mockRestore();
+      clock.mockRestore();
     }
   });
 
