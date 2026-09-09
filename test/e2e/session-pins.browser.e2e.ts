@@ -287,7 +287,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           const paint = canvas.getContext("2d")!;
           paint.fillStyle = footerStyle.backgroundColor;
           paint.fillRect(0, 0, 1, 1);
-          const settings = footer.querySelector('a[aria-current], nav a')!;
+          const settings = footer.querySelector("a[aria-current], nav a")!;
           const settingsRect = settings.getBoundingClientRect();
           const hit = document.elementFromPoint(
             settingsRect.x + settingsRect.width / 2,
