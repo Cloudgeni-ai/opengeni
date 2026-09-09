@@ -360,7 +360,7 @@ jobs:
           fi
 
           bunx changeset status --output "$plan"
-          changeset_count="$(jq -er '.changesets | length' "$plan")"
+          changeset_count="$(jq -er '[.changesets[] | select(.releases | length > 0)] | length' "$plan")"
           release_count="$(jq -er '.releases | length' "$plan")"
           if [ "$changeset_count" -gt 0 ] && [ "$release_count" -eq 0 ]; then
             echo "::error::pending changesets target only ignored/private packages and cannot produce a Version PR"

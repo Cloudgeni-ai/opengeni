@@ -1909,6 +1909,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "user",
     );
     await withWorkspaceSessionActivityRls(client.db, value.owner.workspaceId, async (db) => {
+      // Abort a slow fixture transaction before the enclosing test can time out
+      // and leave its event work running alongside the next test.
+      await db.execute(sql`select set_config('statement_timeout', '60s', true)`);
       await db.execute(sql`
         update sessions
         set status = 'failed', updated_at = now() - interval '2 hours'
@@ -1945,7 +1948,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainAll(value.deps)).toBe(1);
     const view = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
     expect(view).toContain("Older urgent task remains visible");
-  });
+  }, 180_000);
 
   test("Slack identity link tokens are scoped, tamper-evident, and short-lived", () => {
     const now = 1_800_000_000_000;
