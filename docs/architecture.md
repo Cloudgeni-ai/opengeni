@@ -211,6 +211,15 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
+Full session-event reads, compact text-delta delivery, SSE, and browser chat
+retain exact message content. Diagnostic previews must not replace readable or
+copyable conversation text. Page and browser-window byte budgets select whole
+events; an event larger than a budget travels alone so cursors still progress.
+The browser retains a bounded history window rather than the entire session,
+and SSE backpressure permits only one queued frame, including an oversized
+frame. Explicit monitoring summaries and model tool-output budgets remain
+separate from this full-content delivery contract.
+
 Workspace Memory stores retrieval context. It is enabled by default: exact
 live agent attempts autonomously save and correct active facts, decisions,
 incidents, fixes, and outcomes independently of Learning mode. A workspace

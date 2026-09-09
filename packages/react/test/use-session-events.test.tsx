@@ -7,7 +7,6 @@ import {
   SESSION_EVENT_BROWSER_MAX_COUNT,
   SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
   SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
-  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
   boundBrowserSessionEventWindow,
   type UseSessionEventsResult,
   useSessionEvents,
@@ -1143,7 +1142,7 @@ describe("useSessionEvents", () => {
     }
   });
 
-  test("projects oversized events and flushes pending bytes before the timer can run", async () => {
+  test("preserves oversized events and flushes pending bytes before the timer can run", async () => {
     let releaseStream!: () => void;
     const blocked = new Promise<void>((resolve) => {
       releaseStream = resolve;
@@ -1201,15 +1200,11 @@ describe("useSessionEvents", () => {
         SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
       );
       expect(hook.result.current.lastSequence).toBeLessThan(streamed.length);
-      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(
+      expect(hook.result.current.windowBytes).toBeGreaterThan(
         SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
       );
       const firstPayload = hook.result.current.events[0]!.payload as Record<string, unknown>;
-      expect(firstPayload.truncation).toMatchObject({
-        truncated: true,
-        surface: "browser_legacy_guard",
-        fullEvidence: { available: false, reason: "not_retained" },
-      });
+      expect(firstPayload).toBe(streamed[0]!.payload as Record<string, unknown>);
 
       releaseStream();
       await flush(1);
@@ -1471,6 +1466,46 @@ describe("useSessionEvents", () => {
 });
 
 describe("boundBrowserSessionEventWindow", () => {
+  test("preserves complete multibyte message and tool content above the old event limit", () => {
+    const text = `START-${"界🙂 middle ".repeat(30_000)}-END`;
+    const events = [
+      event(1, "user.message", { text }),
+      event(2, "agent.message.completed", { text }),
+      event(3, "agent.toolCall.output", { id: "large-output", output: text }),
+    ];
+    const window = boundBrowserSessionEventWindow(events);
+    expect(window.events).toEqual(events);
+    expect(window.events[1]).toBe(events[1]);
+    expect(window.truncated).toBeFalse();
+    expect(buildTimeline(window.events)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text })]),
+    );
+  });
+
+  test("retains an event larger than the window alone without losing paging progress", () => {
+    const huge = event(2, "agent.message.completed", {
+      text: `START-${"x".repeat(SESSION_EVENT_BROWSER_MAX_BYTES + 1)}-END`,
+    });
+    for (const direction of ["newest", "oldest"] as const) {
+      const events = direction === "newest" ? [event(1), huge] : [huge, event(3)];
+      const window = boundBrowserSessionEventWindow(events, { direction });
+      expect(window.events).toEqual([huge]);
+      expect(window.events[0]).toBe(huge);
+      expect(window.bytes).toBeGreaterThan(SESSION_EVENT_BROWSER_MAX_BYTES);
+      expect(window.truncated).toBeTrue();
+    }
+  });
+
+  test("preserves an oversized compact event and its exact cursor coverage", () => {
+    const compact = event(9, "agent.message.delta", {
+      coalescedUntil: 40_000,
+      text: "界".repeat(100_000),
+    });
+    const window = boundBrowserSessionEventWindow([compact]);
+    expect(window.events[0]).toBe(compact);
+    expect(window.truncated).toBeFalse();
+  });
+
   test("preserves a normal bounded retained receipt while enforcing the browser window", () => {
     const artifactId = "44444444-4444-4444-8444-444444444444";
     const receipt = {
@@ -1522,90 +1557,6 @@ describe("boundBrowserSessionEventWindow", () => {
       ).fullEvidence,
     ).toEqual(receipt);
     expect(window.bytes).toBeLessThanOrEqual(16 * 1024);
-  });
-
-  test("defensively replaces a multi-megabyte legacy event before rendering", () => {
-    const legacy = event(1, "agent.toolCall.output", {
-      id: "call-1",
-      output: `HEAD-${"x".repeat(3 * 1024 * 1024)}-TAIL`,
-    });
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    const payload = retained.payload as Record<string, unknown>;
-    const truncation = payload.truncation as Record<string, unknown>;
-
-    expect(window.truncated).toBeFalse();
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
-    expect(payload.id).toBe("call-1");
-    expect(truncation.surface).toBe("browser_legacy_guard");
-    expect(truncation.fullEvidence).toEqual({
-      available: false,
-      reason: "not_retained",
-    });
-    expect(JSON.stringify(retained)).toContain("HEAD-");
-    expect(JSON.stringify(retained)).toContain("-TAIL");
-  });
-
-  test("canonically bounds oversized multibyte envelope fields before rendering", () => {
-    const legacy = {
-      ...event(7, "agent.toolCall.output", {
-        id: "call-envelope",
-        output: "ok",
-      }),
-      type: `bad\r\ntype-${"界".repeat(100_000)}`,
-      clientEventId: "🙂".repeat(100_000),
-      duplicateReason: "界".repeat(100_000),
-    } as SessionEvent;
-
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    expect(retained.type).toBe("session.event.envelope_omitted");
-    expect(new TextEncoder().encode(JSON.stringify(retained)).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
-    );
-    expect(String(retained.clientEventId)).toEndWith("…[truncated]");
-    expect(String(retained.duplicateReason)).toEndWith("…[truncated]");
-  });
-
-  test("replaces an unserializable legacy payload with explicit bounded non-retention", () => {
-    const circular: Record<string, unknown> = { id: "call-circular" };
-    circular.self = circular;
-    const legacy = event(8, "agent.toolCall.output", circular);
-
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    const payload = retained.payload as Record<string, unknown>;
-    const truncation = payload.truncation as Record<string, unknown>;
-
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
-    expect(payload.id).toBe("call-circular");
-    expect(truncation.reason).toBe("event_not_serializable");
-    expect(truncation.originalBytes).toBeNull();
-    expect(truncation.omittedBytes).toBeNull();
-    expect(truncation.estimatedOriginalTokens).toBeNull();
-    expect(truncation.deliveredBytes).toBe(
-      new TextEncoder().encode(JSON.stringify(retained)).byteLength,
-    );
-    expect(truncation.fullEvidence).toEqual({
-      available: false,
-      reason: "not_retained",
-    });
-  });
-
-  test("preserves compact cursor progress when a legacy compact event is oversized", () => {
-    const legacy = event(9, "agent.message.delta", {
-      coalescedUntil: 40_000,
-      coalescedCount: 39_992,
-      text: `HEAD-${"界".repeat(2 * 1024 * 1024)}-TAIL`,
-    });
-
-    const window = boundBrowserSessionEventWindow([legacy]);
-    const retained = window.events[0]!;
-    const payload = retained.payload as Record<string, unknown>;
-
-    expect(payload.coalescedUntil).toBe(40_000);
-    expect(payload.coalescedCount).toBe(39_992);
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES);
   });
 
   test("retains the newest exact byte-bounded suffix independently of the count cap", () => {
