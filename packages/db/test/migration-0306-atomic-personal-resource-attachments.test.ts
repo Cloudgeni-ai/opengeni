@@ -649,7 +649,10 @@ describe("migration 0306 atomic personal-resource attachments", () => {
             select count(*)::int as count from session_attempt_personal_resource_snapshots
             where attempt_id = ${omitted.activeAttemptId!}`;
             expect(snapshotCount!.count).toBe(0);
-            await expectSqlState(() => read(omitted), "42501");
+            // Protocol-0 admission omitted the non-final personal set, so the
+            // attempt has no snapshot. Materialization fails closed as no_data
+            // found rather than an authorization denial.
+            await expectSqlState(() => read(omitted), "P0002");
             await recover(omitted);
           } finally {
             await admin.begin(async (tx) => {
