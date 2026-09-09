@@ -1498,9 +1498,24 @@ whose timeout never cancels the command.
 
 ### Modal retained-command observation
 
-A resumed Modal SDK session restores the sandbox but not the adapter-local
-numeric process handles. The reaper reports `process_observation_unavailable`
-for that observation boundary, retaining the exact process/admission/holder.
+A resumed Modal SDK session restores the sandbox but not adapter-local numeric
+process handles. New commands use `modal-command-control.ts` and the verified
+Modal 0.9.0 control-plane RPC contract: the admitted workspace generation is
+their route-scoped numeric alias, while opaque provider execution identity and
+per-stream output cursors live in `sandbox_retained_processes.provider_command`.
+Promotion commits the locator with process retention. API, worker, and reaper
+readers adopt only the original sandbox identity, capture stable stream pages,
+then acknowledge cursors. Both streams must drain through provider terminal
+status before settlement. Sandbox files and printed status text are never
+execution authority. Failed initial observation still retains a successful
+start's locator; an ambiguous start is never automatically replayed.
+The dedicated command client preserves abort signals through a version-guarded
+non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
+and retry-disabled calls. Cancelling observation is not process-exit proof;
+the existing token/PGID cleanup fence still owns physical cancellation.
+
+For historical commands without that locator, the reaper reports
+`process_observation_unavailable`, retaining the exact process/admission/holder.
 After five probes it records `quarantined_process_observation_unavailable` and
 rechecks after 24 hours through the existing reconciliation diagnostics/metrics.
 A current owner's exact exit proof still settles immediately; independently
@@ -1508,11 +1523,10 @@ verified loss of the bound provider instance remains authoritative. Neither a
 missing SDK map entry nor failure to recover terminal output proves command loss,
 including when a completed entry aged out in its original adapter.
 
-This is safe containment, not cross-worker command reattachment. A command whose
-owner cannot recover its terminal receipt remains a visible capture blocker;
+Historical containment cannot reconstruct an execution ID the old adapter never
+retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
 operators must reconcile the exact command/provider identity rather than replay
-unknown side effects or clear holders by age. Durable provider execution IDs and
-output reattachment remain separate work. No new process is launched by probing.
+unknown side effects or clear holders by age. No new process is launched by probing.
 
 
 Migration 0419 records the exact launch turn, attempt, and execution generation

@@ -15,6 +15,8 @@
 // in the normal drain state machine.
 
 import { createHash, randomUUID } from "node:crypto";
+import { retainedProviderCommandPersistence } from "@opengeni/db/retained-provider-commands";
+import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
 import { Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
@@ -90,6 +92,7 @@ import {
   inspectModalSandboxLifecycle,
   isExecSessionLostBanner,
   isProviderSandboxNotFoundError,
+  isProviderSandboxGoneDuringRoutedOperation,
   NatsControlRpc,
   NatsOpStreamTransport,
   OpStreamExecClient,
@@ -303,7 +306,13 @@ export type RetainedProcessProbeFn = (
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
   mode?: "observe" | "cancel",
-  captureOutput?: (result: unknown, chunkId: string) => Promise<void>,
+  captureOutput?: (
+    result: unknown,
+    chunkId: string,
+    stream?: "stdout" | "stderr",
+    streamFidelity?: "separate" | "merged",
+  ) => Promise<void>,
+  providerPersistence?: ProviderCommandPersistence,
 ) => Promise<RetainedProcessProbeResult>;
 
 export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
@@ -1468,10 +1477,10 @@ async function reconcileTerminalRetainedProcesses(
               lease!,
               process,
               claim.ownerState === "background_stopping" ? "cancel" : "observe",
-              async (result, chunkId) => {
+              async (result, chunkId, stream, streamFidelity) => {
                 if (
                   typeof result !== "string" ||
-                  isExecSessionLostBanner(result, process.providerSessionId)
+                  (!stream && isExecSessionLostBanner(result, process.providerSessionId))
                 )
                   return;
                 const events = await appendSessionCommandOutput(db, {
@@ -1480,15 +1489,21 @@ async function reconcileTerminalRetainedProcesses(
                   sessionId: process.sessionId,
                   commandId: process.id,
                   chunkId,
-                  stream: "stdout",
-                  streamFidelity: "merged",
-                  chunk: stripExecBanner(result),
+                  stream: stream ?? "stdout",
+                  streamFidelity: streamFidelity ?? (stream ? "separate" : "merged"),
+                  chunk: stream ? result : stripExecBanner(result),
                 });
                 if (events.length && bus)
                   await bus
                     .publish(process.workspaceId, process.sessionId, events)
                     .catch(() => undefined);
               },
+              retainedProviderCommandPersistence(db, {
+                accountId: process.accountId,
+                workspaceId: process.workspaceId,
+                sessionId: process.sessionId,
+                processId: process.id,
+              }),
             );
           } catch (error) {
             observability.warn("sandbox reaper: retained-process provider probe failed", {
@@ -1688,7 +1703,8 @@ type RetainedProcessProbeClient = {
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
 };
 
-type RetainedProcessProbeSession = {
+type RetainedProcessProbeSession = ProviderCommandSession & {
+  acknowledgeCommandOutput?: (result: string) => Promise<void>;
   writeStdin?: (args: {
     sessionId: number;
     chars: string;
@@ -1740,7 +1756,13 @@ export async function probeRetainedProcessAtProvider(
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
   mode: "observe" | "cancel" = "observe",
-  captureOutput?: (result: unknown, chunkId: string) => Promise<void>,
+  captureOutput?: (
+    result: unknown,
+    chunkId: string,
+    stream?: "stdout" | "stderr",
+    streamFidelity?: "separate" | "merged",
+  ) => Promise<void>,
+  providerPersistence?: ProviderCommandPersistence,
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -1874,12 +1896,29 @@ export async function probeRetainedProcessAtProvider(
     ) {
       return { status: "deferred", reason: "provider_binding_mismatch" };
     }
-    // Modal resume recovers the sandbox, not the SDK's adapter-local numeric
-    // process map. Polling this fresh adapter would falsely report a live
-    // owner's command lost. Keep the holder until the owner supplies terminal
-    // proof or the exact bound provider instance is independently proved gone.
-    return { status: "deferred", reason: "process_observation_unavailable" };
+    // Legacy SDK-local handles cannot be reconstructed. New commands carry
+    // an opaque provider locator retained outside the sandbox's authority.
+    const command = await providerPersistence?.load();
+    if (!command || !providerPersistence || !session.bindProviderCommand)
+      return { status: "deferred", reason: "process_observation_unavailable" };
+    session.bindProviderCommand(process.providerSessionId, command, providerPersistence);
   }
+  const capturePage = async (value: unknown): Promise<void> => {
+    if (!captureOutput) {
+      if (session.getProviderCommandOutput?.(value))
+        throw new Error("Provider command output requires durable capture before settlement");
+      return;
+    }
+    const page = session.getProviderCommandOutput?.(value);
+    if (page) {
+      for (const chunk of page.chunks)
+        if (chunk.text)
+          await captureOutput(chunk.text, chunk.chunkId, chunk.stream, page.streamFidelity);
+    } else {
+      await captureRetainedProbeOutput(process.id, value, captureOutput);
+    }
+    if (typeof value === "string") await session.acknowledgeCommandOutput?.(value);
+  };
 
   let result: unknown;
   try {
@@ -1895,7 +1934,7 @@ export async function probeRetainedProcessAtProvider(
     if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
       return { status: "deferred", reason: "provider_timeout" };
     }
-    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+    if (isProviderSandboxGoneDuringRoutedOperation(client.backendId, error)) {
       if (process.providerBackend === "modal" && !process.providerBindingKey) {
         return { status: "deferred", reason: "provider_binding_missing" };
       }
@@ -1910,8 +1949,8 @@ export async function probeRetainedProcessAtProvider(
     }
     return { status: "deferred", reason: "provider_error" };
   }
-  if (captureOutput) await captureRetainedProbeOutput(process.id, result, captureOutput);
-  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId);
+  await capturePage(result);
+  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId, session);
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
@@ -1929,10 +1968,10 @@ export async function probeRetainedProcessAtProvider(
           maxOutputTokens: 2_000,
         }),
       );
-      if (captureOutput) await captureRetainedProbeOutput(process.id, interrupted, captureOutput);
-      return classifyRetainedProcessPollResult(interrupted, process.providerSessionId);
+      await capturePage(interrupted);
+      return classifyRetainedProcessPollResult(interrupted, process.providerSessionId, session);
     } catch (error) {
-      if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      if (isProviderSandboxGoneDuringRoutedOperation(client.backendId, error)) {
         if (process.providerBackend === "modal" && !process.providerBindingKey) {
           return { status: "deferred", reason: "provider_binding_missing" };
         }
@@ -1959,11 +1998,12 @@ export async function probeRetainedProcessAtProvider(
 export function classifyRetainedProcessPollResult(
   result: unknown,
   providerSessionId: number,
+  source?: object,
 ): RetainedProcessProbeResult {
   if (typeof result !== "string") {
     return { status: "deferred", reason: "provider_unknown" };
   }
-  if (isExecSessionLostBanner(result, providerSessionId)) {
+  if (isExecSessionLostBanner(result, providerSessionId, source)) {
     return {
       status: "proved",
       proof: {

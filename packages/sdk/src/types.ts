@@ -3810,6 +3810,7 @@ export type ClientConfig = {
 /** Client-safe voice-input capability projection. */
 export type ClientVoiceInputConfig = {
   available: boolean;
+  providers?: VoiceInputProviderId[] | undefined;
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
@@ -4479,8 +4480,16 @@ export type UpdateSlackChannelRoutesRequest = {
   routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
 };
 
+export type VoiceInputProviderId =
+  | "supergrok-subscription"
+  | "codex-subscription"
+  | "openai"
+  | "azure-openai";
+
 export type WorkspaceVoiceInputSettings = {
   enabled: boolean;
+  preferredProvider?: VoiceInputProviderId | null | undefined;
+  fallbackEnabled?: boolean | undefined;
 };
 
 export type UpdateWorkspaceSettingsRequest = {

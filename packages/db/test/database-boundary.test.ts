@@ -25,6 +25,19 @@ import type {
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 describe("database foundation boundary", () => {
+  test("every published source subpath has a JavaScript build entry", async () => {
+    const manifest = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as {
+      exports: Record<string, { default: string }>;
+    };
+    const { default: config } = await import("../tsup.config");
+    const entries = Object.values((config as { entry: Record<string, string> }).entry);
+    for (const target of Object.values(manifest.exports)) {
+      if (target.default.startsWith("./src/")) expect(entries).toContain(target.default.slice(2));
+    }
+  });
+
   test("keeps the existing root runtime and type surface compatible", () => {
     expect(root.createDb).toBe(database.createDb);
     expect(root.registerDbBinding).toBe(database.registerDbBinding);
