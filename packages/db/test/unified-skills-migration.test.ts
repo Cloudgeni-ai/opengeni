@@ -10,7 +10,7 @@ describe("unified Skill migration boundary", () => {
   test("canonical folder aggregation is independent of database collation", async () => {
     for (const path of [
       "../src/skill-metadata-migration.ts",
-      "../drizzle/0432_unified_skill_lifecycle.sql",
+      "../drizzle/0433_unified_skill_lifecycle.sql",
     ]) {
       const source = await readFile(new URL(path, import.meta.url), "utf8");
       // Both maintenance backfill and ordinary install must store the same
@@ -21,7 +21,7 @@ describe("unified Skill migration boundary", () => {
   });
   test("keeps one head and leaves historical hashes/snapshots untouched", async () => {
     const migration = await readFile(
-      new URL("../drizzle/0432_unified_skill_lifecycle.sql", import.meta.url),
+      new URL("../drizzle/0433_unified_skill_lifecycle.sql", import.meta.url),
       "utf8",
     );
     expect(migration).toContain("-- deployment-mode: maintenance");

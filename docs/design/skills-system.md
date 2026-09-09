@@ -379,7 +379,7 @@ Composite publication now waits for enclosing Pack/Plugin ownership finalization
 the latest integrated PostgreSQL run remains a release gate.
 
 Current main has been merged and the unpublished Skill migration renumbered to
-0432 without repinning published migration hashes. The browser tree-shaking fix
+0433 without repinning published migration hashes. The browser tree-shaking fix
 is integrated and the post-merge production build passes unchanged budgets.
 Projects guidance now uses the same host-controlled bundle selection and eager
 reader, with no unconditional second index or reader tool.

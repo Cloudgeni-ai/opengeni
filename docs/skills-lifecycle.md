@@ -57,7 +57,7 @@ the same Skill management authority; there is no per-agent or per-Skill ACL.
 Learning reads the current workspace policy under a shared lock: Off refuses
 durable writes, Suggest saves an inactive revision, and Automatic activates a
 valid revision directly. No active policy defaults to Suggest, matching the
-workspace Learning default. Require approval uses one in-chat decision, not a
+workspace Learning default. Migration 0434 adds this response path without rewriting the published 0433 cutover. It defaults historical answers to untrusted and preserves the existing lifecycle function grants. This is a maintenance cutover: drain every API, control-worker and turn-worker, supply their exact runtime database roles, apply 0434, and start only the new binaries. Never restart a pre-0434 runtime: an old API can answer a new typed Skill question without activating the revision. Require approval uses one in-chat decision, not a
 second review queue: pending agent receipts carry an immutable `skillReview`
 reference. `request_human_input` displays that revision's complete text folder
 through the existing scoped content API. The verified initiating human chooses
@@ -198,7 +198,7 @@ regardless of Learning mode. MCP already redirects that lane to `skill_save`.
 The historical confirmation and receipt schemas remain readable; Knowledge and
 instruction-policy remember/confirm workflows retain their existing behavior.
 
-The exact 0432 runner stage executes inside an explicit migration transaction:
+The exact 0433 runner stage executes inside an explicit migration transaction:
 setup and owner window, TypeScript parsing into a temporary staging table, then
 SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
 fails closed. All existing active authored heads receive new canonical revisions;
@@ -217,10 +217,10 @@ foreign-key constraints are flushed before restoring FORCE RLS, all within the
 migration transaction. A seeded `NOSUPERUSER NOBYPASSRLS` owner test verifies
 cross-tenant identity preservation, folder content, and the restored posture.
 
-Migration `0432_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
+Migration `0433_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never
-restart a pre-0432 binary: its installed reads bypass the registry content head.
+restart a pre-0433 binary: its installed reads bypass the registry content head.
 The migration preserves existing source ownership, backfills installed Skills
 by portable identity, and rejects invalid existing folders for repair rather
 than silently truncating them. New binding/write-receipt tables are FORCE-RLS and
@@ -229,7 +229,7 @@ lifecycle capability.
 
 ### Stored execution configuration maintenance
 
-The same atomic 0432 runner calls `packages/db/src/skill-config-migration.ts`
+The same atomic 0433 runner calls `packages/db/src/skill-config-migration.ts`
 after staging registry metadata. It converts headerless Skills in current
 `sessions.skills` and `workspace_packs.manifest` (including inline automation
 template Skills). It uses historical name/description, preserves the complete

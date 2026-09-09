@@ -14,7 +14,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const migrationName = "0233_skill_and_integration_authority_cutover.sql";
-const skillCutover = "0432_unified_skill_lifecycle.sql";
+const skillCutover = "0433_unified_skill_lifecycle.sql";
 
 describe("Skill and Integration authority migration replay", () => {
   test("preserves exact curated selection and makes the generic ledger MCP-only", async () => {
@@ -216,7 +216,7 @@ describe("Skill and Integration authority migration replay", () => {
       });
 
       // The current reader resolves the canonical Skill head. Exercise the
-      // actual ordering: 0233 materializes portable content, then 0432 binds it
+      // actual ordering: 0233 materializes portable content, then 0433 binds it
       // to that head. Replaying 0233 after a fully migrated empty template would
       // manufacture legacy content after its one-time backfill already ran.
       await shared.admin`delete from schema_migrations where name >= ${skillCutover}`;

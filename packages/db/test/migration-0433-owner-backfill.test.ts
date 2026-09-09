@@ -13,8 +13,21 @@ import { listSkillDescriptors, listSkillRecords } from "../src/skills";
 import { migrateLegacySkillConfigurations } from "../src/skill-config-migration";
 import { deleteWorkspace } from "../src/index";
 import { withWorkspaceRls } from "../src/database";
+import {
+  upsertKnowledgeProvider,
+  upsertKnowledgeSource,
+  appendKnowledgeSourceAclVersion,
+  upsertKnowledgeSourceObject,
+  appendKnowledgeDocumentVersion,
+  upsertKnowledgeEntity,
+  upsertKnowledgeFact,
+  appendKnowledgeClaim,
+  appendKnowledgeClaimEvidence,
+  createKnowledgeChangeProposal,
+  type Database,
+} from "../src/index";
 
-const cutover = "0432_unified_skill_lifecycle.sql";
+const cutover = "0433_unified_skill_lifecycle.sql";
 const windowTables = [
   "capability_plugin_installations",
   "capability_facets",
@@ -36,6 +49,133 @@ const windowTables = [
   "pack_installations",
 ];
 let owned: OwnerMigratedTestDatabase | null = null;
+
+async function seedOrgScopedCompanyBrainReceipt(
+  db: Database,
+  admin: postgres.Sql,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    preferenceId: string;
+    revisionId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+  },
+) {
+  const scope = { kind: "organization" as const, workspaceId: null, subjectId: null };
+  const actor = {
+    kind: "human" as const,
+    subjectId: input.actorSubjectId,
+    initiatingHumanSubjectId: input.actorSubjectId,
+  };
+  const ctx = { accountId: input.accountId, workspaceId: input.workspaceId, actor };
+  const label = `receipt-${crypto.randomUUID()}`;
+  const provider = await upsertKnowledgeProvider(db, {
+    ...ctx,
+    scope,
+    operationId: crypto.randomUUID(),
+    providerKey: label,
+    externalTenantId: label,
+  });
+  const source = await upsertKnowledgeSource(db, {
+    ...ctx,
+    scope,
+    operationId: crypto.randomUUID(),
+    providerId: provider.id,
+    externalSourceId: label,
+    sourceKind: "test",
+  });
+  const acl = await appendKnowledgeSourceAclVersion(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    sourceId: source.id,
+    audience: scope,
+    expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+    expectedAclGeneration: 0,
+    aclVersion: "v1",
+    agentAccess: true,
+    reasonCode: "receipt-fixture",
+  });
+  const object = await upsertKnowledgeSourceObject(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    sourceId: source.id,
+    externalObjectId: label,
+  });
+  const contentHash = createHash("sha256").update(label).digest("hex");
+  const version = await appendKnowledgeDocumentVersion(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    objectId: object.id,
+    expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+    expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+    expectedVersionGeneration: 0,
+    externalVersionId: "v1",
+    contentSha256: contentHash,
+    ingestionKey: `${label}-ingestion`,
+    aclVersionId: acl.id,
+    aclGeneration: acl.generation,
+    reasonCode: "receipt-fixture",
+  });
+  const entity = await upsertKnowledgeEntity(db, {
+    ...ctx,
+    scope,
+    operationId: crypto.randomUUID(),
+    entityType: "ways-of-working",
+    normalizedKey: label,
+    displayName: "Company-brain receipt fixture",
+  });
+  const fact = await upsertKnowledgeFact(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    subjectEntityId: entity.id,
+    predicateKey: "ways.company-brain-receipt",
+    object: { kind: "text", value: "Historical company-brain preference proposal" },
+  });
+  const claim = await appendKnowledgeClaim(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    factId: fact.id,
+    origin: "inferred",
+    confidenceBps: 9000,
+    effectiveAt: new Date(Date.now() - 1000).toISOString(),
+    extractionMethod: "test",
+  });
+  const evidence = await appendKnowledgeClaimEvidence(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    claimId: claim.id,
+    documentVersionId: version.id,
+    polarity: "supports",
+    contentHash,
+  });
+  const proposal = await createKnowledgeChangeProposal(db, {
+    ...ctx,
+    operationId: crypto.randomUUID(),
+    claimId: claim.id,
+    evidenceId: evidence.id,
+    targetKind: "preference",
+    targetScope: "organization",
+    targetKey: "legacy-company-brain",
+    content: "Historical company-brain preference proposal",
+  });
+  const [event] =
+    await admin`SELECT id FROM preference_registry_events WHERE preference_id=${input.preferenceId} AND type='proposal_created'`;
+  if (!event) throw new Error("expected proposal_created event");
+  const receiptId = crypto.randomUUID();
+  await admin`INSERT INTO company_brain_preference_proposal_receipts (
+      id, account_id, workspace_id, operation_id, input_hash, knowledge_proposal_id,
+      preference_id, revision_id, creation_event_id, session_id, turn_id, attempt_id,
+      execution_generation, actor_subject_id, initiating_human_subject_id)
+    VALUES (
+      ${receiptId}, ${input.accountId}, ${input.workspaceId}, ${crypto.randomUUID()}, ${contentHash},
+      ${proposal.id}, ${input.preferenceId}, ${input.revisionId}, ${event.id},
+      ${input.sessionId}, ${input.turnId}, ${input.attemptId}, 1,
+      ${input.actorSubjectId}, ${input.actorSubjectId})`;
+  return { receiptId, proposalId: proposal.id };
+}
 
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_SKILL_BACKFILL_TEST_ADMIN_URL;
@@ -66,7 +206,7 @@ afterAll(async () => {
   await owned?.release();
 }, 120_000);
 
-describe("0432 owner-only Skill backfill", () => {
+describe("0433 owner-only Skill backfill", () => {
   test("migrates populated tenants as NOSUPERUSER NOBYPASSRLS and restores every FORCE policy", async () => {
     if (!owned) return;
     const { admin, ownerUrl, ownerRole } = owned;
@@ -328,7 +468,44 @@ describe("0432 owner-only Skill backfill", () => {
         VALUES(${runId},${config.accountId},${config.workspaceId},${sourceId},${triggerId},1,${eventId},'fixture',${admin.json({ sessionTemplate: template })})`;
       await expect(migrate(ownerUrl)).rejects.toThrow("automation-run:");
       await admin`UPDATE automation_runs SET status='skipped' WHERE id=${runId}`;
+      const receiptAttemptId = crypto.randomUUID();
+      const workspaceAuthoredSeed = legacyRows.find((row) => row.scope === "workspace")!;
+      await admin.begin(async (sql) => {
+        await sql`ALTER TABLE session_turn_attempts DISABLE TRIGGER USER`;
+        await sql`INSERT INTO session_turn_attempts(
+          id,account_id,workspace_id,session_id,turn_id,execution_generation,state,outcome,
+          temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,
+          mcp_approval_policies,authority_epoch,authority_visibility,closed_at)
+          VALUES(${receiptAttemptId},${config.accountId},${config.workspaceId},${config.sessionId},${queuedTurnId},1,'closed','cancelled',
+            ${queuedTurnId},${receiptAttemptId},${receiptAttemptId},0,'{}',1,'workspace_shared',now())`;
+      });
+      await admin`ALTER TABLE session_turn_attempts ENABLE TRIGGER USER`;
+      // Workspace-scoped knowledge_change_proposals still RESTRICT workspace
+      // delete (pre-Skill residual, not widened). Bind the historical receipt to
+      // an organization-scoped proposal so 0431 CASCADE can remove it.
+      const seeder = createDb(owned!.adminUrl, { max: 1 });
+      let companyBrain: { receiptId: string; proposalId: string };
+      try {
+        companyBrain = await seedOrgScopedCompanyBrainReceipt(seeder.db, admin, {
+          accountId: config.accountId,
+          workspaceId: config.workspaceId,
+          actorSubjectId: "user:original",
+          preferenceId: workspaceAuthoredSeed.id,
+          revisionId: workspaceAuthoredSeed.revisionId,
+          sessionId: config.sessionId,
+          turnId: queuedTurnId,
+          attemptId: receiptAttemptId,
+        });
+      } finally {
+        await seeder.close();
+      }
       await migrate(ownerUrl);
+      expect(
+        await admin`SELECT id FROM company_brain_preference_proposal_receipts WHERE id=${companyBrain.receiptId}`,
+      ).toHaveLength(1);
+      await expect(
+        admin`DELETE FROM company_brain_preference_proposal_receipts WHERE id=${companyBrain.receiptId}`.execute(),
+      ).rejects.toThrow("immutable");
       expect(
         (
           await admin`SELECT session_template FROM automation_trigger_revisions WHERE trigger_id=${triggerId}`
@@ -357,12 +534,12 @@ describe("0432 owner-only Skill backfill", () => {
           {
             source_kind: "session",
             original_configuration: convertedFixture.skills,
-            actor: "service:skill-migration:0432",
+            actor: "service:skill-migration:0433",
           },
           {
             source_kind: "workspace-pack",
             original_configuration: convertedFixture.manifest,
-            actor: "service:skill-migration:0432",
+            actor: "service:skill-migration:0433",
           },
         ]);
       }
@@ -465,7 +642,7 @@ describe("0432 owner-only Skill backfill", () => {
         ).rejects.toThrow("files-bearing revision");
       }
       expect(
-        await admin`select id from preference_registry_events where actor_subject_id='service:skill-migration:0432'`,
+        await admin`select id from preference_registry_events where actor_subject_id='service:skill-migration:0433'`,
       ).toHaveLength(7);
       const restored =
         await admin`select relname,relrowsecurity,relforcerowsecurity from pg_class where relnamespace='public'::regnamespace and relname=any(${windowTables})`;
@@ -582,6 +759,12 @@ describe("0432 owner-only Skill backfill", () => {
       expect(
         await admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${workspaceAuthored.id}`,
       ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM company_brain_preference_proposal_receipts WHERE id=${companyBrain.receiptId}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM knowledge_change_proposals WHERE id=${companyBrain.proposalId}`,
+      ).toHaveLength(1);
       const [orgAfter] =
         await admin`SELECT h.id,h.stable_key,h.scope,r.content FROM preference_registry_preferences h
         JOIN preference_registry_revisions r ON r.id=h.active_revision_id WHERE h.id=${organizationSkill.id}`;
