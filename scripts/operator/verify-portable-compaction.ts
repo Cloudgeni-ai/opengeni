@@ -44,7 +44,7 @@ export function assertOpaqueKickoff(output: Item[]): void {
         typeof item.encrypted_content === "string" &&
         item.encrypted_content.length > 0,
     ) ||
-    !output.some((item) => item.type === "message")
+    !output.some((item) => item.type === "message" && item.role === "assistant")
   ) {
     throw new CompactionVerificationError(
       "Kickoff must contain opaque reasoning and a dependent assistant message.",
