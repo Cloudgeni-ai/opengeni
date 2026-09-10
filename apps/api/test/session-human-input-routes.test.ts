@@ -12,7 +12,11 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
-import { OPEN_SUFFIX_RUN_STATE_BLOB, signDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  OPEN_SUFFIX_RUN_STATE_BLOB,
+  signDelegatedAccessToken,
+  skillReviewHumanInput,
+} from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -129,38 +133,35 @@ async function frozenFixture(
   });
   if (claimed.action !== "claimed") throw new Error(`fixture claim failed: ${claimed.reason}`);
   const requestId = crypto.randomUUID();
-  const questions = options.optionalText
-    ? [
-        {
-          id: "note",
-          kind: "text" as const,
-          prompt: "Anything else?",
-          options: [],
-          required: false,
-          allowOther: false,
-        },
-      ]
-    : [
-        {
-          id: "environment",
-          kind: "single_select" as const,
-          prompt: "Which environment?",
-          options: [{ id: "staging", label: "Staging" }],
-          required: true,
-          allowOther: false,
-        },
-      ];
-  if (options.skillReview) {
-    Object.assign(questions[0]!, {
-      skillReview: {
+  const questions = options.skillReview
+    ? skillReviewHumanInput({
         sourceOperationId: crypto.randomUUID(),
         skillId: crypto.randomUUID(),
         revisionId: crypto.randomUUID(),
         expectedRevisionId: null,
         expectedScopeVersion: 1,
-      },
-    });
-  }
+      }).questions
+    : options.optionalText
+      ? [
+          {
+            id: "note",
+            kind: "text" as const,
+            prompt: "Anything else?",
+            options: [],
+            required: false,
+            allowOther: false,
+          },
+        ]
+      : [
+          {
+            id: "environment",
+            kind: "single_select" as const,
+            prompt: "Which environment?",
+            options: [{ id: "staging", label: "Staging" }],
+            required: true,
+            allowOther: false,
+          },
+        ];
   const allowSkip = options.allowSkip ?? false;
   const expiresAt = options.expiresAt ?? null;
   await applySessionTurnSettlement(client.db, grant.workspaceId!, {
@@ -212,6 +213,7 @@ async function frozenFixture(
     sessionId: session.id,
     requestId,
     authorization: `Bearer ${token}`,
+    questions,
   };
 }
 
@@ -605,7 +607,7 @@ test("a bearer naming the initiating human cannot answer a Skill review or stamp
         requestId: fixture.requestId,
         response: {
           outcome: "answered",
-          answers: [{ questionId: "environment", values: ["staging"] }],
+          answers: [{ questionId: fixture.questions[0]!.id, values: ["save"] }],
         },
       },
     }),
