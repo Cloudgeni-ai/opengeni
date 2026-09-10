@@ -1703,7 +1703,7 @@ async function answeredSkillInput(
       ? {
           allowOther: true,
           options: question.options.map((option) => ({ ...option, description: null })),
-          validation: { minSelections: null, maxSelections: null },
+          validation: null,
         }
       : {}),
   }));

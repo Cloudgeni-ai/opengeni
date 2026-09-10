@@ -68,8 +68,10 @@ entry disappears from the current read projection after activation. Don't save r
 Other, expired requests, agent answers and noncanonical bearer responses never
 activate a Skill.
 
-New typed Skill questions are rebuilt by the runtime from the review reference
-using host-owned presentation, with one dedicated question, no Other and no
+New typed Skill questions must match the host-owned confirmation text and
+choices before the runtime normalizes known wire differences. A typed reference
+does not authorize replacing misleading prompts, labels or descriptions. The
+canonical result has one dedicated question, no Other and no
 request skip. This constructs a review card, not consent or authority; the
 database still verifies the reference against its immutable source receipt.
 

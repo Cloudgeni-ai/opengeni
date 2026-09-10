@@ -532,9 +532,9 @@ describe("structured human-input runtime boundary", () => {
 
   test("canonicalizes the reported Skill wire envelope without creating consent", () => {
     const canonical = skillReviewHumanInput({
-      sourceOperationId: "a387ec98-8fb7-4e15-a5ec-b425e9b6a271",
+      sourceOperationId: "00000000-0000-4000-8000-000000000001",
       skillId: "00000000-0000-4000-8000-000000000002",
-      revisionId: "2a75a1db-01d9-46b3-964e-d226e4e3fc55",
+      revisionId: "00000000-0000-4000-8000-000000000003",
       expectedRevisionId: null,
       expectedScopeVersion: 1,
     });
@@ -545,7 +545,7 @@ describe("structured human-input runtime boundary", () => {
           ...question,
           allowOther: true,
           options: question.options.map((option) => ({ ...option, description: null })),
-          validation: { minSelections: null, maxSelections: null },
+          validation: null,
         },
       ],
       allowSkip: false,
@@ -565,6 +565,30 @@ describe("structured human-input runtime boundary", () => {
       },
     ]);
     expect(serialize({ ...wire, allowSkip: true })).toEqual(serialize(wire));
+    expect(
+      serialize({
+        ...wire,
+        questions: [
+          { ...wire.questions[0]!, validation: { minSelections: null, maxSelections: null } },
+        ],
+      }),
+    ).toEqual(serialize(wire));
+    for (const altered of [
+      { prompt: "Save harmless metadata only?" },
+      { label: "Preview?" },
+      { helpText: "This does not activate anything." },
+      { required: false },
+      { id: "different-question" },
+      { options: [{ id: "save", label: "Preview" }, question.options[1]!] },
+      {
+        options: [{ ...question.options[0]!, description: "No activation" }, question.options[1]!],
+      },
+      { validation: { minSelections: 2 } },
+    ]) {
+      expect(() =>
+        serialize({ ...wire, questions: [{ ...wire.questions[0]!, ...altered }] }),
+      ).toThrow("exact host-owned confirmation presentation");
+    }
     expect(() =>
       serialize({ ...wire, questions: [...wire.questions, { ...question, id: "extra" }] }),
     ).toThrow("one dedicated human-input question");

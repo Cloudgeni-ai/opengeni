@@ -696,13 +696,36 @@ export function serializeHumanInputRequests(
         if (input.questions.length !== 1) {
           throw new Error("Skill review requires one dedicated human-input question");
         }
-        // Presentation is host-owned, never agent-authored consent. The DB
-        // still binds this reference to the immutable receipt and live human.
+        const question = reviews[0]!;
+        const canonical = skillReviewHumanInput(question.skillReview!);
+        const expected = canonical.questions[0]!;
+        // Normalize only known wire differences, never turn misleading text
+        // into a trusted review based solely on a model-supplied reference.
+        // The DB still binds that reference to the receipt and live human.
+        if (
+          question.id !== expected.id ||
+          question.kind !== expected.kind ||
+          question.label !== expected.label ||
+          question.prompt !== expected.prompt ||
+          question.helpText !== expected.helpText ||
+          !question.required ||
+          question.options.length !== expected.options.length ||
+          question.options.some(
+            (option, index) =>
+              option.id !== expected.options[index]!.id ||
+              option.label !== expected.options[index]!.label ||
+              option.description != null,
+          ) ||
+          question.validation?.minSelections != null ||
+          question.validation?.maxSelections != null
+        ) {
+          throw new Error("Skill review must use the exact host-owned confirmation presentation");
+        }
         return {
           toolCallId,
           input: {
             ...input,
-            ...skillReviewHumanInput(reviews[0]!.skillReview!),
+            ...canonical,
             allowSkip: false,
           },
         };
