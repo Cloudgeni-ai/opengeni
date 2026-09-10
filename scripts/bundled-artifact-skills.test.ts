@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS } from "@opengeni/contracts";
-import {
-  ARTIFACT_SKILL_NAMES,
-  SITE_SKILL_NAMES,
-  VIDEO_SKILL_NAMES,
-  checkArtifactSkillBundle,
-} from "./sync-artifact-skills";
+const ARTIFACT_SKILL_NAMES = [
+  "opengeni-spreadsheets",
+  "opengeni-documents",
+  "opengeni-presentations",
+] as const;
+const SITE_SKILL_NAMES = ["opengeni-sites"] as const;
+const VIDEO_SKILL_NAMES = ["opengeni-video-generation"] as const;
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMMAND_KINDS_BY_SKILL = {
@@ -57,13 +58,16 @@ const COMMAND_KINDS_BY_SKILL = {
 } as const satisfies Record<(typeof ARTIFACT_SKILL_NAMES)[number], readonly string[]>;
 
 describe("bundled editable-artifact skills", () => {
-  test("are a deterministic copy of the repo agent skills", async () => {
-    await expect(checkArtifactSkillBundle()).resolves.toBeUndefined();
+  test("keeps runtime bundles out of repository agent discovery", async () => {
+    expect((await readdir(join(repoRoot, ".agents", "skills"))).sort()).toEqual([
+      "opengeni",
+      "opengeni-client",
+    ]);
   });
 
   test("teach the canonical durable artifact surface and only explicit file boundaries", async () => {
     for (const name of ARTIFACT_SKILL_NAMES) {
-      const root = join(repoRoot, ".agents", "skills", name);
+      const root = join(repoRoot, "packages/runtime/src/bundled_artifact_skills", name);
       const skill = await readFile(join(root, "SKILL.md"), "utf8");
       const api = await readFile(join(root, "references", "api.md"), "utf8");
       expect(skill).toStartWith("---\nname:");
@@ -93,7 +97,10 @@ describe("bundled editable-artifact skills", () => {
 
   test("keeps video guidance provider-neutral and independent from Office runtime", async () => {
     for (const name of VIDEO_SKILL_NAMES) {
-      const skill = await readFile(join(repoRoot, ".agents", "skills", name, "SKILL.md"), "utf8");
+      const skill = await readFile(
+        join(repoRoot, "packages/runtime/src/bundled_video_skills", name, "SKILL.md"),
+        "utf8",
+      );
       expect(skill).toStartWith("---\nname:");
       expect(skill).toContain("get_video_generation_capabilities");
       expect(skill).toContain("generate_video");
@@ -105,7 +112,10 @@ describe("bundled editable-artifact skills", () => {
 
   test("teaches Sites as approval-free exact-version tool clients", async () => {
     for (const name of SITE_SKILL_NAMES) {
-      const skill = await readFile(join(repoRoot, ".agents", "skills", name, "SKILL.md"), "utf8");
+      const skill = await readFile(
+        join(repoRoot, "packages/runtime/src/bundled_site_skills", name, "SKILL.md"),
+        "utf8",
+      );
       expect(skill).toStartWith("---\nname:");
       expect(skill).toContain('from "@opengeni/sdk/site"');
       expect(skill).toContain("opengeni__artifacts_create");
