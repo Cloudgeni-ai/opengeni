@@ -1,3 +1,6 @@
+import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
+import { artifactReturnSearch } from "@/lib/session-artifact-navigation";
+
 // Route assembly only — components live under src/routes, shared state in
 // src/context.tsx, logic in src/lib. Route map:
 //   /                                        → remembered/default workspace redirect
@@ -429,11 +432,13 @@ const workspaceArtifactsRoute = createRoute({
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: EditableArtifact,
 });
 const workspaceOrganizationRoute = createRoute({
@@ -721,11 +726,23 @@ function IdentityLink() {
 }
 
 function ArtifactDetail() {
-  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
+  const params = workspaceArtifactDetailRoute.useParams();
+  const { fromSession } = workspaceArtifactDetailRoute.useSearch();
+  return (
+    <ArtifactSessionPage workspaceId={params.workspaceId} fromSession={fromSession}>
+      <LazyArtifactsRoute {...params} />
+    </ArtifactSessionPage>
+  );
 }
 
 function EditableArtifact() {
-  return <LazyEditableArtifactRoute {...workspaceEditableArtifactRoute.useParams()} />;
+  const params = workspaceEditableArtifactRoute.useParams();
+  const { fromSession } = workspaceEditableArtifactRoute.useSearch();
+  return (
+    <ArtifactSessionPage workspaceId={params.workspaceId} fromSession={fromSession}>
+      <LazyEditableArtifactRoute {...params} />
+    </ArtifactSessionPage>
+  );
 }
 
 function Organization() {

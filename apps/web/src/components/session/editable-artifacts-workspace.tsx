@@ -29,22 +29,32 @@ export type SessionEditableArtifactsStatus = "loading" | "ready" | "error";
 
 export function SessionEditableArtifactsWorkspace({
   workspaceId,
+  sessionId,
   artifacts,
   status,
   onRetry,
   initialSelectedArtifactId,
+  openArtifactRequest,
   onSelectedArtifactIdChange,
 }: Readonly<{
   workspaceId: string;
+  sessionId?: string;
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
   onRetry: () => void;
   initialSelectedArtifactId?: string | null;
+  openArtifactRequest?: { artifactId: string; requestId: number } | null;
   onSelectedArtifactIdChange?: (artifactId: string | null) => void;
 }>) {
   const [selectedArtifactId, setSelectedArtifactId] = useState(
     () => initialSelectedArtifactId ?? artifacts[0]?.id ?? null,
   );
+
+  useEffect(() => {
+    if (!openArtifactRequest) return;
+    setSelectedArtifactId(openArtifactRequest.artifactId);
+    onSelectedArtifactIdChange?.(openArtifactRequest.artifactId);
+  }, [openArtifactRequest, onSelectedArtifactIdChange]);
 
   useEffect(() => {
     if (status === "loading") return;
@@ -157,6 +167,7 @@ export function SessionEditableArtifactsWorkspace({
                 : "/workspaces/$workspaceId/artifacts/editable/$artifactId"
             }
             params={{ workspaceId, artifactId: artifact.id }}
+            search={sessionId ? { fromSession: sessionId } : {}}
             aria-label={`Open ${artifact.title} full-page`}
           >
             <Maximize2Icon className="size-4" />

@@ -6,7 +6,7 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 mock.module("@/routes/editable-artifact", () => ({
@@ -32,6 +32,73 @@ afterAll(() => {
 });
 
 describe("SessionEditableArtifactsWorkspace empty states", () => {
+  test("chat requests switch an already mounted viewer and can reopen the same Site", async () => {
+    const first = "22222222-2222-4222-8222-222222222222";
+    const second = "44444444-4444-4444-8444-444444444444";
+    const route = createRootRoute({
+      component: () => {
+        const [request, setRequest] = useState<{ artifactId: string; requestId: number } | null>(
+          null,
+        );
+        return (
+          <>
+            <button
+              onClick={() =>
+                setRequest({ artifactId: second, requestId: (request?.requestId ?? 0) + 1 })
+              }
+            >
+              Open linked Site
+            </button>
+            <SessionEditableArtifactsWorkspace
+              workspaceId="11111111-1111-4111-8111-111111111111"
+              artifacts={[
+                { id: first, title: "First", modality: "site" },
+                { id: second, title: "Second", modality: "site" },
+              ]}
+              status="ready"
+              onRetry={() => undefined}
+              openArtifactRequest={request}
+            />
+          </>
+        );
+      },
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      expect(
+        container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
+      ).toBe(first);
+      await act(async () => container.querySelector("button")!.click());
+      expect(
+        container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
+      ).toBe(second);
+      await act(async () => {
+        const select = container.querySelector("select")!;
+        select.value = first;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(
+        container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
+      ).toBe(first);
+      await act(async () => container.querySelector("button")!.click());
+      expect(
+        container.querySelector("[data-site-preview]")?.getAttribute("data-site-preview"),
+      ).toBe(second);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
   test("opens a session Site in the shared preview with a full-page link", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -41,6 +108,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       component: () => (
         <SessionEditableArtifactsWorkspace
           workspaceId="11111111-1111-4111-8111-111111111111"
+          sessionId="33333333-3333-4333-8333-333333333333"
           artifacts={[{ id, title: "Dashboard", modality: "site" }]}
           status="ready"
           onRetry={() => undefined}
@@ -61,7 +129,7 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       ).toBe(id);
       expect(container.textContent).toContain("Embedded Site");
       expect(container.querySelector("a")?.getAttribute("href")).toBe(
-        `/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${id}`,
+        `/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${id}?fromSession=33333333-3333-4333-8333-333333333333`,
       );
     } finally {
       await act(async () => root.unmount());
