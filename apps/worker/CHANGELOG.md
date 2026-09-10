@@ -1,5 +1,16 @@
 # @opengeni/worker-bundle
 
+## 0.28.1
+
+### Patch Changes
+
+- be17b8e: Remove the SDK Skill loader capability and use eager sandbox-free Skill reading
+  with a turn-prepared descriptor index. Keep on-demand checkout and repository
+  Skill discovery separate, and render Skill tool calls consistently in the timeline.
+- Updated dependencies [be17b8e]
+  - @opengeni/runtime@2.5.1
+  - @opengeni/core@2.9.1
+
 ## 0.28.0
 
 ### Minor Changes
