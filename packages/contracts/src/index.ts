@@ -10905,6 +10905,8 @@ export const FikenInstallRequest = z.object({
 export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
 
 export const FikenOAuthStartRequest = z.object({
+  /** Same-origin product route to return to after provider consent. */
+  returnPath: z.string().min(1).max(2048).optional(),
   /** Existing Fiken connection to re-authorize in place (reconnect). */
   connectionId: z.string().uuid().optional(),
 });

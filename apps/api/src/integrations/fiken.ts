@@ -1,3 +1,4 @@
+import { safeReturnPath } from "./oauth-return-path";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
@@ -1116,7 +1117,9 @@ export async function startFikenOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
-    returnPath: `/workspaces/${input.workspaceId}/capabilities`,
+    returnPath: safeReturnPath(
+      input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
+    ),
     ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
     ...(input.externalContinuation
       ? {

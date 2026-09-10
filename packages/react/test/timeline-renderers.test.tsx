@@ -886,6 +886,24 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("lets the authenticated host render setup inline and preserves the fallback", async () => {
+    const row = authNeededItem();
+    const custom = await renderComponent(
+      <TimelineRow
+        item={row}
+        renderAuthNeeded={(value) => <button>Review {value.providerDomain} inline</button>}
+      />,
+    );
+    expect(custom.container.textContent).toContain("Review linear.app inline");
+    expect(custom.container.textContent).not.toContain("This tool call wasn't replayed");
+    await custom.unmount();
+    const fallback = await renderComponent(
+      <TimelineRow item={row} renderAuthNeeded={() => undefined} onReconnect={() => {}} />,
+    );
+    expect(fallback.container.textContent).toContain("Connect Linear");
+    await fallback.unmount();
+  });
+
   test("renders a capability recommendation as ungranted access with one review action", async () => {
     let selected = "";
     const r = await renderComponent(
