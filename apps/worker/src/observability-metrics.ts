@@ -431,17 +431,17 @@ export class TurnLifecycleMetrics {
   refreshGauges(): void {
     this.observability.setGauge({
       name: "opengeni_turns_inflight",
-      help: "Current number of in-flight agent turns in this worker process.",
+      help: "Current number of in-flight physical agent-turn attempts in this worker process.",
       value: this.attempts.size,
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_inflight_age_seconds",
-      help: "Age in seconds of the oldest in-flight agent turn in this worker process.",
+      help: "Age in seconds of the oldest in-flight physical agent-turn attempt in this worker process.",
       value: this.oldestInflightAgeSeconds(),
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_no_progress_age_seconds",
-      help: "Seconds since durable progress for the least recently progressing in-flight turn.",
+      help: "Seconds since durable progress for the least recently progressing in-flight physical agent-turn attempt.",
       value: this.oldestNoProgressAgeSeconds(),
     });
   }

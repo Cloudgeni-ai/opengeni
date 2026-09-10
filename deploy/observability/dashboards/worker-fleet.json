@@ -99,8 +99,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Turns inflight vs eligible backlog (fleet total)",
-      "description": "Temporal activity backlog contains only runAgentTurn work eligible for worker admission. Paused human prompts are intentionally excluded. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
+      "title": "Worker attempts inflight vs eligible turn backlog (fleet total)",
+      "description": "Inflight is a worker-local count of physical runAgentTurn attempts, so overlapping recovery attempts can temporarily exceed the logical active-turn count. Temporal activity backlog contains only logical turn work eligible for worker admission. Paused human prompts are intentionally excluded. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -132,7 +132,7 @@
         {
           "refId": "A",
           "expr": "sum(opengeni_turns_inflight{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
-          "legendFormat": "inflight",
+          "legendFormat": "inflight attempts",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -162,8 +162,8 @@
     },
     {
       "type": "stat",
-      "title": "Oldest inflight turn age (max)",
-      "description": "",
+      "title": "Oldest inflight worker attempt age (max)",
+      "description": "Maximum age of an in-flight physical runAgentTurn attempt across the selected worker fleet.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

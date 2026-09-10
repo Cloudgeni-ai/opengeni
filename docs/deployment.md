@@ -2298,7 +2298,7 @@ Minimum production alerts:
 - API/worker availability: `/healthz` or `/readyz` is unavailable from probes for more than 2 minutes.
 - API errors: 5xx ratio is above 2% for 10 minutes, or any critical route stays above 5% for 5 minutes.
 - API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
-- Turn stuck: the oldest in-flight turn is older than 15 minutes for 5 minutes.
+- Turn stuck: a physical worker attempt has made no durable progress for more than 15 minutes for 5 minutes. Overlapping recovery attempts are counted and aged independently.
 - Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
 - Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 60 seconds, or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.

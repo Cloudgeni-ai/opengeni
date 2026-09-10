@@ -25,6 +25,15 @@ describe("turn lifecycle metrics", () => {
     tracker.refreshGauges();
 
     let metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain(
+      "# HELP opengeni_turns_inflight Current number of in-flight physical agent-turn attempts in this worker process.",
+    );
+    expect(metrics).toContain(
+      "# HELP opengeni_turn_oldest_inflight_age_seconds Age in seconds of the oldest in-flight physical agent-turn attempt in this worker process.",
+    );
+    expect(metrics).toContain(
+      "# HELP opengeni_turn_oldest_no_progress_age_seconds Seconds since durable progress for the least recently progressing in-flight physical agent-turn attempt.",
+    );
     expect(metrics).toMatch(/opengeni_turns_inflight\{[^}]*\} 1/);
     expect(metrics).toMatch(/opengeni_turn_oldest_inflight_age_seconds\{[^}]*\} 3/);
     expect(metrics).toMatch(/opengeni_turn_oldest_no_progress_age_seconds\{[^}]*\} 3/);

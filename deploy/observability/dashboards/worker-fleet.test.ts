@@ -112,7 +112,7 @@ describe("worker fleet dashboard scope", () => {
     }>;
     const byTitle = new Map(panels.map((panel) => [panel.title, panel]));
     const backlogExpression = byTitle
-      .get("Turns inflight vs eligible backlog (fleet total)")
+      .get("Worker attempts inflight vs eligible turn backlog (fleet total)")
       ?.targets?.find((target) => target.refId === "B")?.expr;
     const oldestExpression = byTitle.get("Oldest eligible turn backlog age")?.targets?.[0]?.expr;
 
@@ -139,6 +139,22 @@ describe("worker fleet dashboard scope", () => {
         .filter((sample) => sample.fresh === 1 && sample.lastSuccessAgeSeconds < 45)
         .map((sample) => ({ instance: sample.instance, backlog: sample.backlog })),
     ).toEqual([{ instance: "fresh-zero", backlog: 0 }]);
+
+    const attemptPanel = byTitle.get(
+      "Worker attempts inflight vs eligible turn backlog (fleet total)",
+    ) as
+      | {
+          description?: string;
+          targets?: Array<{ refId?: string; legendFormat?: string }>;
+        }
+      | undefined;
+    expect(attemptPanel?.description).toContain("physical runAgentTurn attempts");
+    expect(attemptPanel?.targets?.find((target) => target.refId === "A")?.legendFormat).toBe(
+      "inflight attempts",
+    );
+    expect(byTitle.get("Oldest inflight worker attempt age (max)")?.description).toContain(
+      "physical runAgentTurn attempt",
+    );
   });
 });
 

@@ -6,6 +6,20 @@ const DEPLOYMENT_SCOPE =
   "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
 
 describe("turn-capacity Prometheus alerts", () => {
+  test("describes the stuck-turn signal as physical attempt telemetry", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const start = template.indexOf("        - alert: OpenGeniTurnStuck\n");
+    const end = template.indexOf("        - alert:", start + 1);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const alert = template.slice(start, end);
+    expect(alert).toContain("opengeni_turn_oldest_no_progress_age_seconds > 900");
+    expect(alert).toContain("worker turn attempt without durable progress");
+    expect(alert).toContain("tracks physical runAgentTurn attempts");
+  });
+
   test("labels the complete rule group with exact deployment identity", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
