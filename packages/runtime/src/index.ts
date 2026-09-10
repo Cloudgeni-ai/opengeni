@@ -214,6 +214,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
+import { z } from "zod";
+
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
@@ -277,6 +279,8 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
+  readRuntimeSkill,
+  skillCatalogFromComposition,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
@@ -285,6 +289,8 @@ import {
 export {
   composeRuntimeSkills,
   loadNativeToolSkillArtifacts,
+  readRuntimeSkill,
+  skillCatalogFromComposition,
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
@@ -2364,6 +2370,12 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+const SkillReadToolInput = z.object({
+  skill: z.string().min(1).max(512),
+  listFiles: z.boolean().optional(),
+  paths: z.array(z.string().min(1).max(1024)).min(1).max(128).optional(),
+});
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -2379,6 +2391,22 @@ export function buildOpenGeniAgent(
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
     options.attemptToolCatalog,
   );
+  const sandboxBackend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    editableArtifacts: editableArtifactToolsAvailable,
+    sites: sandboxBackend !== "selfhosted" && sandboxBackend !== "none",
+    videoGeneration:
+      Boolean(options.videoGeneration) &&
+      sandboxBackend !== "selfhosted" &&
+      sandboxBackend !== "none",
+  });
+  const hostSuppliedSkillCatalog = options.skillCatalog !== undefined;
+  const skillCatalog = hostSuppliedSkillCatalog
+    ? options.skillCatalog
+    : skillComposition.index.length > 0
+      ? skillCatalogFromComposition(skillComposition)
+      : undefined;
+  const instructionOptions: BuildAgentOptions = { ...options, skillCatalog };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2511,7 +2539,19 @@ export function buildOpenGeniAgent(
     ...(videoGenerationTool ? [videoGenerationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
-  const instructionInspection = inspectPersistentAgentInstructions(settings, options);
+  const embeddedSkillReadTool =
+    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+      ? agentTool({
+          name: "skill_read",
+          description:
+            "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
+          parameters: SkillReadToolInput,
+          errorFunction: null,
+          execute: (input) => JSON.stringify(readRuntimeSkill(skillComposition, input)),
+        })
+      : null;
+  if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
+  const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -2574,6 +2614,8 @@ export function buildOpenGeniAgent(
     const agent = new Agent(baseConfig);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
+    agentSkillSelections.set(agent, skillComposition.selections);
+    agentRuntimeSkillIndex.set(agent, skillComposition.index);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
@@ -2602,22 +2644,6 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  const skillComposition = composeRuntimeSkills(
-    options.skillActivations ?? [],
-    {
-      editableArtifacts: editableArtifactToolsAvailable,
-      // Sites guidance is bundled capability metadata, not eager tool authority.
-      // Tool discovery/execution remains governed by the lazy attempt gateway.
-      sites:
-        (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
-      // A connected machine owns its filesystem, and its session deliberately
-      // does not materialize host-local bundled Site files. Keep the executable
-      // tools, but expose the bundled helper only where it can be read.
-      videoGeneration:
-        Boolean(options.videoGeneration) &&
-        options.activeSandboxBackend !== "selfhosted",
-    },
-  );
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
