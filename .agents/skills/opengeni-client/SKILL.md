@@ -227,8 +227,10 @@ explicit workspace membership described in `references/external-users-and-connec
 verified external owners can create private sessions when the organization enables
 that feature. Private sessions do not make workspace Files or Sites private.
 Managed-human Only-me sessions are not a backend impersonation mechanism. A live
-agent with cross-session tools can reach unrelated sessions only when both
-sessions' agent reach policies and ordinary resource authorization allow it.
+agent with cross-session tools can reach unrelated sessions only when its
+outbound `agentAccess` scope and ordinary resource authorization allow it.
+The target's `agentAccess` never restricts inbound access; private-session
+ownership and ordinary permissions still apply.
 Removing tools is not a substitute for private human visibility.
 
 The external backend owns product Skills. Store and version them outside

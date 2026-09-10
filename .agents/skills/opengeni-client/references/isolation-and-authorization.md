@@ -22,7 +22,7 @@ A workspace is control-plane state, not a dedicated cluster or permanently runni
 
 - A top-level session created by an organization API key defaults to workspace visibility.
 - Private or Only-me sessions require verified owning-user authority and organization activation. Native managed sessions and the server-side `asUser()` path establish that authority; a raw `endUser` payload does not.
-- An agent must pass ordinary permissions and private-session ownership checks. `agentAccess` optionally narrows reach further: `session` stays in its root tree; `user` requires matching canonical scope users across trees; `workspace` adds no further restriction. Both caller and target policies apply. None of these modes overrides private visibility.
+- An agent must pass ordinary permissions and private-session ownership checks. The caller's `agentAccess` narrows outbound reach: `session` stays in its root tree; `user` requires matching non-null canonical scope users across trees; `workspace` adds no further restriction. The target's `agentAccess` never restricts inbound access. None of these modes overrides private visibility.
 - Workspace Memory controls retrieval and saving of workspace facts. Turning it off does not remove session history, change session visibility, or neutralize cross-session tools.
 - Hiding session-list and session-get alone is incomplete. Events, waiting, messaging, control, discovery, workspace Memory, documents, notes, or other workspace-wide tools may still cross the intended boundary.
 

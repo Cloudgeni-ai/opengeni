@@ -51,15 +51,15 @@ Then open the smallest source files that answer the question:
   `withDirectHostMcpAdmission` prepares a locked direct-turn snapshot only; its
   callback must persist within canonical accepted-work transaction boundaries.
   Never call it for scheduled/inherited work or treat it as caller authentication.
-  `captureDirectHostMcpAuthority` persists that snapshot in the 0440 append-only
+  `captureDirectHostMcpAuthority` persists that snapshot in the 0445 append-only
   ledger with an independent canonical insert guard. Production capture callers
   now capture atomically for explicit direct initial-turn and follow-up send/steer selection. Worker `authorizeDirectHostMcpUse` validates captured direct
-  work and exact same-session causal resumptions. Migration 0441 separately
+  work and exact same-session causal resumptions. Migration 0446 separately
   proves delivered goal/child-result lineage before copying authority. Revoked
-  selections are omitted, not broadened. Migration 0442 freezes host selections
+  selections are omitted, not broadened. Migration 0447 freezes host selections
   on native task revisions and captures exact scheduled runs; retain promotion
   during reusable-session materialization and restore source revisions on rollback.
-  Migration 0443 admits only the spawning turn's selected `always` grants to a
+  Migration 0448 admits only the spawning turn's selected `always` grants to a
   child's initial turn. Scheduled origin survives successors. Agent-created
   schedules use the live accepted attempt, never a creator account lookup.
   Preserve frozen initiatingHumanSubjectId independently of service audit identity.
