@@ -1951,7 +1951,7 @@ export type BuildAgentOptions = {
    * executable tool catalog.
    */
   skillActivations?: readonly RuntimeSkillActivation[];
-  /** Server-backed Skill descriptors, independent of sandbox capabilities. */
+  /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
@@ -2391,22 +2391,29 @@ export function buildOpenGeniAgent(
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
     options.attemptToolCatalog,
   );
-  const sandboxBackend = options.activeSandboxBackend ?? settings.sandboxBackend;
-  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
-    editableArtifacts: editableArtifactToolsAvailable,
-    sites: sandboxBackend !== "selfhosted" && sandboxBackend !== "none",
-    videoGeneration:
-      Boolean(options.videoGeneration) &&
-      sandboxBackend !== "selfhosted" &&
-      sandboxBackend !== "none",
-  });
   const hostSuppliedSkillCatalog = options.skillCatalog !== undefined;
+  if (hostSuppliedSkillCatalog && options.skillActivations?.length) {
+    throw new Error(
+      "Supply either host Skill catalog/reader or runtime Skill activations, not both.",
+    );
+  }
+  // Site authoring needs filesystem execution; managed and connected compute
+  // are equivalent. Reading supplied Skill files never needs either.
+  const filesystemAvailable = (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
+  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
+    sites: !hostSuppliedSkillCatalog && filesystemAvailable,
+    videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),
+  });
   const skillCatalog = hostSuppliedSkillCatalog
     ? options.skillCatalog
     : skillComposition.index.length > 0
       ? skillCatalogFromComposition(skillComposition)
       : undefined;
-  const instructionOptions: BuildAgentOptions = { ...options, skillCatalog };
+  const instructionOptions: BuildAgentOptions = {
+    ...options,
+    ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+  };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2547,7 +2554,14 @@ export function buildOpenGeniAgent(
             "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
           parameters: SkillReadToolInput,
           errorFunction: null,
-          execute: (input) => JSON.stringify(readRuntimeSkill(skillComposition, input)),
+          execute: (input) =>
+            JSON.stringify(
+              readRuntimeSkill(skillComposition, {
+                skill: input.skill,
+                ...(input.paths !== undefined ? { paths: input.paths } : {}),
+                ...(input.listFiles !== undefined ? { listFiles: input.listFiles } : {}),
+              }),
+            ),
         })
       : null;
   if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);

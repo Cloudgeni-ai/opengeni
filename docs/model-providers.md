@@ -518,7 +518,7 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-`load_skill`, `request_human_input`, `list_models`), and exact session MCP refs marked
+`skill_read`, `request_human_input`, `list_models`), and exact session MCP refs marked
 `eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
 `generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
@@ -759,7 +759,7 @@ Progressive disclosure is selected explicitly per resolved provider:
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
-`apply_patch`, `view_image`, `load_skill`, `request_human_input`, `list_models`) plus MCP
+`apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`) plus MCP
 tools whose session `ToolRef.eager` is true. Every other function tool —
 deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
 `get_video_generation_capabilities`, and later first-party additions — is

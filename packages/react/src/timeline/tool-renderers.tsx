@@ -2362,7 +2362,7 @@ function GenericToolIcon({ name }: { name: string }) {
                                 ? FileSearchIcon
                                 : leaf === "tool_search"
                                   ? PackageSearchIcon
-                                  : leaf === "load_skill"
+                                  : leaf.startsWith("skill_")
                                     ? PlugIcon
                                     : WrenchIcon;
   return <Icon className={ICON_SIZE} />;

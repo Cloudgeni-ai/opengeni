@@ -30,6 +30,26 @@ export function assertSkillRelativePath(path: string): void {
   }
 }
 
+/** Inventory shares the reader's path validation and never includes file bodies. */
+export function listSkillPaths(
+  files: readonly SkillTextFile[],
+  maxFiles: number,
+): { paths: string[] } {
+  if (files.length > maxFiles)
+    throw new SkillFileError("output_too_large", `Skill inventory exceeds ${maxFiles} files.`);
+  const seen = new Set<string>();
+  for (const { path } of files) {
+    assertSkillRelativePath(path);
+    if (seen.has(path))
+      throw new SkillFileError("invalid_request", `Duplicate stored Skill path: ${path}`);
+    seen.add(path);
+  }
+  const result = { paths: [...seen].sort() };
+  if (new TextEncoder().encode(JSON.stringify(result)).byteLength > SKILL_READ_MAX_OUTPUT_BYTES)
+    throw new SkillFileError("output_too_large", "Skill inventory exceeds the read output limit.");
+  return result;
+}
+
 /** Omitted paths default to the entry point; explicit paths are never expanded. */
 export function readSkillFiles(
   files: readonly SkillTextFile[],

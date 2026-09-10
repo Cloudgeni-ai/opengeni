@@ -858,7 +858,7 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `load_skill`, `skill_read`,
+`write_stdin`, `apply_patch`, `view_image`, `skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas

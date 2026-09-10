@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
-import {
-  buildOpenGeniAgent,
-  composeRuntimeSkills,
-  runtimeSkillIndexForAgent,
-} from "../src";
+import { buildOpenGeniAgent, composeRuntimeSkills, runtimeSkillIndexForAgent } from "../src";
 
 const capabilities = {
   schemaVersion: 1 as const,
@@ -52,10 +48,14 @@ describe("video generation runtime surface", () => {
         (tool) => tool.name,
       );
     expect(names(disabled)).toEqual([]);
-    expect(names(enabled)).toEqual(["get_video_generation_capabilities", "generate_video"]);
+    expect(names(enabled)).toEqual([
+      "get_video_generation_capabilities",
+      "generate_video",
+      "skill_read",
+    ]);
   });
 
-  test("keeps its lazy skill absent unless the same executable boundary is enabled", () => {
+  test("keeps its Skill absent unless the same executable boundary is enabled", () => {
     const disabled = composeRuntimeSkills([]);
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
@@ -66,7 +66,7 @@ describe("video generation runtime surface", () => {
     expect(enabled.index.map((entry) => entry.name)).toContain("opengeni-video-generation");
   });
 
-  test("keeps video tools but does not advertise an undeliverable skill on connected machines", () => {
+  test("keeps video tools and server-readable guidance on connected machines", () => {
     const agent = buildOpenGeniAgent(
       testSettings({ sandboxBackend: "selfhosted", webSearchEnabled: false }),
       [],
@@ -88,8 +88,12 @@ describe("video generation runtime surface", () => {
       (tool) => tool.name,
     );
 
-    expect(toolNames).toEqual(["get_video_generation_capabilities", "generate_video"]);
-    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).not.toContain(
+    expect(toolNames).toEqual([
+      "get_video_generation_capabilities",
+      "generate_video",
+      "skill_read",
+    ]);
+    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain(
       "opengeni-video-generation",
     );
   });

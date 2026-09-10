@@ -9,12 +9,7 @@ import {
   buildPortableSkillArtifact,
   readSkillLibraryArtifact,
 } from "./skill-library";
-import {
-  SKILL_READ_MAX_OUTPUT_BYTES,
-  SkillFileError,
-  assertSkillRelativePath,
-  readSkillFiles,
-} from "./skill-files";
+import { SkillFileError, listSkillPaths, readSkillFiles } from "./skill-files";
 import type { SkillCatalogDescriptor } from "./skill-catalog";
 
 export type RuntimeSkillArtifactFile = Readonly<{
@@ -257,16 +252,18 @@ export function readRuntimeSkill(
   request: RuntimeSkillReadRequest,
 ): { skillId: string; files?: ReturnType<typeof readSkillFiles>["files"]; paths?: string[] } {
   const skill = request.skill.trim();
-  if (!skill) throw new SkillFileError("invalid_request", "skill_read requires a Skill identifier.");
+  if (!skill)
+    throw new SkillFileError("invalid_request", "skill_read requires a Skill identifier.");
   if (request.listFiles === true && request.paths !== undefined) {
     throw new SkillFileError(
       "invalid_request",
       "skill_read listFiles:true cannot be combined with paths.",
     );
   }
-  const matches = composition.artifacts.filter(
-    (artifact) => artifact.id === skill || artifact.name === skill,
-  );
+  const exact = composition.artifacts.find((artifact) => artifact.id === skill);
+  const matches = exact
+    ? [exact]
+    : composition.artifacts.filter((artifact) => artifact.name === skill);
   if (matches.length === 0) {
     throw new SkillFileError("missing_file", `Skill not found: ${skill}`);
   }
@@ -278,34 +275,12 @@ export function readRuntimeSkill(
   }
   const artifact = matches[0]!;
   if (request.listFiles === true) {
-    return { skillId: artifact.id, paths: listSkillPaths(artifact.files) };
+    return { skillId: artifact.id, ...listSkillPaths(artifact.files, PORTABLE_SKILL_MAX_FILES) };
   }
   return {
     skillId: artifact.id,
     files: readSkillFiles(artifact.files, request.paths).files,
   };
-}
-
-function listSkillPaths(files: readonly RuntimeSkillArtifactFile[]): string[] {
-  if (files.length > PORTABLE_SKILL_MAX_FILES) {
-    throw new SkillFileError(
-      "output_too_large",
-      `Skill inventory exceeds ${PORTABLE_SKILL_MAX_FILES} files.`,
-    );
-  }
-  const seen = new Set<string>();
-  for (const { path } of files) {
-    assertSkillRelativePath(path);
-    if (seen.has(path)) {
-      throw new SkillFileError("invalid_request", `Duplicate stored Skill path: ${path}`);
-    }
-    seen.add(path);
-  }
-  const paths = [...seen].sort();
-  if (Buffer.byteLength(JSON.stringify({ paths }), "utf8") > SKILL_READ_MAX_OUTPUT_BYTES) {
-    throw new SkillFileError("output_too_large", "Skill inventory exceeds the read output limit.");
-  }
-  return paths;
 }
 
 function resolveEffectiveActivations(

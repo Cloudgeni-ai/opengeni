@@ -13,6 +13,7 @@ export { parseSkillFrontmatter as parsePortableSkillFrontmatter } from "@opengen
 export {
   applySkillFileChanges,
   assertSkillRelativePath,
+  listSkillPaths,
   readSkillFiles,
   SkillFileError,
   SKILL_READ_MAX_OUTPUT_BYTES,
