@@ -57,6 +57,28 @@ describe("goalContinuationPrompt", () => {
     expect(prompt).not.toContain("take the next useful action");
   });
 
+  test.each([true, false])(
+    "distinguishes actionable unfinished work from external blockage (inputWaitAvailable=%s)",
+    (inputWaitAvailable) => {
+      const prompt = goalContinuationPrompt(
+        { text: "Ship the fix" } as Parameters<typeof goalContinuationPrompt>[0],
+        3,
+        null,
+        { inputWaitAvailable },
+      );
+
+      expect(prompt).toContain(
+        "An incomplete-status report is not a substitute for continuing the work",
+      );
+      expect(prompt).toContain(
+        "If the remaining problem can be investigated or addressed within your current authority, continue that work in this turn rather than returning another equivalent status-only final",
+      );
+      expect(prompt).toContain(
+        "Distinguish unfinished work from a blocker that actually requires human input or external change; use the existing waiting and blocked audits only when their conditions hold",
+      );
+    },
+  );
+
   test("teaches wait_for_input only when the tool is in the session's selection", () => {
     const goal = { text: "Ship the fix" } as Parameters<typeof goalContinuationPrompt>[0];
     const withWait = goalContinuationPrompt(goal, 1, null, { inputWaitAvailable: true });
