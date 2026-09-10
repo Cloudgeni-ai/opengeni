@@ -451,6 +451,8 @@ probes remain immediate.
 
 Rotation recovery: [lifecycle](run-lifecycle.md).
 
+Archive capture/restore: [storage](workspace-archive-storage.md).
+
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.

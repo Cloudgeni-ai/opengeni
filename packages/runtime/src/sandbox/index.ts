@@ -24,6 +24,15 @@ export type {
 
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
+import type { WorkspaceArchiveSpool } from "./archive-spool";
+import { restoreHostWorkspaceArchive } from "./host-archive-spool";
+export {
+  captureWorkspaceArchiveForStorage,
+  disposeWorkspaceArchive,
+  type VerifiedWorkspaceArchivePayload,
+} from "./workspace-archive";
+
 import {
   BROWSER_CONTROL_PORT,
   DESKTOP_STREAM_PORT,
@@ -31,6 +40,9 @@ import {
   TERMINAL_STREAM_PORT,
   omitInlineWorkspaceArchiveWhenObjectRefPresent,
   parseWorkspaceArchiveObjectRef,
+  parseWorkspaceArchiveDescriptor,
+  type WorkspaceArchiveObjectRef,
+  type TarWorkspaceArchiveDescriptor,
   type SandboxBackend,
   type SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
@@ -1676,9 +1688,16 @@ async function terminateCreatedSandbox(
 }
 
 type ModalNativeWorkspacePersistence = "snapshot_filesystem" | "snapshot_directory";
+type RestoreWorkspaceArchive =
+  | VerifiedWorkspaceArchive
+  | {
+      kind: "host_spool";
+      descriptor: TarWorkspaceArchiveDescriptor;
+      ref: WorkspaceArchiveObjectRef;
+    };
 
 function modalWorkspacePersistenceForRestore(
-  archive: VerifiedWorkspaceArchive | null,
+  archive: RestoreWorkspaceArchive | null,
 ): ModalNativeWorkspacePersistence | null {
   if (archive?.kind !== "provider_snapshot") return null;
   const snapshot = archive.nativeSnapshot;
@@ -1707,7 +1726,7 @@ function modalWorkspacePersistenceForRestore(
 function settingsForWorkspaceArchiveRestore(
   backend: SandboxBackend,
   settings: Settings,
-  archive: VerifiedWorkspaceArchive | null,
+  archive: RestoreWorkspaceArchive | null,
 ): Settings {
   if (backend !== "modal") return settings;
   const workspacePersistence = modalWorkspacePersistenceForRestore(archive);
@@ -1735,6 +1754,7 @@ export async function establishSandboxSessionFromEnvelope(
   opts: {
     sessionId: string;
     recovery: "create-or-restore" | "resume-only";
+    loadHostWorkspaceArchive?: (ref: WorkspaceArchiveObjectRef) => Promise<WorkspaceArchiveSpool>;
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
@@ -1817,6 +1837,7 @@ export async function establishSandboxSessionFromEnvelope(
     envelopeSessionState && typeof envelopeSessionState === "object"
       ? (envelopeSessionState as {
           workspaceArchive?: unknown;
+          workspaceArchiveRef?: unknown;
           workspaceArchiveMeta?: unknown;
         })
       : undefined;
@@ -1838,220 +1859,217 @@ export async function establishSandboxSessionFromEnvelope(
     // Parse/verify lazily: a warm resume-by-id does not consume its retained
     // archive, so a legacy live box remains resumable. Creation/restoration is
     // the boundary that requires complete durable metadata.
-    const workspaceArchive: VerifiedWorkspaceArchive | null = readVerifiedWorkspaceArchive(
+    let workspaceArchive: RestoreWorkspaceArchive | null = readVerifiedWorkspaceArchive(
       workspaceArchiveBase64,
       workspaceArchiveMetadata,
     );
-    // The selected native artifact is the durable authority for its restore
-    // protocol. The process setting governs new sandboxes only: a mode rollout
-    // must not make an older, verified Modal snapshot impossible to hydrate.
-    const restoreSettings = settingsForWorkspaceArchiveRestore(backend, settings, workspaceArchive);
-    const restoreClient =
-      restoreSettings === settings
-        ? client
-        : ((opts.clientFactory
-            ? opts.clientFactory(backend, restoreSettings, environment)
-            : createSandboxClientForBackend(
-                backend,
-                restoreSettings,
-                environment,
-                opts.metrics,
-              )) as ResumeCapableClient | undefined);
-    if (!restoreClient?.create) {
-      throw new SandboxConfigError(
-        backend,
-        `Sandbox backend "${backend}" does not support fresh archive restoration`,
+    const objectRef = parseWorkspaceArchiveObjectRef(archiveState?.workspaceArchiveRef);
+    const objectDescriptor = parseWorkspaceArchiveDescriptor(workspaceArchiveMetadata);
+    if (
+      process.platform === "linux" &&
+      objectRef &&
+      objectDescriptor?.version === 1 &&
+      objectDescriptor.workspace.projection === "sdk_local_archive_v1" &&
+      opts.loadHostWorkspaceArchive
+    ) {
+      if (
+        (backend !== "local" && backend !== "docker") ||
+        objectRef.sha256 !== objectDescriptor.archiveSha256 ||
+        objectRef.bytes !== objectDescriptor.archiveBytes
+      ) {
+        throw new WorkspaceArchiveIntegrityError(
+          "archive_metadata_invalid",
+          "Host archive object reference does not match its provider and descriptor",
+        );
+      }
+      workspaceArchive = { kind: "host_spool", descriptor: objectDescriptor, ref: objectRef };
+    }
+    if (objectRef && !workspaceArchive) {
+      throw new WorkspaceArchiveIntegrityError(
+        "archive_hydration_failed",
+        "Selected workspace archive object has no supported restore loader",
       );
     }
-    let createdClient = restoreClient;
-    const createStarted = Date.now();
-    let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
+    let hostSpool: WorkspaceArchiveSpool | undefined;
     try {
-      restored = await restoreClient.create({ manifest: createManifest });
-      recordSandboxCreateMetric(
-        opts.metrics,
-        restoreClient.backendId,
-        createImageSource,
-        "completed",
-        createStarted,
-      );
-    } catch (error) {
-      recordSandboxCreateMetric(
-        opts.metrics,
-        restoreClient.backendId,
-        createImageSource,
-        "failed",
-        createStarted,
-      );
-      recordSandboxProviderApiThrottleMetric(
-        opts.metrics,
-        restoreClient.backendId,
-        "create",
-        error,
-      );
-      if (
-        createImageSource !== "provider_immutable" ||
-        backend !== "modal" ||
-        !isProviderSandboxNotFoundError(restoreClient.backendId, error)
-      ) {
-        throw error;
+      // Preserve the pre-create integrity boundary used by inline archives.
+      // A missing/corrupt object must not create a provider just to delete it.
+      if (workspaceArchive?.kind === "host_spool") {
+        hostSpool = await opts.loadHostWorkspaceArchive!(workspaceArchive.ref);
+        if (
+          hostSpool.sha256 !== workspaceArchive.descriptor.archiveSha256 ||
+          hostSpool.byteSize !== workspaceArchive.descriptor.archiveBytes
+        ) {
+          throw new WorkspaceArchiveIntegrityError(
+            "archive_hash_mismatch",
+            "Downloaded workspace archive does not match its descriptor",
+          );
+        }
       }
-      const fallbackBaseSettings =
-        opts.logicalFallbackSettings ??
-        (settings.modalImageRef ? { ...settings, modalImageId: undefined } : null);
-      if (!fallbackBaseSettings) {
-        // An ID-only logical base is supported. Without the exact pre-selection
-        // settings, clearing the optimized ID would silently boot Modal's
-        // default image, so fail closed instead of changing the rig base.
-        throw error;
-      }
-      const fallbackSettings = settingsForWorkspaceArchiveRestore(
+      // The selected native artifact is the durable authority for its restore
+      // protocol. The process setting governs new sandboxes only: a mode rollout
+      // must not make an older, verified Modal snapshot impossible to hydrate.
+      const restoreSettings = settingsForWorkspaceArchiveRestore(
         backend,
-        fallbackBaseSettings,
+        settings,
         workspaceArchive,
       );
-      await ensureModalRegistryImage(fallbackSettings);
-      const fallbackClient = (
-        opts.clientFactory
-          ? opts.clientFactory(backend, fallbackSettings, environment)
-          : createSandboxClientForBackend(backend, fallbackSettings, environment, opts.metrics)
-      ) as ResumeCapableClient | undefined;
-      if (!fallbackClient?.create) {
+      const restoreClient =
+        restoreSettings === settings
+          ? client
+          : ((opts.clientFactory
+              ? opts.clientFactory(backend, restoreSettings, environment)
+              : createSandboxClientForBackend(
+                  backend,
+                  restoreSettings,
+                  environment,
+                  opts.metrics,
+                )) as ResumeCapableClient | undefined);
+      if (!restoreClient?.create) {
         throw new SandboxConfigError(
           backend,
-          "Modal logical-image fallback does not support fresh creation",
+          `Sandbox backend "${backend}" does not support fresh archive restoration`,
         );
       }
-      const fallbackStarted = Date.now();
+      let createdClient = restoreClient;
+      const createStarted = Date.now();
+      let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
       try {
-        restored = await fallbackClient.create({ manifest: createManifest });
+        restored = await restoreClient.create({ manifest: createManifest });
         recordSandboxCreateMetric(
           opts.metrics,
-          fallbackClient.backendId,
-          "logical",
+          restoreClient.backendId,
+          createImageSource,
           "completed",
-          fallbackStarted,
+          createStarted,
         );
-        createdClient = fallbackClient;
-      } catch (fallbackError) {
+      } catch (error) {
         recordSandboxCreateMetric(
           opts.metrics,
-          fallbackClient.backendId,
-          "logical",
+          restoreClient.backendId,
+          createImageSource,
           "failed",
-          fallbackStarted,
+          createStarted,
         );
         recordSandboxProviderApiThrottleMetric(
           opts.metrics,
-          fallbackClient.backendId,
+          restoreClient.backendId,
           "create",
-          fallbackError,
+          error,
         );
-        throw fallbackError;
-      }
-    }
-    let restoredState = (restored as { state?: unknown }).state;
-    const restoredInstanceId = readInstanceId(backend, restored);
-    if (!restoredInstanceId) {
-      await terminateCreatedSandbox(createdClient, restored, restoredState);
-      throw new SandboxConfigError(
-        backend,
-        `Sandbox backend "${backend}" created a handle without its declared provider identity`,
-      );
-    }
-    let established: EstablishedSandboxSession = {
-      client: createdClient,
-      session: restored,
-      sessionState: restoredState ?? resumeFallbackState,
-      instanceId: restoredInstanceId,
-      backendId: createdClient.backendId,
-    };
-    if (opts.onSandboxCreated) {
-      try {
-        await opts.onSandboxCreated(established);
-      } catch (createCallbackError) {
-        await terminateCreatedSandbox(createdClient, restored, restoredState);
-        throw createCallbackError;
-      }
-    }
-    let hydrationApplied = false;
-    if (workspaceArchive) {
-      const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
-        .hydrateWorkspace;
-      if (typeof hydrate !== "function") {
-        await terminateCreatedSandbox(createdClient, restored, restoredState);
-        throw new WorkspaceArchiveIntegrityError(
-          "archive_hydration_failed",
-          `sandbox backend ${createdClient.backendId} cannot hydrate selected archive revision ${workspaceArchive.descriptor.revision}`,
-        );
-      }
-      try {
-        // hydrateWorkspace may internally replace the underlying box.
-        await hydrate.call(restored, workspaceArchive.bytes);
-      } catch (error) {
-        await terminateCreatedSandbox(
-          createdClient,
-          restored,
-          (restored as { state?: unknown }).state,
-        );
-        if (error instanceof WorkspaceArchiveIntegrityError) throw error;
-        throw new WorkspaceArchiveIntegrityError(
-          "archive_hydration_failed",
-          `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
-          { retryable: true, cause: error },
-        );
-      }
-      // hydrateWorkspace may replace the provider box (Modal's native snapshot
-      // restore does this). Attribute the newly-active identity immediately,
-      // before restore-state marking, fingerprint verification, or any caller
-      // can publish the box warm. The callback is the durable lease/tagging
-      // boundary; if it cannot persist the replacement, the caller fails closed
-      // and this exact replacement is terminated below.
-      const hydratedState = (restored as { state?: unknown }).state;
-      const hydratedInstanceId = readInstanceId(backend, restored);
-      if (!hydratedInstanceId) {
-        await terminateCreatedSandbox(createdClient, restored, hydratedState);
-        throw new SandboxConfigError(
-          backend,
-          `Sandbox backend "${backend}" hydrated a handle without its declared provider identity`,
-        );
-      }
-      if (hydratedInstanceId !== established.instanceId) {
-        established = {
-          client: createdClient,
-          session: restored,
-          sessionState: hydratedState ?? resumeFallbackState,
-          instanceId: hydratedInstanceId,
-          backendId: createdClient.backendId,
-        };
-        if (opts.onSandboxCreated) {
-          try {
-            await opts.onSandboxCreated(established);
-          } catch (createCallbackError) {
-            await terminateCreatedSandbox(createdClient, restored, hydratedState);
-            throw createCallbackError;
-          }
-        }
-      }
-      if (opts.onWorkspaceRestoreVerifying) {
-        try {
-          await opts.onWorkspaceRestoreVerifying(workspaceArchive.descriptor);
-        } catch (error) {
-          await terminateCreatedSandbox(
-            createdClient,
-            restored,
-            (restored as { state?: unknown }).state,
-          );
+        if (
+          createImageSource !== "provider_immutable" ||
+          backend !== "modal" ||
+          !isProviderSandboxNotFoundError(restoreClient.backendId, error)
+        ) {
           throw error;
         }
-      }
-      // Native provider snapshots are restored by their exact opaque receipt.
-      // OpenGeni verifies receipt identity/hash before hydration, but it must not
-      // impose a tar/inode equivalence contract on the provider's filesystem
-      // image. Tar archives remain content-verified after hydration.
-      if (workspaceArchive.kind === "tar") {
+        const fallbackBaseSettings =
+          opts.logicalFallbackSettings ??
+          (settings.modalImageRef ? { ...settings, modalImageId: undefined } : null);
+        if (!fallbackBaseSettings) {
+          // An ID-only logical base is supported. Without the exact pre-selection
+          // settings, clearing the optimized ID would silently boot Modal's
+          // default image, so fail closed instead of changing the rig base.
+          throw error;
+        }
+        const fallbackSettings = settingsForWorkspaceArchiveRestore(
+          backend,
+          fallbackBaseSettings,
+          workspaceArchive,
+        );
+        await ensureModalRegistryImage(fallbackSettings);
+        const fallbackClient = (
+          opts.clientFactory
+            ? opts.clientFactory(backend, fallbackSettings, environment)
+            : createSandboxClientForBackend(backend, fallbackSettings, environment, opts.metrics)
+        ) as ResumeCapableClient | undefined;
+        if (!fallbackClient?.create) {
+          throw new SandboxConfigError(
+            backend,
+            "Modal logical-image fallback does not support fresh creation",
+          );
+        }
+        const fallbackStarted = Date.now();
         try {
-          await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+          restored = await fallbackClient.create({ manifest: createManifest });
+          recordSandboxCreateMetric(
+            opts.metrics,
+            fallbackClient.backendId,
+            "logical",
+            "completed",
+            fallbackStarted,
+          );
+          createdClient = fallbackClient;
+        } catch (fallbackError) {
+          recordSandboxCreateMetric(
+            opts.metrics,
+            fallbackClient.backendId,
+            "logical",
+            "failed",
+            fallbackStarted,
+          );
+          recordSandboxProviderApiThrottleMetric(
+            opts.metrics,
+            fallbackClient.backendId,
+            "create",
+            fallbackError,
+          );
+          throw fallbackError;
+        }
+      }
+      let restoredState = (restored as { state?: unknown }).state;
+      const restoredInstanceId = readInstanceId(backend, restored);
+      if (!restoredInstanceId) {
+        await terminateCreatedSandbox(createdClient, restored, restoredState);
+        throw new SandboxConfigError(
+          backend,
+          `Sandbox backend "${backend}" created a handle without its declared provider identity`,
+        );
+      }
+      let established: EstablishedSandboxSession = {
+        client: createdClient,
+        session: restored,
+        sessionState: restoredState ?? resumeFallbackState,
+        instanceId: restoredInstanceId,
+        backendId: createdClient.backendId,
+      };
+      if (opts.onSandboxCreated) {
+        try {
+          await opts.onSandboxCreated(established);
+        } catch (createCallbackError) {
+          await terminateCreatedSandbox(createdClient, restored, restoredState);
+          throw createCallbackError;
+        }
+      }
+      let hydrationApplied = false;
+      if (workspaceArchive) {
+        const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
+          .hydrateWorkspace;
+        if (workspaceArchive.kind !== "host_spool" && typeof hydrate !== "function") {
+          await terminateCreatedSandbox(createdClient, restored, restoredState);
+          throw new WorkspaceArchiveIntegrityError(
+            "archive_hydration_failed",
+            `sandbox backend ${createdClient.backendId} cannot hydrate selected archive revision ${workspaceArchive.descriptor.revision}`,
+          );
+        }
+        try {
+          // hydrateWorkspace may internally replace the underlying box.
+          if (workspaceArchive.kind === "host_spool") {
+            // This is the exact newly-created, unpublished destination. The lease
+            // restore fence must exclude admitted writers until verification ends;
+            // descriptor-relative filesystem access alone is not writer isolation.
+            const root = (restored as { state?: { workspaceRootPath?: unknown } }).state
+              ?.workspaceRootPath;
+            if (typeof root !== "string")
+              throw new WorkspaceArchiveIntegrityError(
+                "archive_hydration_failed",
+                "Host archive restore has no exact workspace root",
+              );
+            await restoreHostWorkspaceArchive(root, hostSpool!, {
+              archiveLimits: Reflect.get(restored as object, "archiveLimits"),
+            });
+          } else await hydrate!.call(restored, workspaceArchive.bytes);
         } catch (error) {
           await terminateCreatedSandbox(
             createdClient,
@@ -2060,35 +2078,106 @@ export async function establishSandboxSessionFromEnvelope(
           );
           if (error instanceof WorkspaceArchiveIntegrityError) throw error;
           throw new WorkspaceArchiveIntegrityError(
-            "workspace_fingerprint_unavailable",
-            `failed to verify selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
-            { retryable: true },
+            "archive_hydration_failed",
+            `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
+            { retryable: true, cause: error },
           );
         }
+        // hydrateWorkspace may replace the provider box (Modal's native snapshot
+        // restore does this). Attribute the newly-active identity immediately,
+        // before restore-state marking, fingerprint verification, or any caller
+        // can publish the box warm. The callback is the durable lease/tagging
+        // boundary; if it cannot persist the replacement, the caller fails closed
+        // and this exact replacement is terminated below.
+        const hydratedState = (restored as { state?: unknown }).state;
+        const hydratedInstanceId = readInstanceId(backend, restored);
+        if (!hydratedInstanceId) {
+          await terminateCreatedSandbox(createdClient, restored, hydratedState);
+          throw new SandboxConfigError(
+            backend,
+            `Sandbox backend "${backend}" hydrated a handle without its declared provider identity`,
+          );
+        }
+        if (hydratedInstanceId !== established.instanceId) {
+          established = {
+            client: createdClient,
+            session: restored,
+            sessionState: hydratedState ?? resumeFallbackState,
+            instanceId: hydratedInstanceId,
+            backendId: createdClient.backendId,
+          };
+          if (opts.onSandboxCreated) {
+            try {
+              await opts.onSandboxCreated(established);
+            } catch (createCallbackError) {
+              await terminateCreatedSandbox(createdClient, restored, hydratedState);
+              throw createCallbackError;
+            }
+          }
+        }
+        if (opts.onWorkspaceRestoreVerifying) {
+          try {
+            await opts.onWorkspaceRestoreVerifying(workspaceArchive.descriptor);
+          } catch (error) {
+            await terminateCreatedSandbox(
+              createdClient,
+              restored,
+              (restored as { state?: unknown }).state,
+            );
+            throw error;
+          }
+        }
+        // Native provider snapshots are restored by their exact opaque receipt.
+        // OpenGeni verifies receipt identity/hash before hydration, but it must not
+        // impose a tar/inode equivalence contract on the provider's filesystem
+        // image. Tar archives remain content-verified after hydration.
+        if (workspaceArchive.kind === "tar" || workspaceArchive.kind === "host_spool") {
+          try {
+            await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+          } catch (error) {
+            await terminateCreatedSandbox(
+              createdClient,
+              restored,
+              (restored as { state?: unknown }).state,
+            );
+            if (error instanceof WorkspaceArchiveIntegrityError) throw error;
+            throw new WorkspaceArchiveIntegrityError(
+              "workspace_fingerprint_unavailable",
+              `failed to verify selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
+              { retryable: true },
+            );
+          }
+        }
+        hydrationApplied = true;
+        console.info(
+          `[sandbox] cold-restore applied ${workspaceArchive.kind === "provider_snapshot" ? "native snapshot receipt" : "verified tar archive"} revision ${workspaceArchive.descriptor.revision}`,
+        );
       }
-      hydrationApplied = true;
-      console.info(
-        `[sandbox] cold-restore applied ${workspaceArchive.kind === "provider_snapshot" ? "native snapshot receipt" : "verified tar archive"} revision ${workspaceArchive.descriptor.revision}`,
-      );
+      restoredState = (restored as { state?: unknown }).state;
+      const finalInstanceId = readInstanceId(backend, restored);
+      if (!finalInstanceId) {
+        await terminateCreatedSandbox(createdClient, restored, restoredState);
+        throw new SandboxConfigError(
+          backend,
+          `Sandbox backend "${backend}" returned a handle without its declared provider identity`,
+        );
+      }
+      return {
+        client: createdClient,
+        session: restored,
+        sessionState: restoredState ?? resumeFallbackState,
+        instanceId: finalInstanceId,
+        backendId: createdClient.backendId,
+        origin: hydrationApplied ? ("restored" as const) : ("created" as const),
+        ...(workspaceArchive ? { restoredArchive: workspaceArchive.descriptor } : {}),
+      };
+    } finally {
+      await hostSpool?.dispose().catch(() => {
+        // Cleanup must not discard a successfully established provider handle
+        // or replace the authoritative restore failure with a filesystem error.
+        console.warn("workspace archive download spool cleanup failed");
+      });
     }
-    restoredState = (restored as { state?: unknown }).state;
-    const finalInstanceId = readInstanceId(backend, restored);
-    if (!finalInstanceId) {
-      await terminateCreatedSandbox(createdClient, restored, restoredState);
-      throw new SandboxConfigError(
-        backend,
-        `Sandbox backend "${backend}" returned a handle without its declared provider identity`,
-      );
-    }
-    return {
-      client: createdClient,
-      session: restored,
-      sessionState: restoredState ?? resumeFallbackState,
-      instanceId: finalInstanceId,
-      backendId: createdClient.backendId,
-      origin: hydrationApplied ? ("restored" as const) : ("created" as const),
-      ...(workspaceArchive ? { restoredArchive: workspaceArchive.descriptor } : {}),
-    };
   };
 
   // Does the envelope carry a RESUMABLE box id (warm reattach), or only a

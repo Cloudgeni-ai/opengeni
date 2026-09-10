@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
+import { workspaceArchiveObjectKey, type WorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   acquireLease,
   acquireSandboxLeaseReaperHold,
@@ -29,6 +30,7 @@ import {
   claimSandboxCheckpointArtifactsForGc,
   claimSandboxSharedPreparation,
   persistDrainSnapshot as persistDrainSnapshotRaw,
+  persistWarmSnapshot,
   readLease,
   readSandboxSharedPreparation,
   readWorkspaceArchiveCapturePreflight,
@@ -101,6 +103,26 @@ function archiveDescriptor(archive: string, capturedAtMs: number) {
       fileCount: 1,
       totalFileBytes: bytes.length,
     },
+  };
+}
+
+function archiveObjectRef(
+  scope: { accountId: string; workspaceId: string; groupId: string },
+  descriptor: ReturnType<typeof archiveDescriptor>,
+  uploadId?: string,
+): WorkspaceArchiveObjectRef {
+  return {
+    schema: "sandbox_archive_object_v1",
+    // Construct explicitly so red tests exercise publication before the new
+    // optional uploadId generator is implemented.
+    key: workspaceArchiveObjectKey({
+      ...scope,
+      sandboxGroupId: scope.groupId,
+      revision: descriptor.revision,
+    }).replace(/\.tar$/, `${uploadId ? `.${uploadId}` : ""}.tar`),
+    sha256: descriptor.archiveSha256,
+    bytes: descriptor.archiveBytes,
+    backend: "s3-compatible",
   };
 }
 
@@ -413,6 +435,253 @@ async function seedLiveCanonicalAttempt(input: {
   });
   return { turnId, attemptId, holderId: `turn-attempt:${attemptId}` };
 }
+
+describe("archive object publication binding and disposition", () => {
+  async function fixture(liveness: "warm" | "draining") {
+    const ids = await freshWorkspace();
+    const sessionId = crypto.randomUUID();
+    const attempt = await seedLiveCanonicalAttempt({ ...ids, sessionId });
+    const scope = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    await acquireLease(db, {
+      ...scope,
+      kind: "turn",
+      holderId: attempt.holderId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const instanceId = "archive-publication-fixture";
+    await commitWarmingToWarm(db, {
+      ...scope,
+      expectedEpoch: 0,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: {} },
+      leaseTtlMs: 45_000,
+    });
+    if (liveness === "draining") {
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "turn",
+        holderId: attempt.holderId,
+        idleGraceMs: 0,
+      });
+    }
+    const source = (await readLease(db, ids.workspaceId, ids.groupId))!;
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      ...scope,
+      captureId,
+      expectedEpoch: source.leaseEpoch,
+      expectedInstanceId: instanceId,
+      liveness,
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+      ...(liveness === "warm" ? { warmAttempt: { sessionId, ...attempt } } : {}),
+    });
+    if (claim.status !== "claimed") throw new Error(`archive fixture capture: ${claim.status}`);
+    const descriptor = archiveDescriptor(
+      Buffer.from("archive candidate bytes").toString("base64"),
+      1_900_000_000_000,
+    );
+    const input = {
+      ...scope,
+      sessionId,
+      ...attempt,
+      expectedLeaseId: source.id,
+      expectedEpoch: source.leaseEpoch,
+      expectedInstanceId: instanceId,
+      expectedWorkspaceGeneration: 0,
+      captureId,
+      providerRequestId: claim.claim.providerRequestId,
+      workspaceArchiveMeta: descriptor,
+      minIntervalMs: 0,
+      capturedAtMs: Date.parse(descriptor.capturedAt),
+    };
+    const publish = (ref: WorkspaceArchiveObjectRef, overrides = {}) =>
+      liveness === "warm"
+        ? persistWarmSnapshot(db, { ...input, workspaceArchiveRef: ref, ...overrides })
+        : persistDrainSnapshotRaw(db, { ...input, workspaceArchiveRef: ref, ...overrides });
+    return { ids, scope, source, input, descriptor, publish };
+  }
+
+  for (const liveness of ["warm", "draining"] as const) {
+    for (const mismatch of [
+      "accountId",
+      "workspaceId",
+      "groupId",
+      "revision",
+      "sha256",
+      "bytes",
+      "malformed",
+    ] as const) {
+      test(`${liveness} rejects archive ref ${mismatch} mismatch before publication`, async () => {
+        if (!available) return;
+        const f = await fixture(liveness);
+        const ref = archiveObjectRef(f.ids, f.descriptor);
+        if (mismatch === "accountId" || mismatch === "workspaceId" || mismatch === "groupId") {
+          ref.key = archiveObjectRef(
+            { ...f.ids, [mismatch]: crypto.randomUUID() },
+            f.descriptor,
+          ).key;
+        } else if (mismatch === "revision") {
+          ref.key = ref.key.replace("1900000000000", "1900000000001");
+        } else if (mismatch === "sha256") ref.sha256 = "b".repeat(64);
+        else if (mismatch === "bytes") ref.bytes += 1;
+        else ref.key = "malformed";
+        const before = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+        // A malformed supplied ref must not silently fall back to valid inline bytes.
+        await expect(
+          f.publish(
+            ref,
+            mismatch === "malformed"
+              ? { workspaceArchive: Buffer.from("archive candidate bytes").toString("base64") }
+              : {},
+          ),
+        ).rejects.toThrow();
+        expect((await readLease(db, f.ids.workspaceId, f.ids.groupId))?.resumeState).toEqual(
+          before?.resumeState,
+        );
+      }, 60_000);
+    }
+
+    test(`${liveness} commits a unique candidate and identifies exact-ref replay without readback inference`, async () => {
+      if (!available) return;
+      const f = await fixture(liveness);
+      const ref = archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID());
+      const first = await f.publish(ref);
+      expect(first).toMatchObject({
+        wrote: true,
+        archiveRevision: f.descriptor.revision,
+        candidateDisposition: "adopted",
+      });
+      // Simulate a lost acknowledgement: retry the exact submitted ref.
+      expect(await f.publish(ref)).toMatchObject({
+        wrote: liveness === "draining",
+        candidateDisposition: "already_referenced",
+      });
+      const otherRef = archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID());
+      expect(await f.publish(otherRef)).toMatchObject({
+        wrote: liveness === "draining",
+        candidateDisposition: "unused",
+      });
+      const lease = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+      expect(lease?.resumeState?.sessionState).toMatchObject({ workspaceArchiveRef: ref });
+      expect(lease?.resumeState?.sessionState).not.toHaveProperty("workspaceArchive");
+    }, 60_000);
+  }
+
+  test("cold-late unique candidate adopts once, exact replay stays referenced and a distinct replay is unused", async () => {
+    if (!available) return;
+    const f = await fixture("draining");
+    expect(
+      await confirmDrainCold(db, {
+        ...f.scope,
+        expectedEpoch: f.source.leaseEpoch,
+        expectedCaptureId: f.input.captureId,
+        providerMissingBeforeCapture: true,
+      }),
+    ).toMatchObject({ wentCold: true });
+    const ref = archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID());
+    for (const overrides of [
+      { expectedLeaseId: crypto.randomUUID() },
+      { expectedEpoch: f.source.leaseEpoch + 1 },
+      { expectedWorkspaceGeneration: 1 },
+      { expectedInstanceId: "different-instance" },
+      { providerRequestId: crypto.randomUUID() },
+    ]) {
+      expect(await f.publish(ref, overrides)).toMatchObject({
+        wrote: false,
+        candidateDisposition: "unused",
+      });
+    }
+    expect(await f.publish(ref)).toMatchObject({ wrote: true, candidateDisposition: "adopted" });
+    expect(await f.publish(ref)).toMatchObject({
+      wrote: false,
+      candidateDisposition: "already_referenced",
+    });
+    expect(
+      await f.publish(archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID())),
+    ).toMatchObject({ wrote: false, candidateDisposition: "unused" });
+    const lease = await readLease(db, f.ids.workspaceId, f.ids.groupId);
+    expect(lease?.recovery.lateArchiveCapture).toBeUndefined();
+    expect(lease?.resumeState?.sessionState).toMatchObject({ workspaceArchiveRef: ref });
+  }, 60_000);
+
+  test("concurrent duplicate drain uploads publish one physical candidate without changing wrote", async () => {
+    if (!available) return;
+    const f = await fixture("draining");
+    const candidates = [
+      archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID()),
+      archiveObjectRef(f.ids, f.descriptor, crypto.randomUUID()),
+    ];
+    const outcomes = await Promise.all(candidates.map((ref) => f.publish(ref)));
+    expect(outcomes.map((result) => result.wrote)).toEqual([true, true]);
+    expect(outcomes.map((result) => result.candidateDisposition).sort()).toEqual([
+      "adopted",
+      "unused",
+    ]);
+    const winner =
+      candidates[outcomes.findIndex((result) => result.candidateDisposition === "adopted")];
+    expect(
+      (await readLease(db, f.ids.workspaceId, f.ids.groupId))?.resumeState?.sessionState,
+    ).toMatchObject({ workspaceArchiveRef: winner });
+  }, 60_000);
+
+  test("warm rotation preserves a legacy previous ref and replay recognizes it after capture fencing", async () => {
+    if (!available) return;
+    const f = await fixture("warm");
+    const legacy = archiveObjectRef(f.ids, f.descriptor);
+    expect(await f.publish(legacy)).toMatchObject({ wrote: true, candidateDisposition: "adopted" });
+    const captureId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        ...f.scope,
+        captureId,
+        expectedEpoch: f.source.leaseEpoch,
+        expectedInstanceId: f.input.expectedInstanceId,
+        liveness: "warm",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+        warmAttempt: {
+          sessionId: f.input.sessionId,
+          turnId: f.input.turnId,
+          attemptId: f.input.attemptId,
+          holderId: f.input.holderId,
+        },
+      }),
+    ).toMatchObject({ status: "claimed" });
+    const descriptor = archiveDescriptor(
+      Buffer.from("newer archive bytes").toString("base64"),
+      1_900_000_000_001,
+    );
+    const unique = archiveObjectRef(f.ids, descriptor, crypto.randomUUID());
+    expect(
+      await f.publish(unique, {
+        captureId,
+        workspaceArchiveMeta: descriptor,
+        capturedAtMs: Date.parse(descriptor.capturedAt),
+      }),
+    ).toMatchObject({ wrote: true, candidateDisposition: "adopted" });
+    expect(
+      (await readLease(db, f.ids.workspaceId, f.ids.groupId))?.resumeState?.sessionState,
+    ).toMatchObject({ workspaceArchiveRef: unique, workspaceArchivePrevRef: legacy });
+    expect(await f.publish(legacy)).toMatchObject({
+      wrote: false,
+      candidateDisposition: "already_referenced",
+    });
+    // A wrong/closed attempt still cannot turn a referenced ref into cleanup
+    // authority just because the lifecycle write is rejected before its guard.
+    expect(await f.publish(legacy, { attemptId: crypto.randomUUID() })).toMatchObject({
+      wrote: false,
+      superseded: true,
+      candidateDisposition: "already_referenced",
+    });
+  }, 60_000);
+});
 
 describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(0-delete) workspace deletion atomically refuses live leases and returns durable schedule cleanup ids", async () => {
