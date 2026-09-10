@@ -741,8 +741,10 @@ jobs:
           bun test --max-concurrency=1 --timeout 180000 \
             ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \
             ./apps/api/test/managed-auth-session-sets.integration.test.ts
+          if [ "$OPENGENI_ACCOUNT_BROWSER_ENGINE" = "chromium" ]; then
+            bun scripts/run-browser-e2e.ts ./test/e2e/browser-account-request-observation.browser.e2e.ts
+          fi
           bun scripts/run-browser-e2e.ts \
-            ./test/e2e/browser-account-request-observation.browser.e2e.ts \
             ./test/e2e/browser-accounts-acceptance.e2e.ts
 
       - name: Editable artifact browser acceptance

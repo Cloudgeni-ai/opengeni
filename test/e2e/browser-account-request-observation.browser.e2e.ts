@@ -1,15 +1,35 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
-import { chromium, firefox, webkit, type Browser, type Request } from "playwright";
-import { observeNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import { chromium, type Browser, type Page, type Request } from "playwright";
+import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 
-const engines = { chromium, firefox, webkit };
 const engine = process.env.OPENGENI_ACCOUNT_BROWSER_ENGINE ?? "chromium";
-if (!(engine in engines)) throw new Error(`Unsupported browser engine: ${engine}`);
+if (engine !== "chromium") {
+  throw new Error("Chromium request-authority regression must run in the Chromium accounts lane");
+}
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
-test("neutral request authority survives missing response metadata and document replacement", async () => {
+test.each(["firefox", "webkit"])(
+  "the Chromium observer leaves %s routing untouched",
+  async (name) => {
+    let routingTouched = false;
+    const page = {
+      context: () => ({ browser: () => ({ browserType: () => ({ name: () => name }) }) }),
+      route: async () => {
+        routingTouched = true;
+      },
+      unroute: async () => {
+        routingTouched = true;
+      },
+    } as unknown as Page;
+    const stop = await observeChromiumNeutralSessionSetRequestAuthority(page, "http://127.0.0.1");
+    await stop();
+    expect(routingTouched).toBe(false);
+  },
+);
+
+test("Chromium request authority survives missing response metadata and document replacement", async () => {
   const original = "a".repeat(43);
   const successor = "b".repeat(43);
   let heldResponse: ServerResponse | undefined;
@@ -44,10 +64,8 @@ test("neutral request authority survives missing response metadata and document 
   const origin = `http://127.0.0.1:${address.port}`;
   let browser: Browser | undefined;
   try {
-    browser = await engines[engine as keyof typeof engines].launch(
-      engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
-        ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
-        : {},
+    browser = await chromium.launch(
+      process.env.OPENGENI_BROWSER_BIN ? { executablePath: process.env.OPENGENI_BROWSER_BIN } : {},
     );
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -62,7 +80,7 @@ test("neutral request authority survives missing response metadata and document 
     page.on("response", (response) => {
       if (new URL(response.url()).pathname === "/v1/auth/session-set") responseSeen = true;
     });
-    const stop = await observeNeutralSessionSetRequestAuthority(page, origin);
+    const stop = await observeChromiumNeutralSessionSetRequestAuthority(page, origin);
     await page.goto(`${origin}/seed`);
     await page.goto(origin);
     await sibling.goto(origin);

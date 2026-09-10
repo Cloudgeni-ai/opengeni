@@ -35,7 +35,7 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
-import { observeNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -4145,7 +4145,7 @@ describe("provider-neutral browser account acceptance", () => {
 
       const stopRaceAuthorityObservation = await Promise.all(
         [page, secondTab].map((observedPage) =>
-          observeNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
+          observeChromiumNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
         ),
       );
       setBrowserPhase(pageProblems, "cross-tab-select-race");

@@ -311,6 +311,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -337,7 +338,10 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
 };
 
 const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly string[]>> = {
-  accounts: ["test/e2e/browser-accounts-acceptance.e2e.ts"],
+  accounts: [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
   interaction: [
     "test/e2e/codex-overview.e2e.ts",
     "test/e2e/custom-api-control-center.browser.e2e.ts",
@@ -364,7 +368,12 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
   ROOT_TEST_DEPENDENCIES[path] = [...TEMPORAL_WORKFLOW_DEPENDENCIES];
 }
 
-const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {};
+const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/e2e/browser-account-request-observation.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
+};
 
 const ARTIFACT_RUNTIME_WORKSPACES = [
   "@opengeni/api-router",
