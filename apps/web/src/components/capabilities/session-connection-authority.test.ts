@@ -175,3 +175,18 @@ test("ambiguous personal accounts never issue an arbitrary account grant", async
   ).rejects.toThrow("More than one personal account");
   expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
 });
+
+test("unselected duplicate accounts do not block messages; an exact grant restores its account", async () => {
+  const h = harness();
+  const connections = await h.client.listConnections("workspace");
+  h.client.listConnections = async () => [
+    ...connections,
+    { ...connections[0]!, id: "second", authorityId: "second-authority" },
+  ];
+  expect(await sessionConnectionAuthorities(h.client, session, [item])).toEqual([]);
+  const granted = harness([grant]);
+  granted.client.listConnections = h.client.listConnections;
+  const selections = await sessionConnectionAuthorities(granted.client, session, [item]);
+  expect(selections).toHaveLength(1);
+  expect(selections[0]?.connectionId).toBe("connection");
+});

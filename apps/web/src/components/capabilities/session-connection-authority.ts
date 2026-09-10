@@ -9,9 +9,9 @@ import type {
 
 import { normalizeProviderDomain } from "@/lib/capabilities";
 
-function personalConnection(item: CapabilityCatalogItem, connections: ConnectionMetadata[]) {
+function personalConnections(item: CapabilityCatalogItem, connections: ConnectionMetadata[]) {
   const ref = item.connectionRef;
-  if (ref?.subjectScope !== "subject") return undefined;
+  if (ref?.subjectScope !== "subject") return [];
   // The shared catalog deliberately omits personal IDs. Resolve only against
   // the authenticated owner's private metadata, never store that ID in catalog.
   const matches = connections.filter(
@@ -21,11 +21,7 @@ function personalConnection(item: CapabilityCatalogItem, connections: Connection
       entry.kind === ref.kind &&
       normalizeProviderDomain(entry.providerDomain) === normalizeProviderDomain(ref.providerDomain),
   );
-  if (matches.length > 1)
-    throw new Error(
-      "More than one personal account matches this integration. Review its connection settings before continuing.",
-    );
-  return matches[0];
+  return matches;
 }
 
 export async function sessionConnectionAuthorities(
@@ -56,32 +52,41 @@ export async function sessionConnectionAuthorities(
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
   return personal.flatMap((item) => {
-    const connection = personalConnection(item, connections);
-    if (!connection?.authorityId) return [];
-    const authority = authorities.find(
-      (entry) =>
-        entry.resourceId === connection.id &&
-        entry.authorityId === connection.authorityId &&
-        entry.status === "active",
-    );
-    // Only an exact-session grant is adopted here. A standing grant from another
-    // surface never silently opts a personal account into this conversation.
-    const grant = authority?.grants.find(
-      (entry) =>
-        entry.mode === "session" &&
-        entry.status === "active" &&
-        entry.action === "connection.use" &&
-        entry.targetSessionId === session.id &&
-        entry.targetWorkspaceId === session.workspaceId &&
-        entry.authorityEpoch === authorityEpoch &&
-        entry.context === visibility &&
-        (!entry.expiresAt || Date.parse(entry.expiresAt) > Date.now()),
-    );
+    // Multiple accounts in the owner's metadata are harmless until this
+    // conversation has authorized them. Restore the exact grant, not a
+    // provider-domain default, and do not block unrelated messages.
+    const matches = personalConnections(item, connections).flatMap((connection) => {
+      if (!connection.authorityId) return [];
+      const authority = authorities.find(
+        (entry) =>
+          entry.resourceId === connection.id &&
+          entry.authorityId === connection.authorityId &&
+          entry.status === "active",
+      );
+      const grant = authority?.grants.find(
+        (entry) =>
+          entry.mode === "session" &&
+          entry.status === "active" &&
+          entry.action === "connection.use" &&
+          entry.targetSessionId === session.id &&
+          entry.targetWorkspaceId === session.workspaceId &&
+          entry.authorityEpoch === authorityEpoch &&
+          entry.context === visibility &&
+          (!entry.expiresAt || Date.parse(entry.expiresAt) > Date.now()),
+      );
+      return grant ? [{ connection, grant }] : [];
+    });
+    if (matches.length > 1)
+      throw new Error(
+        "Multiple personal accounts are authorized for this integration. Review this conversation's connection grants before continuing.",
+      );
+    const match = matches[0];
+    const grant = match?.grant;
     return grant
       ? [
           {
             serverId: item.runtime.mcpServerId!,
-            connectionId: connection.id,
+            connectionId: match!.connection.id,
             userDelegation: grant.delegation,
           },
         ]
@@ -113,7 +118,12 @@ export async function authorizeSessionPersonalConnection(
     );
   if (session.tenancy.visibility === "workspace" && !sharedOutputAcknowledged)
     throw new Error("Acknowledge shared results before using your personal account here.");
-  const connection = personalConnection(item, connections);
+  const matches = personalConnections(item, connections);
+  if (matches.length > 1)
+    throw new Error(
+      "More than one personal account matches this integration. Review its connection settings before continuing.",
+    );
+  const connection = matches[0];
   if (!connection?.authorityId)
     throw new Error(
       "This personal connection has no active sharing authority. Reconnect it and try again.",
