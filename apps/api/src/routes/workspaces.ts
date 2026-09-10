@@ -1,3 +1,7 @@
+import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
+import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
+import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
+import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -35,7 +39,6 @@ import {
 import {
   allWorkspacePermissions,
   createWorkspace,
-  deleteWorkspaceIfQuiescent,
   ensureWorkspaceByExternalIdentity,
   findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
@@ -58,10 +61,10 @@ import {
   nestedPostgresSqlState,
   removeWorkspaceMember,
   requireWorkspace,
+  updateWorkspaceSettings,
   getRig,
   setWorkspaceDefaultRig,
   updateWorkspace,
-  updateWorkspaceSettings,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
@@ -86,7 +89,10 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  listExternalActorWorkspaces,
+  addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
@@ -96,13 +102,13 @@ import {
   assertWorkspaceMemberRemovable,
   assertWorkspaceMemberUpdateAllowed,
   controlHumanWorkspace,
+  controlHumanWorkspaceTimer,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
-import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
-import { workspaceDeleteObserver } from "../workspace-delete-observability";
+import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
@@ -196,12 +202,25 @@ export function workspaceUpdateRequestsAccountTransfer(value: unknown): boolean 
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.post("/v1/workspaces/:workspaceId/external-members", async (c) => {
+    return c.json(
+      await addExternalWorkspaceMemberForRequest(
+        c,
+        deps,
+        c.req.param("workspaceId"),
+        await c.req.json(),
+      ),
+    );
+  });
   app.get("/v1/access/me", async (c) => {
     return c.json(await requireAccessContext(c, deps));
   });
 
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
+    const externalWorkspaces = await listExternalActorWorkspaces(context, deps);
+    if (externalWorkspaces !== null)
+      return c.json(externalWorkspaces.map((workspace) => Workspace.parse(workspace)));
     const accountScopedAuthority = accountScopedApiKeyWorkspaceAuthority(context);
     if (
       accountScopedAuthority &&
@@ -239,6 +258,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireAccountPermission(context, payload.accountId, "workspace:create");
     try {
       const existing = await findWorkspaceByExternalIdentity(deps.db, {
+        accountId: payload.accountId,
         externalSource: payload.externalSource,
         externalId: payload.externalId,
       });
@@ -369,7 +389,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   // deep-merges (top-level) a settings patch, preserving unknown/future keys.
   app.patch("/v1/workspaces/:workspaceId/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -378,9 +398,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy
     // workspace yields the retryable 503 instead of parking this request.
-    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data, {
-      controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-    });
+    const workspace = await updateWorkspaceSettingsWithToolDefaults(
+      deps.db,
+      workspaceId,
+      parsed.data,
+      { requireWorkspace, updateWorkspaceSettings },
+      {
+        controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+      },
+    );
     return c.json(Workspace.parse(workspace));
   });
 
@@ -392,6 +418,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [
+      connectionModelRestrictions,
       resolvedCatalog,
       policy,
       codexSubscriptionActive,
@@ -405,6 +432,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationGatewayCustomModels,
       organizationOpenRouterCustomModels,
     ] = await Promise.all([
+      getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
       deps.resolveCatalogSettings(),
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
@@ -444,6 +472,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       WorkspaceModelCatalogResponse.parse(
         buildWorkspaceModelCatalog({
+          connectionModelRestrictions,
           settings: resolvedCatalog.settings,
           policy,
           codexSubscriptionActive,
@@ -478,7 +507,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
@@ -554,7 +583,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/gateway-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -615,7 +644,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = CreateWorkspaceOpenRouterCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
@@ -693,7 +722,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const customModelId = c.req.param("customModelId");
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
@@ -806,12 +835,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // Full replace (PUT, not merge): null/omitted = unrestricted for that
-  // dimension; an empty array is a valid explicit total block. Admin access —
-  // this decides whether turns can reach paid providers, so it is the same
-  // trust level as billing-affecting workspace settings.
+  // dimension; an empty array is a valid explicit total block. Settings access
+  // admits workspace administrators and the verified Personal owner, without
+  // widening membership or API-key delegation authority.
   app.put("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = UpdateWorkspaceModelPolicyRequest.parse(await c.req.json());
     const catalog = await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: grant.accountId,
@@ -826,9 +855,42 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(policy);
   });
 
+  app.post("/v1/workspaces/:workspaceId/pause-timer", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
+    const parsed = WorkspacePauseTimerRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid pause timer" });
+    try {
+      await controlHumanWorkspaceTimer(
+        {
+          db: deps.db,
+          bus: deps.bus,
+          workflowClient: deps.workflowClient,
+          ...(deps.schedulePromptPostCommit
+            ? { schedulePromptPostCommit: deps.schedulePromptPostCommit }
+            : {}),
+        },
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        parsed.data,
+      );
+    } catch (error) {
+      if (error instanceof SessionControlConflictError)
+        throw new HTTPException(409, {
+          message: "Workspace changed. Reopen the timer and try again.",
+        });
+      if (error instanceof WorkspacePauseTimerInputError)
+        throw new HTTPException(400, { message: error.message });
+      throw error;
+    }
+    return c.json({ ok: true });
+  });
+
   app.post("/v1/workspaces/:workspaceId/inference-control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
       throw new HTTPException(400, {
         message: "workspace-control actor is too large",
@@ -913,65 +975,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    // The DB transaction locks the account/workspace and every existing
-    // session/lease before checking runtime quiescence, then returns the exact
-    // external schedules removed by the cascade. A racing cold->warm transition
-    // can therefore never erase the only provider/capture ownership receipt.
-    const deleteObserver = workspaceDeleteObserver(deps.observability, {
+    await deleteWorkspaceForRequest(deps, {
       accountId: grant.accountId,
       workspaceId,
     });
-    const deleted = await deleteWorkspaceIfQuiescent(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      ...(deleteObserver ? { observer: deleteObserver } : {}),
-    });
-    if (deleted.status === "not_found") {
-      throw new HTTPException(404, { message: "workspace not found" });
-    }
-    if (deleted.status === "only_workspace") {
-      throw new HTTPException(409, {
-        message: "cannot delete the account's only workspace",
-      });
-    }
-    if (deleted.status === "active_sessions") {
-      throw new HTTPException(409, {
-        message: "stop the workspace's running sessions before deleting it",
-      });
-    }
-    if (deleted.status === "active_video_generations") {
-      throw new HTTPException(409, {
-        message: "wait for the workspace's active video generations to finish before deleting it",
-      });
-    }
-    if (deleted.status === "active_background_commands") {
-      throw new HTTPException(409, {
-        message: "pause or cancel the workspace's background commands before deleting it",
-      });
-    }
-    if (deleted.status === "live_sandboxes") {
-      throw new HTTPException(409, {
-        message: "wait for the workspace's active sandboxes to finish draining before deleting it",
-      });
-    }
-    if (deleted.status !== "deleted") {
-      throw new Error(`Unhandled workspace deletion outcome: ${deleted.status}`);
-    }
-    // The cleanup claims were inserted in the same transaction as the cascade.
-    // Try them immediately; failures are released to the replica-safe outbox
-    // pump, so a process crash or Temporal outage cannot orphan the schedules.
-    await processTemporalScheduleCleanupClaims(
-      {
-        db: deps.db,
-        deleteSchedule: async (temporalScheduleId) => {
-          await deps.workflowClient.deleteScheduledTaskSchedule({
-            temporalScheduleId,
-          });
-        },
-        ...(deps.observability ? { observability: deps.observability } : {}),
-      },
-      deleted.temporalScheduleCleanups,
-    );
     return c.body(null, 204);
   });
 

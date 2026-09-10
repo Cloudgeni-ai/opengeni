@@ -1,4 +1,8 @@
-import { resolveFirstPartyMcpToolPolicy, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveFirstPartyMcpToolPolicy,
+  type Settings,
+} from "@opengeni/config";
 import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
@@ -17,6 +21,10 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceSessionToolDefaults,
+  resolveBundledSkillSelection,
+  SessionAgentAccess,
+  SessionScopeSubjectId,
+  SessionMemoryScope,
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
@@ -41,12 +49,17 @@ import {
   withWorkspaceSubjectRls,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
+  type ScheduledTaskCreatorPolicy,
   type TemporalScheduleCleanupClaim,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { isDeepStrictEqual } from "node:util";
-import { hasPermission, requirePermission } from "../access";
+import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  prepareHostMcpTaskAdmission,
+  prepareInheritedHostMcpTaskAdmission,
+} from "./host-mcp-task-admission";
 import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -56,6 +69,7 @@ import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { lockActiveCustomModelForAdmission, workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
 import { validateVariableSetAttachment } from "./environments";
 import {
   freezePersonalConnectionDelegations,
@@ -147,6 +161,7 @@ export async function createValidatedScheduledTask(input: {
   db: Database;
   objectStorage: ObjectStorageDependency;
   grant: AccessGrant;
+  authorization?: AccessGrantAuthorization;
   payload: CreateScheduledTaskPayload;
   // Whether the caller explicitly set agentConfig.tools (see
   // scheduledTaskToolsProvided). Absent tools get the workspace's enabled
@@ -161,6 +176,10 @@ export async function createValidatedScheduledTask(input: {
   // API parsing fills this default, but pack installers and older internal
   // callers can still invoke the shared validator with the pre-action shape.
   const action = input.payload.action ?? ({ kind: "agent_turn" } as const);
+  const hostSelections =
+    "selectedHostMcpDelegations" in input.payload
+      ? input.payload.selectedHostMcpDelegations
+      : undefined;
   const knowledgeAction = action.kind === "knowledge_source_sync" ? action : null;
   if (knowledgeAction) {
     await validateKnowledgeSourceSyncAction({
@@ -246,6 +265,18 @@ export async function createValidatedScheduledTask(input: {
           ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
         });
   const creationInitiator = creationInitiatorForGrant(input.grant);
+  const captureLinkAuthority = prepareExternalLinkTaskAdmission(
+    input.authorization,
+    creationInitiator.actor,
+  );
+  const creatorPolicy = creationInitiator.actor
+    ? await frozenScheduledTaskCreatorPolicy({
+        db: input.db,
+        settings: input.settings,
+        grant: input.grant,
+        sessionId: creationInitiator.actor.sessionId,
+      })
+    : null;
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -283,15 +314,89 @@ export async function createValidatedScheduledTask(input: {
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
+      ...(captureLinkAuthority ? { captureLinkAuthority } : {}),
       personalConnectionDelegations,
       xaiProviderAccountAuthoritySnapshot,
+      creatorPolicy,
       targetSessionId: target?.id ?? null,
       variableSetId: input.payload.variableSetId ?? null,
       rigId: input.payload.rigId ?? null,
       metadata: input.payload.metadata,
+      ...(hostSelections?.length && runtimeSettings
+        ? {
+            captureHostAuthority: prepareHostMcpTaskAdmission({
+              settings: runtimeSettings,
+              tools: target?.tools ?? agentConfig.tools,
+              grant: input.grant,
+              ...(input.authorization ? { authorization: input.authorization } : {}),
+              selections: hostSelections,
+            }),
+          }
+        : hostSelections === undefined && creationInitiator.actor && runtimeSettings
+          ? {
+              captureHostAuthority: prepareInheritedHostMcpTaskAdmission(
+                runtimeSettings,
+                target?.tools ?? agentConfig.tools,
+                creationInitiator.actor,
+              ),
+            }
+          : {}),
       ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
     }),
   );
+}
+
+/**
+ * Freeze the creating session's boundary onto an agent-created task so the
+ * sessions generated for it inherit exactly what the creator could see and
+ * do, never the deployment default. Tools are the session's effective
+ * model-visible selection under the deployment ceiling; permissions are the
+ * session's effective first-party set intersected with what the calling
+ * grant actually holds (a narrowly delegated spawn token cannot hand a
+ * schedule more than itself). The session access policy is copied from the
+ * projection when it exposes those facts; each absent fact is stored as null
+ * so a generated session keeps its own default for that key.
+ */
+async function frozenScheduledTaskCreatorPolicy(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  sessionId: string;
+}): Promise<ScheduledTaskCreatorPolicy> {
+  const session = await getSession(input.db, input.grant.workspaceId, input.sessionId);
+  if (!session) {
+    throw new HTTPException(403, {
+      message: "the calling agent session is not available in this workspace",
+    });
+  }
+  const firstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+    input.settings,
+    session.firstPartyMcpTools,
+  );
+  const firstPartyMcpPermissions = (
+    session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
+  ).filter((permission) => hasPermission(input.grant.permissions, permission));
+  if (firstPartyMcpPermissions.length === 0) {
+    throw new HTTPException(403, {
+      message:
+        "the calling agent session holds no first-party MCP permission it could delegate to scheduled runs",
+    });
+  }
+  // The projection facts are validated through the access-scope contract so
+  // only a well-formed value is frozen; anything else stores null for that key.
+  const projection = session as unknown as Record<string, unknown>;
+  const agentAccess = SessionAgentAccess.safeParse(projection["agentAccess"]);
+  const scopeSubjectId = SessionScopeSubjectId.safeParse(projection["scopeSubjectId"]);
+  const memoryScope = SessionMemoryScope.safeParse(projection["memoryScope"]);
+  return {
+    firstPartyMcpTools,
+    firstPartyMcpPermissions,
+    sessionPolicy: {
+      agentAccess: agentAccess.success ? agentAccess.data : null,
+      scopeSubjectId: scopeSubjectId.success ? scopeSubjectId.data : null,
+      memoryScope: memoryScope.success ? memoryScope.data : null,
+    },
+  };
 }
 
 function nestedPostgresMessage(error: unknown): string | null {
@@ -409,6 +514,14 @@ export async function validateScheduledTaskTarget(input: {
   const session = await getSession(input.db, input.grant.workspaceId, input.targetSessionId);
   if (!session || session.accountId !== input.grant.accountId) {
     throw new HTTPException(404, { message: "target session not found" });
+  }
+  if (
+    input.agentConfig.bundledSkillIds !== undefined &&
+    !isDeepStrictEqual(input.agentConfig.bundledSkillIds, session.bundledSkillIds)
+  ) {
+    throw new HTTPException(422, {
+      message: "An existing-session schedule cannot change that session's bundled Skill selection",
+    });
   }
   if (session.status === "cancelled") {
     throw new HTTPException(409, {
@@ -572,6 +685,7 @@ export async function validatedScheduledTaskUpdate(input: {
   db: Database;
   objectStorage: ObjectStorageDependency;
   grant: AccessGrant;
+  authorization?: AccessGrantAuthorization;
   existing: ScheduledTask;
   payload: UpdateScheduledTaskPayload;
   /** See createValidatedScheduledTask; only consulted when agentConfig is updated. */
@@ -593,7 +707,8 @@ export async function validatedScheduledTaskUpdate(input: {
       input.payload.targetSessionId !== undefined ||
       input.payload.variableSetId !== undefined ||
       input.payload.rigId !== undefined ||
-      input.payload.connectionAuthorities !== undefined
+      input.payload.connectionAuthorities !== undefined ||
+      input.payload.selectedHostMcpDelegations !== undefined
     ) {
       throw new HTTPException(422, {
         message: "knowledge source schedules do not accept agent/session configuration",
@@ -756,6 +871,7 @@ export async function validatedScheduledTaskUpdate(input: {
     (input.payload.rigId !== undefined && input.payload.rigId !== input.existing.rigId);
   const materialExecutionChange =
     authorityTargetChanged ||
+    input.payload.selectedHostMcpDelegations !== undefined ||
     input.payload.connectionAuthorities !== undefined ||
     !isDeepStrictEqual(nextAgentConfig, input.existing.agentConfig) ||
     (input.payload.action !== undefined &&
@@ -938,6 +1054,30 @@ export async function validatedScheduledTaskUpdate(input: {
     update.targetSessionId = nextTargetSessionId;
   }
   Object.assign(update, scheduledTaskAuthorityUpdateForGrant(input.grant));
+  const linkCapture = prepareExternalLinkTaskAdmission(
+    input.authorization,
+    creationInitiatorForGrant(input.grant).actor,
+  );
+  if (linkCapture) update.captureLinkAuthority = linkCapture;
+  if (input.payload.selectedHostMcpDelegations !== undefined) {
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+      input.db,
+      input.grant.workspaceId,
+      input.settings,
+      { subjectId: input.grant.subjectId },
+    );
+    const target =
+      nextRunMode === "existing_session" && nextTargetSessionId
+        ? await getSession(input.db, input.grant.workspaceId, nextTargetSessionId)
+        : null;
+    update.captureHostAuthority = prepareHostMcpTaskAdmission({
+      settings: runtimeSettings,
+      tools: target?.tools ?? nextAgentConfig.tools,
+      grant: input.grant,
+      ...(input.authorization ? { authorization: input.authorization } : {}),
+      selections: input.payload.selectedHostMcpDelegations,
+    });
+  }
   if (update.clonePersonalResourceAuthorityFromRevision !== undefined) {
     update.refreshPersonalResourceAuthority = false;
   }
@@ -1231,6 +1371,24 @@ async function validateScheduledTaskAgentConfig(input: {
   workspaceId: string;
   toolsProvided?: boolean;
 }): Promise<ScheduledTaskAgentConfig> {
+  const actor = creationInitiatorForGrant(input.grant).actor;
+  const parent = actor ? await getSession(input.db, input.workspaceId, actor.sessionId) : null;
+  if (actor && (!parent || parent.accountId !== input.grant.accountId)) {
+    throw new HTTPException(403, {
+      message: "Scheduled Skill selection requires the creating agent's session",
+    });
+  }
+  let bundledSkillIds: ScheduledTaskAgentConfig["bundledSkillIds"];
+  try {
+    bundledSkillIds = resolveBundledSkillSelection(
+      input.payload.agentConfig.bundledSkillIds,
+      parent?.bundledSkillIds,
+    );
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
+    });
+  }
   // Reject a curated-out model before touching the DB: a scheduled task is a
   // session the worker runs later, so it must pass the same allow-list as the
   // session choke points (a `scheduled_tasks:manage` holder could otherwise set
@@ -1312,6 +1470,7 @@ async function validateScheduledTaskAgentConfig(input: {
   }
   const validated = {
     ...input.payload.agentConfig,
+    ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,

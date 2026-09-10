@@ -74,6 +74,7 @@
       "@opengeni/react/artifacts/spreadsheet": ["./packages/react/src/artifacts-spreadsheet.ts"],
       "@opengeni/react/clipboard": ["./packages/react/src/clipboard.ts"],
       "@opengeni/sdk": ["./packages/sdk/src/index.ts"],
+      "@opengeni/connect": ["./packages/connect/src/index.ts"],
       "@opengeni/sdk/editable-artifacts": ["./packages/sdk/src/editable-artifacts.ts"],
       "@opengeni/sdk/editable-artifacts/worker": [
         "./packages/sdk/src/editable-artifacts-worker.ts"

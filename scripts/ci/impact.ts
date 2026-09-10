@@ -99,6 +99,14 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/integration/child-wait-boundary.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/api.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/core",
@@ -184,6 +192,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/workspace-pause-timers.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/sdk",
+    "@opengeni/worker-bundle",
+    "@opengeni/testing",
+  ],
   "test/e2e/connected-machine-removal.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -221,6 +238,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/composer-pane.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
   "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/realtime-demo.browser.e2e.ts": [
@@ -229,6 +247,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/restored-attachment-preview.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/session-pins.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -238,6 +262,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/testing",
   ],
+  "test/e2e/slack-settings.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/slack-access-link.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/slack-installation-binding.browser.e2e.ts": [
     "opengeni-web",
@@ -247,6 +272,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/source-packages-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/timeline-scroll.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/timeline-tip-follow.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/lossless-message.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -286,8 +312,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/site-conversations.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/setup-account-token.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/personal-resource-attachments.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -314,6 +344,7 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/queue-surface.browser.e2e.ts",
     "test/e2e/timeline-scroll.browser.e2e.ts",
     "test/e2e/timeline-tip-follow.browser.e2e.ts",
+    "test/e2e/lossless-message.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
     "test/e2e/source-packages-control-center.browser.e2e.ts",
@@ -354,8 +385,7 @@ const ARTIFACT_RUNTIME_SOURCE_WORKSPACES = new Set([
 ]);
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
-const ARTIFACT_SKILL_PATTERN =
-  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets|video-generation)\//;
+const ARTIFACT_SKILL_PATTERN = /^packages\/runtime\/src\/bundled_(?:artifact|site|video)_skills\//;
 
 type RootPathImpact = Readonly<{
   packages: readonly string[];
@@ -376,7 +406,7 @@ function rootPathImpact(path: string, unitTests: readonly string[]): RootPathImp
   if (ARTIFACT_SKILL_PATTERN.test(path)) {
     return {
       packages: ["@opengeni/runtime"],
-      unitTests: ["scripts/sync-artifact-skills.test.ts"],
+      unitTests: ["scripts/bundled-artifact-skills.test.ts"],
       reason: "bundled artifact skill source boundary",
     };
   }
@@ -611,7 +641,7 @@ export function createImpactPlan(
   const changedTests = new Set<string>();
   for (const path of changedFiles) {
     const pkg = workspaceForPath(graph, path);
-    if (pkg) {
+    if (pkg && !ARTIFACT_SKILL_PATTERN.test(path)) {
       direct.add(pkg.name);
       reasons.push({ path, reason: `workspace ${pkg.name}` });
       if (/\.test\.tsx?$/.test(path) && existsSync(join(process.cwd(), path)))

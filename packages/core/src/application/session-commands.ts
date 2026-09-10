@@ -28,6 +28,7 @@ import {
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  setWorkspacePauseTimerInTransaction,
   projectEffectiveControlForRelatedAccess,
   runIdempotentPersistenceTransaction,
   saveComposerDraftInTransaction,
@@ -555,7 +556,7 @@ export async function controlAgentSessionWorkstream(
           wakeRevision: result.workflowWake.wakeRevision,
           shouldSignal: true,
           interruptionCount: result.interruptionCount,
-          controlRequested: true,
+          controlRequested: input.action === "pause",
         });
       },
     },
@@ -928,7 +929,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
           wakeRevision: result.workflowWake.wakeRevision,
           shouldSignal: true,
           interruptionCount: result.interruptionCount,
-          controlRequested: true,
+          controlRequested: input.action === "pause",
         });
       },
     },
@@ -1064,4 +1065,35 @@ export async function saveHumanComposerDraft(
       ),
   );
   return composerDraft(row)!;
+}
+
+export async function controlHumanWorkspaceTimer(
+  deps: Parameters<typeof controlHumanWorkspace>[0],
+  context: Parameters<typeof controlHumanWorkspace>[1],
+  input: import("@opengeni/contracts").WorkspacePauseTimerRequest,
+): Promise<void> {
+  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
+    scoped.transaction((tx) =>
+      setWorkspacePauseTimerInTransaction(tx as unknown as Database, {
+        ...input,
+        ...context,
+      }),
+    ),
+  );
+  scheduleSessionCommandPostCommit(deps, "human_workspace_timer", [
+    ...(result.workspaceControlEventId
+      ? [
+          {
+            kind: "workspace_control_fanout" as const,
+            run: async () =>
+              await publishWorkspaceControlEvent(
+                deps,
+                context.workspaceId,
+                result.workspaceControlEventId!,
+              ),
+          },
+        ]
+      : []),
+    { kind: "workflow_wake" as const, run: async () => await requestControlWakeDispatch(deps, 1) },
+  ]);
 }

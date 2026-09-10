@@ -27,6 +27,7 @@ import {
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
+import { createRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
   resolveCatalogSettings,
@@ -54,6 +55,7 @@ import {
 } from "./editable-artifact-websocket";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -122,6 +124,7 @@ export async function createTemporalWorkflowClient(
       workflowId,
       wakeRevision,
       interruptionRequested,
+      onSignalAccepted,
     }) => {
       await temporal.workflow.signalWithStart("sessionWorkflow", {
         taskQueue: settings.temporalTaskQueue,
@@ -130,7 +133,8 @@ export async function createTemporalWorkflowClient(
         args: [{ accountId, workspaceId, sessionId }],
         signal: interruptionRequested ? "sessionControl" : "queueChanged",
       });
-      await markSessionWorkflowWakeDelivered(db, {
+      onSignalAccepted?.();
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,
@@ -416,6 +420,7 @@ export async function startApi(
   }
   const { app, routeDeps } = createAppComposition({
     settings,
+    connectionCredentials: createRemoteMcpCredentialsPort(settings),
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,
@@ -455,7 +460,10 @@ export async function startApi(
       if (artifactWebSockets.handles(request)) {
         return artifactWebSockets.upgrade(request, bunServer);
       }
-      return app.fetch(request);
+      return app.fetch(
+        request,
+        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+      );
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,

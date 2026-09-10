@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
   TriggerScheduledTaskRequest,
@@ -6,7 +7,11 @@ import {
 import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant, resolveWorkspaceCatalogSettings } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  resolveWorkspaceCatalogSettings,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -34,7 +39,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:manage",
+    );
+    const grant = authorization.grant;
     const rawPayload = await c.req.json();
     const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
     if (!parsedPayload.success) {
@@ -60,6 +71,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       db,
       objectStorage,
       grant,
+      authorization,
       payload,
       toolsProvided: scheduledTaskToolsProvided(rawPayload),
       sessionAuthorization: deps.sessionAuthorization,
@@ -72,7 +84,24 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    const tasks = await listScheduledTasks(db, workspaceId, boundedLimit(c.req.query("limit")));
+    const sessionId = c.req.query("sessionId");
+    const offset = Number(c.req.query("offset") ?? 0);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new HTTPException(400, { message: "invalid offset" });
+    }
+    if (sessionId !== undefined) {
+      if (!z.string().uuid().safeParse(sessionId).success) {
+        throw new HTTPException(400, { message: "invalid sessionId" });
+      }
+      await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    }
+    const tasks = await listScheduledTasks(
+      db,
+      workspaceId,
+      boundedLimit(c.req.query("limit")),
+      offset,
+      sessionId,
+    );
     return c.json(tasks.map((task) => scheduledTaskForGrant(task, grant)));
   });
 
@@ -85,7 +114,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.patch("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:manage",
+    );
+    const grant = authorization.grant;
     const taskId = c.req.param("taskId");
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
     const previous = await captureScheduledTaskRestoreState(db, existing);
@@ -109,6 +144,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       objectStorage,
       grant,
       existing,
+      authorization,
       payload,
       toolsProvided: scheduledTaskToolsProvided(rawPayload),
       sessionAuthorization: deps.sessionAuthorization,
@@ -133,7 +169,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/resume", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:manage",
+    );
+    const grant = authorization.grant;
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const catalogSettings = (
@@ -149,6 +191,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       grant,
       existing,
       payload: { status: "active" },
+      authorization,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });

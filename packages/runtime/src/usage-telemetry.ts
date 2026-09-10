@@ -46,7 +46,10 @@ export type ModelCallUsageNormalization = {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
-    inputTokensDetails?: { cached_tokens: number };
+    inputTokensDetails?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    };
   }>;
   /** Bounded field paths only; raw provider values are never retained. */
   rejectedFields: string[];
@@ -161,15 +164,21 @@ export function normalizeModelCallUsage(
             inputTokensDetails: entry.inputTokensDetails ?? entry.input_tokens_details,
             outputTokensDetails: entry.outputTokensDetails ?? entry.output_tokens_details,
           });
+          const inputTokensDetails = {
+            ...(normalized.telemetry.cachedTokens === null
+              ? {}
+              : { cached_tokens: normalized.telemetry.cachedTokens }),
+            ...(normalized.telemetry.cacheWriteTokens === null
+              ? {}
+              : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
+          };
           return {
             inputTokens: normalized.telemetry.inputTokens!,
             outputTokens: normalized.telemetry.outputTokens!,
             totalTokens:
               normalized.totalTokens ??
               normalized.telemetry.inputTokens! + normalized.telemetry.outputTokens!,
-            ...(normalized.telemetry.cachedTokens === null
-              ? {}
-              : { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }),
+            ...(Object.keys(inputTokensDetails).length === 0 ? {} : { inputTokensDetails }),
           };
         })
       : undefined;

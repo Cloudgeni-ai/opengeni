@@ -1,0 +1,18 @@
+{
+  "name": "@opengeni/example-chat-quickstart",
+  "version": "0.0.6",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file=.env.local server.ts",
+    "server": "bun --env-file=.env.local server.ts",
+    "build": "bun build server.ts --target=bun --packages=external --outdir=dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opengeni/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

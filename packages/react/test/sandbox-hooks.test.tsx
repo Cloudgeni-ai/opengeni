@@ -968,6 +968,7 @@ describe("useSandboxFiles", () => {
 
   test("canonical roots keep list, tree, status, and top-level mutations in one namespace", async () => {
     const listedPaths: string[] = [];
+    const route = { epoch: 9, root: "/workspace" };
     let created = false;
     const client = fakeClient({
       gitStatus: async (_workspaceId, _sessionId, request) => {
@@ -994,6 +995,7 @@ describe("useSandboxFiles", () => {
       fsList: async (_workspaceId, _sessionId, request) => {
         const path = request?.path ?? "";
         listedPaths.push(path);
+        expect(request?.route).toEqual(route);
         return {
           root: {
             name: "workspace",
@@ -1035,6 +1037,7 @@ describe("useSandboxFiles", () => {
       },
       fsMkdir: async (_workspaceId, _sessionId, request) => {
         expect(request.path).toBe("/workspace/new");
+        expect(request.route).toEqual(route);
         created = true;
         return { path: request.path, revision: 2 };
       },
@@ -1045,6 +1048,7 @@ describe("useSandboxFiles", () => {
           client,
           workspaceId: WORKSPACE_ID,
           rootPath: "/workspace",
+          route,
         }),
       undefined,
     );
@@ -1059,6 +1063,58 @@ describe("useSandboxFiles", () => {
     await flush();
     expect(hook.result.current.tree.some((node) => node.path === "/workspace/new")).toBe(true);
     expect(listedPaths).toContain("/workspace");
+    await hook.unmount();
+  });
+
+  test("UNC roots keep both leading separators across repository frontier prefetch", async () => {
+    const root = "//server/share/repo";
+    const listedPaths: string[] = [];
+    const client = fakeClient({
+      fsList: async (_workspaceId, _sessionId, request) => {
+        const path = request?.path ?? "";
+        listedPaths.push(path);
+        return {
+          root: {
+            name: path.split("/").filter(Boolean).at(-1) ?? "",
+            path,
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            children: [],
+            truncated: false,
+          },
+          revision: 1,
+          truncated: false,
+        };
+      },
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxFiles(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          rootPath: root,
+          repoPaths: ["packages/app"],
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(listedPaths).toContain(root);
+    expect(listedPaths).toContain("//server/share/repo/packages");
+    expect(listedPaths).toContain("//server/share/repo/packages/app");
+    expect(listedPaths.some((path) => path.startsWith("/server/"))).toBe(false);
     await hook.unmount();
   });
 

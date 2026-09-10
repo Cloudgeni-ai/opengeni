@@ -199,6 +199,45 @@ afterEach(() => {
 });
 
 describe("MessageTimeline pagination affordances", () => {
+  test("places host message actions beside Copy and suppresses them while streaming", async () => {
+    const selected: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          userItem("prompt", "Question"),
+          {
+            kind: "agent-message",
+            id: "reply",
+            turnId: "turn",
+            text: "Answer",
+            streaming: false,
+            occurredAt: "2026-09-09T07:00:00Z",
+          },
+          {
+            kind: "agent-message",
+            id: "stream",
+            turnId: "next",
+            text: "Working",
+            streaming: true,
+            occurredAt: "2026-09-09T07:01:00Z",
+          },
+        ]}
+        renderMessageActions={(item) => (
+          <button data-message-action={item.id} onClick={() => selected.push(item.id)}>
+            Fork from here
+          </button>
+        )}
+      />,
+    );
+    const buttons = r.container.querySelectorAll<HTMLButtonElement>("[data-message-action]");
+    expect([...buttons].map((button) => button.dataset.messageAction)).toEqual(["prompt", "reply"]);
+    for (const button of buttons)
+      expect(button.parentElement?.querySelector("[data-og-copy]")).not.toBeNull();
+    await actRun(() => buttons[1]!.click());
+    expect(selected).toEqual(["reply"]);
+    await r.unmount();
+  });
+
   test("can reveal a known-fresh first message without blanking the scroller", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
@@ -590,6 +629,169 @@ describe("MessageTimeline pagination affordances", () => {
 
     await drainFrames(frames);
     expect(scroller.scrollTop).toBe(424);
+    await r.unmount();
+  });
+
+  test("a reader-driven prepend on a compact tail does not snap back to the live tip", async () => {
+    // Initial paint is a compact newest-suffix window. When that tail only
+    // barely overflows, the reader can be at the top (loading older history)
+    // while still within PIN_THRESHOLD of the live tip AFTER the prepend
+    // restores their gap. A restore write looks like a scroll-down toward the
+    // tip and used to re-pin, then the next commit snapped them to the bottom.
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const tail = manyEvents(8).map((evt) => event(evt.sequence + 12)); // 13..20
+    const r = await renderComponent(
+      <MessageTimeline events={tail} hasOlder loadingOlder={false} />,
+    );
+    await drainFrames(frames);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 440,
+      tipHeight: 80,
+      paddingBottom: 24,
+      emitScrollOnWrite: true,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(distanceFromBottom(scroller)).toBe(0);
+
+    await actRun(() => {
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -80, bubbles: true }));
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(0);
+
+    await r.rerender(<MessageTimeline events={tail} hasOlder loadingOlder={false} />);
+    await flush();
+    expect(scroller.scrollTop).toBe(0);
+
+    layout.setContentHeightOnPrepend(2_440);
+    await r.rerender(<MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} />);
+    await flush();
+    await drainFrames(frames);
+
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(2_000);
+    expect(distanceFromBottom(scroller)).toBe(40);
+
+    // Browsers may emit more than one scroll event for the same restoration.
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+    expect(scroller.scrollTop).toBe(2_000);
+
+    // An actual reader move toward the now-distant live tip still re-pins.
+    await actRun(() => {
+      scroller.scrollTop = 2_040;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(scroller.className).toContain("[overflow-anchor:none]");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("a sentinel-owned prepend restores an unpinned compact tail instead of snapping to the tip", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const tail = manyEvents(8).map((evt) => event(evt.sequence + 12));
+    const load = deferred<boolean>();
+    const controlled = controlledOlderReceipt(load.promise);
+    const onLoadOlder: OlderHistoryLoader = () => controlled.receipt;
+    const r = await renderComponent(
+      <PublicMessageTimeline events={tail} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 440,
+      tipHeight: 80,
+      paddingBottom: 24,
+      emitScrollOnWrite: true,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await readerScrollUp(scroller, 0);
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    const target = observed.at(-1);
+    if (!target) {
+      throw new Error("expected observed top sentinel");
+    }
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(scroller.scrollTop).toBe(0);
+
+    controlled.commit();
+    layout.setContentHeightOnPrepend(2_440);
+    await r.rerender(
+      <PublicMessageTimeline events={manyEvents(20)} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await flush();
+    await drainFrames(frames);
+
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(2_000);
+    expect(distanceFromBottom(scroller)).toBe(40);
+
+    await actRun(() => load.resolve(true));
+    await flush();
+    layout.restore();
     await r.unmount();
   });
 
@@ -1943,6 +2145,196 @@ describe("MessageTimeline pagination affordances", () => {
 
     expect(scroller.scrollTop).toBe(1_600);
     expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    await actRun(() => load.resolve(true));
+    await flush();
+    expect(calls).toBe(1);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test.each(["keyboard", "touch"] as const)(
+    "%s demand continues through a short committed page",
+    async (input) => {
+      let intersect: () => void = () => {
+        throw new Error("sentinel not observed");
+      };
+      globalThis.IntersectionObserver = class implements IntersectionObserver {
+        readonly root = null;
+        readonly rootMargin = "400px";
+        readonly scrollMargin = "0px";
+        readonly thresholds = [0];
+        constructor(private callback: IntersectionObserverCallback) {}
+        observe(target: Element) {
+          intersect = () =>
+            this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this);
+        }
+        unobserve() {}
+        disconnect() {}
+        takeRecords(): IntersectionObserverEntry[] {
+          return [];
+        }
+      };
+      const pending = [deferred<boolean>(), deferred<boolean>(), deferred<boolean>()];
+      const receipts = pending.map((load) => controlledOlderReceipt(load.promise));
+      let calls = 0;
+      const loadOlder: OlderHistoryLoader = () => receipts[calls++]!.receipt;
+      const events = Array.from({ length: 20 }, (_, i) => event(i + 2));
+      const view = await renderComponent(
+        <PublicMessageTimeline events={events} hasOlder onLoadOlder={loadOlder} />,
+      );
+      const scroller = view.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 500,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      await actRun(() => {
+        if (input === "keyboard") {
+          scroller.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+        } else {
+          const touchEvent = (name: string, y: number) => {
+            const gesture = new Event(name, { bubbles: true });
+            Object.defineProperty(gesture, "touches", { value: [{ clientX: 200, clientY: y }] });
+            scroller.dispatchEvent(gesture);
+          };
+          touchEvent("touchstart", 200);
+          touchEvent("touchmove", 240);
+        }
+        scroller.scrollTop = 0;
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      await actRun(() => intersect());
+      expect(calls).toBe(1);
+      receipts[0]!.commit();
+      await view.rerender(
+        <PublicMessageTimeline events={[event(1), ...events]} hasOlder onLoadOlder={loadOlder} />,
+      );
+      await actRun(() => pending[0]!.resolve(true));
+      // No leave/re-enter gesture and no new scroll range: next accepted page
+      // must still be reachable for both inputs, just as for wheel input.
+      await actRun(() => intersect());
+      expect(calls).toBe(2);
+      await actRun(() => intersect());
+      expect(calls).toBe(2);
+      // The web route keys this component by session ID. A pending old page
+      // must neither block the new session nor publish its retry UI there.
+      await view.rerender(
+        <PublicMessageTimeline
+          key="next-session"
+          events={events}
+          hasOlder
+          onLoadOlder={loadOlder}
+        />,
+      );
+      await armOlderPrefetch(view.container);
+      await actRun(() => intersect());
+      expect(calls).toBe(3);
+      await actRun(() => pending[1]!.resolve(false));
+      expect(view.container.querySelector("[data-og-retry]")).toBeNull();
+      await actRun(() => pending[2]!.resolve(true));
+      layout.restore();
+      await view.unmount();
+    },
+  );
+
+  test("a reconstructed first display item does not turn retained events into a replacement", async () => {
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const load = deferred<boolean>();
+    const controlled = controlledOlderReceipt(load.promise);
+    let calls = 0;
+    const loadOlder: OlderHistoryLoader = () => {
+      calls += 1;
+      return controlled.receipt;
+    };
+    const forwardingLoadOlder: OlderHistoryLoader = () => loadOlder();
+    const source = Array.from({ length: 40 }, (_, i) => event(i + 2));
+    const initialItems = Array.from({ length: 40 }, (_, index) =>
+      userItem(`tail-${index}`, `tail ${index}`),
+    );
+    const replacement = Array.from({ length: 40 }, (_, index) =>
+      userItem(`older-${index}`, `older ${index}`),
+    );
+    const r = await renderComponent(
+      <PublicMessageTimeline
+        items={initialItems}
+        events={source}
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 1_600,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <PublicMessageTimeline
+        items={initialItems}
+        events={source}
+        status="idle"
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+    await readerScrollUp(scroller, 80);
+    const target = observed.at(-1);
+    if (!target) {
+      throw new Error("expected observed top sentinel");
+    }
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(calls).toBe(1);
+    expect(scroller.scrollTop).toBe(80);
+
+    controlled.commit();
+    layout.setContentHeight(2_000);
+    await r.rerender(
+      <PublicMessageTimeline
+        items={replacement}
+        events={[event(1), ...source]}
+        status="idle"
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+
+    expect(scroller.scrollTop).toBe(480);
+    await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+    expect(scroller.getAttribute("data-og-bottom-follow")).toBe("false");
     expect(r.container.textContent).toContain("Jump to latest");
 
     await actRun(() => load.resolve(true));
@@ -3956,12 +4348,28 @@ function mockScrollerLayout(
     paddingBottom: number;
     /** Snap scrollTop writes to whole pixels like a real browser at dpr 1. */
     quantize?: boolean;
+    /**
+     * Chromium fires `scroll` from programmatic `scrollTop` writes. Opt in so
+     * restore/camera assignments exercise the same echo path as the browser.
+     */
+    emitScrollOnWrite?: boolean;
   },
 ) {
   let contentHeight = options.contentHeight;
   let tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;
   let currentScrollTop = Math.max(0, contentHeight - options.clientHeight);
   const scrollerTop = 100;
+  let pendingHeight: { height: number; rows: number } | null = null;
+  const refreshLayout = () => {
+    if (
+      pendingHeight &&
+      scroller.querySelectorAll("[data-og-group-key]").length !== pendingHeight.rows
+    ) {
+      contentHeight = pendingHeight.height;
+      tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;
+      pendingHeight = null;
+    }
+  };
 
   const findTip = (): HTMLElement | null => {
     const inner = scroller.firstElementChild;
@@ -3982,7 +4390,10 @@ function mockScrollerLayout(
   });
   Object.defineProperty(scroller, "scrollHeight", {
     configurable: true,
-    get: () => contentHeight,
+    get: () => {
+      refreshLayout();
+      return contentHeight;
+    },
   });
   Object.defineProperty(scroller, "scrollTop", {
     configurable: true,
@@ -3990,12 +4401,20 @@ function mockScrollerLayout(
     set: (value: number) => {
       const max = Math.max(0, contentHeight - options.clientHeight);
       const clamped = Math.max(0, Math.min(max, value));
-      currentScrollTop = options.quantize ? Math.floor(clamped) : clamped;
+      const next = options.quantize ? Math.floor(clamped) : clamped;
+      if (next === currentScrollTop) {
+        return;
+      }
+      currentScrollTop = next;
+      if (options.emitScrollOnWrite) {
+        scroller.dispatchEvent(new Event("scroll"));
+      }
     },
   });
 
   const scrollerElementRect = Element.prototype.getBoundingClientRect;
   Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+    refreshLayout();
     if (this === scroller) {
       return {
         top: scrollerTop,
@@ -4047,6 +4466,14 @@ function mockScrollerLayout(
   };
 
   return {
+    // Pre-commit snapshots must see the old DOM's geometry. Growing the mock
+    // before React mutates rows would simulate an unrelated prior resize.
+    setContentHeightOnPrepend(next: number) {
+      pendingHeight = {
+        height: next,
+        rows: scroller.querySelectorAll("[data-og-group-key]").length,
+      };
+    },
     setContentHeight(next: number) {
       contentHeight = next;
       tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;

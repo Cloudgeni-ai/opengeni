@@ -2,6 +2,8 @@
 import {
   ChatComposer,
   SessionChrome,
+  SessionCommandsPanel,
+  MessageTimeline,
   type ComposerState,
   type UseGoalResult,
   type UseTurnQueueResult,
@@ -14,6 +16,7 @@ import type {
 } from "@opengeni/sdk";
 import { useMemo, useState } from "react";
 
+import { activityEvents } from "@/dev/session-activity-events";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { ModelPicker, SessionToolPicker } from "@/components/pickers";
 import { SubagentTree } from "@/components/session/subagents";
@@ -45,6 +48,7 @@ const fixtureClient = {
 function useHarnessLiveQueue(seed: UseTurnQueueResult): {
   queue: UseTurnQueueResult;
   dismissIncoming: (inputId: string) => void;
+  addCommandResult: (summary: string) => void;
 } {
   const [turns, setTurns] = useState<SessionTurn[]>(seed.queue);
   const [inputs, setInputs] = useState<SessionPendingInputPreview[]>(seed.pendingInputs);
@@ -77,15 +81,8 @@ function useHarnessLiveQueue(seed: UseTurnQueueResult): {
         return null;
       },
       steerTurn: async (turnId) => {
-        setTurns((prev) => {
-          const from = prev.findIndex((turn) => turn.id === turnId);
-          if (from <= 0) return prev;
-          const next = [...prev];
-          const [moved] = next.splice(from, 1);
-          if (!moved) return prev;
-          next.unshift(moved);
-          return next;
-        });
+        if (seed.mutationError) return false;
+        setTurns((prev) => prev.filter((turn) => turn.id !== turnId));
         return true;
       },
       removeTurn: async (turnId) => {
@@ -98,6 +95,19 @@ function useHarnessLiveQueue(seed: UseTurnQueueResult): {
 
   return {
     queue,
+    addCommandResult: (summary) =>
+      setInputs((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          sessionId: seed.queue[0]?.sessionId ?? "22222222-2222-4222-8222-222222222222",
+          kind: "background_command_result",
+          classification: "info",
+          sourceId: "Build checks",
+          summary,
+          createdAt: new Date().toISOString(),
+        },
+      ]),
     dismissIncoming: (inputId) => {
       setInputs((prev) => prev.filter((input) => input.id !== inputId));
     },
@@ -114,6 +124,7 @@ function useHarnessLiveGoal(seed: UseGoalResult): UseGoalResult {
       isPaused: goal?.status === "paused",
       isCompleted: goal?.status === "completed",
       pause: async () => {
+        if (seed.mutationError) return goal;
         if (!goal || goal.status !== "active") return goal;
         const next: SessionGoal = {
           ...goal,
@@ -153,6 +164,7 @@ function useHarnessLiveGoal(seed: UseGoalResult): UseGoalResult {
         setGoal(null);
       },
       deleteGoal: async () => {
+        if (seed.mutationError) return;
         setGoal(null);
       },
     }),
@@ -174,9 +186,31 @@ export function ScenarioStack({
   const [effort, setEffort] = useState<IntelligenceEffort>("medium");
   const [toolSelection, setToolSelection] = useState(galleryToolSelection);
   const attachments = useMemo(() => emptyAttachments(), []);
-  const { queue, dismissIncoming } = useHarnessLiveQueue(scenario.queue);
+  const { queue, dismissIncoming, addCommandResult } = useHarnessLiveQueue(scenario.queue);
   const goal = useHarnessLiveGoal(scenario.goal);
   const agents = scenario.agentNodes;
+  const [commands, setCommands] = useState(scenario.commands ?? []);
+  const [commandState, setCommandState] = useState(scenario.commandState);
+  const commandList = {
+    commands,
+    loading: commandState === "loading",
+    error: commandState === "error" ? new Error("Connection unavailable") : null,
+    refresh: async () => {
+      setCommandState(undefined);
+    },
+    cancel: async (id: string) => {
+      if (commandState === "stop-error")
+        throw new Error("Stop was not confirmed. The command may still be running.");
+      setCommands((prev) =>
+        prev.map((command) =>
+          command.id === id
+            ? { ...command, state: "stopping", cancelRequestedAt: new Date().toISOString() }
+            : command,
+        ),
+      );
+    },
+  };
+  const receivedEvents = useMemo(() => activityEvents(), []);
 
   const runningAgents = agents.filter(
     (node) => node.session.status === "running" && node.session.effectiveControl.state === "active",
@@ -187,11 +221,21 @@ export function ScenarioStack({
 
   const chrome = (
     <SessionChrome
+      compact
       key={`${scenario.id}-${scenario.defaultActive ?? "none"}`}
       queue={queue}
       composer={composer}
       goal={goal}
-      onDismissIncoming={dismissIncoming}
+      readOnly={scenario.readOnly}
+      commandsCount={
+        commands.length || (commandState === "loading" || commandState === "error" ? 1 : 0)
+      }
+      commandsPanel={
+        scenario.commands ? (
+          <SessionCommandsPanel commands={commandList} readOnly={scenario.readOnly} />
+        ) : undefined
+      }
+      onDismissIncoming={scenario.readOnly ? undefined : dismissIncoming}
       defaultActive={scenario.defaultActive}
       agentsSignal={
         agents.length > 0
@@ -217,12 +261,13 @@ export function ScenarioStack({
 
   const composerBlock = (
     <ChatComposer
+      responsiveBasis="container"
       composer={composer}
       effectiveControl={scenario.session.effectiveControl}
       queuedAheadCount={queue.queue.length}
       placeholder="Send a follow-up…"
       attachments={attachments}
-      attachButtonClassName="max-sm:hidden"
+      attachButtonClassName="console-composer-wide-control max-sm:hidden"
       transcription={{
         client: fixtureClient as never,
         workspaceId: GALLERY_WORKSPACE_ID,
@@ -239,7 +284,7 @@ export function ScenarioStack({
         />
       }
       controlsStart={
-        <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
+        <div className="@container/model-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
           <ModelPicker
             rows={galleryModelRows}
             model={model}
@@ -255,7 +300,7 @@ export function ScenarioStack({
             firstPartyTools={galleryFirstPartyTools}
             selection={toolSelection}
             menuSide="top"
-            triggerClassName="max-sm:hidden"
+            triggerClassName="console-composer-wide-control max-sm:hidden"
             onChange={setToolSelection}
           />
         </div>
@@ -266,6 +311,30 @@ export function ScenarioStack({
   // Match `session.tsx`: SessionChrome card, then composer — same spacing in phone + gallery.
   const stack = (
     <>
+      {scenario.showDeliveredInputs ? (
+        <div className="mx-auto w-full max-w-3xl px-4 py-6">
+          <MessageTimeline events={receivedEvents} status="idle" />
+        </div>
+      ) : null}
+      {scenario.commands && commands.length > 0 ? (
+        <div className="px-4 pb-3 text-xs text-fg-subtle">
+          <button
+            type="button"
+            className="underline"
+            onClick={() => {
+              const command = commands[0];
+              if (!command) return;
+              setCommands((prev) => prev.slice(1));
+              addCommandResult(
+                command.commandPreview +
+                  (command.state === "stopping" ? ": stopped." : ": finished successfully."),
+              );
+            }}
+          >
+            Simulate next command result
+          </button>
+        </div>
+      ) : null}
       <div
         className={
           variant === "phone" ? "mb-2 w-full shrink-0 px-3" : "mb-2 w-full shrink-0 px-4 sm:px-6"

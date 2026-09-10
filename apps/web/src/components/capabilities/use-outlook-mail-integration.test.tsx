@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { OpenGeniClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -46,6 +47,13 @@ function accessContext(permissions: string[]): AccessContext {
 }
 
 function appContext(permissions: string[], client: Record<string, unknown> = {}) {
+  client.connectTransport ??= () =>
+    new OpenGeniClient({
+      baseUrl: "http://localhost:3000",
+      fetch: async () => {
+        throw new Error("Unexpected Connect request in Outlook presentation test");
+      },
+    }).connectTransport();
   return { client, accessContext: accessContext(permissions) };
 }
 

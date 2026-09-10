@@ -7,9 +7,11 @@ import postgres from "postgres";
 import {
   bootstrapWorkspace,
   createDb,
+  deactivatePreferenceRegistry,
   deleteWorkspace,
   getPortableSkillUninstallPreview,
   installPortableSkill,
+  skillFilesContentHash,
   listInstalledPortableSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
@@ -98,6 +100,8 @@ function skillInput(slug: string): InstallPortableSkillInput {
     accountId: first.accountId,
     workspaceId: first.workspaceId,
     subjectId: first.subjectId,
+    skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
+    skillOperationId: crypto.randomUUID(),
     capabilityId: `skill:${slug}-${sha256(slug).slice(0, 12)}`,
     pluginKey: `skill/acme/skills/${slug}`,
     source: "github",
@@ -120,6 +124,24 @@ function skillInput(slug: string): InstallPortableSkillInput {
   };
 }
 
+async function deactivateInstalledSkill(
+  installed: Awaited<ReturnType<typeof installPortableSkill>>,
+) {
+  await deactivatePreferenceRegistry(client!.db, {
+    accountId: first.accountId,
+    workspaceId: first.workspaceId,
+    actorSubjectId: first.subjectId,
+    principalKind: "human_session",
+    preferenceId: installed.skillReceipt.skillId,
+    expectedCurrentRevisionId: installed.skillReceipt.revisionId,
+    expectedScopeVersion: 1,
+    authorizeScope: (scope) => {
+      expect(scope).toBe("workspace");
+    },
+    reason: "Deactivate before removing source",
+  });
+}
+
 describe("portable Skill persistence", () => {
   test("installs idempotently, isolates tenants, and removes an unowned runtime Skill", async () => {
     if (!available || !client) return;
@@ -127,11 +149,14 @@ describe("portable Skill persistence", () => {
     const installed = await installPortableSkill(client.db, input);
     const replay = await installPortableSkill(client.db, input);
     expect(installed.created).toBe(true);
-    expect(replay).toEqual({ ...installed, created: false });
+    expect(replay).toEqual({
+      ...installed,
+      skillReceipt: { ...installed.skillReceipt, replayed: true },
+    });
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({
         capabilityId: input.capabilityId,
-        contentSha256: input.contentSha256,
+        contentSha256: skillFilesContentHash(input.files),
         files: [{ path: "SKILL.md", content: input.files[0]!.content }],
       }),
     ]);
@@ -157,14 +182,16 @@ describe("portable Skill persistence", () => {
         expectedInstallationVersion: 2,
       }),
     ).rejects.toBeInstanceOf(PortableSkillInstallationVersionConflictError);
+    await deactivateInstalledSkill(installed);
     expect(
       await uninstallPortableSkill(client.db, {
+        skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         capabilityId: input.capabilityId,
         expectedInstallationVersion: 1,
       }),
-    ).toEqual({
+    ).toMatchObject({
       capabilityId: input.capabilityId,
       status: "uninstalled",
       remainingOwners: [],
@@ -198,12 +225,55 @@ describe("portable Skill persistence", () => {
 
     expect(await installPortableSkill(client.db, input)).toEqual({
       ...installed,
-      created: false,
+      skillReceipt: { ...installed.skillReceipt, replayed: true },
     });
     await expect(
       installPortableSkill(client.db, { ...input, totalBytes: input.totalBytes + 1 }),
+    ).rejects.toThrow("reused with different input");
+    await expect(
+      installPortableSkill(client.db, {
+        ...input,
+        skillOperationId: crypto.randomUUID(),
+        totalBytes: input.totalBytes + 1,
+      }),
     ).rejects.toThrow("conflicts with immutable stored content");
+    await deactivateInstalledSkill(installed);
     await uninstallPortableSkill(client.db, {
+      skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      capabilityId: input.capabilityId,
+      expectedInstallationVersion: installed.installationVersion,
+    });
+  }, 60_000);
+
+  test("keeps session-selected Skills out of workspace runtime until explicitly requested", async () => {
+    if (!available || !client) return;
+    const input = {
+      ...skillInput("implementation-only"),
+      activationMode: "session_selected" as const,
+    };
+    const installed = await installPortableSkill(client.db, input);
+
+    expect(
+      (await listInstalledPortableSkills(client.db, first.workspaceId)).some(
+        (skill) => skill.capabilityId === input.capabilityId,
+      ),
+    ).toBe(false);
+    expect(
+      await listInstalledPortableSkills(client.db, first.workspaceId, {
+        includeSessionSelected: true,
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        capabilityId: input.capabilityId,
+        activationMode: "session_selected",
+      }),
+    );
+
+    await deactivateInstalledSkill(installed);
+    await uninstallPortableSkill(client.db, {
+      skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       capabilityId: input.capabilityId,

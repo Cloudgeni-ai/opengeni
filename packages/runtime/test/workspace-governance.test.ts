@@ -145,6 +145,96 @@ function preferenceSnapshot(
 }
 
 describe("exact-attempt workspace governance prompt", () => {
+  test("shared Skill reading removes the duplicate preference index without weakening policy", () => {
+    const governance = renderWorkspaceGovernanceContext(
+      {
+        instructionPolicy: policySnapshot([
+          policyEntry({ kind: "policy", scope: "global", content: "GLOBAL_POLICY_SENTINEL" }),
+        ]),
+        preferences: preferenceSnapshot([descriptor("workspace", "LEGACY_SKILL")]),
+      },
+      { sharedSkillReader: true },
+    );
+    expect(governance).toContain("GLOBAL_POLICY_SENTINEL");
+    expect(governance).toContain("shared Skill index and skill_read");
+    expect(governance).not.toContain("LEGACY_SKILL");
+    expect(governance).not.toContain("preference_registry_get");
+    expect(governance).not.toContain("lane=preference");
+    expect(governance).not.toContain("Skill snapshot evidence");
+    expect(governance).not.toContain("opengeni-skills");
+  });
+
+  test("equivalent authority stays byte-identical across accepted attempts", () => {
+    const original = {
+      companyProfile: companyProfileSnapshot(),
+      instructionPolicy: policySnapshot([
+        policyEntry({ kind: "charter", scope: "global", content: "CHARTER_SENTINEL" }),
+      ]),
+      preferences: preferenceSnapshot([descriptor("user", "PERSONAL")]),
+    };
+    const next = structuredClone(original);
+    for (const snapshot of Object.values(next)) {
+      snapshot.id = crypto.randomUUID();
+      snapshot.turnId = crypto.randomUUID();
+      snapshot.attemptId = crypto.randomUUID();
+      snapshot.executionGeneration += 1;
+      snapshot.createdAt = "2026-09-09T12:00:00.000Z";
+    }
+    const before = renderWorkspaceGovernanceContext(original)!;
+    const after = renderWorkspaceGovernanceContext(next)!;
+    expect(after).toBe(before);
+    for (const snapshot of [...Object.values(original), ...Object.values(next)]) {
+      expect(after).not.toContain(snapshot.id);
+    }
+    // Revision identity and frozen retrieval authority remain model-visible.
+    expect(after).toContain(original.companyProfile.profile!.id);
+    expect(after).toContain(original.instructionPolicy.entries[0]!.revisionId);
+    expect(after).toContain(original.preferences.descriptors[0]!.retrievalHandle);
+    const settings = testSettings({ sandboxBackend: "none" });
+    const options = { sessionInstructions: "SESSION_SENTINEL" };
+    expect(
+      buildOpenGeniAgent(settings, [], { ...options, workspaceGovernance: after }).instructions,
+    ).toBe(
+      buildOpenGeniAgent(settings, [], { ...options, workspaceGovernance: before }).instructions,
+    );
+  });
+
+  test("real governance changes still change the rendered prompt", () => {
+    const original = {
+      companyProfile: companyProfileSnapshot(),
+      instructionPolicy: policySnapshot([
+        policyEntry({ kind: "charter", scope: "global", content: "CHARTER_SENTINEL" }),
+      ]),
+      preferences: preferenceSnapshot([descriptor("user", "PERSONAL")]),
+    };
+    const before = renderWorkspaceGovernanceContext(original);
+    const changes: Array<(next: typeof original) => void> = [
+      (next) => {
+        next.companyProfile.profile!.profile.mission = "New mission";
+      },
+      (next) => {
+        next.companyProfile.profile!.activationVersion += 1;
+      },
+      (next) => {
+        next.instructionPolicy.entries[0]!.content = "New charter";
+      },
+      (next) => {
+        next.instructionPolicy.policyRole = "operator";
+      },
+      (next) => {
+        next.preferences.descriptors[0]!.description = "New skill guidance";
+      },
+      (next) => {
+        next.preferences.descriptors[0]!.retrievalHandle += "&changed=1";
+      },
+    ];
+    for (const change of changes) {
+      const next = structuredClone(original);
+      change(next);
+      expect(renderWorkspaceGovernanceContext(next)).not.toBe(before);
+    }
+  });
+
   test("orders fixed authorities before session/task state and bounded memory", () => {
     const governance = renderWorkspaceGovernanceContext({
       companyProfile: companyProfileSnapshot(),

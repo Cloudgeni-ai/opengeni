@@ -191,19 +191,60 @@ function preferenceRequest(operationId = crypto.randomUUID()) {
   };
 }
 
+function ruleRequest() {
+  return {
+    operationId: crypto.randomUUID(),
+    lane: "instruction_policy" as const,
+    scope: "workspace" as const,
+    content: "Never include secret values in public logs.",
+    reason: "The user requested a universal rule.",
+  };
+}
+
 describe("remember router (real PostgreSQL)", () => {
+  test("retired preference writes fail before creating notes, proposals, or confirmation questions in every Learning mode", async () => {
+    if (!shared || !client) return;
+    for (const mode of ["off", "suggest", "automatic"] as const) {
+      const f = await fixture(mode);
+      let createCalls = 0;
+      const router = createRememberRouter({
+        db: client.db,
+        createNote: async () => {
+          createCalls += 1;
+          throw new Error("Retired lane must not create a note");
+        },
+      });
+      await expect(
+        router.remember({ attempt: f.attempt, request: preferenceRequest() }),
+      ).rejects.toMatchObject({ name: "RememberError", code: "preference_retired" });
+      expect(createCalls).toBe(0);
+      expect(
+        await shared.admin`SELECT id FROM task_notes WHERE workspace_id=${f.grant.workspaceId}`,
+      ).toHaveLength(0);
+      expect(
+        await shared.admin`SELECT id FROM knowledge_change_proposals WHERE scope_workspace_id=${f.grant.workspaceId}`,
+      ).toHaveLength(0);
+      expect(
+        await shared.admin`SELECT id FROM preference_registry_preferences WHERE scope_workspace_id=${f.grant.workspaceId}`,
+      ).toHaveLength(0);
+      expect(
+        await shared.admin`SELECT id FROM session_human_input_requests WHERE workspace_id=${f.grant.workspaceId}`,
+      ).toHaveLength(0);
+    }
+  }, 180_000);
+
   test("activates immediately under automatic learning", async () => {
     if (!shared || !client) return;
     const f = await fixture("automatic");
     const router = createRememberRouter({ db: client.db });
     const receipt = await router.remember({
       attempt: f.attempt,
-      request: preferenceRequest(),
+      request: ruleRequest(),
     });
     expect(receipt.status).toBe("activated");
     if (receipt.status !== "activated") return;
     expect(receipt.activation).toMatchObject({
-      destination: "preference",
+      destination: "instruction_policy",
       authorityKind: "automatic",
       undo: "learning_history",
     });
@@ -224,7 +265,7 @@ describe("remember router (real PostgreSQL)", () => {
     if (!shared || !client) return;
     const f = await fixture("suggest");
     const router = createRememberRouter({ db: client.db });
-    const request = preferenceRequest();
+    const request = ruleRequest();
     const receipt = await router.remember({ attempt: f.attempt, request });
     expect(receipt.status).toBe("confirmation_required");
     if (receipt.status !== "confirmation_required") return;
@@ -240,7 +281,7 @@ describe("remember router (real PostgreSQL)", () => {
     // The card names the cost before a human agrees to it.
     expect(receipt.humanInput.questions[0]!.label).toBe(
       rememberConfirmationLabel({
-        lane: "preference",
+        lane: "instruction_policy",
         contentChars: request.content.length,
       }),
     );
@@ -251,7 +292,13 @@ describe("remember router (real PostgreSQL)", () => {
 
     const decisionReceiptId = receipt.learning!.receiptId;
     // A "don't save" answer cannot activate.
-    const skipped = await answeredRememberInput(f, receipt.proposalId!, request.content, ["skip"]);
+    const skipped = await answeredRememberInput(
+      f,
+      receipt.proposalId!,
+      request.content,
+      ["skip"],
+      "Save this as a mandatory workspace rule for everyone in this workspace?",
+    );
     await expect(
       router.confirm({
         attempt: f.attempt,
@@ -265,7 +312,13 @@ describe("remember router (real PostgreSQL)", () => {
       }),
     ).rejects.toThrow();
     // A different proposal id cannot be confirmed with this answer.
-    const answered = await answeredRememberInput(f, receipt.proposalId!, request.content);
+    const answered = await answeredRememberInput(
+      f,
+      receipt.proposalId!,
+      request.content,
+      ["save"],
+      "Save this as a mandatory workspace rule for everyone in this workspace?",
+    );
     await expect(
       router.confirm({
         attempt: f.attempt,
@@ -308,7 +361,7 @@ describe("remember router (real PostgreSQL)", () => {
       proposalId: receipt.proposalId,
       decisionReceiptId,
       activation: {
-        destination: "preference",
+        destination: "instruction_policy",
         authorityKind: "human_confirmed",
         undo: "learning_history",
       },
@@ -394,7 +447,7 @@ describe("remember router (real PostgreSQL)", () => {
     const off = await fixture("off");
     const blocked = await router.remember({
       attempt: off.attempt,
-      request: preferenceRequest(),
+      request: ruleRequest(),
     });
     expect(blocked).toMatchObject({
       status: "blocked",

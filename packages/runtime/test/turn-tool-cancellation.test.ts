@@ -66,6 +66,67 @@ async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolea
 }
 
 describe("turn sandbox-tool physical cancellation fence", () => {
+  test("command_input preserves stdin approval and cancellation and is absent without a shell", async () => {
+    const controller = createTurnToolCancellationController();
+    const write = functionTool("write_stdin", async () => exited(0));
+    write.needsApproval = async () => true;
+    const tools = controller.wrapTools([
+      functionTool("exec_command", async () => exited(0)),
+      write,
+    ]) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const input = tools.find((tool) => tool.name === "command_input")!;
+    expect(input.needsApproval).toBe(write.needsApproval);
+    expect(
+      controller.wrapTools(tools).filter((tool) => tool.name === "command_input"),
+    ).toHaveLength(1);
+    expect(controller.wrapTools([functionTool("read_file", async () => "read")])).toHaveLength(1);
+    controller.cancel(new Error("steered"));
+    await expect(
+      input.invoke(runContext, JSON.stringify({ session_id: 18, chars: "no" })),
+    ).rejects.toThrow("steered");
+  });
+
+  test("command_input is a callable native capability using exact owning stdin admission", async () => {
+    const controller = createTurnToolCancellationController();
+    const inputs: unknown[] = [];
+    const tools = controller.wrapTools(
+      [
+        functionTool("exec_command", async () => exited(0)),
+        functionTool("write_stdin", async () => {
+          throw new Error("must use pinned mutation");
+        }),
+      ],
+      {
+        hasRetainedProcess: () => true,
+        supportsCommandInput: () => true,
+        writeStdinForProcessMutation: async (input) => {
+          inputs.push(input);
+          return exited(0, "received");
+        },
+      },
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const input = tools.find((tool) => tool.name === "command_input")!;
+    expect(input).toBeDefined();
+    expect(
+      await input.invoke(runContext, JSON.stringify({ session_id: 18, chars: "hello\n" })),
+    ).toContain("received");
+    expect(inputs).toEqual([{ sessionId: 18, chars: "hello\n", yieldTimeMs: 0 }]);
+    expect(await input.invoke(runContext, JSON.stringify({ session_id: 18, chars: "" }))).toContain(
+      "nonempty",
+    );
+  });
+
+  test("command_input on Connected Machine shells reports unsupported without inventing stdin", async () => {
+    const controller = createTurnToolCancellationController();
+    const tools = controller.wrapTools([functionTool("exec_command", async () => exited(0))], {
+      commandCancellationTransport: async () => "remote_operation",
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const input = tools.find((tool) => tool.name === "command_input")!;
+    expect(
+      await input.invoke(runContext, JSON.stringify({ session_id: 1, chars: "hello" })),
+    ).toContain("no stdin transport");
+  });
+
   test("waits internally for a short command instead of returning a pollable session", async () => {
     const controller = createTurnToolCancellationController();
     const writes: Array<Record<string, unknown>> = [];
@@ -111,6 +172,185 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(output).toContain("Process running with session ID 16");
     expect(writes).toBe(0);
+  });
+
+  test("a retained process becomes a background command only before its receipt is returned", async () => {
+    const controller = createTurnToolCancellationController();
+    let adoptions = 0;
+    const exec = functionTool("exec_command", async () => running(116, "ready\n"));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 116,
+      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number) => {
+        expect(sessionId).toBe(116);
+        adoptions += 1;
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "long-task", yield_time_ms: 0 }),
+    );
+
+    expect(output).toContain("Process running with session ID 116");
+    expect(adoptions).toBe(1);
+  });
+
+  test("an adopted native handle exposes its UUID and a later read honors the foreground wait", async () => {
+    const controller = createTurnToolCancellationController();
+    let reads = 0;
+    let observations = 0;
+    const session = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        sandboxId: null,
+        kind: "modal",
+        session: {
+          execCommand: async () => running(117, "start\n"),
+          writeStdin: async () => (++reads === 1 ? running(117, "middle\n") : exited(0, "done\n")),
+        },
+      }),
+      adoptProcessAsBackgroundCommand: async () => {},
+      observeProcessTerminal: async () => {
+        observations += 1;
+      },
+    });
+    const exec = functionTool("exec_command", async () => session.execCommand({ cmd: "work" }));
+    const write = functionTool("write_stdin", async () => {
+      throw new Error("must use pinned route");
+    });
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+    const started = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "work", yield_time_ms: 0 }),
+    );
+    expect(started).toContain(`Command ID: ${session.retainedProcessIdentity(117)!.id}`);
+    const result = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 117, chars: "", yield_time_ms: 1000 }),
+    );
+    expect(result).toContain("Process exited with code 0");
+    expect(result).toContain("middle\ndone");
+    expect(reads).toBe(2);
+    expect(observations).toBe(1);
+    await controller.waitForQuiescence();
+  });
+
+  test("a failed eager read cannot cause adoption before the requested deadline", async () => {
+    const controller = createTurnToolCancellationController();
+    let adoptions = 0;
+    const session = {
+      hasRetainedProcess: () => true,
+      writeStdinForProcessRead: async () => {
+        throw new Error("read unavailable");
+      },
+      writeStdinForProcessControl: async () => exited(0),
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions += 1;
+      },
+    };
+    const [exec] = controller.wrapTools(
+      [functionTool("exec_command", async () => running(118))],
+      session,
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    await expect(
+      exec!.invoke(runContext, JSON.stringify({ cmd: "work", yield_time_ms: 1000 })),
+    ).rejects.toThrow("read unavailable");
+    expect(adoptions).toBe(0);
+  });
+
+  test("OpenSandbox numeric handles stay observable in their owning context despite remote-op cancellation", async () => {
+    const controller = createTurnToolCancellationController();
+    let writes = 0;
+    const session = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        sandboxId: null,
+        kind: "opensandbox",
+        session: {
+          commandCancellationTransport: async () => "remote_operation",
+          cancelExecCommand: async () => true,
+          execCommand: async () => running(119, "started\n"),
+          writeStdin: async () => {
+            writes += 1;
+            return exited(0, "finished\n");
+          },
+        },
+      }),
+    });
+    const [exec] = controller.wrapTools(
+      [functionTool("exec_command", async () => session.execCommand({ cmd: "work" }))],
+      session,
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const result = await exec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "work", yield_time_ms: 1000 }),
+    );
+    expect(result).toContain("Process exited with code 0");
+    expect(result).toContain("started\nfinished");
+    expect(writes).toBe(1);
+    expect(session.hasRetainedProcess(119)).toBe(false);
+    await controller.waitForQuiescence();
+  });
+
+  test("a process-local retained command yields a turn-scoped handle without background adoption", async () => {
+    const controller = createTurnToolCancellationController();
+    let writes = 0;
+    let adoptions = 0;
+    const exec = functionTool("exec_command", async () => running(118, "ready\n"));
+    const write = functionTool("write_stdin", async () => {
+      writes += 1;
+      return exited(0, "finished\n");
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 118,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions += 1;
+      },
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "local-task", yield_time_ms: 0 }),
+    );
+
+    expect(output).toContain("Process running with session ID 118");
+    expect(output).toContain("turn-scoped");
+    expect(output).toContain("ready");
+    expect(writes).toBe(0);
+    const completed = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 118, chars: "", yield_time_ms: 0 }),
+    );
+    expect(completed).toContain("Process exited with code 0");
+    expect(writes).toBe(1);
+    expect(adoptions).toBe(0);
+  });
+
+  test("failed background adoption never exposes a live process receipt", async () => {
+    const controller = createTurnToolCancellationController();
+    const exec = functionTool("exec_command", async () => running(117, "ready\n"));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 117,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        throw new Error("durable adoption failed");
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "long-task", yield_time_ms: 0 })),
+    ).rejects.toThrow("durable adoption failed");
   });
 
   test.skipIf(Bun.which("setsid") === null)(
@@ -204,9 +444,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       writes.push(input.chars ?? "");
       return processAlive ? running(7) : exited(137);
     });
-    const wrapped = controller.wrapTools([exec, write]) as Array<
-      Extract<Tool<unknown>, { type: "function" }>
-    >;
+    const wrapped = controller.wrapTools([exec, write], {
+      hasRetainedProcess: (id: number) => id === 7,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
 
     const output = await wrapped[0]!.invoke(
       runContext,
@@ -342,6 +583,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     });
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 32,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
       writeStdinForProcessMutation: async () => {
         mutations += 1;
         return running(32);
@@ -401,6 +643,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(320));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 320 && retained,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
       execCommandForProcessControl: async () => {
         helperCalls += 1;
         await Bun.sleep(providerLatencyMs);
@@ -436,6 +679,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(321));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 321 && retained,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
       execCommandForProcessControl: async (_sessionId: number, args: { cmd: string }) => {
         helperCommands.push(args.cmd);
         return exited(helperCommands.length === 1 ? 76 : helperCommands.length === 2 ? 75 : 0);
@@ -593,6 +837,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
   test("resolves a lazy routing backend before choosing its cancellation transport", async () => {
     const controller = createTurnToolCancellationController();
     let resolves = 0;
+    let backgroundAdoptions = 0;
     let wrappedInput: Record<string, unknown> | null = null;
     const backend = {
       supportsPty: () => true,
@@ -609,6 +854,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       resolveActiveBackend: async () => {
         resolves += 1;
         return { session: backend, sandboxId: null, kind: "modal" };
+      },
+      adoptProcessAsBackgroundCommand: async () => {
+        backgroundAdoptions += 1;
       },
     });
     const exec = functionTool("exec_command", async (_runContext, input) => {
@@ -634,6 +882,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       ),
     ).toContain("Process running with session ID 41");
     expect(resolves).toBe(1);
+    expect(backgroundAdoptions).toBe(1);
     expect(wrappedInput?.yield_time_ms).toBe(0);
     expect(String(wrappedInput?.cmd)).toContain("/tmp/opengeni-turn-shell/");
 
@@ -756,7 +1005,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 33, chars: "input" }));
+    await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 33, chars: "input", yield_time_ms: 0 }),
+    );
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
     expect(controlAttempts).toBe(0);

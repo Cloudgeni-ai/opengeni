@@ -6,13 +6,78 @@ page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
-| **First-party OpenGeni MCP** (`/v1/workspaces/:id/mcp`) | Embedding host selects tool names per session | Always attached; the model sees the session's exact catalog selection intersected with its authorization grant | The caller's own bearer; internally delegated `ogd_` tokens carry permissions and the separate tool-name selection | An agent should use selected OpenGeni-native orchestration or self-management tools |
+| **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing OpenGeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
-| **Docs MCP** (`/mcp/docs`) | Nobody — built in | Built in; selected through the `docs` server ref | Caller's bearer | An agent should search the workspace's documents store |
-| **Files MCP** (`/mcp/files`) | Nobody — built in | Default-on download-materialization surface selected through the `files` server ref; an explicit API policy may omit it | Caller's bearer with `files:read` | An agent needs a short-lived download URL for a ready file, including an original file identified by document search |
+| **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
+| **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview |
+| **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
+| **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated compatibility endpoint; the same Files implementation is also included in the unified gateway | Caller's bearer with `files:read` | A narrowly configured client needs only file materialization |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and Slack's hosted MCP are personal-only and never workspace-owned | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
+
+The public OAuth authorization server is deliberately narrow: public dynamic
+client registration, authorization-code grant with mandatory PKCE S256, exact
+RFC 8707 resource binding to one workspace MCP/Docs/Files resource, scope
+`mcp:access`, opaque 15-minute access tokens, and rotating 30-day refresh
+tokens. Consent requires the existing managed or local current-human session. OAuth
+tokens are accepted only by MCP routes and never become REST credentials.
+OAuth consent grants MCP access; it does not silently satisfy a tool's separate
+one-shot human-approval classification. HTTP/SDK approval capabilities bind a
+private provider-authority revision as well as the public catalog identity and
+arguments. Their connection preflight never refreshes credentials or records
+provider usage, and an approval-required connection-backed adapter without that
+seam is omitted until it can fail before capability issuance. An unconsumed
+capability may be replaced when catalog or provider authority changes, but a
+consumed capability leaves a durable hash-only operation tombstone: the same
+operation id cannot be approved again after execution may have started.
+
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+
+### Recovery from tool-search misses
+
+Progressive discovery uses the same authorized deferred pool on Codex-native,
+OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
+exhaustive. `tool_list` is a query-independent fallback: it returns compact
+names and description previews, with a default page of 20, a maximum of 40,
+and a 16 KiB response budget. Follow `nextCursor` until null, preserving the
+optional literal `namePrefix` filter. An invalid cursor requires restarting
+the listing against the current pool. Names and prefixes are display/routing
+keys, never authorization identities.
+
+Use `tool_search` with `query: ""` and `names: ["exact_name"]` to disclose the
+listed tool's full schema without keyword ranking. Exact lookup cannot admit
+a tool outside the current pool. Search backfills smaller candidates after
+schema-size exclusions while retaining existing count and byte limits.
+Native disclosure returns the original SDK tool objects; generic dispatch,
+approvals, and invocation continue through the existing runtime. Listing
+joins deferred preparation but adds no preparation barrier to the first model
+request, no shell dependency, and no change to eager/search policy defaults.
+
+The native Connected Machine Codemode client sends its compiled API contract
+acknowledgement for compatibility with older deployments whose Codemode routes
+were protected by the product mutation fence. Current deployments scope
+Codemode through the attempt protocol independently, and the TypeScript client
+does not send this header. A server contract mismatch must fail explicitly;
+clients must not blindly echo a newly advertised version. The native mirror is
+pinned to the shared contracts by `packages/codemode/test/native-api-contract.test.ts`.
+
+Native Codemode failures emit a JSON receipt on stderr with the operation ID,
+observed state, error code, and message once an operation ID has been allocated.
+Its existence may remain unconfirmed if submission and subsequent observation fail.
+An unobserved state remains null, never an inferred execution failure.
+`opengeni-agent codemode read <operation-id>` reads the existing journal under
+the current attempt's authority without submitting or repeating the tool.
+Unknown outcomes are not automatically retried. Client compatibility must be
+verified on packaged artifacts; catalog authority does not certify an installed
+JavaScript client, and an optional client failure grants no additional access.
+The `read` command exits successfully when journal observation succeeds, even
+when the returned operation failed; inspect `operation.state` before using its
+result. Reads remain attempt-authorized and can be denied after an attempt ends.
+On a Linux Docker build host, `bun scripts/test-codemode-image.ts <image>
+<absolute-native-binary> receipts` verifies the packaged clients against an
+owned loopback fixture, including credential modes and GET-only recovery. This
+is release verification, not a health probe that executes customer tools.
 
 First-party OpenGeni MCP memory tools:
 
@@ -26,13 +91,14 @@ the setting is off.
 
 First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEnabled`):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Review first: Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Require approval: Off creates nothing, Require approval stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 
-- `sessions_list` / `session_get` / `session_events` - compact discovery, exact bounded detail, and the byte-bounded semantic event tail. `sessions_list` can perform permission-first title/active-goal/typed-claim related-work discovery, but every match remains advisory and grants no access; see [`work-discovery.md`](work-discovery.md).
-- `session_wait` - one blocking call (session-scoped grants only) for short waits inside the current turn: it returns when a watched session satisfies the selected condition after the caller's cursor, the caller's own session has pending machine input, or `maxWaitSeconds` (default 45, max 50, enforced in the schema and in the waiter) elapses. `waitFor: "change"` is the backward-compatible default and observes turn lifecycle, `agent.message.completed`, blocking failures, goal facts, and session status/control changes. `waitFor: "completion"` is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and wakes only for a result-bearing final turn or a blocking state. In particular, `goal.completed` records durable goal state but does not mean the child has emitted its final result; an ordinary `turn.completed` carrying `output` is the final result, while `turn.completed` carrying `segmentLimit` or `maintenance` is not. The tool subscribes to live NATS fanout first and then reads `session_events` in PostgreSQL, so the result always carries exact durable rows plus a `latestSequence` cursor per target; the bus only wakes it, and a failed subscription degrades to the durable pre-check plus deadline re-check (`liveFanout: false`) instead of failing the tool. Every target is authorized exactly as `session_events` (`session.events.read`) before any subscription and re-authorized before a post-wait result is returned; the result is byte-bounded like `session_events` (summaries shorten first, then newest rows drop, so a changed target can return `events: []` with `hasMore: true`). `ownPendingUpdates > 0` means the caller's own machine input is waiting: it is delivered only when the next turn is claimed, so the agent should finish the turn or pass `includeOwnPendingUpdates: false` to keep waiting. The API serves one MCP transport per POST, so the worker's cancel notification cannot reach the handler; the route instead binds the HTTP request's abort to `transport.close()`, which aborts the handler's `extra.signal` when the worker drops the call on Steer/Pause, and the deadline bounds the wait regardless. The 50 s cap exists because the built-in `opengeni` server entry uses the MCP client's default 60 s request timeout; long waits end the turn with `goal_wait` rather than looping `session_wait` for hours while holding the turn and sandbox.
-- `goal_wait` (`goals:manage`, session-scoped grants only, self-only) - the long-wait counterpart: records a bounded continuation hold on the caller's active goal (reason plus a mandatory deadline of 30 s to 7 days, `goal.held` timeline fact) so the agent can end its turn and be woken by a child result, an agent message, a human prompt, or the deadline instead of a continuation turn three seconds after idle. It never substitutes for `goal_pause` when a human decision is the blocker. See [`goals.md`](goals.md).
+- `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
+- `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. Do not immediately repeat a timed-out short wait without new evidence.
+- `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
+- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 
 Exact-attempt advisory work-claim mutations (`sessions:control`) use
 `work_claim_upsert` and `work_claim_release`. They are CAS/idempotency-fenced,

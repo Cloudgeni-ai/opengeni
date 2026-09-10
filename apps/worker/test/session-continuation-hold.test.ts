@@ -1,11 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
+  cancelledAttemptRecoveryMayContinue,
   continuationHoldMs,
   deferredResultMayContinue,
   humanInputDeadlineWaitMs,
   unclaimedAttemptRetryDelayMs,
   unclaimedAttemptWakeChanged,
 } from "../src/workflows/session";
+
+describe("cancelled activity result recovery", () => {
+  test("continues only while exact-attempt redispatch remains bounded", () => {
+    expect(cancelledAttemptRecoveryMayContinue("recovering")).toBe(true);
+    expect(cancelledAttemptRecoveryMayContinue("stale")).toBe(true);
+    expect(cancelledAttemptRecoveryMayContinue("unclaimed")).toBe(true);
+    expect(cancelledAttemptRecoveryMayContinue("exceeded")).toBe(false);
+  });
+});
 
 // P3 all-capped infinite-loop bugfix (fix #6). session.ts must treat a rotation
 // all-capped idle (`idleUntilReset`) as a MANDATORY hold: a 0/elapsed continueDelayMs

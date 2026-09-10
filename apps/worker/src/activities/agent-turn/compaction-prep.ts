@@ -20,7 +20,10 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "../types";
-import { recordContextCompaction } from "../../observability-metrics";
+import {
+  recordContextCompaction,
+  recordContextCompactionStarted,
+} from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { type SessionEvent } from "@opengeni/contracts";
@@ -288,6 +291,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const compactionModeOptions = {
     codexCompactionMode: session.codexCompactionMode,
     isCodexSubscriptionTurn: billingState.isCodexTurn,
+    onCompactionStarted: (trigger: "auto" | "operator" | "proactive" | "overflow") =>
+      recordContextCompactionStarted(observability, trigger),
     publishLiveEvents: publishCompactionLiveEvents,
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;

@@ -11,6 +11,7 @@ import {
   assertRuntimeDatabasePosture,
   countSessionRecoveryBacklog,
   createDb,
+  getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   type Database,
   type RuntimeDatabasePostureOptions,
@@ -56,9 +57,11 @@ import {
   type WorkerLifecycleState,
 } from "./http";
 import {
+  initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
   observabilityEventLogger,
+  startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
   type TurnTaskQueueStats,
@@ -225,6 +228,9 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
   initializeWorkerOutcomeMetrics(observability);
+  if (options.role === "turn") {
+    initializeContextCompactionMetrics(observability);
+  }
   if (options.role === "turn" && options.workflowBundle) {
     throw new Error("workflowBundle is valid only for the control worker role");
   }
@@ -370,6 +376,7 @@ export async function createWorkerWorkflowSignaler(
       workflowId,
       wakeRevision,
       interruptionRequested,
+      onSignalAccepted,
     }) => {
       if (interruptionRequested) {
         await temporal.workflow.signalWithStart("sessionWorkflow", {
@@ -389,7 +396,8 @@ export async function createWorkerWorkflowSignaler(
           signal: "queueChanged",
         });
       }
-      await markSessionWorkflowWakeDelivered(db, {
+      onSignalAccepted?.();
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,
@@ -800,6 +808,9 @@ export async function createOpenGeniWorkerService(
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
   let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
   let sessionRecoveryMonitor: ReturnType<typeof startSessionRecoveryMonitor> | undefined;
+  let contextCompactionPendingMonitor:
+    | ReturnType<typeof startContextCompactionPendingMonitor>
+    | undefined;
   const schedules: Array<{ close: () => Promise<void> }> = [];
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   let memoryPressureGuard: TurnWorkerMemoryPressureGuard | undefined;
@@ -888,6 +899,10 @@ export async function createOpenGeniWorkerService(
         observability,
         read: async () => await countSessionRecoveryBacklog(options.activityDependencies.db),
       });
+      contextCompactionPendingMonitor = startContextCompactionPendingMonitor({
+        observability,
+        read: async () => await getContextCompactionPendingSummary(options.activityDependencies.db),
+      });
     }
 
     if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
@@ -946,6 +961,7 @@ export async function createOpenGeniWorkerService(
     await Promise.allSettled([
       turnCapacityMonitor?.close(),
       sessionRecoveryMonitor?.close(),
+      contextCompactionPendingMonitor?.close(),
       workerBundle?.connection.close(),
       signaler?.close(),
       ...schedules.map((schedule) => schedule.close()),
@@ -969,6 +985,7 @@ export async function createOpenGeniWorkerService(
       await Promise.allSettled([
         turnCapacityMonitor?.close(),
         sessionRecoveryMonitor?.close(),
+        contextCompactionPendingMonitor?.close(),
         activeWorkerBundle.connection.close(),
         activeSignaler?.close(),
         ...schedules.map((schedule) => schedule.close()),

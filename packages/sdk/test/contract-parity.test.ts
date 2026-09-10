@@ -118,6 +118,8 @@ import {
   SyncSessionRealtimeLedgerResponse as ContractSyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest as ContractRenewSessionRealtimeRequest,
   SessionStatus as ContractSessionStatus,
+  SessionSystemUpdateKind as ContractSessionSystemUpdateKind,
+  SessionSystemUpdatePayload as ContractSessionSystemUpdatePayload,
   SessionTurn as ContractSessionTurn,
   SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
@@ -271,6 +273,8 @@ import type {
   SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
   SessionStatus,
+  SessionSystemUpdateKind,
+  SessionSystemUpdatePayload,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
@@ -457,6 +461,25 @@ describe("SDK / contracts parity", () => {
     );
   });
 
+  test("session system-update kinds and payloads accept every contract value", () => {
+    type ContractSessionSystemUpdateKind = z.infer<typeof ContractSessionSystemUpdateKind>;
+    type ContractSessionSystemUpdatePayload = z.infer<typeof ContractSessionSystemUpdatePayload>;
+    const sdkAcceptsContractKind = (
+      value: ContractSessionSystemUpdateKind,
+    ): SessionSystemUpdateKind => value;
+    const contractAcceptsSdkKind = (
+      value: SessionSystemUpdateKind,
+    ): ContractSessionSystemUpdateKind => value;
+    const sdkAcceptsContractPayload = (
+      value: ContractSessionSystemUpdatePayload,
+    ): SessionSystemUpdatePayload => value;
+    expect(
+      [sdkAcceptsContractKind, contractAcceptsSdkKind, sdkAcceptsContractPayload].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
+  });
+
   test("Codex realtime V3 wire shapes and voices match", () => {
     const voices: readonly CodexRealtimeVoice[] = ContractCodexRealtimeVoice.options;
     expect(voices).toEqual(ContractCodexRealtimeVoice.options);
@@ -624,13 +647,22 @@ describe("SDK / contracts parity", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: {
         sandboxBackend: "modal",
         goal: { text: "finish", maxAutoContinuations: 8 },
         firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
       },
     };
-    expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
+    const parsed = ContractSaveNewSessionDraftRequest.parse(save);
+    expect(parsed.selectedProjectChannelId).toBeNull();
+    const { selectedProjectChannelId: _selectedProjectChannelId, ...legacySave } = save;
+    expect(
+      Object.hasOwn(
+        ContractSaveNewSessionDraftRequest.parse(legacySave),
+        "selectedProjectChannelId",
+      ),
+    ).toBe(false);
   });
 
   test("established-session submit requires one exact policy snapshot", () => {
@@ -1392,4 +1424,33 @@ describe("SDK / contracts parity", () => {
       ].every((value) => typeof value === "function"),
     ).toBe(true);
   });
+});
+
+test("workspace timer wire types match contracts", async () => {
+  const { WorkspacePauseTimer, WorkspacePauseTimerRequest } = await import("@opengeni/contracts");
+  const request: import("../src/types").WorkspacePauseTimerRequest = {
+    action: "set",
+    pauseInSeconds: 1800,
+    pauseForSeconds: 7200,
+    expectedRevision: 4,
+    clientEventId: "timer-parity",
+  };
+  const contractRequest: import("@opengeni/contracts").WorkspacePauseTimerRequest = request;
+  const sdkRequest: import("../src/types").WorkspacePauseTimerRequest =
+    WorkspacePauseTimerRequest.parse(contractRequest);
+  expect(sdkRequest).toEqual(request);
+  const contractTimer = WorkspacePauseTimer.parse({
+    id: crypto.randomUUID(),
+    action: "pause",
+    dueAt: new Date().toISOString(),
+    pauseForSeconds: 7200,
+  });
+  const sdkTimer: import("../src/types").WorkspacePauseTimer = contractTimer;
+  const timer: import("@opengeni/contracts").WorkspacePauseTimer = sdkTimer;
+  expect(timer).toEqual(contractTimer);
+  for (const seconds of [-1, 1, 59, 2592001, 1.5]) {
+    expect(
+      WorkspacePauseTimerRequest.safeParse({ ...request, pauseInSeconds: seconds }).success,
+    ).toBe(false);
+  }
 });

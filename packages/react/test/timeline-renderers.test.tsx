@@ -326,6 +326,61 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("opens the typed child source without treating receipt delivery as work completion", async () => {
+    resetTimelineEvents();
+    const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-results",
+            count: 3,
+            members: [
+              {
+                id: "result-1",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: childId,
+                summary: "The worker went idle while waiting for CI.",
+              },
+              {
+                id: "result-2",
+                kind: "child_terminal_result",
+                classification: "failure",
+                sourceId: childId,
+                summary: "A later turn failed.",
+              },
+              {
+                id: "result-3",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: "not-a-session",
+                summary: "Merged after verification.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("3 agent results received");
+    expect(r.container.textContent).not.toContain("agents finished");
+    const links = [...r.container.querySelectorAll("button")].filter(
+      (button) => button.textContent === "View session",
+    );
+    expect(links).toHaveLength(2);
+    await act(async () => {
+      links[0]?.click();
+      links[1]?.click();
+    });
+    expect(opened).toEqual([childId, childId]);
+    expect(r.container.textContent).toContain("A later turn failed.");
+    expect(r.container.textContent).toContain("Merged after verification.");
+    await r.unmount();
+  });
+
   test("renders a collapsed landmark pill; details hold typed members", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
@@ -355,7 +410,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 updates · Agent update, Agent finished");
+    expect(r.container.textContent).toContain("2 updates · Agent update, Agent result received");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
@@ -367,11 +422,11 @@ describe("durable machine-input timeline", () => {
     // Detail rows stay in the DOM for expand-on-demand audit.
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
-    expect(r.container.textContent).toContain("Agent finished");
+    expect(r.container.textContent).toContain("Agent result received");
     await r.unmount();
   });
 
-  test("identical agent-finished members collapse to one plural pill", async () => {
+  test("result receipts collapse to a neutral count", async () => {
     resetTimelineEvents();
     const members = Array.from({ length: 15 }, (_, index) => ({
       id: `update-${index}`,
@@ -392,7 +447,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("15 agents finished");
+    expect(r.container.textContent).toContain("15 agent results received");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(
       (
@@ -454,6 +509,42 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     ...overrides,
   };
 }
+
+describe("SiteArtifactRenderer", () => {
+  test("renders a direct durable Site link from the structured mutation result", async () => {
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              artifact: {
+                id: "22222222-2222-4222-8222-222222222222",
+                workspaceId: "11111111-1111-4111-8111-111111111111",
+                title: "Incident board",
+              },
+              version: { revision: 1 },
+              replayed: false,
+            }),
+          },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Published Incident board");
+    const link = r.container.querySelector('a[aria-label="Open Incident board"]');
+    expect(link?.getAttribute("href")).toBe(
+      "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",
+    );
+
+    await r.unmount();
+  });
+});
 
 describe("tool-output truncation disclosure", () => {
   test("shows bounded delivery and non-retention facts only after expansion", async () => {
@@ -715,6 +806,31 @@ describe("FleetDecisionRow", () => {
     await r.unmount();
   });
 
+  test("renders allocator-disabled production waiting as policy-constrained capacity", async () => {
+    resetTimelineEvents();
+    const payload = fleetDecisionEventPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+    const r = await renderComponent(
+      <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
+    );
+
+    const disclosure = await fleetDecisionDisclosure(r.container);
+    await act(async () => {
+      disclosure.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("The policy-selected subscription was disabled for new allocations");
+    expect(text).not.toContain("credential-secret");
+    await r.unmount();
+  });
+
   test("renders manager priority as standard-work pacing rather than manager admission", async () => {
     resetTimelineEvents();
     const payload = fleetDecisionEventPayload();
@@ -770,6 +886,24 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("lets the authenticated host render setup inline and preserves the fallback", async () => {
+    const row = authNeededItem();
+    const custom = await renderComponent(
+      <TimelineRow
+        item={row}
+        renderAuthNeeded={(value) => <button>Review {value.providerDomain} inline</button>}
+      />,
+    );
+    expect(custom.container.textContent).toContain("Review linear.app inline");
+    expect(custom.container.textContent).not.toContain("This tool call wasn't replayed");
+    await custom.unmount();
+    const fallback = await renderComponent(
+      <TimelineRow item={row} renderAuthNeeded={() => undefined} onReconnect={() => {}} />,
+    );
+    expect(fallback.container.textContent).toContain("Connect Linear");
+    await fallback.unmount();
+  });
+
   test("renders a capability recommendation as ungranted access with one review action", async () => {
     let selected = "";
     const r = await renderComponent(
@@ -1060,13 +1194,17 @@ describe("MessageTimeline — settled turn folding", () => {
         phase: "commentary",
       }),
       timelineEvent("agent.toolCall.created", {
-        id: "goal-wait-1",
-        name: "goal_wait",
-        arguments: { reason: "child still running", untilSeconds: 900 },
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason: "child still running", timeoutSeconds: 900 },
       }),
-      timelineEvent("goal.held", { actor: "agent", reason: "child still running" }),
-      timelineEvent("agent.toolCall.output", { id: "goal-wait-1", output: { status: "held" } }),
-      timelineEvent("turn.completed", {}),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "child still running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: fallback }),
+      timelineEvent("turn.completed", { output: fallback }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
     await flush();
@@ -1074,6 +1212,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Waiting: child still running");
 
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1082,7 +1221,144 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
-    expect(r.container.textContent).toContain("Goal wait");
+    expect(r.container.textContent).toContain("Waiting: child still running");
+    expect(r.container.textContent).toContain("Wait for input");
+
+    await r.unmount();
+  });
+
+  test.each([
+    "streamed",
+    "completed",
+    "completed-before-commentary",
+    "whitespace-tail",
+    "opaque-tail",
+  ])("a %s answer stays visible once when a trailing wait ends with empty output", async (mode) => {
+    resetTimelineEvents();
+    const answer = "Not yet. The browser test still times out; I have resumed the repair.";
+    const events = [
+      timelineEvent("user.message", { text: "Is it mergeable?" }),
+      timelineEvent("agent.message.delta", { text: "Checking CI now." }),
+      timelineEvent("agent.toolCall.created", {
+        id: "check",
+        name: "exec_command",
+        arguments: { cmd: "gh pr checks" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "check", output: "one failure" }),
+      timelineEvent("agent.message.delta", { text: answer.slice(0, 12) }),
+      timelineEvent("agent.message.delta", { text: answer.slice(12) }),
+      ...(mode === "streamed" || mode === "whitespace-tail" || mode === "opaque-tail"
+        ? []
+        : [timelineEvent("agent.message.completed", { text: answer, phase: "final_answer" })]),
+      ...(mode === "whitespace-tail" || mode === "opaque-tail"
+        ? [
+            timelineEvent("agent.toolCall.created", {
+              id: "tail",
+              name: "exec_command",
+              arguments: {},
+            }),
+            timelineEvent("agent.toolCall.output", { id: "tail", output: "ok" }),
+            timelineEvent("agent.message.delta", {
+              text: mode === "opaque-tail" ? "citeopaque-handle" : "  ",
+            }),
+          ]
+        : []),
+      ...(mode === "completed-before-commentary"
+        ? [
+            timelineEvent("agent.toolCall.created", {
+              id: "follow",
+              name: "exec_command",
+              arguments: {},
+            }),
+            timelineEvent("agent.toolCall.output", { id: "follow", output: "ok" }),
+            timelineEvent("agent.message.completed", {
+              text: "Waiting for the worker now.",
+              phase: "commentary",
+            }),
+          ]
+        : []),
+      timelineEvent("agent.toolCall.created", {
+        id: "wait",
+        name: "wait_for_input",
+        arguments: { reason: "Repair running", timeoutSeconds: 300 },
+      }),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "Repair running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "wait",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent?.split(answer)).toHaveLength(2);
+    expect(r.container.textContent).not.toContain("Checking CI now.");
+    if (mode !== "completed") expect(r.container.textContent).toContain("Waiting: Repair running");
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent?.split(answer)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Checking CI now.");
+    await r.unmount();
+  });
+
+  test("empty wait turns keep their durable reason outside the collapsed steps", async () => {
+    resetTimelineEvents();
+    const reason = "Two delegated reviews are still running.";
+    const events = [
+      timelineEvent("user.message", { text: "Wait for the reviews" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason, timeoutSeconds: 3600 },
+      }),
+      timelineEvent("session.wait.started", {
+        actor: "agent",
+        waitTurnId: "turn-1",
+        deadlineAt: "2026-06-10T13:00:00.000Z",
+        reason,
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: "" }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent).toContain(`Waiting: ${reason}`);
+    expect(r.container.textContent?.split(reason)).toHaveLength(2);
+    const visibleOutcome = Array.from(
+      r.container.querySelectorAll('[data-og-recorded-outcome="wait"]'),
+    ).find((element) => element.textContent?.includes(`Waiting: ${reason}`));
+    expect(visibleOutcome).not.toBeUndefined();
+    expect(visibleOutcome?.tagName).toBe("DETAILS");
+    expect(visibleOutcome?.hasAttribute("open")).toBe(false);
+    expect(visibleOutcome?.querySelector("summary")?.textContent).not.toContain(reason);
+    expect(visibleOutcome?.getAttribute("role")).toBe("note");
+    expect(visibleOutcome?.textContent).toContain("Wait recorded");
+    expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
+      events[2]!.occurredAt,
+    );
+    expect(visibleOutcome?.querySelector("time")?.textContent).toContain(
+      String(new Date(events[2]!.occurredAt).getFullYear()),
+    );
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(visibleOutcome?.isConnected).toBe(true);
+    expect(r.container.textContent).toContain("Wait for input");
 
     await r.unmount();
   });
@@ -2304,6 +2580,27 @@ describe("SandboxRow — failed chip", () => {
 });
 
 describe("StartupPhaseRow", () => {
+  test("names a sandbox rotation wait", async () => {
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rotation-wait",
+      turnId: "turn-rotation",
+      phase: "sandbox",
+      status: "cancelled",
+      blockedReason: "rotation_in_progress",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1000).toISOString(),
+      durationMs: 1000,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    expect(r.container.textContent ?? "").toContain("Waiting for sandbox rotation");
+    expect(r.container.textContent ?? "").not.toContain("Sandbox startup interrupted");
+    await r.unmount();
+  });
+
   test("shows the settled phase duration and truthful sandbox origin", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",

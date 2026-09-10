@@ -1,3 +1,4 @@
+import { ChildSessionLink } from "./child-session-link";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -50,6 +51,12 @@ import {
 } from "../older-history";
 import { Markdown } from "./markdown";
 import {
+  TimelineBeforeLayout,
+  captureTimelineAnchor,
+  timelineAnchorCorrection,
+  type TimelineAnchor,
+} from "./timeline-anchor";
+import {
   UserMessageBody,
   UserMessageDisclosureProvider,
   type UserMessageDisclosureContextValue,
@@ -99,6 +106,7 @@ import {
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
+import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
@@ -111,10 +119,11 @@ import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
-import { TimelineAnnotationsChip } from "./timeline-annotations";
+import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
+const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -123,6 +132,8 @@ export type MessageTimelineProps = {
   items?: TimelineItem[] | undefined;
   /** Current session status (reserved; tip "Working…" chrome removed for now). */
   status?: SessionStatus | null | undefined;
+  /** Host-owned controls beside Copy and the timestamp on settled message rows. */
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
@@ -146,6 +157,8 @@ export type MessageTimelineProps = {
    * a Reconnect button without a handler to run it.
    */
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   /**
    * Decide which durable authentication notices this timeline presents.
    * Defaults to showing every notice. Embedded hosts can suppress notices for
@@ -183,6 +196,10 @@ export type MessageTimelineProps = {
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /** Composer draft quotes currently attached to the next send. */
+  draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
+  /** Open the composer review list for one numbered draft badge. */
+  onDraftAnnotationSelect?: ((id: string) => void) | undefined;
   /** Older durable history exists above the current window (see useSessionEvents). */
   hasOlder?: boolean | undefined;
   /** An older window is being fetched; shows the quiet top shimmer. */
@@ -278,13 +295,18 @@ function invokeOlderLoad(
   load: OlderHistoryLoader,
   noProgress: () => void,
   attempt: OlderLoadAttempt,
+  preserveTail = false,
 ): 1 | undefined {
   try {
     // Receipt creation is captured synchronously through legacy wrappers such
     // as `() => void loadOlder()`, even when the wrapper discards the return.
-    const result = invokeOlderHistoryLoaderWithReceiptCapture(load, (receipt) => {
-      attempt[2] = receipt;
-    }) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
+    const result = invokeOlderHistoryLoaderWithReceiptCapture(
+      load,
+      (receipt) => {
+        attempt[2] = receipt;
+      },
+      preserveTail,
+    ) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
     const receipt =
       attempt[2] ??
       (typeof (result as { committed?: unknown } | undefined)?.committed === "boolean"
@@ -382,10 +404,12 @@ export function MessageTimeline({
   events,
   items,
   status: _status,
+  renderMessageActions,
   renderMessageText,
   onOpenSession,
   onMemoryClick,
   onReconnect,
+  renderAuthNeeded,
   shouldRenderAuthNeeded,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
@@ -396,6 +420,8 @@ export function MessageTimeline({
   turnSummary,
   autoFollow = true,
   onAnnotate,
+  draftAnnotations,
+  onDraftAnnotationSelect,
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
@@ -418,8 +444,15 @@ export function MessageTimeline({
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
   }, [items, events, shouldRenderAuthNeeded]);
-  const sourceItems = items || events;
+  // Event-window identity is independent of projected rows (partial messages
+  // can acquire a different first-delta id when older text arrives).
+  const sourceItems = events ?? items;
   const olderBoundaryKey = sourceItems?.[0]?.id;
+  const previousSourceIdsRef = useRef(new Set<string>());
+  const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
+  const readingAnchorRef = useRef<TimelineAnchor | null>(null);
+  const olderPageBudgetRef = useRef(0);
+  const [olderDemand, setOlderDemand] = useState(0);
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
@@ -648,29 +681,22 @@ export function MessageTimeline({
   }, []);
 
   /** Reader left the tip — wheel, keyboard, pointer-armed scroll-up, or scrollend. */
-  const releasePinFromReader = useCallback(
-    (node?: HTMLElement | null) => {
-      if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
-        return;
-      }
-      // Unscrollable window: unpin strands Jump-to-latest with no way back.
-      if (node && maxScrollOf(node) <= 1) {
-        return;
-      }
-      clearReaderIntent();
-      clearPendingReaderLeave();
-      stopFollow();
-      applyPinned(false);
-      if (wantPinRef.current) {
-        wantPinRef.current = false;
-      }
-      if (!olderPrefetchArmedRef.current) {
-        olderPrefetchArmedRef.current = true;
-        setOlderPrefetchArmed(true);
-      }
-    },
-    [autoFollow, applyPinned, clearPendingReaderLeave, clearReaderIntent, stopFollow],
-  );
+  const releasePinFromReader = useCallback(() => {
+    if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
+      return;
+    }
+    clearReaderIntent();
+    clearPendingReaderLeave();
+    stopFollow();
+    applyPinned(false);
+    if (wantPinRef.current) {
+      wantPinRef.current = false;
+    }
+    if (!olderPrefetchArmedRef.current) {
+      olderPrefetchArmedRef.current = true;
+      setOlderPrefetchArmed(true);
+    }
+  }, [autoFollow, applyPinned, clearPendingReaderLeave, clearReaderIntent, stopFollow]);
 
   /**
    * Settled away from the tip while the camera is idle — Vimium / unfocused
@@ -691,7 +717,7 @@ export function MessageTimeline({
         clearPendingReaderLeave();
         return;
       }
-      releasePinFromReader(node);
+      releasePinFromReader();
       rearmOlderPrefetchAfterLeavingTop(node);
     },
     [autoFollow, clearPendingReaderLeave, rearmOlderPrefetchAfterLeavingTop, releasePinFromReader],
@@ -712,6 +738,19 @@ export function MessageTimeline({
     });
   }, [cancelLeaveFallback, releasePinAfterScrollSettled]);
 
+  const requestEarlierFromReader = () => {
+    releasePinFromReader();
+    wantPinRef.current = false;
+    // A stationary upward gesture is still demand. Successful short/folded
+    // pages may never create enough range to leave the prefetch band.
+    olderPageBudgetRef.current = 8;
+    if (olderLoadAttemptRef.current?.[1] === 2) {
+      olderLoadAttemptRef.current = null;
+      setOlderDemand((value) => value + 1);
+    }
+  };
+  const touchPositionRef = useRef<{ x: number; y: number } | null>(null);
+
   const onWheel = (event: {
     deltaY: number;
     deltaX: number;
@@ -729,12 +768,11 @@ export function MessageTimeline({
       return;
     }
     disclosureKeepsUnpinnedRef.current = false;
+    programmaticScrollRef.current = 0;
     if (event.deltaY >= 0) {
       return;
     }
-    const node =
-      event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
-    releasePinFromReader(node);
+    requestEarlierFromReader();
   };
 
   /** Touch / stylus / mouse drag on the scroller — explicit leave (not layout). */
@@ -779,9 +817,8 @@ export function MessageTimeline({
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
       return;
     }
-    const node =
-      event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
-    releasePinFromReader(node);
+    programmaticScrollRef.current = 0;
+    requestEarlierFromReader();
   };
 
   const snapToBottom = useCallback(
@@ -871,10 +908,12 @@ export function MessageTimeline({
     () => ({
       userMessageDisclosureContext,
       behavior: {
+        renderMessageActions,
         renderMessageText,
         onOpenSession,
         onMemoryClick,
         onReconnect,
+        renderAuthNeeded,
         resolveProviderLogo,
         toolRegistry,
         loadRetainedScreenshot,
@@ -890,6 +929,8 @@ export function MessageTimeline({
       onMemoryClick,
       onOpenSession,
       onReconnect,
+      renderAuthNeeded,
+      renderMessageActions,
       renderMessageText,
       resolveProviderLogo,
       toolRegistry,
@@ -947,7 +988,7 @@ export function MessageTimeline({
       // exact `false` is the first-party request-not-accepted receipt.
       // All other fulfillment retains this exact owner until its prepend
       // boundary commits; promise settlement alone cannot prove progress.
-      invokeOlderLoad(onLoadOlder, noProgress, attempt);
+      invokeOlderLoad(onLoadOlder, noProgress, attempt, !retry);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
@@ -1103,15 +1144,26 @@ export function MessageTimeline({
       previousMaxScroll <= 1 ||
       previousMaxScroll - previousScrollTop < Math.min(PIN_THRESHOLD_PX, previousMaxScroll);
     const firstItemChanged = !!previousFirstItemId && firstItemId !== previousFirstItemId;
-    const prepended =
-      firstItemChanged && resolvedItems.some((item) => item.id === previousFirstItemId);
+    const sourceChanged = olderBoundaryKey !== previousSourceBoundaryRef.current;
+    const retainedSource =
+      sourceItems?.some((item) => previousSourceIdsRef.current.has(item.id)) ?? false;
+    const prepended = sourceChanged && retainedSource;
+    previousSourceBoundaryRef.current = olderBoundaryKey;
+    previousSourceIdsRef.current = new Set(sourceItems?.map((item) => item.id));
+    const readingAnchor = readingAnchorRef.current;
+    readingAnchorRef.current = null;
     const attempt = olderLoadAttemptRef.current;
     const committedZeroOverlapOlderReplacement = !!(
       attempt?.[2]?.committed &&
-      firstItemChanged &&
-      !prepended
+      sourceChanged &&
+      !retainedSource
     );
     const restorePrependAnchor = () => {
+      const correction = readingAnchor && timelineAnchorCorrection(node, readingAnchor);
+      if (correction != null) {
+        if (Math.abs(correction) > 1) writeScrollTop(node, node.scrollTop + correction);
+        return;
+      }
       // Keep the reader on the same retained rows. Prefer the exact first-item
       // content coordinate (needed when a prepend merges inside one group),
       // then the retained group offset, then scrollHeight as a final fallback.
@@ -1183,17 +1235,23 @@ export function MessageTimeline({
         applyPinned(false);
       }
     } else if (prepended) {
+      const olderAttemptState = olderLoadAttemptRef.current?.[1];
+      const underfillOwned =
+        !!olderLoadAttemptRef.current &&
+        olderAttemptState !== 1 &&
+        olderAttemptState !== 2 &&
+        olderAttemptState !== 3;
       if (
         autoFollow &&
         pinnedRef.current &&
         !hasNewer &&
         !pendingReaderLeaveRef.current &&
-        (wasAtLiveTailBeforeCommit || olderLoadAttemptRef.current)
+        (wasAtLiveTailBeforeCommit || underfillOwned)
       ) {
-        // A pending short-window load owns the prepend even when live growth
-        // has left its still-pinned camera with raw geometry debt. Unrelated
-        // prepends retain the prior-tip fallback so a stale pin after an
-        // extension/programmatic history jump still restores its row anchor.
+        // Still following the live tip: underfill, or a prefetch the reader
+        // started and then returned from. Park at the new tip. A stale pin
+        // while they are actually up in a short window (gap is not inside
+        // PIN_THRESHOLD of maxScroll, so wasAtLiveTail is false) restores.
         clearPendingReaderLeave();
         snapToBottom(node);
       } else {
@@ -1283,6 +1341,19 @@ export function MessageTimeline({
     // Boundary progress retires the request owner. A late settlement from
     // that completed prefetch cannot mutate the new window's cooldown owner.
     olderLoadAttemptRef.current = [olderBoundaryKey, 2];
+    // Bound automatic work, but let continued upward input replenish demand.
+    // Only a committed first-party receipt proves that another page is safe.
+    if (
+      attempt[2]?.committed &&
+      !pinnedRef.current &&
+      hasOlder &&
+      node.scrollTop <= OLDER_PREFETCH_MARGIN_PX &&
+      olderPageBudgetRef.current > 0
+    ) {
+      olderPageBudgetRef.current -= 1;
+      olderLoadAttemptRef.current = null;
+      setOlderDemand((value) => value + 1);
+    }
     rearmOlderPrefetchAfterLeavingTop(node);
     requestOlderIfUnderfilled(node);
   });
@@ -1453,6 +1524,7 @@ export function MessageTimeline({
     loadingOlder,
     olderBoundaryKey,
     olderPrefetchArmed,
+    olderDemand,
     onLoadOlder,
     requestOlderIfUnderfilled,
   ]);
@@ -1474,7 +1546,9 @@ export function MessageTimeline({
     }
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+        // An underfilled history window has both sentinels visible. Advancing
+        // it automatically would undo an explicit older-page navigation.
+        if (maxScrollOf(root) > 1 && entries.some((entry) => entry.isIntersecting)) {
           onLoadNewer();
         }
       },
@@ -1598,6 +1672,19 @@ export function MessageTimeline({
       return;
     }
 
+    if (programmatic && !pinnedRef.current) {
+      // Restore/camera writes while reading history are not a return to the tip.
+      // Still expire a pending Jump-to-latest latch: the in-window jump itself
+      // is a programmatic snap, and a later reader scroll-away can arrive
+      // before that echo is consumed. Skipping this left the latch armed and
+      // snapped the reader when hasNewer later flipped false.
+      syncScrollBaseline(node);
+      if (wantPinRef.current && !isNearBottom(node)) {
+        wantPinRef.current = false;
+      }
+      return;
+    }
+
     if (autoFollow && pinnedRef.current && !hasNewer) {
       // Fold / composer / SessionChrome: viewport shrink raises maxScroll without
       // growing content. Must hit tipFollow before we adopt the new clientHeight
@@ -1632,7 +1719,7 @@ export function MessageTimeline({
       // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
       if (readerArmed && cumulativeReaderUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
         clearReaderIntent();
-        releasePinFromReader(node);
+        requestEarlierFromReader();
         rearmOlderPrefetchAfterLeavingTop(node);
         return;
       }
@@ -1657,12 +1744,20 @@ export function MessageTimeline({
     }
 
     syncScrollBaseline(node);
+    if (programmatic) {
+      // Anchor restoration is never permission to resume tip-follow.
+      return;
+    }
     const nearBottom = isNearBottom(node);
 
-    // Re-pin only when the reader moved toward/at the tip — not when a fold
-    // clamp dragged scrollTop down onto nearBottom.
-    const nextPinned =
-      !hasNewer && nearBottom && nextTop >= previousTop - TIP_FOLLOW_READER_UP_EPS_PX;
+    // Re-pin only when the reader moved toward/at the tip without a content
+    // insertion. Prepend restore and overflow-anchor raise scrollTop by
+    // roughly the same amount as maxScroll; treating that as a scroll-down
+    // re-pinned a compact-tail history reader (their preserved gap falls
+    // inside PIN_THRESHOLD once the window is tall) and snapped them back.
+    const inserted = Math.max(0, nextMaxScroll - previousMaxScroll);
+    const towardTip = nextTop - previousTop - inserted;
+    const nextPinned = !hasNewer && nearBottom && towardTip > 0.5 && inserted <= 1;
     if (!nextPinned) {
       stopFollow();
     }
@@ -1715,249 +1810,318 @@ export function MessageTimeline({
           <TimelineComputeLabelProvider value={computeLabel ?? null}>
             <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
-                <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-                  {onAnnotate ? (
-                    <Suspense fallback={null}>
-                      <TimelineAnnotationSelection
-                        rootRef={scrollRef}
-                        sources={annotationSources}
-                        onAnnotate={onAnnotate}
-                      />
-                    </Suspense>
-                  ) : null}
-                  {/* Pinned: anchoring off so the tip-follow camera owns the motion.
+                <TimelineAnnotationSourceRootContext.Provider value={scrollRef}>
+                  <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                    {onAnnotate ? (
+                      <Suspense fallback={null}>
+                        <TimelineAnnotationSelection
+                          rootRef={scrollRef}
+                          sources={annotationSources}
+                          onAnnotate={onAnnotate}
+                        />
+                      </Suspense>
+                    ) : null}
+                    {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
-                  <div
-                    ref={scrollRef}
-                    data-og-timeline-scroller=""
-                    data-og-bottom-follow={autoFollow && pinned && !hasNewer ? "true" : "false"}
-                    tabIndex={-1}
-                    onScroll={onScroll}
-                    onScrollEnd={onScrollEnd}
-                    onWheel={onWheel}
-                    onPointerDown={onPointerDown}
-                    onKeyDown={onKeyDown}
-                    style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
-                    className={cn(
-                      // tabIndex=-1 is programmatic only — never paint a focus ring on
-                      // the whole scroller (click + Shift used to flash a blue outline).
-                      "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-hidden",
-                      autoFollow && pinned && !hasNewer
-                        ? "[overflow-anchor:none]"
-                        : "[overflow-anchor:auto]",
-                    )}
-                  >
-                    <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
-                      {!groups.length
-                        ? (emptyState ?? (
-                            <p className="py-10 text-center text-og-menu text-og-fg-subtle">
-                              No activity yet.
-                            </p>
-                          ))
-                        : null}
-                      {hasOlder && olderPrefetchArmed ? (
-                        // Overlaid, not a layout row: mounting/unmounting the sentinel
-                        // must never shift content (that shift was itself a wobble).
-                        <div
-                          ref={topSentinelRef}
-                          data-og-top-sentinel=""
-                          data-og-timeline-chrome=""
-                          aria-hidden="true"
-                          className="pointer-events-none absolute inset-x-0 top-0 h-px"
-                        />
-                      ) : null}
-                      {groups.map(({ group, key, entranceEnabled }, index) => {
-                        return (
-                          <TimelineGroupEntry
-                            key={key}
-                            groupKey={key}
-                            group={group}
-                            nextGroup={groups[index + 1]?.group}
-                            entranceEnabled={entranceEnabled}
-                            liveEntranceEnabled={
-                              group.kind === "activity" ? !bulkRender : undefined
-                            }
-                            context={timelineGroupEntryContext}
-                          />
-                        );
-                      })}
-                      {groups.length > 0 && trailingState ? (
-                        <div data-og-timeline-trailing-state="">{trailingState}</div>
-                      ) : null}
-                      {hasNewer ? (
-                        <div
-                          ref={bottomSentinelRef}
-                          data-og-bottom-sentinel=""
-                          data-og-timeline-chrome=""
-                          aria-hidden="true"
-                          className="h-px w-full"
-                        />
-                      ) : null}
-                    </div>
-                  </div>
-                  <AnimatePresence>
-                    {loadingOlder ||
-                    loadingOldest ||
-                    (hasOlder && onJumpToStart && olderPrefetchArmed) ||
-                    underfillRetryReady ? (
-                      // Floating over the scroller (not a timeline row) so showing and
-                      // hiding it never reflows history under the reader.
-                      <motion.div
-                        initial={{ opacity: 0, y: -6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -6 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        data-og-loading-older=""
-                        aria-live="polite"
-                        className="absolute inset-x-0 top-3 z-10 flex justify-center"
+                    <div
+                      ref={scrollRef}
+                      data-og-timeline-scroller=""
+                      data-og-bottom-follow={autoFollow && pinned && !hasNewer ? "true" : "false"}
+                      tabIndex={-1}
+                      onScroll={onScroll}
+                      onScrollEnd={onScrollEnd}
+                      onWheel={onWheel}
+                      onTouchStart={(event) => {
+                        const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+                        touchPositionRef.current = touch
+                          ? { x: touch.clientX, y: touch.clientY }
+                          : null;
+                      }}
+                      onTouchMove={(event) => {
+                        const touch = event.touches[0];
+                        const previous = touchPositionRef.current;
+                        if (!touch || !previous || event.touches.length !== 1) {
+                          touchPositionRef.current = null;
+                          return;
+                        }
+                        const deltaX = previous.x - touch.clientX;
+                        const deltaY = previous.y - touch.clientY;
+                        if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 4) return;
+                        touchPositionRef.current = { x: touch.clientX, y: touch.clientY };
+                        onWheel({
+                          deltaX,
+                          deltaY,
+                          target: event.target,
+                          currentTarget: event.currentTarget,
+                        });
+                      }}
+                      onTouchEnd={() => {
+                        touchPositionRef.current = null;
+                      }}
+                      onTouchCancel={() => {
+                        touchPositionRef.current = null;
+                      }}
+                      onClickCapture={(event) => {
+                        const target =
+                          event.target instanceof Element
+                            ? event.target.closest("button[aria-expanded]")
+                            : null;
+                        if (target) {
+                          releasePinFromReader();
+                          disclosureKeepsUnpinnedRef.current = true;
+                        }
+                      }}
+                      onPointerDown={onPointerDown}
+                      onKeyDown={onKeyDown}
+                      style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+                      className={cn(
+                        // tabIndex=-1 is programmatic only — never paint a focus ring on
+                        // the whole scroller (click + Shift used to flash a blue outline).
+                        "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-16 pb-6 sm:px-6 outline-hidden",
+                        autoFollow && pinned && !hasNewer
+                          ? "[overflow-anchor:none]"
+                          : "[overflow-anchor:auto]",
+                      )}
+                    >
+                      <TimelineBeforeLayout
+                        capture={() => {
+                          readingAnchorRef.current =
+                            !pinnedRef.current && scrollRef.current
+                              ? captureTimelineAnchor(scrollRef.current)
+                              : null;
+                        }}
                       >
-                        {loadingOlder || loadingOldest ? (
-                          <span className={LOADING_CHIP_CLASS}>
-                            <span className="og-shimmer-text">
-                              {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
-                            </span>
-                          </span>
-                        ) : null}
-                        {hasOlder &&
-                        !loadingOlder &&
-                        !loadingOldest &&
-                        (underfillRetryReady || onJumpToStart) ? (
-                          <button
-                            type="button"
-                            data-og-retry={underfillRetryReady || undefined}
-                            data-og-jump-to-start={!underfillRetryReady || undefined}
-                            onClick={() => {
-                              const node = scrollRef.current;
-                              if (underfillRetryReady) {
-                                if (node && underfillRetryReadyRef.current) {
-                                  // AnimatePresence retains this handler during
-                                  // exit. Current authorization plus the exact
-                                  // attempt check prevent stale dispatch.
-                                  requestOlderIfUnderfilled(node, underfillSettledAttempt!);
+                        <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
+                          <AnimatePresence>
+                            {loadingOlder ||
+                            loadingOldest ||
+                            (hasOlder && onJumpToStart && olderPrefetchArmed) ||
+                            underfillRetryReady ? (
+                              // Reserved top gutter: controls scroll with history and cannot
+                              // cover a disclosure. Visibility never changes content height.
+                              <motion.div
+                                initial={{ opacity: 0, y: -6 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -6 }}
+                                transition={{ duration: 0.15, ease: "easeOut" }}
+                                data-og-loading-older=""
+                                aria-live="polite"
+                                className="pointer-events-none absolute inset-x-0 -top-11 z-10 flex justify-center"
+                              >
+                                {loadingOlder || loadingOldest ? (
+                                  <span className={LOADING_CHIP_CLASS}>
+                                    <span className="og-shimmer-text">
+                                      {loadingOldest
+                                        ? "Jumping to start…"
+                                        : "Loading earlier activity…"}
+                                    </span>
+                                  </span>
+                                ) : null}
+                                {hasOlder &&
+                                !loadingOlder &&
+                                !loadingOldest &&
+                                (underfillRetryReady || onJumpToStart) ? (
+                                  <button
+                                    type="button"
+                                    data-og-retry={underfillRetryReady || undefined}
+                                    data-og-jump-to-start={!underfillRetryReady || undefined}
+                                    onClick={() => {
+                                      const node = scrollRef.current;
+                                      if (underfillRetryReady) {
+                                        if (node && underfillRetryReadyRef.current) {
+                                          // AnimatePresence retains this handler during
+                                          // exit. Current authorization plus the exact
+                                          // attempt check prevent stale dispatch.
+                                          requestOlderIfUnderfilled(node, underfillSettledAttempt!);
+                                        }
+                                        return;
+                                      }
+                                      applyPinned(false);
+                                      pendingJumpToStartRef.current = true;
+                                      const seq = ++jumpToStartSeqRef.current;
+                                      void Promise.resolve(onJumpToStart!()).then(
+                                        () => {
+                                          // The commit that swaps in the oldest window consumes
+                                          // the flag against the new DOM; this write covers the
+                                          // already-committed order and the no-window-change
+                                          // case (jumping within the current window).
+                                          const scroller = scrollRef.current ?? node;
+                                          if (scroller) {
+                                            scroller.scrollTop = 0;
+                                          }
+                                          // A host may resolve without ever changing the
+                                          // window (already on the oldest page). Any swap
+                                          // commit runs its layout effect before the next
+                                          // frame, so a flag still armed by then is the
+                                          // no-change case — clear it, or a LATER prepend
+                                          // would spuriously jump the reader to the top.
+                                          requestFrame(() => {
+                                            if (jumpToStartSeqRef.current === seq) {
+                                              pendingJumpToStartRef.current = false;
+                                            }
+                                          });
+                                        },
+                                        () => {
+                                          if (jumpToStartSeqRef.current === seq) {
+                                            pendingJumpToStartRef.current = false;
+                                          }
+                                        },
+                                      );
+                                    }}
+                                    className="pointer-events-auto rounded-full border border-og-border px-3 py-1.5 text-og-control"
+                                  >
+                                    {underfillRetryReady
+                                      ? underfillSettledAttempt?.[2]?.tailPreserved
+                                        ? "Load earlier activity"
+                                        : "Retry earlier activity"
+                                      : "Jump to start"}
+                                  </button>
+                                ) : null}
+                              </motion.div>
+                            ) : null}
+                          </AnimatePresence>
+                          {!groups.length
+                            ? (emptyState ?? (
+                                <p className="py-10 text-center text-og-menu text-og-fg-subtle">
+                                  No activity yet.
+                                </p>
+                              ))
+                            : null}
+                          {hasOlder && olderPrefetchArmed ? (
+                            // Overlaid, not a layout row: mounting/unmounting the sentinel
+                            // must never shift content (that shift was itself a wobble).
+                            // End at the scroll origin above the pt-16 gutter so the
+                            // observer and scrollTop cooldown share the same 400px band.
+                            <div
+                              ref={topSentinelRef}
+                              data-og-top-sentinel=""
+                              data-og-timeline-chrome=""
+                              aria-hidden="true"
+                              className="pointer-events-none absolute inset-x-0 -top-16 h-px -translate-y-full"
+                            />
+                          ) : null}
+                          {groups.map(({ group, key, entranceEnabled }, index) => {
+                            return (
+                              <TimelineGroupEntry
+                                key={key}
+                                groupKey={key}
+                                group={group}
+                                nextGroup={groups[index + 1]?.group}
+                                entranceEnabled={entranceEnabled}
+                                liveEntranceEnabled={
+                                  group.kind === "activity" ? !bulkRender : undefined
                                 }
-                                return;
-                              }
-                              applyPinned(false);
-                              pendingJumpToStartRef.current = true;
-                              const seq = ++jumpToStartSeqRef.current;
-                              void Promise.resolve(onJumpToStart!()).then(
-                                () => {
-                                  // The commit that swaps in the oldest window consumes
-                                  // the flag against the new DOM; this write covers the
-                                  // already-committed order and the no-window-change
-                                  // case (jumping within the current window).
-                                  const scroller = scrollRef.current ?? node;
-                                  if (scroller) {
-                                    scroller.scrollTop = 0;
-                                  }
-                                  // A host may resolve without ever changing the
-                                  // window (already on the oldest page). Any swap
-                                  // commit runs its layout effect before the next
-                                  // frame, so a flag still armed by then is the
-                                  // no-change case — clear it, or a LATER prepend
-                                  // would spuriously jump the reader to the top.
-                                  requestFrame(() => {
-                                    if (jumpToStartSeqRef.current === seq) {
-                                      pendingJumpToStartRef.current = false;
+                                context={timelineGroupEntryContext}
+                              />
+                            );
+                          })}
+                          {groups.length > 0 && trailingState ? (
+                            <div data-og-timeline-trailing-state="">{trailingState}</div>
+                          ) : null}
+                          {hasNewer ? (
+                            <div
+                              ref={bottomSentinelRef}
+                              data-og-bottom-sentinel=""
+                              data-og-timeline-chrome=""
+                              aria-hidden="true"
+                              className="h-px w-full"
+                            />
+                          ) : null}
+                        </div>
+                      </TimelineBeforeLayout>
+                    </div>
+                    {draftAnnotations && draftAnnotations.length > 0 ? (
+                      <Suspense fallback={null}>
+                        <TimelineAnnotationMarkers
+                          rootRef={scrollRef}
+                          annotations={draftAnnotations}
+                          onSelect={onDraftAnnotationSelect}
+                        />
+                      </Suspense>
+                    ) : null}
+
+                    <AnimatePresence>
+                      {loadingNewer ? (
+                        <motion.div
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 6 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          data-og-loading-newer=""
+                          aria-live="polite"
+                          className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
+                        >
+                          <span className={LOADING_CHIP_CLASS}>
+                            <span className="og-shimmer-text">Loading later activity…</span>
+                          </span>
+                        </motion.div>
+                      ) : null}
+                    </AnimatePresence>
+                    <AnimatePresence>
+                      {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
+                        <motion.button
+                          type="button"
+                          data-og-jump-to-latest=""
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 8 }}
+                          transition={{ duration: 0.15, ease: "easeOut" }}
+                          onClick={() => {
+                            disclosureKeepsUnpinnedRef.current = false;
+                            if (hasNewer) {
+                              // Do not pin against the current history page — its bottom
+                              // is not the tip. The pin + snap run when the tip window
+                              // actually lands (`hasNewer` flips false).
+                              wantPinRef.current = true;
+                              const node = scrollRef.current;
+                              if (onJumpToLatest) {
+                                void Promise.resolve(onJumpToLatest()).then(
+                                  () => {
+                                    // Covers a host that flipped hasNewer before
+                                    // resolving; otherwise the tip-window commit
+                                    // consumes the flag.
+                                    const current = scrollRef.current;
+                                    if (current && wantPinRef.current && !hasNewerRef.current) {
+                                      wantPinRef.current = false;
+                                      applyPinned(true);
+                                      snapToBottom(current);
                                     }
-                                  });
-                                },
-                                () => {
-                                  if (jumpToStartSeqRef.current === seq) {
-                                    pendingJumpToStartRef.current = false;
-                                  }
-                                },
-                              );
-                            }}
-                            className="rounded-full border border-og-border px-3 py-1.5 text-og-control"
-                          >
-                            {underfillRetryReady ? "Retry earlier activity" : "Jump to start"}
-                          </button>
-                        ) : null}
-                      </motion.div>
-                    ) : null}
-                  </AnimatePresence>
-                  <AnimatePresence>
-                    {loadingNewer ? (
-                      <motion.div
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 6 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        data-og-loading-newer=""
-                        aria-live="polite"
-                        className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
-                      >
-                        <span className={LOADING_CHIP_CLASS}>
-                          <span className="og-shimmer-text">Loading later activity…</span>
-                        </span>
-                      </motion.div>
-                    ) : null}
-                  </AnimatePresence>
-                  <AnimatePresence>
-                    {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
-                      <motion.button
-                        type="button"
-                        data-og-jump-to-latest=""
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 8 }}
-                        transition={{ duration: 0.15, ease: "easeOut" }}
-                        onClick={() => {
-                          disclosureKeepsUnpinnedRef.current = false;
-                          if (hasNewer) {
-                            // Do not pin against the current history page — its bottom
-                            // is not the tip. The pin + snap run when the tip window
-                            // actually lands (`hasNewer` flips false).
-                            wantPinRef.current = true;
-                            const node = scrollRef.current;
-                            if (onJumpToLatest) {
-                              void Promise.resolve(onJumpToLatest()).then(
-                                () => {
-                                  // Covers a host that flipped hasNewer before
-                                  // resolving; otherwise the tip-window commit
-                                  // consumes the flag.
-                                  const current = scrollRef.current;
-                                  if (current && wantPinRef.current && !hasNewerRef.current) {
+                                  },
+                                  () => {
+                                    // The tip reload failed (ordinary network error):
+                                    // an armed latch would fire a surprise snap when
+                                    // the reader later pages to the tip themselves.
                                     wantPinRef.current = false;
-                                    applyPinned(true);
-                                    snapToBottom(current);
-                                  }
-                                },
-                                () => {
-                                  // The tip reload failed (ordinary network error):
-                                  // an armed latch would fire a surprise snap when
-                                  // the reader later pages to the tip themselves.
-                                  wantPinRef.current = false;
-                                },
-                              );
-                            } else if (node) {
-                              // No tip reload available: jump within the in-memory
-                              // window so the newer sentinel can page forward; the
-                              // latch pins if the tip window eventually lands.
+                                  },
+                                );
+                              } else if (node) {
+                                // No tip reload available: jump within the in-memory
+                                // window so the newer sentinel can page forward; the
+                                // latch pins if the tip window eventually lands.
+                                snapToBottom(node);
+                              }
+                              return;
+                            }
+                            const node = scrollRef.current;
+                            if (node) {
+                              applyPinned(true);
                               snapToBottom(node);
                             }
-                            return;
-                          }
-                          const node = scrollRef.current;
-                          if (node) {
-                            applyPinned(true);
-                            snapToBottom(node);
-                          }
-                        }}
-                        className={cn(
-                          "absolute inset-x-0 bottom-4 mx-auto w-fit",
-                          "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                          "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
-                          "hover:border-og-border-strong",
-                        )}
-                      >
-                        <ArrowDownIcon className="size-3.5" />
-                        Jump to latest
-                      </motion.button>
-                    ) : null}
-                  </AnimatePresence>
-                </div>
+                          }}
+                          className={cn(
+                            "absolute inset-x-0 bottom-4 mx-auto w-fit",
+                            "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                            "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
+                            "hover:border-og-border-strong",
+                          )}
+                        >
+                          <ArrowDownIcon className="size-3.5" />
+                          Jump to latest
+                        </motion.button>
+                      ) : null}
+                    </AnimatePresence>
+                  </div>
+                </TimelineAnnotationSourceRootContext.Provider>
               </TooltipProvider>
             </EntranceAnimationProvider>
           </TimelineComputeLabelProvider>
@@ -2145,10 +2309,12 @@ type TimelineGroupEntryContext = {
 };
 
 type TimelineGroupBehaviorProps = {
+  renderMessageActions: MessageTimelineProps["renderMessageActions"];
   renderMessageText: MessageTimelineProps["renderMessageText"];
   onOpenSession: MessageTimelineProps["onOpenSession"];
   onMemoryClick: MessageTimelineProps["onMemoryClick"];
   onReconnect: MessageTimelineProps["onReconnect"];
+  renderAuthNeeded: MessageTimelineProps["renderAuthNeeded"];
   resolveProviderLogo: MessageTimelineProps["resolveProviderLogo"];
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot: MessageTimelineProps["loadRetainedScreenshot"];
@@ -2208,10 +2374,12 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
 // streaming and host updates still invalidate immediately.
 const TimelineGroupView = memo(function TimelineGroupView({
   group,
+  renderMessageActions,
   renderMessageText,
   onOpenSession,
   onMemoryClick,
   onReconnect,
+  renderAuthNeeded,
   resolveProviderLogo,
   toolRegistry,
   loadRetainedScreenshot,
@@ -2225,12 +2393,15 @@ const TimelineGroupView = memo(function TimelineGroupView({
   contextCompactionCount,
 }: {
   group: TimelineGroup;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
@@ -2383,10 +2554,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
             key={key}
             resetKeys={[
               child,
+              renderMessageActions,
               renderMessageText,
               onOpenSession,
               onMemoryClick,
               onReconnect,
+              renderAuthNeeded,
               resolveProviderLogo,
               toolRegistry,
               loadRetainedScreenshot,
@@ -2397,10 +2570,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
           >
             <TimelineGroupView
               group={child}
+              renderMessageActions={renderMessageActions}
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               onReconnect={onReconnect}
+              renderAuthNeeded={renderAuthNeeded}
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
@@ -2443,8 +2618,10 @@ const TimelineGroupView = memo(function TimelineGroupView({
       return (
         <TimelineRow
           item={group.item}
+          renderMessageActions={renderMessageActions}
           renderMessageText={renderMessageText}
           onReconnect={onReconnect}
+          renderAuthNeeded={renderAuthNeeded}
           resolveProviderLogo={resolveProviderLogo}
           onOpenSession={onOpenSession}
           loadVideoArtifactPlayback={loadVideoArtifactPlayback}
@@ -2694,28 +2871,45 @@ function durationBetween(startedAt: string, endedAt: string): number | undefined
  */
 export function TimelineRow({
   item,
+  renderMessageActions,
   renderMessageText,
   onReconnect,
+  renderAuthNeeded,
   resolveProviderLogo,
   onOpenSession,
   loadVideoArtifactPlayback,
 }: {
   item: TimelineItem;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
-      return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
+      return (
+        <UserMessageRow
+          item={item}
+          renderMessageActions={renderMessageActions}
+          renderMessageText={renderMessageText}
+        />
+      );
     case "human-input":
       return <HumanInputConversationRow item={item} />;
     case "agent-message":
-      return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
+      return (
+        <AgentMessageRow
+          item={item}
+          renderMessageActions={renderMessageActions}
+          renderMessageText={renderMessageText}
+        />
+      );
     case "worker-completion":
       return <WorkerCompletionRow item={item} onOpenSession={onOpenSession} />;
     case "session-status":
@@ -2724,7 +2918,11 @@ export function TimelineRow({
       return <GoalRow item={item} />;
     case "machine-input-batch":
       return (
-        <MachineInputBatchRow item={item} loadVideoArtifactPlayback={loadVideoArtifactPlayback} />
+        <MachineInputBatchRow
+          item={item}
+          onOpenSession={onOpenSession}
+          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+        />
       );
     case "notice":
       return <NoticeRow item={item} />;
@@ -2732,11 +2930,13 @@ export function TimelineRow({
       return <CompactionRow item={item} />;
     case "auth-needed":
       return (
-        <AuthNeededRow
-          item={item}
-          onReconnect={onReconnect}
-          resolveProviderLogo={resolveProviderLogo}
-        />
+        renderAuthNeeded?.(item) ?? (
+          <AuthNeededRow
+            item={item}
+            onReconnect={onReconnect}
+            resolveProviderLogo={resolveProviderLogo}
+          />
+        )
       );
     default:
       return null;
@@ -2781,7 +2981,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.phase === "started"
         ? WAITING_PILL_CLASS
-        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+        : NEUTRAL_PILL;
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <div
@@ -2837,9 +3037,11 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
 
 function UserMessageRow({
   item,
+  renderMessageActions,
   renderMessageText,
 }: {
   item: UserMessageItem;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
@@ -2858,7 +3060,12 @@ function UserMessageRow({
           }
           label="Copy message"
           className="w-fit max-w-full min-w-0"
-          trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
+          trailing={
+            <>
+              {renderMessageActions?.(item)}
+              <MessageFooterTime occurredAt={item.occurredAt} />
+            </>
+          }
         >
           <div className={MESSAGE_BUBBLE_CLASS}>
             {item.text ? (
@@ -2873,7 +3080,7 @@ function UserMessageRow({
               </div>
             ) : null}
             {(item.annotations?.length ?? 0) > 0 ? (
-              <TimelineAnnotationsChip
+              <TimelineAnnotationCards
                 annotations={item.annotations ?? []}
                 className={item.text ? "mt-2" : undefined}
               />
@@ -3049,9 +3256,11 @@ function humanInputConversationCopyText(item: HumanInputItem, settledLabel: stri
 
 function AgentMessageRow({
   item,
+  renderMessageActions,
   renderMessageText,
 }: {
   item: AgentMessageItem;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderMessageText?:
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
@@ -3067,17 +3276,27 @@ function AgentMessageRow({
   // While streaming, copy is still useful (current text) but keep chrome calm —
   // stamp only after the message finishes (occurredAt tracks completion).
   return (
-    <div data-og-annotation-source-key={item.annotationSource?.eventId}>
-      <CopyHoverFrame
-        copyText={item.text}
-        label="Copy message"
-        align="start"
-        className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
-        trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
+    <CopyHoverFrame
+      copyText={item.text}
+      label="Copy message"
+      align="start"
+      className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
+      trailing={
+        item.streaming ? null : (
+          <>
+            {renderMessageActions?.(item)}
+            <MessageFooterTime occurredAt={item.occurredAt} />
+          </>
+        )
+      }
+    >
+      <div
+        data-og-wide-table-message=""
+        data-og-annotation-source-key={item.annotationSource?.eventId}
       >
         {body}
-      </CopyHoverFrame>
-    </div>
+      </div>
+    </CopyHoverFrame>
   );
 }
 
@@ -3277,41 +3496,46 @@ type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?:
 
 const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
-const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
-  set: {
-    label: "Goal set",
-    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
-    icon: TargetIcon,
-  },
-  updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
-  completed: {
-    label: "Goal completed",
-    pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
-    icon: CheckIcon,
-  },
-  paused: {
-    label: "Goal paused",
-    pill: WAITING_PILL_CLASS,
-    icon: PauseIcon,
-  },
-  resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
-  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
-  held: {
-    label: "Goal held",
-    pill: WAITING_PILL_CLASS,
-    icon: PauseCircleIcon,
-  },
-  continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
-};
+// Shared production chunks can be cyclic. Resolve icon bindings during render,
+// after their modules initialize, rather than permanently capturing undefined.
+function goalMeta(action: GoalItem["action"]): GoalMeta {
+  const metadata: Record<GoalItem["action"], GoalMeta> = {
+    set: {
+      label: "Goal set",
+      pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
+      icon: TargetIcon,
+    },
+    updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
+    completed: {
+      label: "Goal completed",
+      pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
+      icon: CheckIcon,
+    },
+    paused: {
+      label: "Goal paused",
+      pill: WAITING_PILL_CLASS,
+      icon: PauseIcon,
+    },
+    resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+    cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+    held: {
+      label: "Goal held",
+      pill: WAITING_PILL_CLASS,
+      icon: PauseCircleIcon,
+    },
+    continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+  };
+  return metadata[action];
+}
 
 /**
  * A goal landmark pill. Resolves its label, accent/tone, and glyph from
- * {@link GOAL_META} so all six actions are visually distinguishable while the
+ * {@link goalMeta} so all six actions are visually distinguishable while the
  * palette stays restrained — see that table for the per-action rationale.
  */
 function GoalRow({ item }: { item: GoalItem }) {
   const enter = useEntranceAnimation();
-  const { label, pill, icon: Icon } = GOAL_META[item.action];
+  const { label, pill, icon: Icon } = goalMeta(item.action);
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <span
@@ -3332,9 +3556,11 @@ function GoalRow({ item }: { item: GoalItem }) {
 
 function MachineInputBatchRow({
   item,
+  onOpenSession,
   loadVideoArtifactPlayback,
 }: {
   item: MachineInputBatchItem;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   const enter = useEntranceAnimation();
@@ -3354,7 +3580,11 @@ function MachineInputBatchRow({
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
-      <details className="group w-full max-w-full" data-og-machine-input-batch="">
+      <details
+        className="group w-full max-w-full"
+        data-og-machine-input-batch=""
+        title={`Received ${formatClockTime(item.occurredAt)}`}
+      >
         <summary className="flex cursor-pointer list-none justify-center [&::-webkit-details-marker]:hidden">
           <span
             className={cn(
@@ -3370,10 +3600,14 @@ function MachineInputBatchRow({
           </span>
         </summary>
         <div className="mx-auto mt-2 w-full max-w-lg space-y-2 border-t border-og-border/50 pt-2">
+          <p className="text-og-xs text-og-fg-subtle">
+            Received <time dateTime={item.occurredAt}>{formatClockTime(item.occurredAt)}</time>
+          </p>
           {item.members.map((member) => (
             <MachineInputRow
               key={member.id}
               member={member}
+              onOpenSession={onOpenSession}
               loadVideoArtifactPlayback={loadVideoArtifactPlayback}
             />
           ))}
@@ -3390,9 +3624,11 @@ function MachineInputBatchRow({
 
 function MachineInputRow({
   member,
+  onOpenSession,
   loadVideoArtifactPlayback,
 }: {
   member: MachineInputBatchItem["members"][number];
+  onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   if (member.kind === "media_generation_result" && member.result) {
@@ -3419,6 +3655,11 @@ function MachineInputRow({
             {truncate(summary, 320)}
           </p>
         ) : null}
+        <ChildSessionLink
+          kind={member.kind}
+          sourceId={member.sourceId}
+          onOpenSession={onOpenSession}
+        />
       </div>
     </div>
   );
@@ -3492,12 +3733,38 @@ function formatVideoDuration(seconds: number): string {
 
 function NoticeRow({ item }: { item: NoticeItem }) {
   const enter = useEntranceAnimation();
+  if (item.recordedOutcome) {
+    return (
+      <details
+        className="group text-og-sm text-og-fg-muted"
+        role="note"
+        data-og-recorded-outcome="wait"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-1 [&::-webkit-details-marker]:hidden">
+          <ChevronRightIcon
+            aria-hidden
+            className="size-3.5 transition-transform group-open:rotate-90"
+          />
+          <span>
+            Wait recorded ·{" "}
+            <time dateTime={item.occurredAt}>
+              {new Date(item.occurredAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </time>
+          </span>
+        </summary>
+        <p className="mt-1 whitespace-pre-wrap break-words pl-5 text-og-fg-muted">{item.text}</p>
+      </details>
+    );
+  }
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.tone === "waiting"
         ? WAITING_PILL_CLASS
-        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+        : NEUTRAL_PILL;
   return (
     <div
       className={cn(
@@ -3505,17 +3772,29 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-og-menu",
         tone,
       )}
-      role="status"
+      role={item.recordedOutcome ? "note" : "status"}
+      data-og-recorded-outcome={item.recordedOutcome ? "wait" : undefined}
     >
       <TriangleAlertIcon
         className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
       <div className="min-w-0 flex-1">
+        {item.recordedOutcome ? (
+          <p className="mb-1 text-og-control font-medium">
+            Wait recorded{" "}
+            <time dateTime={item.occurredAt}>
+              {new Date(item.occurredAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </time>
+          </p>
+        ) : null}
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono">
               {JSON.stringify(item.details.value, null, 2)}
             </pre>
           </details>

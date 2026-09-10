@@ -16,6 +16,7 @@ import {
   PackIdentity,
   PackInstallationPlan,
   PackUninstallPlan,
+  sessionSelectedPackSkillIdForLaunch,
 } from "./pack-dialogs";
 
 beforeAll(() => {
@@ -56,6 +57,7 @@ describe("PackDetailDialog", () => {
         onPreviewUninstall={async () => uninstallPreview()}
         onUninstall={async () => true}
         onUnregister={async () => true}
+        onStartSession={() => {}}
       />,
     );
     try {
@@ -82,6 +84,7 @@ describe("PackDetailDialog", () => {
         onPreviewUninstall={async () => uninstallPreview()}
         onUninstall={async () => true}
         onUnregister={async () => true}
+        onStartSession={() => {}}
       />,
     );
     try {
@@ -96,6 +99,9 @@ describe("PackDetailDialog", () => {
     const contents = await render(<PackContents pack={pack()} />);
     try {
       expect(contents.container.textContent).toContain("Compute requirement");
+      expect(contents.container.textContent).toContain(
+        "Installs as an immutable Skill · 1 included file",
+      );
       expect(contents.container.textContent).toContain("Configuration requirements");
       expect(contents.container.textContent).toContain(
         "Values come from an encrypted Variable Set",
@@ -109,7 +115,7 @@ describe("PackDetailDialog", () => {
       expect(plan.container.textContent).toContain("Ready to install");
       expect(plan.container.textContent).toContain("Pinned components");
       expect(plan.container.textContent).toContain("Terraform");
-      expect(plan.container.textContent).toContain("Legacy fields will be migrated");
+      expect(plan.container.textContent).toContain("Installation details");
       expect(plan.container.textContent).toContain("Production Rig");
     } finally {
       await plan.unmount();
@@ -184,6 +190,61 @@ describe("PackDetailDialog", () => {
     }
   });
 
+  test("starts a session only when a session-selected Pack Skill is available", async () => {
+    const onStartSession = mock(() => {});
+    const rendered = await render(
+      <PackDetailActions
+        busy={false}
+        installed
+        reviewing={false}
+        reviewed
+        hasPreview
+        installReady
+        installLabel="Repair Pack"
+        canStartSession
+        onCancel={() => {}}
+        onReview={() => {}}
+        onInstall={() => {}}
+        onUninstall={() => {}}
+        onUnregister={() => {}}
+        onStartSession={onStartSession}
+      />,
+    );
+    try {
+      await act(async () => button(rendered.container, "Start with Pack").click());
+      expect(onStartSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("launches only an exact installed manifest with a resolved session-selected Skill", () => {
+    const productPack = sessionSelectedPack();
+    const activeInstallation = sessionSelectedInstallation(productPack);
+    const exactPreview = sessionSelectedPreview(productPack, activeInstallation);
+    expect(sessionSelectedPackSkillIdForLaunch(productPack, activeInstallation, exactPreview)).toBe(
+      exactPreview.components[0]!.capabilityId,
+    );
+
+    expect(
+      sessionSelectedPackSkillIdForLaunch(productPack, activeInstallation, {
+        ...exactPreview,
+        manifestDigest: "f".repeat(64),
+      }),
+    ).toBeNull();
+    expect(
+      sessionSelectedPackSkillIdForLaunch(productPack, activeInstallation, {
+        ...exactPreview,
+        components: [
+          {
+            ...exactPreview.components[0]!,
+            resolvedId: exactPreview.components[0]!.capabilityId,
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
   test("names the installed version, role, category, digest, and description", async () => {
     const rendered = await render(<PackIdentity pack={pack()} installation={installation()} />);
     try {
@@ -242,6 +303,58 @@ function installation(): PackInstallation {
     metadata: {},
     enabledAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
+  };
+}
+
+function sessionSelectedPack(): CapabilityPack {
+  return {
+    ...pack(),
+    id: "product-integration",
+    version: "1.0.0",
+    skills: [
+      {
+        name: "product-integration",
+        activationMode: "session_selected",
+        files: [{ path: "SKILL.md", content: "# Product integration" }],
+      },
+    ],
+  };
+}
+
+function sessionSelectedInstallation(productPack: CapabilityPack): PackInstallation {
+  return {
+    ...installation(),
+    packId: productPack.id,
+    version: 7,
+    manifestSnapshot: productPack,
+    manifestDigest: "c".repeat(64),
+  };
+}
+
+function sessionSelectedPreview(
+  productPack: CapabilityPack,
+  activeInstallation: PackInstallation,
+): PackInstallationPreview {
+  return {
+    ...installPreview(),
+    packId: productPack.id,
+    packVersion: productPack.version,
+    manifestDigest: activeInstallation.manifestDigest!,
+    installationVersion: activeInstallation.version,
+    action: "repair",
+    components: [
+      {
+        key: "inline-skill/product-integration",
+        kind: "inline_skill",
+        capabilityId: `skill:pack-inline/session-selected/product-integration@${"b".repeat(64)}`,
+        required: true,
+        status: "ready",
+        expectedDigest: "b".repeat(64),
+        actualDigest: "b".repeat(64),
+        resolvedId: "66666666-6666-4666-8666-666666666666",
+        label: "product-integration",
+      },
+    ],
   };
 }
 

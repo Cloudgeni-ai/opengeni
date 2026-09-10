@@ -438,6 +438,9 @@ describe("embedded worker lifecycle contract", () => {
           "company_profile_heads",
           "company_profile_revisions",
           "connections",
+          "external_identities",
+          "external_identity_links",
+          "workspace_inference_controls",
           "files",
           "google_drive_object_acl_evidence",
           "google_drive_object_acl_principals",
@@ -469,6 +472,9 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_policies",
           "organization_workspace_lifecycle_events",
           "organization_workspace_operation_receipts",
+          "preference_registry_preferences",
+          "preference_registry_revisions",
+          "preference_registry_events",
           "self_service_organization_setup_receipts",
           "session_human_input_requests",
           "session_tenancy_activations",
@@ -495,6 +501,7 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
         ...[
+          "additional_organization_creation_receipts",
           "canonical_human_identities",
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
@@ -503,6 +510,7 @@ describe("embedded worker lifecycle contract", () => {
           ...organizationRecoveryTables,
           "organization_user_setup_deliveries",
           "organization_user_setup_delivery_attempts",
+          "session_tenancy_additional_organization_activation_evidence",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -648,6 +656,7 @@ describe("embedded worker lifecycle contract", () => {
       expectedRole: "opengeni_app",
       targetSchema: "public",
       protectedTables: [
+        "additional_organization_creation_receipts",
         "canonical_human_identities",
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
@@ -656,9 +665,11 @@ describe("embedded worker lifecycle contract", () => {
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
+        "session_tenancy_additional_organization_activation_evidence",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
+        "additional_organization_creation_receipts",
         "canonical_human_identities",
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
@@ -667,6 +678,7 @@ describe("embedded worker lifecycle contract", () => {
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
+        "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
     expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([

@@ -382,6 +382,11 @@ describe("OpenGeniClient access + workspaces", () => {
     const invitationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const membershipId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const operationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await client.createAdditionalOrganization({
+      name: "Product team",
+      workspaceName: "General",
+      operationId,
+    });
     await client.listOrganizationInvitations({
       cursor: invitationId,
       limit: 25,
@@ -419,6 +424,7 @@ describe("OpenGeniClient access + workspaces", () => {
     });
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
+        "POST /v1/organizations/additional",
         "GET /v1/organization-invitations",
         `GET /v1/organizations/${organizationId}/invitations`,
         `POST /v1/organizations/${organizationId}/invitations`,
@@ -430,11 +436,16 @@ describe("OpenGeniClient access + workspaces", () => {
         `PATCH /v1/organizations/${organizationId}/retention-policy`,
       ],
     );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      name: "Product team",
+      workspaceName: "General",
+      operationId,
+    });
+    expect(new URL(requests[2]!.url).searchParams.get("cursor")).toBe(invitationId);
+    expect(new URL(requests[2]!.url).searchParams.get("limit")).toBe("25");
     expect(new URL(requests[1]!.url).searchParams.get("cursor")).toBe(invitationId);
     expect(new URL(requests[1]!.url).searchParams.get("limit")).toBe("25");
-    expect(new URL(requests[0]!.url).searchParams.get("cursor")).toBe(invitationId);
-    expect(new URL(requests[0]!.url).searchParams.get("limit")).toBe("25");
-    expect(JSON.parse(requests[6]!.body!)).toEqual({
+    expect(JSON.parse(requests[7]!.body!)).toEqual({
       kind: "suspend",
       expectedAuthorizationRevision: 2,
       operationId,
@@ -2119,6 +2130,12 @@ describe("OpenGeniClient github", () => {
       returnPath: `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     });
     await client.listGitHubRepositories(WORKSPACE_ID);
+    await client.getGitHubActionPolicies(WORKSPACE_ID);
+    await client.updateGitHubActionPolicy(WORKSPACE_ID, {
+      actor: { kind: "workspace_app", installationId: 123 },
+      group: "routine",
+      decision: "allow",
+    });
     await client.syncGitHubRepositories(WORKSPACE_ID);
     await client.unlinkGitHubInstallation(WORKSPACE_ID, 123);
     await client.createGitHubAppManifest(WORKSPACE_ID, {
@@ -2128,6 +2145,8 @@ describe("OpenGeniClient github", () => {
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/github/app`,
         `GET /v1/workspaces/${WORKSPACE_ID}/github/repositories`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/github/action-policies`,
+        `PATCH /v1/workspaces/${WORKSPACE_ID}/github/action-policies`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/repositories/sync`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/github/installations/123`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/app-manifest`,
@@ -2136,6 +2155,11 @@ describe("OpenGeniClient github", () => {
     expect(new URL(requests[0]!.url).searchParams.get("returnPath")).toBe(
       `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      actor: { kind: "workspace_app", installationId: 123 },
+      group: "routine",
+      decision: "allow",
+    });
     expect(client.githubConnectUrl(WORKSPACE_ID, "signed-state")).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/github/connect?state=signed-state`,
     );

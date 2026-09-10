@@ -508,12 +508,17 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       retryPromise,
     ]);
     expect(retired).toMatchObject({ outcome: "success" });
-    expect(winner.action).toBe("start");
-    if (winner.action !== "start") throw new Error("producer winner did not start a session");
+    // Admission commits before idempotent session creation. Either overlapping
+    // caller may create the session; the other must signal that same session.
+    expect(["start", "signal"]).toContain(winner.action);
+    if (winner.action !== "start" && winner.action !== "signal") {
+      throw new Error("producer winner did not converge on the accepted session");
+    }
     expect(["start", "signal"]).toContain(replay.action);
     if (replay.action !== "start" && replay.action !== "signal") {
       throw new Error("producer replay did not converge on the accepted session");
     }
+    expect([winner.action, replay.action]).toContain("start");
     expect(replay.sessionId).toBe(winner.sessionId);
     expect(replay.triggerEventId).toBe(winner.triggerEventId);
     const persistedRun = await getScheduledTaskRunByProducerKey(client.db, {

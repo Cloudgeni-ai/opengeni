@@ -484,6 +484,167 @@ async function waitForBlockedRecoveryCommand(timeoutMs = 10_000): Promise<void> 
 }
 
 describe("migration 0363 organization recovery custody", () => {
+  test("does not duplicate a claim when another dispatcher commits after its statement snapshot", async () => {
+    if (!owned || !ownerClient) return;
+    const ceremony = await createCeremony();
+    await startAndReachQuorum(ceremony);
+    const [routine] = await owned.admin<{ definition: string }[]>`
+      select pg_get_functiondef('prepare_organization_recovery_notifications(text,text,integer,integer)'::regprocedure) as definition`;
+    if (!routine) throw new Error("missing claim routine");
+    const key = 9363042;
+    const blocker = await owned.admin.reserve();
+    let delayed: Promise<unknown> | undefined;
+    try {
+      await owned.admin.unsafe(`create function public.test_recovery_claim_barrier(owner_name text)
+        returns boolean language plpgsql volatile as $barrier$
+        begin
+          if owner_name = 'snapshot-dispatcher' then
+            perform pg_advisory_xact_lock(${key});
+          end if;
+          return true;
+        end $barrier$`);
+      const anchor =
+        "    WHERE NOT EXISTS (\n      SELECT 1 FROM organization_recovery_notification_attempts attempt";
+      expect(routine.definition).toContain(anchor);
+      await owned.admin.unsafe(
+        routine.definition.replace(
+          anchor,
+          "    WHERE public.test_recovery_claim_barrier(p_claim_owner) AND NOT EXISTS (\n      SELECT 1 FROM organization_recovery_notification_attempts attempt",
+        ),
+      );
+      await blocker`select pg_advisory_lock(${key})`;
+      delayed = prepareOrganizationRecoveryNotifications(ownerClient.db, {
+        provider: "fake",
+        claimOwner: "snapshot-dispatcher",
+        limit: 100,
+        leaseSeconds: 15,
+      });
+      const observed = delayed.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      const deadline = Date.now() + 10_000;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        const [row] = await owned.admin<{ blocked: boolean }[]>`
+          select exists(select 1 from pg_locks where locktype = 'advisory'
+            and objid = ${key}::oid and not granted) as blocked`;
+        if (row?.blocked) {
+          blocked = true;
+          break;
+        }
+        await Bun.sleep(10);
+      }
+      expect(blocked).toBe(true);
+      const first = await prepareOrganizationRecoveryNotifications(ownerClient.db, {
+        provider: "fake",
+        claimOwner: "first-dispatcher",
+        limit: 100,
+        leaseSeconds: 15,
+      });
+      expect(first.length).toBeGreaterThan(0);
+      await blocker`select pg_advisory_unlock(${key})`;
+      const second = await observed;
+      if (!("value" in second)) throw second.error;
+      expect(second.value).toEqual([]);
+    } finally {
+      await blocker`select pg_advisory_unlock_all()`;
+      await delayed?.catch(() => undefined);
+      await owned.admin.unsafe(routine.definition);
+      await owned.admin.unsafe("drop function if exists public.test_recovery_claim_barrier(text)");
+      await blocker.release();
+    }
+  }, 60_000);
+
+  test("claims under explicit READ COMMITTED and rejects retained snapshots before effects", async () => {
+    if (!owned) return;
+    const ceremony = await createCeremony();
+    await startAndReachQuorum(ceremony);
+    const [before] = await owned.admin<{ count: number }[]>`
+      select count(*)::integer as count from organization_recovery_notification_attempts`;
+    for (const isolation of ["repeatable read", "serializable"]) {
+      await expectSqlState(
+        () =>
+          owned!.admin.begin(`isolation level ${isolation}`, async (tx) => {
+            await tx`select prepare_organization_recovery_notifications('fake', 'unsupported-isolation', 100, 15)`;
+          }),
+        "25001",
+      );
+    }
+    const [after] = await owned.admin<{ count: number }[]>`
+      select count(*)::integer as count from organization_recovery_notification_attempts`;
+    expect(after?.count).toBe(before?.count);
+    await owned.admin.begin("isolation level read committed", async (tx) => {
+      const [row] = await tx<{ claims: unknown[] }[]>`
+        select prepare_organization_recovery_notifications('fake', 'explicit-read-committed', 100, 15) as claims`;
+      expect(row?.claims.length).toBeGreaterThan(0);
+    });
+  }, 60_000);
+
+  test("0421 preserves installed schema and ACL metadata and replays without changing evidence", async () => {
+    if (!owned) return;
+    const migration = readFileSync(
+      new URL("../drizzle/0421_recovery_notification_claim_snapshot.sql", import.meta.url),
+      "utf8",
+    );
+    const schemaName = `recovery_claim_${crypto.randomUUID().replaceAll("-", "")}`;
+    const originalRoutine = migrationSource.slice(
+      migrationSource.indexOf(
+        "CREATE OR REPLACE FUNCTION prepare_organization_recovery_notifications(",
+      ),
+      migrationSource.indexOf(
+        "$body$;",
+        migrationSource.indexOf(
+          "CREATE OR REPLACE FUNCTION prepare_organization_recovery_notifications(",
+        ),
+      ) + 8,
+    );
+    await owned.admin.begin(async (tx) => {
+      await tx.unsafe(`create schema "${schemaName}"`);
+      await tx`select set_config('search_path', ${schemaName + ", pg_catalog"}, true)`;
+      await tx.unsafe(
+        "create table organization_recovery_notification_outbox (like public.organization_recovery_notification_outbox including all)",
+      );
+      await tx.unsafe(
+        "create table organization_recovery_notification_attempts (like public.organization_recovery_notification_attempts including all)",
+      );
+      await tx.unsafe(originalRoutine);
+      await tx.unsafe(
+        `alter function prepare_organization_recovery_notifications(text,text,integer,integer) set search_path to "${schemaName}", pg_catalog, pg_temp`,
+      );
+      await tx.unsafe(
+        "revoke all on function prepare_organization_recovery_notifications(text,text,integer,integer) from public",
+      );
+      const [before] = await tx<
+        { owner: number; acl: unknown; config: unknown; secured: boolean }[]
+      >`
+        select proowner as owner, proacl as acl, proconfig as config, prosecdef as secured
+        from pg_proc where oid = 'prepare_organization_recovery_notifications(text,text,integer,integer)'::regprocedure`;
+      await tx.unsafe(migration);
+      await tx.unsafe(migration);
+      const [after] = await tx<
+        { owner: number; acl: unknown; config: unknown; secured: boolean }[]
+      >`
+        select proowner as owner, proacl as acl, proconfig as config, prosecdef as secured
+        from pg_proc where oid = 'prepare_organization_recovery_notifications(text,text,integer,integer)'::regprocedure`;
+      expect(after).toEqual(before);
+      // Public rows exist, but this fixed-schema routine must see only the empty dedicated schema.
+      const [empty] = await tx<{ claims: unknown[] }[]>`
+        select prepare_organization_recovery_notifications('fake', 'dedicated-schema', 100, 15) as claims`;
+      expect(empty?.claims).toEqual([]);
+      await tx.unsafe(
+        "insert into organization_recovery_notification_outbox select * from public.organization_recovery_notification_outbox limit 1",
+      );
+      const [claimed] = await tx<{ claims: unknown[] }[]>`
+        select prepare_organization_recovery_notifications('fake', 'dedicated-schema', 100, 15) as claims`;
+      expect(claimed?.claims).toHaveLength(1);
+      await tx.unsafe(migration);
+      const [again] = await tx<{ claims: unknown[] }[]>`
+        select prepare_organization_recovery_notifications('fake', 'dedicated-schema', 100, 15) as claims`;
+      expect(again?.claims).toEqual([]);
+      await tx.unsafe(`drop schema "${schemaName}" cascade`);
+    });
+  }, 60_000);
   test("is rolling, fixed-path, FORCE-RLS, append-only, and revision-fenced", async () => {
     expect(migrationSource.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(migrationSource).toContain("FORCE ROW LEVEL SECURITY");

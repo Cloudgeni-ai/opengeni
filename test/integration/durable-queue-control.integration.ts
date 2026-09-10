@@ -147,7 +147,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           Array.from({ length: 100 }, (_, index) =>
             addSessionSystemUpdate(
               dbClient.db,
-              systemUpdateInput(grant, session.id, "children:integration", index),
+              neutralSystemUpdateInput(grant, session.id, "notices:integration", index),
             ),
           ),
         );
@@ -547,7 +547,12 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(repair.failed).toBe(0);
         expect(repair.exhaustedBatchLimit).toBe(false);
         expect(repair.claimed).toBeGreaterThanOrEqual(1);
-        expect(repair.delivered).toBe(repair.claimed);
+        expect(repair.signaled).toBe(repair.claimed);
+        expect(repair.unconfirmed).toBe(0);
+        // Signal acceptance can race the actual claim. Every receipt must be
+        // either acknowledged or truthfully pending; the model/turn checks
+        // below establish that this specific session actually executed.
+        expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
         await waitFor(
           async () => {
@@ -1379,6 +1384,30 @@ function systemUpdateInput(
   };
 }
 
+function neutralSystemUpdateInput(
+  grant: AccessGrant,
+  sessionId: string,
+  groupingKey: string,
+  index: number,
+) {
+  const operationId = crypto.randomUUID();
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    kind: "agent_message" as const,
+    classification: "info" as const,
+    sourceId: `notice-${index}`,
+    dedupeKey: `${groupingKey}:notice-${index}`,
+    summary: `Ordinary notice ${index}`,
+    payload: {
+      type: "agent_message" as const,
+      text: `Ordinary notice ${index}`,
+      operationId,
+    },
+  };
+}
+
 function sessionWorkflowClient(
   temporal: Client,
   taskQueue: string,
@@ -1406,7 +1435,7 @@ function sessionWorkflowClient(
         ],
         signal: input.interruptionRequested ? "sessionControl" : "queueChanged",
       });
-      await markSessionWorkflowWakeDelivered(db, {
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

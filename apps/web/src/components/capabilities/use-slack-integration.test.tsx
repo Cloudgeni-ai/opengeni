@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
+import { OpenGeniClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -20,7 +21,17 @@ const PERSONAL_CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 // The adapter reads everything through the app context; swap it per case.
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({
-  useAppContext: () => mutableContext.current,
+  useAppContext: () => {
+    const client = mutableContext.current.client as Record<string, unknown>;
+    client.connectTransport ??= () =>
+      new OpenGeniClient({
+        baseUrl: "http://localhost:3000",
+        fetch: async () => {
+          throw new Error("Unexpected Connect request in Slack presentation test");
+        },
+      }).connectTransport();
+    return mutableContext.current;
+  },
 }));
 
 // Radix portals do not mount under happy-dom; render dialog frames inline so
@@ -44,7 +55,7 @@ const {
 } = await import("./use-slack-integration");
 
 beforeAll(() => {
-  GlobalRegistrator.register();
+  GlobalRegistrator.register({ url: "http://localhost:3000" });
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -141,13 +152,20 @@ async function renderAdapter({
   permissions,
   connections,
   bindings,
+  contextOverride,
 }: {
   permissions: string[];
   connections: ConnectionMetadata[];
   bindings: SlackInstallationBinding[];
-}): Promise<{ model: IntegrationViewModel; unmount: () => Promise<void> }> {
-  mutableContext.current = appContext(permissions);
+  contextOverride?: Record<string, unknown>;
+}): Promise<{
+  model: IntegrationViewModel;
+  dialogs: () => React.ReactNode;
+  unmount: () => Promise<void>;
+}> {
+  mutableContext.current = contextOverride ?? appContext(permissions);
   let captured: IntegrationViewModel | null = null;
+  let dialogs: React.ReactNode;
   function Probe() {
     const adapter = useSlackIntegration({
       workspaceId: WORKSPACE_ID,
@@ -160,6 +178,7 @@ async function renderAdapter({
       onRuntimeChanged: () => {},
     });
     captured = adapter.model;
+    dialogs = adapter.dialogs;
     return null;
   }
   const container = document.createElement("div");
@@ -169,6 +188,7 @@ async function renderAdapter({
   if (!captured) throw new Error("Slack adapter model was not captured");
   return {
     model: captured,
+    dialogs: () => dialogs,
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -179,6 +199,91 @@ async function renderAdapter({
 function optionById(model: IntegrationViewModel, id: string) {
   return model.options.find((option) => option.id === id) ?? null;
 }
+
+test("setup conflict survives remount and can be dismissed without clearing other search state", async () => {
+  window.history.replaceState(
+    null,
+    "",
+    `/workspaces/${WORKSPACE_ID}/plugins?slack=error&reason=http_409&integration=slack`,
+  );
+  let rendered = await renderAdapter({
+    permissions: ["workspace:admin"],
+    connections: [],
+    bindings: [],
+  });
+  try {
+    expect(rendered.model.chip.label).toBe("Needs attention");
+    expect(rendered.model.notice?.title).toContain("already linked");
+    expect(rendered.model.notice?.action).toBeUndefined();
+    expect(rendered.model.footer.kind).toBe("locked");
+    await rendered.unmount();
+    rendered = await renderAdapter({
+      permissions: ["workspace:admin"],
+      connections: [],
+      bindings: [],
+    });
+    expect(rendered.model.notice?.title).toContain("already linked");
+    await act(async () => rendered.model.notice?.onDismiss?.());
+    expect(window.location.search).toBe("?integration=slack");
+  } finally {
+    await rendered.unmount();
+    window.history.replaceState(null, "", "/");
+  }
+});
+
+test("an unverified installation cannot silently become a new setup invitation", async () => {
+  const { binding } = installedBot();
+  const rendered = await renderAdapter({
+    permissions: ["workspace:admin"],
+    connections: [],
+    bindings: [binding],
+  });
+  try {
+    expect(rendered.model.chip.label).toBe("Needs attention");
+    expect(rendered.model.footer.kind).toBe("locked");
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("a sibling installation cannot hide the local bot's reconnect action", async () => {
+  const { bot, binding } = installedBot();
+  const siblingId = "55555555-5555-4555-8555-555555555555";
+  const grants = accessContext(["workspace:admin"]);
+  grants.workspaceGrants.push({ ...grants.workspaceGrants[0]!, workspaceId: siblingId });
+  const list = mock(async () => [{ ...binding, workspaceId: siblingId }]);
+  const install = mock(async (_workspaceId: string, _input: unknown) => ({
+    authorizationUrl: "http://localhost:3000/consent",
+  }));
+  const rendered = await renderAdapter({
+    permissions: ["workspace:admin"],
+    connections: [{ ...bot, status: "needs_reauth" }],
+    bindings: [binding],
+    contextOverride: {
+      ...appContext(["workspace:admin"]),
+      accessContext: grants,
+      client: { listSlackInstallationBindings: list, startOpenGeniSlackBotInstall: install },
+    },
+  });
+  try {
+    expect(list).not.toHaveBeenCalled();
+    expect(rendered.model.footer.kind).toBe("repair");
+    expect(rendered.model.notice?.action?.label).toBe("Reconnect Slack");
+    await act(async () => rendered.model.notice?.action?.onClick());
+    // Reconnect now opens the common Connect setup; it must retain the exact
+    // local account, not start a sibling's legacy redirect flow.
+    expect(install).not.toHaveBeenCalled();
+    const fragment = rendered.dialogs() as React.ReactElement<{ children: React.ReactNode[] }>;
+    const setup = fragment.props.children[0] as React.ReactElement<{
+      request: { providerId: string; reconnectAccountId: string };
+    }>;
+    expect(setup.props.request.providerId).toBe("slack-bot");
+    expect(setup.props.request.reconnectAccountId).toBe(bot.id);
+  } finally {
+    await rendered.unmount();
+    window.history.replaceState(null, "", "/");
+  }
+});
 
 describe("useSlackIntegration model selection and gating", () => {
   test("admin with an installed bot manages every option", async () => {

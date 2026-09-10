@@ -8,19 +8,37 @@ import {
   getSelfServiceOrganizationOnboardingStatus,
   type SelfServiceOrganizationOnboardingState,
 } from "@/api";
+import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  clearOrganizationInvitationContinuation,
+  storeOrganizationInvitationContinuation,
+  type OrganizationInvitationContinuation,
+} from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@/types";
 
 export function OrganizationOnboardingPanel({
   onComplete,
   client,
+  billingMode = "disabled",
+  codexEnabled = false,
+  supergrokEnabled = false,
   previewState,
+  activeEmail = null,
+  invitation = null,
+  onUseInvitedAccount,
 }: {
   onComplete: () => void;
   client?: OpenGeniBrowserClient;
+  billingMode?: "disabled" | "stripe";
+  codexEnabled?: boolean;
+  supergrokEnabled?: boolean;
   previewState?: SelfServiceOrganizationOnboardingState;
+  activeEmail?: string | null;
+  invitation?: OrganizationInvitationContinuation | null;
+  onUseInvitedAccount?: (targetEmail: string) => void;
 }) {
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
@@ -30,12 +48,20 @@ export function OrganizationOnboardingPanel({
   const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
   const [invitationLoading, setInvitationLoading] = useState(false);
   const [invitationError, setInvitationError] = useState<string | null>(null);
+  const [invitationResolution, setInvitationResolution] = useState<
+    "matched" | "wrong_account" | "unavailable" | null
+  >(null);
   const [acceptingInvitationId, setAcceptingInvitationId] = useState<string | null>(null);
+  const [createdSetup, setCreatedSetup] = useState<{
+    organizationId: string;
+    personalWorkspaceId: string;
+  } | null>(null);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
 
   useEffect(() => {
     if (previewState) return;
+    if (createdSetup) return;
     let active = true;
     void getSelfServiceOrganizationOnboardingStatus()
       .then((result) => {
@@ -55,18 +81,37 @@ export function OrganizationOnboardingPanel({
     return () => {
       active = false;
     };
-  }, [previewState, onComplete]);
+  }, [createdSetup, previewState, onComplete]);
 
   useEffect(() => {
-    if (state !== "invitation_pending" || !client) return;
+    if ((state !== "invitation_pending" && !invitation) || !client) return;
     let active = true;
     setInvitationLoading(true);
     setInvitationError(null);
-    void client
-      .listOrganizationInvitations({ limit: 100 })
-      .then((result) => {
+    setInvitationResolution(null);
+    void listAllOrganizationInvitations(client)
+      .then((listedInvitations) => {
         if (!active) return;
-        setInvitations(result.invitations.filter((invitation) => invitation.status === "pending"));
+        const pendingInvitations = listedInvitations.filter(
+          (listedInvitation) => listedInvitation.status === "pending",
+        );
+        if (!invitation) {
+          setInvitations(pendingInvitations);
+          return;
+        }
+        const matchingInvitation = pendingInvitations.find(
+          (listedInvitation) =>
+            listedInvitation.organizationId === invitation.organizationId &&
+            normalizeEmail(listedInvitation.targetEmail) === normalizeEmail(invitation.targetEmail),
+        );
+        const resolution = matchingInvitation
+          ? "matched"
+          : activeEmail && normalizeEmail(activeEmail) !== normalizeEmail(invitation.targetEmail)
+            ? "wrong_account"
+            : "unavailable";
+        setInvitations(matchingInvitation ? [matchingInvitation] : []);
+        setInvitationResolution(resolution);
+        if (resolution !== "wrong_account") clearOrganizationInvitationContinuation();
       })
       .catch((error) => {
         if (!active) return;
@@ -78,21 +123,22 @@ export function OrganizationOnboardingPanel({
     return () => {
       active = false;
     };
-  }, [client, state]);
+  }, [activeEmail, client, invitation, state]);
 
-  async function acceptInvitation(invitation: OrganizationInvitation) {
+  async function acceptInvitation(selectedInvitation: OrganizationInvitation) {
     if (!client || acceptingInvitationId) return;
     const acceptedOperationId =
-      invitationOperationIds.current.get(invitation.id) ?? crypto.randomUUID();
-    invitationOperationIds.current.set(invitation.id, acceptedOperationId);
-    setAcceptingInvitationId(invitation.id);
+      invitationOperationIds.current.get(selectedInvitation.id) ?? crypto.randomUUID();
+    invitationOperationIds.current.set(selectedInvitation.id, acceptedOperationId);
+    setAcceptingInvitationId(selectedInvitation.id);
     setInvitationError(null);
     try {
-      await client.acceptOrganizationInvitation(invitation.id, {
-        expectedRevision: invitation.revision,
+      await client.acceptOrganizationInvitation(selectedInvitation.id, {
+        expectedRevision: selectedInvitation.revision,
         operationId: acceptedOperationId,
       });
-      invitationOperationIds.current.delete(invitation.id);
+      invitationOperationIds.current.delete(selectedInvitation.id);
+      clearOrganizationInvitationContinuation();
       onComplete();
     } catch (error) {
       setInvitationError(error instanceof Error ? error.message : String(error));
@@ -110,12 +156,20 @@ export function OrganizationOnboardingPanel({
     setBusy(true);
     try {
       if (!previewState) {
-        await completeSelfServiceOrganizationSetup({
+        const created = await completeSelfServiceOrganizationSetup({
           organizationName: normalizedName,
           operationId: operationId.current,
         });
-        onComplete();
+        setCreatedSetup({
+          organizationId: created.organizationId,
+          personalWorkspaceId: created.personalWorkspaceId,
+        });
+        return;
       }
+      setCreatedSetup({
+        organizationId: "preview-organization",
+        personalWorkspaceId: "preview-workspace",
+      });
     } catch (error) {
       toast.error("Organization setup failed", {
         description: error instanceof Error ? error.message : String(error),
@@ -133,17 +187,33 @@ export function OrganizationOnboardingPanel({
     );
   }
 
-  if (state === "invitation_pending") {
+  if (state === "invitation_pending" || invitation) {
+    const wrongAccount = invitationResolution === "wrong_account";
+    const unavailable = invitationResolution === "unavailable";
+    const focusedInvitation = invitationResolution === "matched" ? invitations[0] : null;
     return (
       <section className="flex flex-1 items-center justify-center px-4">
         <div className="w-full max-w-lg rounded-lg border border-border bg-surface p-5 shadow-sm">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <MailIcon className="size-4" />
           </span>
-          <h1 className="text-base font-semibold">Invitation pending</h1>
+          <h1 className="text-base font-semibold">
+            {focusedInvitation
+              ? `Join ${focusedInvitation.organizationName ?? "organization"}`
+              : wrongAccount
+                ? `This invitation is for ${invitation?.targetEmail}`
+                : unavailable
+                  ? "This invitation is no longer available"
+                  : "Invitation pending"}
+          </h1>
           <p className="mt-2 text-sm leading-5 text-fg-subtle">
-            Choose the organization you want to join. Accepting creates your own Personal workspace
-            there and never grants access to another person's personal content.
+            {focusedInvitation
+              ? "Accept this invitation to create your own Personal workspace in the organization."
+              : wrongAccount
+                ? `You're signed in as ${activeEmail}. Switch accounts to join ${invitation?.organizationName}.`
+                : unavailable
+                  ? `The invitation to ${invitation?.organizationName} may already have been accepted, expired, or revoked.`
+                  : "Choose the organization you want to join. Accepting creates your own Personal workspace there and never grants access to another person's personal content."}
           </p>
           {invitationLoading ? (
             <p className="mt-4 flex items-center gap-2 text-sm text-fg-muted">
@@ -153,6 +223,31 @@ export function OrganizationOnboardingPanel({
             <p role="alert" className="mt-4 text-sm text-danger">
               We couldn't update your invitations. {invitationError}
             </p>
+          ) : wrongAccount ? (
+            <div className="mt-4 rounded-md border border-border bg-surface-subtle p-3">
+              <p className="text-sm text-fg-subtle">
+                Use the account for {invitation?.targetEmail}. The invitation remains available
+                while you switch.
+              </p>
+              {onUseInvitedAccount ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => {
+                    if (!invitation) return;
+                    storeContinuation(invitation);
+                    onUseInvitedAccount(invitation.targetEmail);
+                  }}
+                >
+                  Switch account
+                </Button>
+              ) : null}
+            </div>
+          ) : unavailable ? (
+            <p className="mt-4 text-sm text-fg-muted">
+              Ask the organization administrator for a new invitation if you still need access.
+            </p>
           ) : invitations.length === 0 ? (
             <p className="mt-4 text-sm text-fg-muted">
               No pending invitation is available. Refresh the page or ask your administrator for a
@@ -160,26 +255,26 @@ export function OrganizationOnboardingPanel({
             </p>
           ) : (
             <div className="mt-4 grid gap-2">
-              {invitations.map((invitation) => (
+              {invitations.map((listedInvitation) => (
                 <article
-                  key={invitation.id}
+                  key={listedInvitation.id}
                   className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
                 >
                   <div className="min-w-0">
                     <p className="text-sm font-medium">
-                      {invitation.organizationName ?? "Inviting organization"}
+                      {listedInvitation.organizationName ?? "Inviting organization"}
                     </p>
                     <p className="text-xs text-fg-muted">
-                      {invitation.targetEmail} · {invitation.role}
+                      {listedInvitation.targetEmail} · {listedInvitation.role}
                     </p>
                   </div>
                   <Button
                     type="button"
                     size="sm"
                     disabled={acceptingInvitationId !== null}
-                    onClick={() => void acceptInvitation(invitation)}
+                    onClick={() => void acceptInvitation(listedInvitation)}
                   >
-                    {acceptingInvitationId === invitation.id ? (
+                    {acceptingInvitationId === listedInvitation.id ? (
                       <Loader2Icon className="size-4 animate-spin" />
                     ) : null}
                     Join organization
@@ -190,6 +285,20 @@ export function OrganizationOnboardingPanel({
           )}
         </div>
       </section>
+    );
+  }
+
+  if (createdSetup) {
+    return (
+      <ModelAccessOnboardingPanel
+        client={client}
+        organizationId={createdSetup.organizationId}
+        workspaceId={createdSetup.personalWorkspaceId}
+        billingMode={billingMode}
+        codexEnabled={codexEnabled}
+        supergrokEnabled={supergrokEnabled}
+        onComplete={onComplete}
+      />
     );
   }
 
@@ -251,4 +360,39 @@ export function OrganizationOnboardingPanel({
       </form>
     </section>
   );
+}
+
+async function listAllOrganizationInvitations(
+  client: OpenGeniBrowserClient,
+): Promise<OrganizationInvitation[]> {
+  const invitations: OrganizationInvitation[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const result = await client.listOrganizationInvitations({
+      ...(cursor === undefined ? {} : { cursor }),
+      limit: 100,
+    });
+    invitations.push(...result.invitations);
+    const nextCursor = result.nextCursor ?? undefined;
+    if (nextCursor !== undefined && seenCursors.has(nextCursor)) {
+      throw new Error("Organization invitation pagination did not advance");
+    }
+    if (nextCursor !== undefined) seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (cursor !== undefined);
+  return invitations;
+}
+
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function storeContinuation(invitation: OrganizationInvitationContinuation): void {
+  storeOrganizationInvitationContinuation({
+    organizationId: invitation.organizationId,
+    organizationName: invitation.organizationName,
+    targetEmail: invitation.targetEmail,
+    expiresAt: invitation.expiresAt,
+  });
 }

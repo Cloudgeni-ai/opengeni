@@ -6,8 +6,8 @@ import {
   createDb,
   createWorkspace,
   ensureWorkspaceByExternalIdentity,
+  findWorkspaceByExternalIdentity,
   listSharedWorkspacesForAccount,
-  WorkspaceExternalIdentityConflictError,
   WorkspaceLimitExceededError,
   type DbClient,
 } from "../src";
@@ -113,27 +113,46 @@ describe("external workspace provisioning", () => {
     });
   });
 
-  test("the same external identity cannot replay across organizations", async () => {
+  test("the same external identity maps independently in each organization", async () => {
     if (!client) return;
     const firstAccountId = await createAccount("External provisioning owner");
     const secondAccountId = await createAccount("External provisioning stranger");
     const externalSource = `cross-account-${crypto.randomUUID()}`;
     const externalId = "tenant-shared-id";
 
-    await ensureWorkspaceByExternalIdentity(client.db, {
+    const first = await ensureWorkspaceByExternalIdentity(client.db, {
       accountId: firstAccountId,
       externalSource,
       externalId,
       name: "First owner",
     });
-    await expect(
-      ensureWorkspaceByExternalIdentity(client.db, {
-        accountId: secondAccountId,
+    const second = await ensureWorkspaceByExternalIdentity(client.db, {
+      accountId: secondAccountId,
+      externalSource,
+      externalId,
+      name: "Second owner",
+    });
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(true);
+    expect(second.workspace.id).not.toBe(first.workspace.id);
+    expect(second.workspace.accountId).toBe(secondAccountId);
+    for (const result of [first, second]) {
+      const found = await findWorkspaceByExternalIdentity(client.db, {
+        accountId: result.workspace.accountId,
         externalSource,
         externalId,
-        name: "Second owner",
-      }),
-    ).rejects.toBeInstanceOf(WorkspaceExternalIdentityConflictError);
+      });
+      expect(found?.id).toBe(result.workspace.id);
+      const replay = await ensureWorkspaceByExternalIdentity(client.db, {
+        accountId: result.workspace.accountId,
+        externalSource,
+        externalId,
+        name: "Do not overwrite",
+      });
+      expect(replay.created).toBe(false);
+      expect(replay.workspace.id).toBe(result.workspace.id);
+      expect(replay.workspace.name).toBe(result.workspace.name);
+    }
   });
 
   test("direct and external creators share one account workspace-limit fence", async () => {

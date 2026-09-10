@@ -264,7 +264,28 @@ describe("migration 0138 (checkpoint artifacts and finite provider deadlines)", 
       const migrationUrl = new URL(blank.databaseUrl);
       migrationUrl.username = migrationRole;
       migrationUrl.password = migrationPassword;
+      // This borrowed-DDL identity proves the historical 0138 protocol marker,
+      // not the ownership contract of every future migration. Later owner-only
+      // cutovers must run as the actual table owner, not an inheriting member.
+      const deferred = files.filter((file) => file > migration);
+      for (const file of deferred) {
+        await sql`insert into schema_migrations(name) values(${file}) on conflict do nothing`;
+      }
       await migrate(migrationUrl.toString());
+      const [historicalBoundary] = await sql<Array<{ applied: boolean; sessionsOwner: string }>>`
+        select exists(select 1 from schema_migrations where name=${migration}) as applied,
+          pg_get_userbyid(relowner) as "sessionsOwner"
+        from pg_class where oid='sessions'::regclass`;
+      expect(historicalBoundary).toEqual({ applied: true, sessionsOwner: identity!.currentUser });
+      // Normalize only objects created by this fixture's temporary role before
+      // advancing current code, preserving one genuine migration owner.
+      await sql.unsafe(
+        `REASSIGN OWNED BY ${quoteIdentifier(migrationRole)} TO ${quoteIdentifier(identity!.currentUser)}`,
+      );
+      for (const file of deferred) {
+        await sql`delete from schema_migrations where name=${file}`;
+      }
+      await migrate(blank.databaseUrl);
 
       const [migrated] = await sql<
         Array<{

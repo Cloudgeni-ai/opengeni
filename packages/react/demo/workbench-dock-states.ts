@@ -502,6 +502,12 @@ function captureAvailable(m: WorkspaceCaptureManifest): GetWorkspaceCaptureRespo
 }
 const captureNone: GetWorkspaceCaptureResponse = { available: false };
 
+// Valid 64×64 blue/green PNG: browser coverage must decode real raster bytes, not merely
+// find an <img> whose source happens to have an image MIME type.
+const recoveryPng =
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAgklEQVR4nO3YQQ0AMAhDUZRM3YQhZyIQMw0censJBghQ2l91J1rndbRKAyZghRwxFSKjHplPzEowc9woOy3QSGQipVCPSsAqwBYyBy2Cu+j0Gq/H+X0YXWrABKyQI6ZCZNQj84lZCWaOG2WnBRqJTKQU6lEJWAXYQuagRXAXnZ7tGXyehjFL36VnmwAAAABJRU5ErkJggg==";
+const recoveryTree = dir("workspace", "", [fsfile("recovery.png", "recovery.png", 187)]);
+
 function status(files: GitStatusResponse["files"], isRepo = true): GitStatusResponse {
   return {
     isRepo,
@@ -555,9 +561,21 @@ export type DockState = {
   /** fileCount seeded into a `workspace.revision.captured` announce so the
    *  pre-paint default tab resolves correctly (>0 → Changes, 0/absent → Files). */
   announceFileCount?: number;
+  /** First attach fails; a second explicit intent recovers the live PNG. */
+  liveFileWakeRecovery?: boolean;
 };
 
 export const DOCK_STATES: Record<string, DockState> = {
+  "live-file-wake-recovery": {
+    label: "Live file · failed wake recovery",
+    capabilities: capsCold(),
+    capture: captureAvailable(manifest([], recoveryTree, 7)),
+    machines: fleet(machine({ state: "offline", active: false })),
+    gitStatus: statusClean,
+    gitDiff: [],
+    tree: recoveryTree,
+    liveFileWakeRecovery: true,
+  },
   // Warm box, live diff, everything lit. The happy path.
   "warm-live": {
     label: "Warm · live",
@@ -785,6 +803,9 @@ export type DockStateKey = keyof typeof DOCK_STATES;
  * the ~7 methods the dock's hooks read are overridden.
  */
 export class DockStateMockClient extends MockOpenGeniClient {
+  private attachAttempts = 0;
+  private recovered = false;
+
   constructor(private readonly state: DockState) {
     super();
     // Seed a capture announce so the pre-paint default tab resolves (Changes when
@@ -815,17 +836,32 @@ export class DockStateMockClient extends MockOpenGeniClient {
   override async getStreamCapabilities(): Promise<SessionCapabilities> {
     if (this.state.capabilities === "error")
       throw new Error("sandbox unreachable — the box could not be resumed");
-    return this.state.capabilities;
+    return this.recovered
+      ? caps("warm", { DesktopStream: capsCold().DesktopStream })
+      : this.state.capabilities;
   }
 
   // A viewer attach warms the box; report the state's REAL liveness so a warm box
   // never gets folded back to "cold" (the base mock always says cold, which would
   // make the header chip lie about a live box once the Files tab warms it).
   override async attachViewer(): Promise<Awaited<ReturnType<MockOpenGeniClient["attachViewer"]>>> {
+    if (this.state.liveFileWakeRecovery) {
+      this.attachAttempts += 1;
+      if (this.attachAttempts === 1) {
+        throw new Error("Fixture attach failed: retry the live file");
+      }
+      this.recovered = true;
+    }
     const base = await super.attachViewer();
-    const liveness =
-      this.state.capabilities === "error" ? "cold" : this.state.capabilities.liveness;
-    return { ...base, liveness };
+    if (this.state.capabilities === "error") return { ...base, liveness: "cold" };
+    // The holder and descriptor describe one exact lease. Regressing the mock
+    // holder to the base fixture's epoch 0 makes a legitimate Files route fence
+    // reset the editor after its first edit intent.
+    return {
+      ...base,
+      liveness: this.recovered ? "warm" : this.state.capabilities.liveness,
+      leaseEpoch: this.state.capabilities.leaseEpoch,
+    };
   }
 
   override async getWorkspaceCapture(): Promise<GetWorkspaceCaptureResponse> {
@@ -834,6 +870,29 @@ export class DockStateMockClient extends MockOpenGeniClient {
 
   override async listMachines(): Promise<MachinesResponse> {
     return this.state.machines;
+  }
+
+  override async fsRead(
+    workspaceId: string,
+    sessionId: string,
+    request: { path: string },
+  ): Promise<Awaited<ReturnType<MockOpenGeniClient["fsRead"]>>> {
+    if (
+      this.state.liveFileWakeRecovery &&
+      request.path.replace(/^\/workspace\//, "") === "recovery.png"
+    ) {
+      if (!this.recovered) throw new Error("Live PNG read before successful attach");
+      return {
+        path: request.path,
+        encoding: "base64",
+        content: recoveryPng,
+        sizeBytes: 187,
+        truncated: false,
+        isBinary: true,
+        revision: 1,
+      };
+    }
+    return super.fsRead(workspaceId, sessionId, request);
   }
 
   override async gitStatus(): Promise<GitStatusResponse> {

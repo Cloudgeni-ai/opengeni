@@ -1,19 +1,16 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import { sitePackageVersions } from "./site-package-versions";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSkillMetadata } from "@opengeni/contracts";
 
-import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
 import {
-  dir,
-  file,
-  localDir,
-  type Dir,
-  type Entry,
-  type LocalDirLazySkillSource,
-  type SkillIndexEntry,
-} from "@openai/agents/sandbox";
-
-import { skillArtifactContentSha256 } from "./skill-library";
+  PORTABLE_SKILL_MAX_FILES,
+  buildPortableSkillArtifact,
+  readSkillLibraryArtifact,
+} from "./skill-library";
+import { SkillFileError, listSkillPaths, readSkillFiles } from "./skill-files";
+import type { SkillCatalogDescriptor } from "./skill-catalog";
 
 export type RuntimeSkillArtifactFile = Readonly<{
   path: string;
@@ -61,6 +58,7 @@ export type RuntimeSkillActivation =
 
 export type NativeToolSkillSet = Readonly<{
   editableArtifacts: boolean;
+  sites?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -73,13 +71,28 @@ export type EffectiveSkillSelection = Readonly<{
   reason: string;
 }>;
 
+export type RuntimeSkillReadable = Readonly<{
+  id: string;
+  name: string;
+  description: string;
+  files: readonly RuntimeSkillArtifactFile[];
+}>;
+
 export type RuntimeSkillComposition = Readonly<{
-  lazySource: LocalDirLazySkillSource;
   selections: readonly EffectiveSkillSelection[];
   /** Exact always-visible catalog descriptors for explicitly activated Skills. */
   configuredDescriptors: readonly RuntimeSkillDescriptor[];
   configuredNames: readonly string[];
   nativeToolNames: readonly string[];
+  /** Model-facing catalog descriptors for configured and bundled Skills. */
+  index: readonly RuntimeSkillIndexEntry[];
+  artifacts: readonly RuntimeSkillReadable[];
+}>;
+
+export type RuntimeSkillIndexEntry = Readonly<{
+  id: string;
+  name: string;
+  description: string;
 }>;
 
 export type RuntimeSkillDescriptor = Readonly<{
@@ -90,6 +103,12 @@ export type RuntimeSkillDescriptor = Readonly<{
   description: string;
 }>;
 
+export type RuntimeSkillReadRequest = Readonly<{
+  skill: string;
+  paths?: readonly string[];
+  listFiles?: boolean;
+}>;
+
 type ValidatedRuntimeSkillActivation = Readonly<{
   activation: RuntimeSkillActivation;
   contentSha256: string;
@@ -97,19 +116,47 @@ type ValidatedRuntimeSkillActivation = Readonly<{
 
 const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
   editableArtifacts: false,
+  sites: false,
   videoGeneration: false,
 });
 
-let stagedBundledArtifactSkillsDir: string | null = null;
-let stagedBundledVideoSkillsDir: string | null = null;
+/**
+ * Packaged guidance is server-readable content, not a sandbox installation.
+ * The caller supplies the effective capability selection; compute backend is
+ * deliberately absent. Reading never stages files into cwd or a user's box.
+ */
+export function loadNativeToolSkillArtifacts(
+  nativeTools: NativeToolSkillSet & Readonly<{ projects?: boolean }>,
+): readonly RuntimeSkillArtifact[] {
+  const directories: string[] = [];
+  if (nativeTools.projects) directories.push("bundled_project_skills");
+  if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
+  if (nativeTools.sites) directories.push("bundled_site_skills");
+  if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
+  return directories.flatMap((directory) => {
+    const root = packagedSkillDirectory(directory);
+    return skillDirNames(root).map((name) => {
+      const artifact = readSkillLibraryArtifact(join(root, name));
+      const files = [...artifact.files];
+      if (name === "opengeni-sites") {
+        const generatedPath = "package-versions.json";
+        const existing = files.findIndex((entry) => entry.path === generatedPath);
+        if (existing !== -1) files.splice(existing, 1);
+        files.push({
+          path: generatedPath,
+          content: JSON.stringify(sitePackageVersions(), null, 2),
+        });
+      }
+      return buildPortableSkillArtifact(files);
+    });
+  });
+}
 
 /**
  * Compose the exact Skills surface for one agent.
- *
  * Optional/domain Skills enter only through explicit activations. Native
  * Skills are admitted only with the exact executable tool surface they
- * document. This one result owns both lazy materialization and inspection
- * provenance so those projections cannot disagree.
+ * document. The result is an in-memory catalog and file set, not an SDK loader.
  */
 export function composeRuntimeSkills(
   activations: readonly RuntimeSkillActivation[],
@@ -123,39 +170,52 @@ export function composeRuntimeSkills(
     activations.map(validateRuntimeSkillActivation),
     nativeNameKeys,
   );
-  const activatedNameKeys = new Set(
-    effectiveActivations.map(({ activation }) => activation.artifact.name.toLowerCase()),
-  );
-  const children: Record<string, Entry> = {};
-  for (const source of nativeSources) {
-    for (const name of source.names) {
-      children[name] = localDir({ src: join(source.directory, name) });
-    }
-  }
-
-  const activationIndex: SkillIndexEntry[] = [];
-  for (const { activation } of effectiveActivations) {
-    const { artifact } = activation;
-    children[artifact.name] = runtimeSkillDirEntry(artifact);
-    activationIndex.push({
+  const nativeArtifacts = loadNativeToolSkillArtifacts(nativeTools);
+  const nativeReadables: RuntimeSkillReadable[] = nativeArtifacts.map((artifact) =>
+    Object.freeze({
+      id: `native-tool:${artifact.name}`,
       name: artifact.name,
       description: runtimeSkillDescription(artifact),
-      path: artifact.name,
-    });
-  }
+      files: artifact.files,
+    }),
+  );
+  const configuredDescriptors = Object.freeze(
+    effectiveActivations.map(({ activation }) =>
+      Object.freeze({
+        id: activation.id,
+        name: activation.artifact.name,
+        source: activation.source,
+        reason: activation.reason,
+        description: runtimeSkillDescription(activation.artifact),
+      }),
+    ),
+  );
+  const configuredReadables: RuntimeSkillReadable[] = effectiveActivations.map(({ activation }) =>
+    Object.freeze({
+      id: activation.id,
+      name: activation.artifact.name,
+      description: runtimeSkillDescription(activation.artifact),
+      files: activation.artifact.files,
+    }),
+  );
+  const index = Object.freeze([
+    ...nativeReadables.map((artifact) =>
+      Object.freeze({
+        id: artifact.id,
+        name: artifact.name,
+        description: artifact.description,
+      }),
+    ),
+    ...configuredDescriptors.map((descriptor) =>
+      Object.freeze({
+        id: descriptor.id,
+        name: descriptor.name,
+        description: descriptor.description,
+      }),
+    ),
+  ]);
 
   return Object.freeze({
-    lazySource: {
-      source: dir({ children }),
-      getIndex: (manifest, skillsPath) => [
-        ...nativeSources.flatMap((source) =>
-          (source.lazySource.getIndex?.(manifest, skillsPath) ?? []).filter(
-            (entry) => !activatedNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-          ),
-        ),
-        ...activationIndex,
-      ],
-    },
     selections: Object.freeze([
       ...nativeSources.flatMap((source) =>
         source.names.map((name) =>
@@ -171,22 +231,56 @@ export function composeRuntimeSkills(
       ),
       ...effectiveActivations.map((activation) => selectionForActivation(activation)),
     ]),
-    configuredDescriptors: Object.freeze(
-      effectiveActivations.map(({ activation }) =>
-        Object.freeze({
-          id: activation.id,
-          name: activation.artifact.name,
-          source: activation.source,
-          reason: activation.reason,
-          description: runtimeSkillDescription(activation.artifact),
-        }),
-      ),
-    ),
+    configuredDescriptors,
     configuredNames: Object.freeze(
       effectiveActivations.map(({ activation }) => activation.artifact.name),
     ),
-    nativeToolNames: Object.freeze(nativeSources.flatMap((source) => source.names)),
+    nativeToolNames: Object.freeze([...nativeSources.flatMap((source) => source.names)]),
+    index,
+    artifacts: Object.freeze([...nativeReadables, ...configuredReadables]),
   });
+}
+
+export function skillCatalogFromComposition(
+  composition: RuntimeSkillComposition,
+): readonly SkillCatalogDescriptor[] {
+  return composition.index;
+}
+
+export function readRuntimeSkill(
+  composition: RuntimeSkillComposition,
+  request: RuntimeSkillReadRequest,
+): { skillId: string; files?: ReturnType<typeof readSkillFiles>["files"]; paths?: string[] } {
+  const skill = request.skill.trim();
+  if (!skill)
+    throw new SkillFileError("invalid_request", "skill_read requires a Skill identifier.");
+  if (request.listFiles === true && request.paths !== undefined) {
+    throw new SkillFileError(
+      "invalid_request",
+      "skill_read listFiles:true cannot be combined with paths.",
+    );
+  }
+  const exact = composition.artifacts.find((artifact) => artifact.id === skill);
+  const matches = exact
+    ? [exact]
+    : composition.artifacts.filter((artifact) => artifact.name === skill);
+  if (matches.length === 0) {
+    throw new SkillFileError("missing_file", `Skill not found: ${skill}`);
+  }
+  if (matches.length > 1) {
+    throw new SkillFileError(
+      "invalid_request",
+      `Skill name is ambiguous: ${skill}. Use the catalog id.`,
+    );
+  }
+  const artifact = matches[0]!;
+  if (request.listFiles === true) {
+    return { skillId: artifact.id, ...listSkillPaths(artifact.files, PORTABLE_SKILL_MAX_FILES) };
+  }
+  return {
+    skillId: artifact.id,
+    files: readSkillFiles(artifact.files, request.paths).files,
+  };
 }
 
 function resolveEffectiveActivations(
@@ -242,13 +336,21 @@ function validateRuntimeSkillActivation(
   }
   assertSafeRuntimeSkillName(activation.artifact.name);
   runtimeSkillDirNode(activation.artifact);
-  const contentSha256 = skillArtifactContentSha256(activation.artifact.files);
+  const artifact = buildPortableSkillArtifact(activation.artifact.files);
+  if (
+    activation.artifact.name !== artifact.name ||
+    (activation.artifact.description != null &&
+      activation.artifact.description !== artifact.description)
+  ) {
+    throw new Error(`Skill metadata must match SKILL.md frontmatter: ${activation.id}`);
+  }
+  const contentSha256 = artifact.contentSha256;
   if (activation.source === "installation" && contentSha256 !== activation.contentSha256) {
     throw new Error(
       `Installed Skill artifact hash mismatch for ${activation.id}: expected ${activation.contentSha256}, got ${contentSha256}`,
     );
   }
-  return Object.freeze({ activation, contentSha256 });
+  return Object.freeze({ activation: { ...activation, artifact }, contentSha256 });
 }
 
 function selectionForActivation({
@@ -279,32 +381,25 @@ function selectionForActivation({
 }
 
 function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
-  directory: string;
-  lazySource: LocalDirLazySkillSource;
   names: string[];
   reason: string;
 }> {
-  const sources: Array<{
-    directory: string;
-    lazySource: LocalDirLazySkillSource;
-    names: string[];
-    reason: string;
-  }> = [];
+  const sources: Array<{ names: string[]; reason: string }> = [];
   if (nativeTools.editableArtifacts) {
-    const directory = bundledArtifactSkillsDir();
     sources.push({
-      directory,
-      lazySource: localDirLazySkillSource({ src: directory }),
-      names: skillDirNames(directory),
+      names: skillDirNames(packagedSkillDirectory("bundled_artifact_skills")),
       reason: "native editable-artifact tool surface",
     });
   }
-  if (nativeTools.videoGeneration) {
-    const directory = bundledVideoSkillsDir();
+  if (nativeTools.sites) {
     sources.push({
-      directory,
-      lazySource: localDirLazySkillSource({ src: directory }),
-      names: skillDirNames(directory),
+      names: skillDirNames(packagedSkillDirectory("bundled_site_skills")),
+      reason: "bundled Site authoring skill",
+    });
+  }
+  if (nativeTools.videoGeneration) {
+    sources.push({
+      names: skillDirNames(packagedSkillDirectory("bundled_video_skills")),
       reason: "native video-generation tool surface",
     });
   }
@@ -322,50 +417,6 @@ function packagedSkillDirectory(directoryName: string): string {
   );
 }
 
-function bundledArtifactSkillsDir(): string {
-  const packaged = packagedSkillDirectory("bundled_artifact_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledArtifactSkillsDir) {
-    stagedBundledArtifactSkillsDir = stageSkillDirectory(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_artifact_skills"),
-    );
-  }
-  return stagedBundledArtifactSkillsDir;
-}
-
-function bundledVideoSkillsDir(): string {
-  const packaged = packagedSkillDirectory("bundled_video_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledVideoSkillsDir) {
-    stagedBundledVideoSkillsDir = stageSkillDirectory(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_video_skills"),
-    );
-  }
-  return stagedBundledVideoSkillsDir;
-}
-
-function stageSkillDirectory(packaged: string, target: string): string {
-  const temporary = `${target}.tmp-${process.pid}`;
-  rmSync(temporary, { recursive: true, force: true });
-  mkdirSync(dirname(temporary), { recursive: true });
-  cpSync(packaged, temporary, { recursive: true });
-  rmSync(target, { recursive: true, force: true });
-  try {
-    renameSync(temporary, target);
-  } catch (error) {
-    rmSync(temporary, { recursive: true, force: true });
-    if (!existsSync(target)) throw error;
-  }
-  return target;
-}
-
-function isPathWithin(root: string, candidate: string): boolean {
-  const relativePath = relative(root, candidate);
-  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
-}
-
 function skillDirNames(root: string): string[] {
   return readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "SKILL.md")))
@@ -377,10 +428,6 @@ type RuntimeSkillDirNode = {
   dirs: Map<string, RuntimeSkillDirNode>;
   files: Map<string, string>;
 };
-
-function runtimeSkillDirEntry(skill: RuntimeSkillArtifact): Dir {
-  return runtimeSkillDirFromNode(runtimeSkillDirNode(skill));
-}
 
 function runtimeSkillDirNode(skill: RuntimeSkillArtifact): RuntimeSkillDirNode {
   const root: RuntimeSkillDirNode = { dirs: new Map(), files: new Map() };
@@ -410,13 +457,6 @@ function runtimeSkillDirNode(skill: RuntimeSkillArtifact): RuntimeSkillDirNode {
   return root;
 }
 
-function runtimeSkillDirFromNode(node: RuntimeSkillDirNode): Dir {
-  const children: Record<string, Entry> = {};
-  for (const [name, child] of node.dirs) children[name] = runtimeSkillDirFromNode(child);
-  for (const [name, content] of node.files) children[name] = file({ content });
-  return dir({ children });
-}
-
 function assertSafeRuntimeSkillName(name: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(name)) {
     throw new Error(`Invalid Skill name: ${name}`);
@@ -440,43 +480,6 @@ function compareRuntimeSkillName(left: string, right: string): number {
 }
 
 function runtimeSkillDescription(skill: RuntimeSkillArtifact): string {
-  const explicit = skill.description?.trim();
-  if (explicit) return explicit;
   const markdown = skill.files.find((skillFile) => skillFile.path === "SKILL.md")?.content ?? "";
-  return skillFrontmatterDescription(markdown) ?? "No description provided.";
-}
-
-function skillFrontmatterDescription(markdown: string): string | null {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return null;
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (end === -1) return null;
-  const collected: string[] = [];
-  let inDescription = false;
-  for (const line of lines.slice(1, end)) {
-    const match = line.match(/^description:\s*(.*)$/);
-    if (match) {
-      const inline = match[1]!.trim();
-      if (inline && inline !== ">-" && inline !== ">" && inline !== "|" && inline !== "|-") {
-        return unquoteFrontmatterValue(inline);
-      }
-      inDescription = true;
-      continue;
-    }
-    if (!inDescription) continue;
-    if (/^\s+\S/.test(line)) {
-      collected.push(line.trim());
-      continue;
-    }
-    break;
-  }
-  const blockValue = collected.join(" ").trim();
-  return blockValue || null;
-}
-
-function unquoteFrontmatterValue(value: string): string {
-  if (value.length >= 2 && value[0] === value.at(-1) && (value[0] === '"' || value[0] === "'")) {
-    return value.slice(1, -1);
-  }
-  return value;
+  return readSkillMetadata(markdown).description;
 }

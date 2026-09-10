@@ -36,7 +36,11 @@ Only a ready canonical-human managed browser session may read or mutate this
 surface. API keys, Authorization bearer credentials, agents, machines, service
 principals, recovery-only identities, deployment administrators, database
 operators, suspended members, and cross-organization identifiers do not become
-recovery principals. Denied identifiers return a non-enumerating result.
+recovery principals. Denied identifiers return a non-enumerating result. The browser presents a
+structured recovery read denial as a neutral account-unavailable state without
+revealing whether a policy exists. Other load failures retain retry controls.
+The navigation remains available to non-owner custodians; client role checks
+never replace recovery authority.
 
 Every mutation binds these server-owned facts in one transaction:
 
@@ -77,7 +81,17 @@ Repository acceptance uses the in-memory fake transport. It records the exact
 idempotency key and payload digest, makes zero external calls, settles the
 durable attempt, and proves a duplicate claim cannot produce another logical
 delivery. Adding a real email or notification adapter is a separately reviewed
-operator integration. Provider success never authorizes recovery and provider
+operator integration. Migration 0421 keeps outbox rows locked while a new SQL statement rechecks
+attempt eligibility before expiry or claim journaling. This prevents two
+dispatchers from returning the same notification after one commits between the
+other's eligibility scan and row lock. The claim function requires READ COMMITTED
+isolation (the default and the dispatcher adapter's ordinary standalone query);
+explicit READ COMMITTED transactions also work. REPEATABLE READ and SERIALIZABLE
+claims fail before writing evidence with SQLSTATE 25001 because their retained
+snapshot cannot refresh eligibility. Notification evidence remains append-only;
+the migration preserves routine ownership, grants, and the deployment schema.
+
+Provider success never authorizes recovery and provider
 failure never bypasses the notification-journal execution fence.
 
 ## Workspace ownership and unsupported operations

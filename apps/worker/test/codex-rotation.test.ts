@@ -7,14 +7,10 @@ import {
   classifyCodexPin,
   codexAccountNeedsLiveCapacityRefresh,
   computeIdleDelayMs,
-  computeReactiveRotationResume,
   DEFAULT_RESET_COOLDOWN_MS,
   effectiveRotationStrategy,
   isCodexAccountEligible,
   MIN_IDLE_MS,
-  REACTIVE_CIRCUIT_BREAKER_IDLE_MS,
-  REACTIVE_PERSISTENCE_FAULT_FLOOR_MS,
-  REACTIVE_ROTATION_MARGIN,
   shardCredentialForSession,
   type CodexRotationStrategy,
   selectCodexCredentialLeaseForTurn,
@@ -221,7 +217,7 @@ describe("chooseRotationActive — most_remaining", () => {
   });
 
   test("boundedness: each successive capped account drains to allCapped (walk once each)", () => {
-    // Simulate the reactive walk: a, then b cooled; only b/c-style remains. After every
+    // Simulate the bounded lease-failover walk: a, then b cooled; only b/c-style remains. After every
     // account is cooled the engine returns allCapped — never re-picks a cooled account.
     const cool = (until: number) => new Date(NOW.getTime() + until);
     const accounts = [
@@ -332,7 +328,7 @@ describe("availableAt — never a past instant for an exhausted account (invaria
   });
 });
 
-describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
+describe("P3 self-heal + bounded lease-failover walk (invariant 4)", () => {
   test("(d) SELF-HEAL: a refreshed (genuinely-reset) window makes the account eligible again — no permanent idle", () => {
     // Stale cache: both exhausted → allCapped (the would-be idle).
     const stale = [acct("a", { primaryUsedPercent: 100 }), acct("b", { primaryUsedPercent: 100 })];
@@ -349,8 +345,8 @@ describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
     });
   });
 
-  test("(e) BOUNDED reactive retry: N accounts ⇒ at most N rotations ⇒ fixed idle (never re-picks a cooled account, no spin)", () => {
-    // Simulate the reactive 429 walk: each turn the serving account 429s, gets cooled
+  test("(e) BOUNDED lease failover: N accounts ⇒ at most N selections ⇒ fixed wait (never re-picks a cooled account, no spin)", () => {
+    // Simulate same-turn lease failover: each serving account refuses service and gets cooled
     // (exhaustedUntil future), and the engine re-ranks over the fresh list. It must never
     // re-pick a cooled account, so it drains to allCapped in at most N steps — bounded.
     let serving = "a";
@@ -358,7 +354,7 @@ describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
     let rotations = 0;
     let idled = false;
     for (let step = 0; step < 20; step++) {
-      // the serving account just 429'd → stamp its cooldown (the reactive cooldown write).
+      // The serving account refused service, so stamp its durable cooldown.
       accounts = accounts.map((x) =>
         x.id === serving
           ? { ...x, exhaustedUntil: new Date(NOW.getTime() + (step + 1) * HOUR) }
@@ -482,106 +478,6 @@ describe("chooseRotationActive — legacy strategies normalize to sharded rankin
         accounts: capped,
       }),
     ).toEqual({ kind: "active", credentialId: "b", moved: true });
-  });
-});
-
-// Finding 1 (reactive-rotation boundedness). computeReactiveRotationResume bounds the
-// reactive 429 failover's otherwise-0-delay re-dispatch against two second-order faults
-// so a double-fault (cooldown write not persisted + a header-less cap 429 that re-picks
-// the SAME account every proactive rank) degrades to a positive, bounded retry instead
-// of a model-paced hot loop that hammers the capped backend + DB (invariant 4: NO THRASH).
-describe("computeReactiveRotationResume — the reactive failover is bounded", () => {
-  test("(4) happy path: a confirmed cooldown + first failover → 0-delay fast re-dispatch (byte-identical to P3)", () => {
-    // A single rotation onto a live candidate: the just-served account IS cooling, so
-    // the next rank cannot re-pick it. Re-dispatch NOW, no hold, no idleUntilReset.
-    expect(
-      computeReactiveRotationResume({
-        cooldownPersisted: true,
-        priorConsecutiveRotations: 0,
-        connectedAccountCount: 3,
-      }),
-    ).toEqual({ continueDelayMs: 0, idleUntilReset: false });
-  });
-
-  test("(1a) persistence fault: cooldown NOT confirmed persisted → POSITIVE slow-retry floor, never 0", () => {
-    const resume = computeReactiveRotationResume({
-      cooldownPersisted: false,
-      priorConsecutiveRotations: 0,
-      connectedAccountCount: 3,
-    });
-    expect(resume.continueDelayMs).toBe(REACTIVE_PERSISTENCE_FAULT_FLOOR_MS);
-    expect(resume.continueDelayMs).toBeGreaterThan(0); // the crux: a persistence fault never yields a 0-delay hot loop
-    expect(resume.idleUntilReset).toBe(false); // a slow retry, not a mandatory long hold
-  });
-
-  test("(1b) double-fault below the bound still floors positive (persistence fault dominates the 0)", () => {
-    // 2 prior + this = streak 3, bound = 2 accounts + margin(2) = 4 → in bounds, but the
-    // unpersisted cooldown still forces the positive floor rather than a 0.
-    const resume = computeReactiveRotationResume({
-      cooldownPersisted: false,
-      priorConsecutiveRotations: 2,
-      connectedAccountCount: 2,
-    });
-    expect(resume.continueDelayMs).toBe(REACTIVE_PERSISTENCE_FAULT_FLOOR_MS);
-    expect(resume.continueDelayMs).toBeGreaterThan(0);
-  });
-
-  test("(1b) once consecutive failovers EXCEED accounts + margin → FIXED mandatory idle (circuit breaker), never another 0", () => {
-    const accounts = 2;
-    const bound = accounts + REACTIVE_ROTATION_MARGIN; // 4
-    // Walk the streak up to and past the bound; the double-fault keeps cooldown unpersisted.
-    const at = (prior: number) =>
-      computeReactiveRotationResume({
-        cooldownPersisted: false,
-        priorConsecutiveRotations: prior,
-        connectedAccountCount: accounts,
-      });
-    // streak = prior+1. In bounds (streak ≤ 4): positive slow-retry floor, not the breaker.
-    expect(at(bound - 1)).toEqual({
-      continueDelayMs: REACTIVE_PERSISTENCE_FAULT_FLOOR_MS,
-      idleUntilReset: false,
-    }); // streak 4 == bound
-    // Over the bound (streak 5): the circuit breaker fires — a FIXED positive MANDATORY idle.
-    const broken = at(bound); // streak 5 > 4
-    expect(broken.continueDelayMs).toBe(REACTIVE_CIRCUIT_BREAKER_IDLE_MS);
-    expect(broken.continueDelayMs).toBeGreaterThan(0);
-    expect(broken.idleUntilReset).toBe(true); // MANDATORY hold — session.ts can never collapse it to a 0-delay re-dispatch
-  });
-
-  test("(1b) the circuit breaker fires even when the cooldown DID persist (header-less caps can still re-pick)", () => {
-    // Boundedness must not depend on the persistence result: an unbounded streak trips the breaker regardless.
-    const broken = computeReactiveRotationResume({
-      cooldownPersisted: true,
-      priorConsecutiveRotations: 10,
-      connectedAccountCount: 2,
-    });
-    expect(broken.idleUntilReset).toBe(true);
-    expect(broken.continueDelayMs).toBe(REACTIVE_CIRCUIT_BREAKER_IDLE_MS);
-  });
-
-  test("(2) a RESET streak (priorConsecutiveRotations back to 0 after a successful turn) returns to the 0-delay happy path", () => {
-    // The DB counter resets to 0 on a successful turn (turn.completed anchor); the pure
-    // decision must then behave exactly like a fresh first failover — no lingering hold.
-    expect(
-      computeReactiveRotationResume({
-        cooldownPersisted: true,
-        priorConsecutiveRotations: 0,
-        connectedAccountCount: 1,
-      }),
-    ).toEqual({ continueDelayMs: 0, idleUntilReset: false });
-  });
-
-  test("more connected accounts raise the bound proportionally (a legit N-account walk never trips the breaker)", () => {
-    // With N accounts a legitimate walk cools one per failover; the bound N+margin absorbs it.
-    const accounts = 5;
-    // streak N (== accounts) with cooldowns persisting stays on the fast path.
-    expect(
-      computeReactiveRotationResume({
-        cooldownPersisted: true,
-        priorConsecutiveRotations: accounts - 1,
-        connectedAccountCount: accounts,
-      }),
-    ).toEqual({ continueDelayMs: 0, idleUntilReset: false });
   });
 });
 
@@ -1002,7 +898,7 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
   });
 });
 
-describe("credential allocator pin and rollout policy", () => {
+describe("credential allocator pin and rotation policy", () => {
   const context = (
     accounts: CodexLeaseAccountStatus[],
     existingCredentialId: string | null = null,
@@ -1010,7 +906,6 @@ describe("credential allocator pin and rollout policy", () => {
     accounts,
     activeCredentialId: "a",
     rotationEnabled: true,
-    leaseRotationEnabled: true,
     rotationStrategy: "most_remaining",
     existingCredentialId,
     policyScope: null,
@@ -1020,7 +915,6 @@ describe("credential allocator pin and rollout policy", () => {
   test("a healthy explicit pin wins", () => {
     const selected = selectCodexCredentialLeaseForTurn({
       context: context([leasedAcct("a", { primaryUsedPercent: 60 }), leasedAcct("b")]),
-      leasingEnabled: true,
       sessionId: "session-test",
       sessionPinSource: "manual",
       sessionPinnedCredentialId: "a",
@@ -1030,10 +924,67 @@ describe("credential allocator pin and rollout policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
+  test("rotation skips credentials already consumed by this accepted turn", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: {
+        ...context([leasedAcct("a"), leasedAcct("b")], "a"),
+        failedCredentialIds: ["a"],
+      },
+      sessionId: "failed-account-fence",
+      sessionPinSource: null,
+      sessionPinnedCredentialId: null,
+      sessionLastCredentialId: "a",
+      now: NOW,
+    });
+    expect(selected.credentialId).toBe("b");
+  });
+
+  test("manual and rotation-off policy may retry their selected account after health recovers", () => {
+    const baseContext = {
+      ...context([leasedAcct("a"), leasedAcct("b")]),
+      failedCredentialIds: ["a"],
+    };
+    expect(
+      selectCodexCredentialLeaseForTurn({
+        context: baseContext,
+        sessionId: "manual-reconnect",
+        sessionPinSource: "manual",
+        sessionPinnedCredentialId: "a",
+        sessionLastCredentialId: "a",
+        now: NOW,
+      }).credentialId,
+    ).toBe("a");
+    expect(
+      selectCodexCredentialLeaseForTurn({
+        context: { ...baseContext, rotationEnabled: false },
+        sessionId: "rotation-off-reconnect",
+        sessionPinSource: null,
+        sessionPinnedCredentialId: null,
+        sessionLastCredentialId: "a",
+        now: NOW,
+      }).credentialId,
+    ).toBe("a");
+  });
+
+  test("an allocator-disabled manual pin waits instead of becoming a relogin failure", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: context([leasedAcct("a", { allocatorEnabled: false }), leasedAcct("b")]),
+      sessionId: "manual-disabled",
+      sessionPinSource: "manual",
+      sessionPinnedCredentialId: "a",
+      sessionLastCredentialId: "a",
+      now: NOW,
+    });
+    expect(selected).toEqual({
+      credentialId: null,
+      decision: { kind: "allocatorDisabled", credentialId: "a" },
+      advanceActivePointer: false,
+    });
+  });
+
   test("a 99%-used manual pin remains usable and never waits or switches early", () => {
     const selected = selectCodexCredentialLeaseForTurn({
       context: context([leasedAcct("a", { primaryUsedPercent: 99 }), leasedAcct("b")]),
-      leasingEnabled: true,
       sessionId: "manual-near-full",
       sessionPinSource: "manual",
       sessionPinnedCredentialId: "a",
@@ -1055,7 +1006,6 @@ describe("credential allocator pin and rollout policy", () => {
         }),
         leasedAcct("b"),
       ]),
-      leasingEnabled: true,
       sessionId: "session-test",
       sessionPinSource: "policy",
       sessionPinnedCredentialId: "a",
@@ -1074,7 +1024,6 @@ describe("credential allocator pin and rollout policy", () => {
         }),
         leasedAcct("b"),
       ]),
-      leasingEnabled: true,
       sessionId: "manual-session",
       sessionPinSource: "manual",
       sessionPinnedCredentialId: "a",
@@ -1093,7 +1042,6 @@ describe("credential allocator pin and rollout policy", () => {
         activeCredentialId: "outside-scope",
         rotationStrategy: "sharded",
       },
-      leasingEnabled: true,
       sessionId: "sharded-session",
       sessionPinSource: "policy",
       sessionPinnedCredentialId: "outside-scope",
@@ -1107,7 +1055,6 @@ describe("credential allocator pin and rollout policy", () => {
   test("a still-live same-turn lease is reused idempotently", () => {
     const selected = selectCodexCredentialLeaseForTurn({
       context: context([leasedAcct("a"), leasedAcct("b")], "b"),
-      leasingEnabled: true,
       sessionId: "session-test",
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
@@ -1117,84 +1064,12 @@ describe("credential allocator pin and rollout policy", () => {
     expect(selected.credentialId).toBe("b");
   });
 
-  test("cutover flag off preserves the old worker's enabled rotation policy", () => {
-    const selected = selectCodexCredentialLeaseForTurn({
-      context: context([
-        leasedAcct("a", { primaryUsedPercent: 60 }),
-        leasedAcct("b", { primaryUsedPercent: 0 }),
-      ]),
-      leasingEnabled: false,
-      sessionId: "session-test",
-      sessionPinSource: null,
-      sessionPinnedCredentialId: null,
-      sessionLastCredentialId: "a",
-      now: NOW,
-    });
-    // Pre-0053 most_remaining keeps a still-eligible active pointer sticky.
-    expect(selected.credentialId).toBe("a");
-  });
-
-  test("workspace cutover false keeps leases inert while preserving legacy rotation", () => {
-    const selected = selectCodexCredentialLeaseForTurn({
-      context: {
-        ...context([
-          leasedAcct("a", { primaryUsedPercent: 60 }),
-          leasedAcct("b", { primaryUsedPercent: 0 }),
-        ]),
-        leaseRotationEnabled: false,
-      },
-      leasingEnabled: true,
-      sessionId: "session-test",
-      sessionPinSource: null,
-      sessionPinnedCredentialId: null,
-      sessionLastCredentialId: "a",
-      now: NOW,
-    });
-    expect(selected.credentialId).toBe("a");
-  });
-
-  test("legacy rollback ignores stale lease and fairness metadata", () => {
-    const selected = selectCodexCredentialLeaseForTurn({
-      context: {
-        ...context([
-          leasedAcct("a", {
-            primaryUsedPercent: 100,
-            primaryResetAt: new Date(NOW.getTime() + HOUR),
-          }),
-          leasedAcct("b", {
-            primaryUsedPercent: 10,
-            activeLeaseCount: 20,
-            selectionCount: 500,
-            lastSelectedAt: new Date(NOW.getTime() + HOUR),
-          }),
-          leasedAcct("c", {
-            primaryUsedPercent: 20,
-            activeLeaseCount: 0,
-            selectionCount: 0,
-            lastSelectedAt: null,
-          }),
-        ]),
-        leaseRotationEnabled: false,
-      },
-      leasingEnabled: true,
-      sessionId: "session-test",
-      sessionPinSource: null,
-      sessionPinnedCredentialId: null,
-      sessionLastCredentialId: "a",
-      now: NOW,
-    });
-    // The old selector knows only capacity and picks b (90% remaining), not c.
-    expect(selected.credentialId).toBe("b");
-  });
-
-  test("legacy rotation false remains sticky even when the deployment flag is on", () => {
+  test("rotation false remains sticky", () => {
     const selected = selectCodexCredentialLeaseForTurn({
       context: {
         ...context([leasedAcct("a"), leasedAcct("b")]),
         rotationEnabled: false,
-        leaseRotationEnabled: false,
       },
-      leasingEnabled: true,
       sessionId: "session-test",
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
@@ -1213,9 +1088,7 @@ describe("credential allocator pin and rollout policy", () => {
           leasedAcct("b"),
         ]),
         rotationEnabled: false,
-        leaseRotationEnabled: false,
       },
-      leasingEnabled: true,
       sessionId: "session-test",
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
@@ -1225,6 +1098,25 @@ describe("credential allocator pin and rollout policy", () => {
     expect(selected).toEqual({
       credentialId: null,
       decision: { kind: "allCapped", earliestResetAt: resetAt },
+      advanceActivePointer: false,
+    });
+  });
+
+  test("rotation false waits on an allocator-disabled active pointer", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: {
+        ...context([leasedAcct("a", { allocatorEnabled: false }), leasedAcct("b")]),
+        rotationEnabled: false,
+      },
+      sessionId: "rotation-off-disabled",
+      sessionPinSource: null,
+      sessionPinnedCredentialId: null,
+      sessionLastCredentialId: "b",
+      now: NOW,
+    });
+    expect(selected).toEqual({
+      credentialId: null,
+      decision: { kind: "allocatorDisabled", credentialId: "a" },
       advanceActivePointer: false,
     });
   });
@@ -1240,13 +1132,11 @@ describe("credential allocator pin and rollout policy", () => {
         })),
         activeCredentialId: "a",
         rotationEnabled: true,
-        leaseRotationEnabled: true,
         rotationStrategy,
         existingCredentialId: null,
         policyScope: null,
         unavailableDiagnostics: [],
       },
-      leasingEnabled: true,
       sessionId: "session-test",
       sessionPinSource: null,
       sessionPinnedCredentialId: null,

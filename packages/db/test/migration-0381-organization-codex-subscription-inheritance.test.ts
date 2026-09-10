@@ -9,7 +9,12 @@ import {
   createDb,
   createSession,
   disconnectOrganizationCodexAccount,
+  getWorkspaceCodexSubscriptionSource,
   setWorkspaceCodexSubscriptionMode,
+  setWorkspaceCodexSubscriptionModeInTransaction,
+  upsertCodexSubscriptionCredential,
+  upsertOrganizationCodexSubscriptionCredential,
+  withSessionCodexCapacityMutation,
   type DbClient,
 } from "../src";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
@@ -112,7 +117,19 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /setActiveOrganizationCodexCredential[\s\S]*?from\(schema\.organizationCodexRotationSettings\)[\s\S]*?\.for\("update"\)[\s\S]*?from\(schema\.codexSubscriptionCredentials\)/u,
     );
     expect(dbIndexSource).toMatch(
-      /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?sessionTurns\.status[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?active turns are using it/u,
+      /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /assertCodexSubscriptionSourceChangeAllowed[\s\S]*?waiting_capacity[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?CodexSubscriptionSourceChangeBlockedError/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /mutateCodexCapacityInTransaction[\s\S]*?sourceBefore[\s\S]*?sourceAfter[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /lockOrganizationCodexSubscriptionSources[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?lockWorkspaceCodexSubscriptionSource/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /withOrganizationCodexAdministrator[\s\S]*?lockOrganizationMembershipLifecycle[\s\S]*?get_organization_administration_overview/u,
     );
     expect(dbIndexSource).toMatch(
       /acquireCodexCredentialLease[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?getWorkspaceCodexSubscriptionSourceScoped/u,
@@ -121,10 +138,13 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /input\.source === "organization"[\s\S]*?codex_organization_live_lease_count/u,
     );
     expect(dbIndexSource).toMatch(
-      /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_workspace_ids[\s\S]*?session-tenancy:/u,
+      /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?session-tenancy:/u,
     );
     expect(apiCodexRouteSource).toMatch(
-      /withSessionCodexCapacityMutation[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction/u,
+      /withSessionCodexCapacityMutation[\s\S]*?sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction[\s\S]*?effectiveSourceBeforeMutation: sourceBeforeConnect\.effectiveSource/u,
+    );
+    expect(apiCodexRouteSource).toMatch(
+      /organizations\/:organizationId\/codex\/connect\/poll[\s\S]*?upsertOrganizationCodexSubscriptionCredential[\s\S]*?active turns are using it[\s\S]*?HTTPException\(409/u,
     );
     for (const table of [
       "organization_codex_rotation_settings",
@@ -135,7 +155,157 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     }
   });
 
-  test("inherits into shared workspaces, excludes personal workspaces, and honors overrides", async () => {
+  test("Personal activation requires drained runtimes before installing the Codex inventory", async () => {
+    const activation = await Bun.file(
+      new URL(
+        "../drizzle/0422_personal_workspace_organization_codex_inheritance.sql",
+        import.meta.url,
+      ),
+    ).text();
+    expect(activation).toStartWith("-- deployment-mode: maintenance");
+    expect(activation).toContain("$personal_codex_runtime_drain_before$");
+    expect(activation).toContain("$personal_codex_runtime_drain_after$");
+    expect(activation).toContain(
+      "REVOKE ALL ON FUNCTION list_organization_codex_workspace_ids(uuid) FROM PUBLIC",
+    );
+    if (!shared || !app) return;
+    const [runtime] = await app<{ name: string }[]>`select current_user as name`;
+    await expectSqlState(
+      () =>
+        shared!.admin.begin(async (transaction) => {
+          await transaction`select set_config(
+        'opengeni.migration_application_roles', ${JSON.stringify([runtime!.name])}, true
+      )`;
+          await transaction.unsafe(activation);
+        }),
+      "55000",
+    );
+  });
+
+  test("disconnect clears used organization credentials across workspace fences atomically", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('organization-codex-disconnect') returning id`;
+    const actorSubjectId = `user:${crypto.randomUUID()}`;
+    const workspaceIds: string[] = [];
+    for (const name of ["personal", "shared", "disabled"]) {
+      const [workspace] = await shared.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, ${name}) returning id`;
+      workspaceIds.push(workspace!.id);
+      await shared.admin`
+        insert into workspace_inference_controls (account_id, workspace_id)
+        values (${account!.id}, ${workspace!.id})`;
+    }
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (${account!.id}, ${actorSubjectId}, 'owner', 'active', ${workspaceIds[0]!})`;
+    const connect = () =>
+      upsertOrganizationCodexSubscriptionCredential(client!.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialEncrypted: "fixture-not-a-token",
+        chatgptAccountId: crypto.randomUUID(),
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: null,
+        lastRefreshAt: null,
+      });
+    const credential = await connect();
+    const replacement = await connect();
+    const sessionIds: string[] = [];
+    for (const workspaceId of workspaceIds) {
+      const session = await createSession(client.db, {
+        accountId: account!.id,
+        workspaceId,
+        initialMessage: "disconnect fixture",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "codex/gpt-5",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      sessionIds.push(session.id);
+      await shared.admin`
+        update sessions set codex_pinned_credential_id = ${credential.id},
+          codex_last_credential_id = ${credential.id}, codex_pin_source = 'manual'
+        where id = ${session.id}`;
+    }
+    // Historical references can survive a routing change. The delete must fence
+    // the whole organization inventory, not just currently inheriting sources.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into workspace_codex_subscription_preferences (account_id, workspace_id, mode)
+        values (${account!.id}, ${workspaceIds[2]!}, 'disabled')`;
+    });
+    const before = await shared.admin`
+      select id, updated_at, activity_revision, visibility, owner_subject_id, authority_epoch
+      from sessions where account_id = ${account!.id} order by id`;
+    // A non-administrator cannot acquire deletion authority through the new fences.
+    await expect(
+      disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId: `user:${crypto.randomUUID()}`,
+        credentialId: credential.id,
+      }),
+    ).rejects.toThrow();
+    const [otherAccount] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('unrelated-codex-disconnect') returning id`;
+    const [otherCredential] = await shared.admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id
+      ) values (${otherAccount!.id}, ${otherAccount!.id}, 'organization',
+        'unrelated-fixture-not-a-token', ${crypto.randomUUID()}) returning id`;
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: otherCredential!.id,
+      }),
+    ).toMatchObject({ removed: false, newActiveCredentialId: credential.id });
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: credential.id,
+      }),
+    ).toMatchObject({ removed: true, newActiveCredentialId: replacement.id });
+    const references = await shared.admin`
+      select id, codex_pinned_credential_id, codex_last_credential_id
+      from sessions where account_id = ${account!.id} order by id`;
+    expect(references).toHaveLength(sessionIds.length);
+    for (const row of references) {
+      expect(row.codex_pinned_credential_id).toBeNull();
+      expect(row.codex_last_credential_id).toBeNull();
+    }
+    const after = await shared.admin`
+      select id, updated_at, activity_revision, visibility, owner_subject_id, authority_epoch
+      from sessions where account_id = ${account!.id} order by id`;
+    expect([...after]).toEqual([...before]);
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: credential.id,
+      }),
+    ).toMatchObject({ removed: false, newActiveCredentialId: replacement.id });
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: replacement.id,
+      }),
+    ).toMatchObject({ removed: true, newActiveCredentialId: null });
+    expect(
+      await shared.admin`select id from codex_subscription_credentials
+      where id = ${otherCredential!.id}`,
+    ).toHaveLength(1);
+  });
+
+  test("inherits into shared and Personal workspaces and honors overrides", async () => {
     if (!shared || !app || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('organization-codex-inheritance') returning id`;
@@ -163,6 +333,24 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       workspaceId: null,
       subjectId: ownerSubjectId,
     });
+    const codexInventory = await app<{ workspace_id: string }[]>`
+      select workspace_id from list_organization_codex_workspace_ids(${account!.id})`;
+    expect(new Set(codexInventory.map((row) => row.workspace_id))).toEqual(
+      new Set([personalWorkspace!.id, sharedWorkspace!.id]),
+    );
+    const ordinaryInventory = await app<{ workspace_id: string }[]>`
+      select workspace_id from list_organization_workspace_ids(${account!.id})`;
+    expect(ordinaryInventory.map((row) => row.workspace_id)).toEqual([sharedWorkspace!.id]);
+    await expectSqlState(
+      () => app!`select * from list_organization_codex_workspace_ids(${crypto.randomUUID()})`,
+      "42501",
+    );
+    await setAppContext({ accountId: account!.id, workspaceId: personalWorkspace!.id });
+    await expectSqlState(
+      () => app!`select * from list_organization_codex_workspace_ids(${account!.id})`,
+      "42501",
+    );
+    await setAppContext({ accountId: account!.id, workspaceId: null, subjectId: ownerSubjectId });
     const [organizationCredential] = await app<{ id: string }[]>`
       insert into codex_subscription_credentials (
         account_id, workspace_id, organization_id, authority_scope,
@@ -230,7 +418,50 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       select resolve_workspace_codex_subscription_source(
         ${account!.id}, ${personalWorkspace!.id}
       ) as source`;
-    expect(personalSource?.source).toBe("workspace");
+    expect(personalSource?.source).toBe("organization");
+    const personalPool = await app<{ id: string }[]>`
+      select id from codex_subscription_credentials`;
+    expect(personalPool.map((row) => row.id)).toEqual([organizationCredential!.id]);
+    await expectSqlState(
+      () => app!`update codex_subscription_credentials set label = 'personal takeover'
+        where id = ${organizationCredential!.id}`,
+      "42501",
+    );
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "disabled",
+    });
+    const [personalDisabled] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${personalWorkspace!.id}) as source`;
+    expect(personalDisabled?.source).toBe("disabled");
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "automatic",
+    });
+    await app`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, authority_scope, credential_encrypted, status
+      ) values (${account!.id}, ${personalWorkspace!.id}, 'workspace', 'local-ciphertext', 'active')`;
+    const [localPreferred] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${personalWorkspace!.id}) as source`;
+    expect(localPreferred?.source).toBe("workspace");
+    const organizationPreferred = await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "organization",
+    });
+    expect(organizationPreferred.effectiveSource).toBe("organization");
+    const [otherAccount] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('other organization') returning id`;
+    await setAppContext({ accountId: otherAccount!.id, workspaceId: personalWorkspace!.id });
+    expect(await app`select id from codex_subscription_credentials`).toHaveLength(0);
 
     await setAppContext({ accountId: account!.id, workspaceId: sharedWorkspace!.id });
     await app`
@@ -254,7 +485,352 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(organizationOverride?.source).toBe("organization");
   });
 
-  test("allows an organization credential lease only in an inheriting shared workspace", async () => {
+  test("allows an equivalent workspace-source preference while active work remains fenced", async () => {
+    if (!shared || !app || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('codex-equivalent-source-preference') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'shared') returning id`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+
+    const session = await createSession(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initialMessage: "keep the effective workspace source",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "codex/gpt-5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, position, prompt, model, reasoning_effort, sandbox_backend
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`migration-0381-equivalent-${crypto.randomUUID()}`}, 'running', 0,
+          'keep the effective workspace source', 'codex/gpt-5', 'medium', 'none'
+        )`;
+    });
+
+    const connected = await withSessionCodexCapacityMutation(
+      client.db,
+      { workspaceId: workspace!.id, reason: "codex_credential_connected" },
+      async (transaction) => {
+        const sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource(
+          transaction,
+          workspace!.id,
+        );
+        const upserted = await upsertCodexSubscriptionCredential(transaction, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          credentialEncrypted: "workspace-ciphertext",
+          chatgptAccountId: "workspace-provider-account",
+          scopes: null,
+          planType: "pro",
+          isFedramp: false,
+          expiresAt: null,
+          lastRefreshAt: new Date(),
+          connectedBySubjectId: null,
+        });
+        if (upserted.kind !== "upserted") throw new Error("expected credential upsert");
+        const pinned = await setWorkspaceCodexSubscriptionModeInTransaction(transaction, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          subjectId: null,
+          mode: "workspace",
+          effectiveSourceBeforeMutation: sourceBeforeConnect.effectiveSource,
+        });
+        return { result: { pinned, sourceBeforeConnect, upserted }, changed: true };
+      },
+    );
+    expect(connected.result.sourceBeforeConnect).toMatchObject({
+      mode: "automatic",
+      effectiveSource: "workspace",
+      workspaceAvailable: false,
+      organizationAvailable: false,
+    });
+    expect(connected.result.pinned).toMatchObject({
+      mode: "workspace",
+      effectiveSource: "workspace",
+    });
+
+    await expect(
+      setWorkspaceCodexSubscriptionMode(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        subjectId: null,
+        mode: "disabled",
+      }),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    const [retainedPreference] = await shared.admin<{ mode: string }[]>`
+      select mode from workspace_codex_subscription_preferences
+      where workspace_id = ${workspace!.id}`;
+    expect(retainedPreference?.mode).toBe("workspace");
+  });
+
+  test("fences a first workspace credential when the automatic source was organization", async () => {
+    if (!shared || !app || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('codex-pre-connect-source-fence') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'shared') returning id`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+    const [organizationCredential] = await shared.admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, organization_id, authority_scope,
+        credential_encrypted, chatgpt_account_id, status
+      ) values (
+        ${account!.id}, null, ${account!.id}, 'organization',
+        'organization-ciphertext', 'organization-provider-account', 'active'
+      ) returning id`;
+    await shared.admin`
+      insert into organization_codex_rotation_settings (account_id, active_credential_id)
+      values (${account!.id}, ${organizationCredential!.id})`;
+
+    const session = await createSession(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initialMessage: "keep the organization source",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "codex/gpt-5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, position, prompt, model, reasoning_effort, sandbox_backend
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`migration-0381-pre-connect-${crypto.randomUUID()}`}, 'running', 0,
+          'keep the organization source', 'codex/gpt-5', 'medium', 'none'
+        )`;
+    });
+
+    let sourceBeforeConnect: Awaited<
+      ReturnType<typeof getWorkspaceCodexSubscriptionSource>
+    > | null = null;
+    await expect(
+      withSessionCodexCapacityMutation(
+        client.db,
+        { workspaceId: workspace!.id, reason: "codex_credential_connected" },
+        async (transaction) => {
+          const source = await getWorkspaceCodexSubscriptionSource(transaction, workspace!.id);
+          sourceBeforeConnect = source;
+          const upserted = await upsertCodexSubscriptionCredential(transaction, {
+            accountId: account!.id,
+            workspaceId: workspace!.id,
+            credentialEncrypted: "workspace-ciphertext",
+            chatgptAccountId: "first-workspace-provider-account",
+            scopes: null,
+            planType: "pro",
+            isFedramp: false,
+            expiresAt: null,
+            lastRefreshAt: new Date(),
+            connectedBySubjectId: null,
+          });
+          if (upserted.kind !== "upserted") throw new Error("expected credential upsert");
+          await setWorkspaceCodexSubscriptionModeInTransaction(transaction, {
+            accountId: account!.id,
+            workspaceId: workspace!.id,
+            subjectId: null,
+            mode: "workspace",
+            effectiveSourceBeforeMutation: source.effectiveSource,
+          });
+          return { result: upserted, changed: true };
+        },
+      ),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    expect(sourceBeforeConnect).toMatchObject({
+      mode: "automatic",
+      effectiveSource: "organization",
+    });
+    const [rolledBack] = await shared.admin<
+      { workspace_credentials: number; preferences: number }[]
+    >`
+      select
+        count(*) filter (
+          where credential.workspace_id = ${workspace!.id}
+            and credential.authority_scope in ('workspace', 'user')
+        )::integer as workspace_credentials,
+        (
+          select count(*)::integer from workspace_codex_subscription_preferences preference
+          where preference.workspace_id = ${workspace!.id}
+        ) as preferences
+      from codex_subscription_credentials credential
+      where credential.account_id = ${account!.id}`;
+    expect(rolledBack).toEqual({ workspace_credentials: 0, preferences: 0 });
+  });
+
+  test("fences an effective source change while a Codex turn waits for capacity", async () => {
+    if (!shared || !app || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('codex-waiting-source-fence') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'shared') returning id`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+    const [organizationCredential] = await shared.admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, organization_id, authority_scope,
+        credential_encrypted, chatgpt_account_id, status
+      ) values (
+        ${account!.id}, null, ${account!.id}, 'organization',
+        'organization-ciphertext', 'waiting-source-provider-account', 'active'
+      ) returning id`;
+    await shared.admin`
+      insert into organization_codex_rotation_settings (account_id, active_credential_id)
+      values (${account!.id}, ${organizationCredential!.id})`;
+
+    const session = await createSession(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initialMessage: "wait before changing source",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "codex/gpt-5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const turn = await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      const [row] = await transaction<{ id: string }[]>`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, position, prompt, model, reasoning_effort, sandbox_backend
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`migration-0381-waiting-source-${crypto.randomUUID()}`}, 'waiting_capacity', 0,
+          'wait before changing source', 'codex/gpt-5', 'medium', 'none'
+        ) returning id`;
+      await transaction`
+        update sessions
+        set status = 'waiting_capacity', active_turn_id = ${row!.id}
+        where id = ${session.id}`;
+      return row!;
+    });
+
+    await expect(
+      setWorkspaceCodexSubscriptionMode(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        subjectId: null,
+        mode: "disabled",
+      }),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    await setAppContext({ accountId: account!.id, workspaceId: workspace!.id });
+    const [source] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${workspace!.id}
+      ) as source`;
+    expect(source?.source).toBe("organization");
+    expect(turn.id).toBeString();
+  });
+
+  test("fences organization pool connect and disconnect against active Personal turns", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('personal organization source fences') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${account!.id}, 'Personal') returning id`;
+    const actorSubjectId = `user:${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (${account!.id}, ${actorSubjectId}, 'owner', 'active', ${workspace!.id})`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+    const session = await createSession(client.db, {
+      workspaceId: workspace!.id,
+      accountId: account!.id,
+      initialMessage: "retain the accepted source",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "codex/gpt-5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const turn = await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      const [row] = await transaction<{ id: string }[]>`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, position, prompt, model, reasoning_effort, sandbox_backend
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`personal-source-fence-${crypto.randomUUID()}`}, 'running', 0,
+          'retain the accepted source', 'codex/gpt-5', 'medium', 'none'
+        ) returning id`;
+      return row!;
+    });
+    const connect = () =>
+      upsertOrganizationCodexSubscriptionCredential(client!.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialEncrypted: "organization-ciphertext",
+        chatgptAccountId: crypto.randomUUID(),
+        scopes: null,
+        planType: null,
+        isFedramp: false,
+        expiresAt: null,
+        lastRefreshAt: null,
+      });
+    await expect(connect()).rejects.toThrow(
+      "Codex subscription source cannot change while active turns are using it",
+    );
+    const [rolledBack] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from codex_subscription_credentials
+      where account_id = ${account!.id}`;
+    expect(rolledBack?.count).toBe(0);
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`update session_turns set status = 'completed' where id = ${turn.id}`;
+    });
+    const credential = await connect();
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`update session_turns set status = 'waiting_capacity' where id = ${turn.id}`;
+    });
+    await expect(
+      disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: credential.id,
+      }),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    expect(await getWorkspaceCodexSubscriptionSource(client.db, workspace!.id)).toMatchObject({
+      effectiveSource: "organization",
+    });
+    const [retained] = await shared.admin<{ id: string }[]>`
+      select id from codex_subscription_credentials where id = ${credential.id}`;
+    expect(retained?.id).toBe(credential.id);
+  });
+
+  test("allows organization credential leases in inheriting shared and Personal workspaces", async () => {
     if (!shared || !app || !client) return;
     const dbClient = client;
     const [account] = await shared.admin<{ id: string }[]>`
@@ -405,16 +981,13 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       return turn!;
     });
     await setAppContext({ accountId: account!.id, workspaceId: personalWorkspace!.id });
-    await expectSqlState(
-      () =>
-        app!`
-          insert into codex_credential_leases (
-            account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
-          ) values (
-            ${account!.id}, ${personalWorkspace!.id}, ${credential!.id},
-            ${personalTurn.id}, 'personal-holder', now() + interval '5 minutes'
-          )`,
-      "23514",
-    );
+    const [personalLease] = await app<{ credential_id: string }[]>`
+      insert into codex_credential_leases (
+        account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
+      ) values (
+        ${account!.id}, ${personalWorkspace!.id}, ${credential!.id},
+        ${personalTurn.id}, 'personal-holder', now() + interval '5 minutes'
+      ) returning credential_id`;
+    expect(personalLease?.credential_id).toBe(credential!.id);
   });
 });

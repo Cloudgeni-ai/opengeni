@@ -200,7 +200,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
-  "Installed and selected Skills are indexed under .agents/ and may include role-specific guidance.",
+  "Installed and selected Skills appear in the session Skill index; follow its reading instructions and any role-specific guidance.",
   "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
   "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
   "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
@@ -244,6 +244,10 @@ export const McpServerConnectionRefSchema = z
       })
       .optional(),
     authoritySource: z.literal("host").optional(),
+    hostBinding: z
+      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+      .strict()
+      .optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
   .strict()
@@ -255,6 +259,12 @@ export const McpServerConnectionRefSchema = z
         path: ["connectionId"],
       });
     }
+    if (reference.hostBinding && reference.authoritySource !== "host")
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message: "Durable binding requires host authority",
+      });
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -272,6 +282,10 @@ export const McpServerConnectionRefSchema = z
     }
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
+
+/** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
+export const DEFAULT_MODAL_IMAGE_REF =
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:c3bd17b8841de1bff9bb2777aad422cf8c75de78e2c30f9ac81d0cd6810a1b78";
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -337,6 +351,12 @@ const SettingsSchema = z.object({
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Standards-based OAuth authorization server for external workspace MCP
+  // clients. Opt-in because it creates a new public authentication surface.
+  mcpOauthEnabled: EnvBoolean.default(false),
+  // Forwarded client addresses are ignored by default. Operators may trust an
+  // exact number of proxy hops only when direct access to the API is blocked.
+  mcpOauthTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
@@ -522,6 +542,9 @@ const SettingsSchema = z.object({
   // separate compatibility lane for already-persisted embedding integrations.
   // Env: OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED.
   hostMcpAuthoritySourceAdmissionEnabled: EnvBoolean.default(false),
+  // Server-owned per-organization remote MCP resolver configuration. Optional;
+  // inline credentials and native provider OAuth do not require this service.
+  hostMcpCredentialResolversJson: z.string().optional(),
   // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
   // not count a personal workspace as a candidate, so an organization with one
   // shared workspace resolves it as the sole candidate and never asks; the
@@ -764,11 +787,6 @@ const SettingsSchema = z.object({
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
   // OPENGENI_LAZY_TOOL_SEARCH_ENABLED
   lazyToolSearchEnabled: EnvBoolean.default(true),
-  // credential allocator atomic, workspace-local credential allocation. Default OFF is a
-  // deliberate rolling-deploy fence: migrate + roll every worker first, then
-  // enable. Turning it off restores the legacy sticky selector without a schema
-  // rollback; the additive lease table/cursor columns become inert.
-  codexCredentialLeasingEnabled: EnvBoolean.default(false),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -1324,6 +1342,15 @@ const SettingsSchema = z.object({
   // Rolling browser login-slot compatibility. Repository/deployment default is
   // deliberately legacy; changing to broker is an operator-authorized rollout.
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Query transport is an explicit second-stage rollout. A pre-compatibility
+  // web image understands only fragment bearers, so API replicas must keep
+  // generating fragment links until the compatible web fleet has converged.
+  organizationUserSetupEmailTokenTransport: z.enum(["fragment", "query"]).default("fragment"),
+  // Query-bearing setup links may appear in controller/edge error logs even
+  // when access logs and request tracing are disabled. This explicit operator
+  // confirmation keeps query transport fail closed until that separate sink is
+  // proven sanitized.
+  organizationUserSetupQueryEdgeSanitizationConfirmed: EnvBoolean.default(false),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("OpenGeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
@@ -1625,6 +1652,7 @@ export type TemporalConnectionOptions = {
 export type ModelPricing = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
@@ -1658,6 +1686,7 @@ export type EntitlementsConfig = Entitlements;
 const ModelPricingSchema = z.object({
   inputMicrosPerMillionTokens: z.number().int().nonnegative(),
   cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+  cacheWriteMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
   outputMicrosPerMillionTokens: z.number().int().nonnegative(),
   marginBps: z.number().int().min(0).max(100_000).optional(),
 });
@@ -2486,12 +2515,10 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
     capabilities: {
       reasoning: {
         upstream: "supported",
-        // OpenRouter advertises the reasoning controls, but the catalogue does
-        // not publish this model's accepted effort vocabulary. Preserve that
-        // upstream fact without exposing an unverified runnable selector.
-        runnable: false,
-        efforts: [],
-        defaultEffort: null,
+        // OpenRouter /api/v1/models advertises low and medium for this route.
+        runnable: true,
+        efforts: ["low", "medium"],
+        defaultEffort: "medium",
         required: false,
       },
       functionCalling: { upstream: "supported", runnable: true },
@@ -2597,12 +2624,13 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * Built-in OpenGeni credit pricing schedules.
  *
  * Rates are provider list prices in USD micros per 1M tokens. Debit applies
- * `marginBps` (2_500 = +25%) on top. Long-context tiers follow OpenAI's
+ * `marginBps` (500 = +5%) on top. Long-context tiers follow OpenAI's
  * ">272K input tokens" rule (threshold exclusive of 272_000).
  *
  * GPT-5.4 and older families are intentionally omitted — they are no longer
- * offered. Codex / connected-subscription turns use `metering: external` and
- * never consult this map.
+ * offered. Codex / connected-subscription turns use `metering: external`, so
+ * this map never debits them, but it does provide their equivalent OpenGeni
+ * credit price when a matching product model is configured.
  *
  * When adding or changing a billed model, run `bun run check:model-pricing`
  * (see docs/model-providers.md § Price audit). That compares this map to
@@ -2611,20 +2639,23 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   "gpt-5.6-sol": {
     default: {
-      inputMicrosPerMillionTokens: 5_000_000,
-      cachedInputMicrosPerMillionTokens: 500_000,
-      outputMicrosPerMillionTokens: 30_000_000,
-      marginBps: 2_500,
+      // Promotional OpenAI pricing, guaranteed through at least 2026-11-21.
+      inputMicrosPerMillionTokens: 4_000_000,
+      cachedInputMicrosPerMillionTokens: 400_000,
+      cacheWriteMicrosPerMillionTokens: 5_000_000,
+      outputMicrosPerMillionTokens: 20_000_000,
+      marginBps: 500,
     },
     inputTokenTiers: [
       {
         // OpenAI: prompts with >272K input tokens use the long-context rate.
         minimumInputTokens: 272_001,
         pricing: {
-          inputMicrosPerMillionTokens: 10_000_000,
-          cachedInputMicrosPerMillionTokens: 1_000_000,
-          outputMicrosPerMillionTokens: 45_000_000,
-          marginBps: 2_500,
+          inputMicrosPerMillionTokens: 8_000_000,
+          cachedInputMicrosPerMillionTokens: 800_000,
+          cacheWriteMicrosPerMillionTokens: 10_000_000,
+          outputMicrosPerMillionTokens: 30_000_000,
+          marginBps: 500,
         },
       },
     ],
@@ -2633,8 +2664,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
     default: {
       inputMicrosPerMillionTokens: 2_000_000,
       cachedInputMicrosPerMillionTokens: 200_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
       outputMicrosPerMillionTokens: 12_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
     inputTokenTiers: [
       {
@@ -2642,8 +2674,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         pricing: {
           inputMicrosPerMillionTokens: 4_000_000,
           cachedInputMicrosPerMillionTokens: 400_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
           outputMicrosPerMillionTokens: 18_000_000,
-          marginBps: 2_500,
+          marginBps: 500,
         },
       },
     ],
@@ -2652,8 +2685,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
     default: {
       inputMicrosPerMillionTokens: 200_000,
       cachedInputMicrosPerMillionTokens: 20_000,
+      cacheWriteMicrosPerMillionTokens: 250_000,
       outputMicrosPerMillionTokens: 1_200_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
     inputTokenTiers: [
       {
@@ -2661,8 +2695,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         pricing: {
           inputMicrosPerMillionTokens: 400_000,
           cachedInputMicrosPerMillionTokens: 40_000,
+          cacheWriteMicrosPerMillionTokens: 500_000,
           outputMicrosPerMillionTokens: 1_800_000,
-          marginBps: 2_500,
+          marginBps: 500,
         },
       },
     ],
@@ -2677,7 +2712,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 140_000,
       cachedInputMicrosPerMillionTokens: 28_000,
       outputMicrosPerMillionTokens: 280_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
   },
   [OPENGENI_GATEWAY_MODELS.kimi.productId]: {
@@ -2685,7 +2720,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 3_000_000,
       cachedInputMicrosPerMillionTokens: 300_000,
       outputMicrosPerMillionTokens: 15_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
   },
   // Fireworks AI / GLM 5.2 — the first shipped non-OpenAI registry model. A
@@ -2697,7 +2732,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 1_400_000,
       cachedInputMicrosPerMillionTokens: 140_000,
       outputMicrosPerMillionTokens: 4_400_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
   },
 };
@@ -2848,6 +2883,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
+    mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
@@ -2922,6 +2959,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     hostMcpAuthoritySourceAdmissionEnabled: optional(
       "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
     ),
+    hostMcpCredentialResolversJson: optional("OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
@@ -3004,7 +3042,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
-    codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
@@ -3029,7 +3066,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
-    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
+    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF") ?? DEFAULT_MODAL_IMAGE_REF,
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
@@ -3206,6 +3243,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthGithubClientId: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID"),
     managedAuthGithubClientSecret: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET"),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    organizationUserSetupEmailTokenTransport: optional(
+      "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
+    ),
+    organizationUserSetupQueryEdgeSanitizationConfirmed: optional(
+      "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED",
+    ),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
@@ -3277,7 +3320,10 @@ export function allowedFirstPartyMcpToolsForSession(
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
   const allowed = new Set(policy.allowed);
-  return [...(selected ?? policy.default)].filter((tool) => allowed.has(tool));
+  const tools = new Set(selected ?? policy.default);
+  // Existing sessions with pause authority also receive its resume counterpart.
+  if (tools.has("goal_pause")) tools.add("goal_resume");
+  return [...tools].filter((tool) => allowed.has(tool));
 }
 
 /**
@@ -4165,6 +4211,8 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "5.6 Terra";
     case "gpt-5.6-luna":
       return "5.6 Luna";
+    case "gpt-6-astra":
+      return "6 Astra";
     default:
       return null;
   }
@@ -4200,7 +4248,11 @@ function builtinLatencyModesForModel(modelId: string): Array<{
   runnable: boolean;
   billingMultiplierBps?: number;
 }> {
-  if (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("codex/gpt-5.6-")) {
+  if (
+    isBuiltinGpt56ModelId(modelId) ||
+    modelId.startsWith("codex/gpt-5.6-") ||
+    modelId === "codex/gpt-6-astra"
+  ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -4579,7 +4631,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: true,
-          vision: slug.startsWith("gpt-5.6-"),
+          vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
         }),
         ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
           ? {
@@ -5162,10 +5214,9 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
 
 /**
  * Effective per-model pricing schedules. Merge order (later wins): built-in
- * flat defaults → registry model flat/scheduled pricing → explicit legacy flat
- * OPENGENI_MODEL_PRICING_JSON. The explicit legacy map intentionally replaces
- * a registry schedule with one flat default so its historical precedence stays
- * exact.
+ * flat defaults → registry model flat/scheduled pricing → explicit
+ * OPENGENI_MODEL_PRICING_JSON. Explicit entries may be legacy flat prices or a
+ * complete schedule, and always replace the lower-precedence schedule.
  */
 export function configuredModelPricingSchedules(
   settings: Settings,
@@ -5187,7 +5238,7 @@ export function configuredModelPricingSchedules(
   const configured = Object.fromEntries(
     Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
       model,
-      { default: pricing },
+      normalizeModelPricingSchedule(pricing),
     ]),
   );
   return {
@@ -5870,7 +5921,9 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
   }
 }
 
-export function parseModelPricingJson(raw: string): Record<string, ModelPricing> {
+export function parseModelPricingJson(
+  raw: string,
+): Record<string, ModelPricing | ModelPricingScheduleV1> {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
   }
@@ -5884,12 +5937,12 @@ export function parseModelPricingJson(raw: string): Record<string, ModelPricing>
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("OPENGENI_MODEL_PRICING_JSON must be a JSON object keyed by model name");
   }
-  const out: Record<string, ModelPricing> = {};
+  const out: Record<string, ModelPricing | ModelPricingScheduleV1> = {};
   for (const [model, value] of Object.entries(parsed)) {
     if (!model.trim()) {
       throw new Error("OPENGENI_MODEL_PRICING_JSON contains an empty model name");
     }
-    out[model] = ModelPricingSchema.parse(value);
+    out[model] = z.union([ModelPricingSchema, ModelPricingScheduleSchema]).parse(value);
   }
   return out;
 }
@@ -6100,12 +6153,19 @@ function calculateEntryCostMicros(pricing: ModelPricing, entry: ModelUsageInput)
   const inputTokens = positiveInt(entry.inputTokens);
   const outputTokens = positiveInt(entry.outputTokens);
   const cachedTokens = Math.min(inputTokens, cachedInputTokens(entry));
-  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
+  const cacheWriteTokens = Math.min(
+    Math.max(0, inputTokens - cachedTokens),
+    cacheWriteInputTokens(entry),
+  );
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens - cacheWriteTokens);
   const cachedInputRate =
     pricing.cachedInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
+  const cacheWriteRate =
+    pricing.cacheWriteMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
   return (
     Math.ceil((uncachedInputTokens * pricing.inputMicrosPerMillionTokens) / 1_000_000) +
     Math.ceil((cachedTokens * cachedInputRate) / 1_000_000) +
+    Math.ceil((cacheWriteTokens * cacheWriteRate) / 1_000_000) +
     Math.ceil((outputTokens * pricing.outputMicrosPerMillionTokens) / 1_000_000)
   );
 }
@@ -6122,6 +6182,19 @@ function cachedInputTokens(entry: ModelUsageInput): number {
       positiveInt(detail.cached_tokens) +
       positiveInt(detail.cachedInputTokens) +
       positiveInt(detail.cached_input_tokens);
+  }
+  return total;
+}
+
+function cacheWriteInputTokens(entry: ModelUsageInput): number {
+  const details = Array.isArray(entry.inputTokensDetails)
+    ? entry.inputTokensDetails
+    : entry.inputTokensDetails
+      ? [entry.inputTokensDetails]
+      : [];
+  let total = 0;
+  for (const detail of details) {
+    total += positiveInt(detail.cache_write_tokens ?? detail.cacheWriteTokens);
   }
   return total;
 }
@@ -6296,6 +6369,14 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
 
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
+  if (
+    settings.organizationUserSetupEmailTokenTransport === "query" &&
+    !settings.organizationUserSetupQueryEdgeSanitizationConfirmed
+  ) {
+    throw new Error(
+      "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true is required when OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=query",
+    );
+  }
   if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
     throw new Error(
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
@@ -6378,6 +6459,24 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
+      );
+    }
+  }
+  if (settings.mcpOauthEnabled) {
+    if (settings.productAccessMode === "configured") {
+      throw new Error(
+        "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+      );
+    }
+    const publicOrigin = canonicalPublicOrigin(settings.publicBaseUrl);
+    if (!publicOrigin) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when OPENGENI_MCP_OAUTH_ENABLED=true",
+      );
+    }
+    if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when OPENGENI_MCP_OAUTH_ENABLED=true outside local/test",
       );
     }
   }

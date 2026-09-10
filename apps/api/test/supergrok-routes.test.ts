@@ -1,15 +1,26 @@
+// opengeni:test-shared-postgres-exclusive
+import { registerModelConnectionAccessRoutes } from "../src/routes/model-connection-access";
+import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
+import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomUUID } from "node:crypto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
   deleteWorkspace,
   ensureManagedAccessForUser,
+  ensureExternalIdentity,
+  createOrganizationApiKey,
+  revokeOrganizationApiKey,
+  grantWorkspaceAccess,
+  withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
-  acquireSharedTestDatabase,
+  acquireOwnerMigratedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -38,6 +49,7 @@ let managedApp: Hono | null = null;
 let available = true;
 let deviceSequence = 0;
 let userinfoRequests = 0;
+let providerSubject = "xai-user-1";
 
 const settings = testSettings({
   productAccessMode: "configured",
@@ -82,12 +94,12 @@ const xaiFetch: typeof fetch = async (input, init) => {
     return Response.json({
       access_token: jwt({
         principal_type: "User",
-        principal_id: "xai-user-1",
+        principal_id: providerSubject,
         exp: Math.floor(Date.now() / 1_000) + 3_600,
       }),
       refresh_token: `refresh-${deviceSequence}`,
       id_token: jwt({
-        sub: "xai-user-1",
+        sub: providerSubject,
         email: "owner@example.com",
         email_verified: true,
         name: "Owner",
@@ -134,7 +146,19 @@ beforeAll(async () => {
           appUrl: externalAppUrl,
           release: async () => undefined,
         }
-      : await acquireSharedTestDatabase("api-supergrok-routes");
+      : await (async () => {
+          const owned = await acquireOwnerMigratedTestDatabase("api-supergrok-routes");
+          if (!owned) return null;
+          await migrate(owned.ownerUrl);
+          await provisionRoles(owned.adminUrl, {
+            appPassword: owned.appPassword,
+            rlsStrategy: "force",
+          });
+          const appUrl = new URL(owned.ownerUrl);
+          appUrl.username = "opengeni_app";
+          appUrl.password = owned.appPassword;
+          return { ...owned, appUrl: appUrl.toString() };
+        })();
   if (!shared) {
     available = false;
     return;
@@ -214,14 +238,17 @@ beforeAll(async () => {
     },
   };
   managedApp = new Hono();
-  registerSuperGrokRoutes(managedApp, {
+  const managedDeps = {
     db: client.db,
     settings: managedSettings,
     resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, managedSettings),
     githubStateSecret: STATE_SECRET,
     xaiFetch,
     managedAuth: managedAuth as never,
-  } as ApiRouteDeps);
+  } as ApiRouteDeps;
+  registerSuperGrokRoutes(managedApp, managedDeps);
+  registerModelConnectionAccessRoutes(managedApp, managedDeps);
+  registerWorkspaceRoutes(managedApp, managedDeps);
 }, 180_000);
 
 afterAll(async () => {
@@ -468,6 +495,61 @@ describe("SuperGrok subscription routes", () => {
     });
   });
 
+  test("external owners connect private SuperGrok without cookies and cannot replace a revoked device origin", async () => {
+    if (!client || !managedApp) throw new Error("Real database fixture required");
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: managedAccountId,
+      externalId: `supergrok-${randomUUID()}`,
+    });
+    await withWorkspaceSubjectRls(client.db, managedWorkspaceId, managedSubjectId, (tx) =>
+      grantWorkspaceAccess(tx, {
+        accountId: managedAccountId,
+        workspaceId: managedWorkspaceId,
+        subjectId: identity.subjectId,
+        permissions: ["workspace:read", "connections:write"],
+      }),
+    );
+    const tokens = [randomUUID(), randomUUID()];
+    const keys = await Promise.all(
+      tokens.map((token) =>
+        createOrganizationApiKey(client!.db, {
+          accountId: managedAccountId,
+          name: "External device fixture",
+          prefix: "test",
+          keyHash: createHash("sha256").update(token).digest("hex"),
+          permissions: ["workspace:read", "connections:write"],
+        }),
+      ),
+    );
+    const deviceRequest = (path: string, body: unknown, index = 0) =>
+      managedApp!.request(`/v1/workspaces/${managedWorkspaceId}/supergrok${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${tokens[index]}`,
+          "content-type": "application/json",
+          "x-opengeni-external-actor": encodeURIComponent(
+            JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+          ),
+        },
+        body: JSON.stringify(body),
+      });
+    const start = await deviceRequest("/connect/start", { scope: "user" });
+    expect(start.status).toBe(200);
+    const started = await start.json();
+    const connected = await deviceRequest("/connect/poll", { state: started.state });
+    expect({
+      status: connected.status,
+      ...(connected.status !== 200 ? { body: await connected.clone().text() } : {}),
+    }).toEqual({ status: 200 });
+    expect(await connected.json()).toMatchObject({ status: "connected", scope: "user" });
+    const waiting = await deviceRequest("/connect/start", { scope: "user" });
+    expect(waiting.status).toBe(200);
+    const pending = await waiting.json();
+    await revokeOrganizationApiKey(client.db, managedAccountId, keys[0]!.id);
+    const denied = await deviceRequest("/connect/poll", { state: pending.state }, 1);
+    expect(denied.status).toBe(403);
+  });
+
   test("private accounts require the exact same-origin managed browser and never accept bearer borrowing", async () => {
     if (!available) return;
     const crossSite = await managedApp!.request(
@@ -542,4 +624,142 @@ describe("SuperGrok subscription routes", () => {
       newActiveId: null,
     });
   });
+});
+
+test("organization subscriptions use device login, multiple accounts, inherited reads, and administrator-only changes", async () => {
+  if (!available || !managedApp) return;
+  const requestOrganization = (
+    path: string,
+    method = "GET",
+    body?: unknown,
+    authorization?: string,
+  ) =>
+    managedApp!.request(`${PUBLIC_ORIGIN}/v1/organizations/${managedAccountId}/supergrok${path}`, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        origin: PUBLIC_ORIGIN,
+        "sec-fetch-site": "same-origin",
+        ...(authorization
+          ? { authorization: `Bearer ${authorization}` }
+          : { cookie: "better-auth.session_token=private-owner" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const ids: string[] = [];
+  for (const identity of ["organization-first", "organization-second"]) {
+    providerSubject = identity;
+    const start = await requestOrganization("/connect/start", "POST", {});
+    expect(start.status).toBe(200);
+    const code = await start.json();
+    expect(code.scope).toBe("organization");
+    expect(code.deviceCode).toBeUndefined();
+    const poll = await requestOrganization("/connect/poll", "POST", { state: code.state });
+    expect(poll.status).toBe(200);
+    const connected = await poll.json();
+    expect(connected.scope).toBe("organization");
+    ids.push(connected.accountId);
+  }
+  expect(new Set(ids).size).toBe(2);
+  const listed = await requestOrganization("/accounts");
+  const accounts = await listed.json();
+  expect(accounts.accounts).toHaveLength(2);
+  expect(accounts.activeAccountId).toBe(ids[0]);
+  expect(JSON.stringify(accounts)).not.toContain("refresh-");
+  expect((await requestOrganization(`/accounts/${ids[1]}/activate`, "POST", {})).status).toBe(200);
+  expect((await requestOrganization("/settings", "PATCH", { rotationEnabled: true })).status).toBe(
+    200,
+  );
+  expect(
+    (await requestOrganization(`/accounts/${ids[1]}`, "PATCH", { label: "Second subscription" }))
+      .status,
+  ).toBe(200);
+  const inherited = await managedRequest("/supergrok/accounts");
+  expect(inherited.status).toBe(200);
+  expect(await inherited.json()).toMatchObject({
+    source: "organization",
+    activeAccountId: ids[1],
+    settings: { rotationEnabled: true },
+  });
+  expect(
+    (
+      await managedRequest(`/supergrok/accounts/${ids[1]}`, {
+        method: "PATCH",
+        body: { label: "workspace takeover" },
+      })
+    ).status,
+  ).toBe(409);
+  const token = await delegatedBearer({
+    accountId: managedAccountId,
+    workspaceId: managedWorkspaceId,
+    subjectId: managedSubjectId,
+    permissions: ["workspace:read", "workspace:admin"],
+  });
+  expect((await requestOrganization("/accounts", "GET", undefined, token)).status).toBe(401);
+  const crossOrigin = await managedApp.request(
+    `${PUBLIC_ORIGIN}/v1/organizations/${managedAccountId}/supergrok/connect/start`,
+    {
+      method: "POST",
+      headers: {
+        cookie: "better-auth.session_token=private-owner",
+        "content-type": "application/json",
+        origin: "https://other.test",
+        "sec-fetch-site": "cross-site",
+      },
+      body: "{}",
+    },
+  );
+  expect(crossOrigin.status).toBe(403);
+  const accessPath = (id: string) =>
+    `${PUBLIC_ORIGIN}/v1/organizations/${managedAccountId}/model-connections/supergrok/${id}/access`;
+  const accessHeaders = {
+    "content-type": "application/json",
+    origin: PUBLIC_ORIGIN,
+    "sec-fetch-site": "same-origin",
+    cookie: "better-auth.session_token=private-owner",
+  };
+  for (const id of ids) {
+    const policyResponse = await managedApp.request(accessPath(id), { headers: accessHeaders });
+    expect(policyResponse.status).toBe(200);
+    const response = await policyResponse.json();
+    expect(response.policy.allowedModels).toBeNull();
+    expect(response.personalWorkspacesSupported).toBe(true);
+    expect(
+      response.models.every((model: { id: string }) => model.id.startsWith("supergrok/")),
+    ).toBe(true);
+    expect(JSON.stringify(response)).not.toContain("access-");
+    const body = JSON.stringify({ ...response.policy, allowedModels: [] });
+    expect(
+      (
+        await managedApp.request(accessPath(id), {
+          method: "PUT",
+          headers: { ...accessHeaders, origin: "https://other.test" },
+          body,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (await managedApp.request(accessPath(id), { method: "PUT", headers: accessHeaders, body }))
+        .status,
+    ).toBe(200);
+    expect(
+      (await managedApp.request(accessPath(id), { method: "PUT", headers: accessHeaders, body }))
+        .status,
+    ).toBe(409);
+    expect(
+      (await managedApp.request(accessPath(id), { headers: { authorization: `Bearer ${token}` } }))
+        .status,
+    ).toBe(401);
+  }
+  const restrictedCatalog = await managedRequest("/model-catalog");
+  expect(restrictedCatalog.status).toBe(200);
+  const catalog = await restrictedCatalog.json();
+  expect(
+    catalog.models
+      .filter((model: { id: string }) => model.id.startsWith("supergrok/"))
+      .every((model: { policyAllowed: boolean }) => !model.policyAllowed),
+  ).toBe(true);
+  for (const id of ids)
+    expect((await requestOrganization(`/accounts/${id}`, "DELETE")).status).toBe(200);
+  providerSubject = "xai-user-1";
 });

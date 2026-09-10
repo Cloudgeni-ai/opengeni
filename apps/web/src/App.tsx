@@ -5,7 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
+//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
@@ -132,6 +132,10 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyIdentityLinkRoute = lazyRouteComponent(
+  () => import("@/routes/identity-link"),
+  "IdentityLinkRoute",
+);
 const LazyEditableArtifactRoute = lazyRouteComponent(
   () => import("@/routes/editable-artifact"),
   "EditableArtifactRoute",
@@ -160,6 +164,15 @@ const sessionDeepLinkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "sessions/$sessionId",
   component: SessionDeepLink,
+});
+const identityLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "identity-links/$linkId",
+  validateSearch: (search: Record<string, unknown>): { organization?: string } =>
+    typeof search.organization === "string" && /^[0-9a-f-]{36}$/i.test(search.organization)
+      ? { organization: search.organization }
+      : {},
+  component: IdentityLink,
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every
 // checkout session's success_url/cancel_url; this top-level route forwards the
@@ -313,7 +326,7 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "plugins",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+  validateSearch: (search: Record<string, unknown>) => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: Capabilities,
@@ -321,7 +334,7 @@ const workspaceCapabilitiesRoute = createRoute({
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+  validateSearch: (search: Record<string, unknown>) => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: CapabilitiesLegacyRedirect,
@@ -333,10 +346,14 @@ const workspaceSchedulesRoute = createRoute({
   path: "schedules",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { sourceSessionId?: string; taskId?: string } => ({
+  ): { sourceSessionId?: string; taskId?: string; targetSessionId?: string } => ({
     ...(typeof search.sourceSessionId === "string" &&
     SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+    ...(typeof search.targetSessionId === "string" &&
+    SCHEDULES_SEARCH_UUID.test(search.targetSessionId)
+      ? { targetSessionId: search.targetSessionId }
       : {}),
     // Set when arriving from a session that a schedule started, so the page can
     // reveal that one task instead of leaving the reader to find it.
@@ -460,6 +477,7 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
+  identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
   ...(import.meta.env.DEV
@@ -621,29 +639,27 @@ function CapabilitiesLegacyRedirect() {
   const { workspaceId } = workspaceLegacyCapabilitiesRoute.useParams();
   const { section } = workspaceLegacyCapabilitiesRoute.useSearch();
   return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={section ? { section } : {}}
-      replace
-    />
+    <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} legacyRedirect />
   );
 }
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
+  return (
+    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+  );
 }
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  const { sourceSessionId, taskId } = workspaceSchedulesRoute.useSearch();
+  const { sourceSessionId, taskId, targetSessionId } = workspaceSchedulesRoute.useSearch();
   return (
     <LazySchedulesRoute
       workspaceId={workspaceId}
       sourceSessionId={sourceSessionId}
       focusTaskId={taskId}
+      targetSessionId={targetSessionId}
     />
   );
 }
@@ -697,6 +713,11 @@ function WorkspaceState() {
 
 function Artifacts() {
   return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+}
+function IdentityLink() {
+  const { linkId } = identityLinkRoute.useParams();
+  const { organization } = identityLinkRoute.useSearch();
+  return <LazyIdentityLinkRoute linkId={linkId} organizationId={organization} />;
 }
 
 function ArtifactDetail() {

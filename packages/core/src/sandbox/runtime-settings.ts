@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   CapabilityPack,
+  StoredCapabilityPack,
   type RigVersion,
   type Session,
   type SandboxBackend,
@@ -72,8 +73,14 @@ export async function resolveWorkspaceLegacyRuntimePacks(
       continue;
     }
     const registration = await getWorkspacePack(db, workspaceId, installation.packId);
-    const parsed = CapabilityPack.safeParse(registration?.pack);
-    if (parsed.success) packs.push(parsed.data);
+    if (!registration)
+      throw new Error(`Enabled Pack ${installation.packId} has no registered manifest`);
+    const parsed = StoredCapabilityPack.safeParse(registration.pack);
+    if (!parsed.success)
+      throw new Error(
+        `Enabled Pack ${installation.packId} requires repair: ${parsed.error.message}`,
+      );
+    packs.push(parsed.data);
   }
   return packs;
 }

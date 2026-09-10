@@ -3,7 +3,7 @@ import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@
 import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 
-import { buildApiIntegrationServersForTurn } from "../src/activities/api-integrations";
+import { buildApiIntegrationMcpServers as buildApiIntegrationServersForTurn } from "@opengeni/core";
 
 function integration(): ApiIntegrationRuntime {
   return {
@@ -32,6 +32,7 @@ function integration(): ApiIntegrationRuntime {
       scopes: ["inventory.read"],
       subjectScope: "workspace",
     },
+    connectionAuthorityGeneration: 7,
     allowedTools: ["list_items"],
     requireApproval: [],
     revision: {
@@ -75,11 +76,71 @@ const authority = {
 };
 
 describe("installed API Integration worker adapters", () => {
+  test("preflights exact credentials and provider authorization without provider I/O", async () => {
+    const item = integration();
+    const resolvedDestinations: string[] = [];
+    const resolvedModes: Array<string | undefined> = [];
+    const resolvedGenerations: Array<number | undefined> = [];
+    let providerAuthorizations = 0;
+    let providerCalls = 0;
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          connectionRef: item.connectionRef!,
+        },
+      ],
+    });
+    const [registration] = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
+        resolvedDestinations.push(request.destinationUrl);
+        resolvedModes.push(request.credentialResolutionMode);
+        resolvedGenerations.push(request.expectedAuthorityGeneration);
+        return {
+          status: "ok",
+          connectionId: item.connectionRef!.connectionId!,
+          headers: { Authorization: "Bearer preflight-only" },
+          authorizeProviderRequest: async () => {
+            providerAuthorizations += 1;
+            return true;
+          },
+        };
+      },
+      fetchImpl: async () => {
+        providerCalls += 1;
+        return Response.json({ items: [] });
+      },
+    });
+
+    await registration!.preflightCall!("list_items", {});
+
+    expect(registration!.approvalAuthority).toMatchObject({
+      kind: "api_integration",
+      instanceId: item.instanceId,
+      instanceVersion: item.instanceVersion,
+      revisionId: item.revision.id,
+      connectionRef: item.connectionRef,
+    });
+    expect(resolvedDestinations).toEqual(["https://127.0.0.1/v1/items"]);
+    expect(resolvedModes).toEqual(["preflight"]);
+    expect(resolvedGenerations).toEqual([item.connectionAuthorityGeneration]);
+    expect(providerAuthorizations).toBe(1);
+    expect(providerCalls).toBe(0);
+  });
+
   test("uses the exact attempt resolver, local MCP registry, and provider transport", async () => {
     const resolved: Array<{
       destinationUrl: string;
       credentialTarget: string | undefined;
       forceRefresh: boolean;
+      credentialResolutionMode: string | undefined;
+      expectedAuthorityGeneration: number | undefined;
     }> = [];
     const requests: Array<{
       url: string;
@@ -110,13 +171,19 @@ describe("installed API Integration worker adapters", () => {
           destinationUrl: request.destinationUrl,
           credentialTarget: request.credentialTarget,
           forceRefresh: request.forceRefresh === true,
+          credentialResolutionMode: request.credentialResolutionMode,
+          expectedAuthorityGeneration: request.expectedAuthorityGeneration,
         });
         return {
           status: "ok",
           connectionId: item.connectionRef!.connectionId!,
           headers: { Authorization: "Bearer exact-attempt" },
           placements: [
-            { carrier: "header", name: "Authorization", value: "Bearer exact-attempt" },
+            {
+              carrier: "header",
+              name: "Authorization",
+              value: "Bearer exact-attempt",
+            },
             { carrier: "query", name: "api_key", value: "query-secret" },
             { carrier: "cookie", name: "session_key", value: "cookie-secret" },
           ],
@@ -155,6 +222,8 @@ describe("installed API Integration worker adapters", () => {
           destinationUrl: "https://127.0.0.1/v1/items",
           credentialTarget: "http_api",
           forceRefresh: false,
+          credentialResolutionMode: "execution",
+          expectedAuthorityGeneration: item.connectionAuthorityGeneration,
         },
       ]);
       expect(requests).toEqual([
@@ -296,7 +365,10 @@ describe("installed API Integration worker adapters", () => {
         connectionRef: item.connectionRef!,
       })),
     });
-    const resolutions: Array<{ serverId: string; connectionId: string | undefined }> = [];
+    const resolutions: Array<{
+      serverId: string;
+      connectionId: string | undefined;
+    }> = [];
     const localMcpServers = buildApiIntegrationServersForTurn({
       settings,
       integrations: [finance, sales],
@@ -309,7 +381,9 @@ describe("installed API Integration worker adapters", () => {
         return {
           status: "ok",
           connectionId: request.connectionRef.connectionId!,
-          headers: { Authorization: `Bearer ${request.connectionRef.connectionId}` },
+          headers: {
+            Authorization: `Bearer ${request.connectionRef.connectionId}`,
+          },
         };
       },
       fetchImpl: async () =>
@@ -341,7 +415,10 @@ describe("installed API Integration worker adapters", () => {
           serverId: finance.serverId,
           connectionId: finance.connectionRef!.connectionId,
         },
-        { serverId: sales.serverId, connectionId: sales.connectionRef!.connectionId },
+        {
+          serverId: sales.serverId,
+          connectionId: sales.connectionRef!.connectionId,
+        },
       ]);
     } finally {
       await prepared.close();

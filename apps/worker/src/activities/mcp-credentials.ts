@@ -3,6 +3,8 @@ import type { ConnectionCredentialsPort } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
+  getSessionTurnForAttempt,
+  authorizeDirectHostMcpUse,
   resolveAcceptedConnectionUse,
   sessionTenancyProductActivated,
   type Database,
@@ -26,13 +28,18 @@ export function connectionTokenResolverForTurn(input: {
   attemptId: string;
   turn: SessionTurnForExecution;
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
+  /** Test seam; production always reads the canonical active-attempt projection. */
+  getHostTurnForAttempt?: typeof getSessionTurnForAttempt;
   /** Test seam for the activation fence on pre-snapshot workspace refs. */
   isSessionTenancyProductActivated?: typeof sessionTenancyProductActivated;
   /** Optional; used only for content-free compatibility-lane counters. */
   observability?: Observability | null | undefined;
 }): (request: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
   const hostResolver = input.connectionCredentials?.mcpCredentials;
-  const baseResolver = hostResolver
+  const readHostTurn = input.getHostTurnForAttempt ?? getSessionTurnForAttempt;
+  const hostDb = input.db;
+  const nativeResolver = buildConnectionTokenResolver(input.db, input.settings);
+  const configuredResolver = hostResolver
     ? buildHostConnectionTokenResolver(hostResolver, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -44,8 +51,40 @@ export function connectionTokenResolverForTurn(input: {
         initiator: input.turn.initiator,
         initiatorContext: input.turn.initiatorContext,
         surface: "model",
+        // Only immutable captured direct-turn authority is currently supported.
+        // Direct, scheduled and exact causal/child snapshots are validated;
+        // no authority follows merely from a binding or creator identity.
+        authorizeDurableBinding: (request) => authorizeDirectHostMcpUse(hostDb, request),
+        authorizeExecution: async (request) => {
+          // Native UUID references already pass the accepted-use boundary below.
+          // Legacy opaque host IDs retain their compatibility path, but not a
+          // right to execute after their accepted attempt has stopped.
+          if (
+            request.connectionRef.authoritySource !== "host" &&
+            (!request.connectionRef.connectionId ||
+              OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId))
+          )
+            return true;
+          if (!request.attemptId) return false;
+          const current = await readHostTurn(
+            hostDb,
+            request.workspaceId,
+            request.sessionId,
+            request.attemptId,
+          );
+          return (
+            current !== null &&
+            current.id === request.turnId &&
+            current.executionGeneration === request.executionGeneration
+          );
+        },
       })
-    : buildConnectionTokenResolver(input.db, input.settings);
+    : nativeResolver;
+  const baseResolver = (request: ResolveConnectionCredentialInput) =>
+    input.connectionCredentials?.mcpAuthoritySource === "host" &&
+    request.connectionRef.authoritySource !== "host"
+      ? nativeResolver(request)
+      : configuredResolver(request);
   return async (request) => {
     // Host-owned refs carry explicit provenance because their opaque ids may
     // themselves be valid UUIDs. They never enter OpenGeni's native connection
@@ -76,6 +115,7 @@ export function connectionTokenResolverForTurn(input: {
     // so UUID-shaped host ids are unambiguous.
     if (
       hostResolver &&
+      input.connectionCredentials?.mcpAuthoritySource !== "host" &&
       request.connectionRef.connectionId &&
       !OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId)
     ) {

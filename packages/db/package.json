@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/db",
-  "version": "3.7.4",
+  "version": "4.3.0",
   "description": "OpenGeni persistence: Drizzle schema, RLS-scoped query layer, the SQL migration runner, and role provisioning.",
   "license": "Apache-2.0",
   "repository": {
@@ -19,6 +19,14 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./retained-provider-commands": {
+      "types": "./src/retained-provider-commands.ts",
+      "default": "./src/retained-provider-commands.ts"
+    },
+    "./workspace-tool-defaults": {
+      "types": "./src/workspace-tool-defaults.ts",
+      "default": "./src/workspace-tool-defaults.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -58,6 +66,14 @@
     "./session-tenancy": {
       "types": "./src/session-tenancy.ts",
       "default": "./src/session-tenancy.ts"
+    },
+    "./session-event-slices": {
+      "types": "./src/session-event-slices.ts",
+      "default": "./src/session-event-slices.ts"
+    },
+    "./session-command-output": {
+      "types": "./src/session-command-output.ts",
+      "default": "./src/session-command-output.ts"
     },
     "./session-background-commands": {
       "types": "./src/session-background-commands.ts",

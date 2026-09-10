@@ -274,7 +274,13 @@ export function normalizeSdkEvent(
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "output_text_delta" && typeof data.delta === "string") {
-      out.push({ type: "agent.message.delta", payload: { text: data.delta } });
+      out.push({
+        type: "agent.message.delta",
+        payload: {
+          text: data.delta,
+          ...(typeof data.itemId === "string" && data.itemId ? { messageId: data.itemId } : {}),
+        },
+      });
       return out;
     }
     if (data?.type === "response_done") {
@@ -382,6 +388,9 @@ export function normalizeSdkEvent(
         type: "agent.message.completed",
         payload: {
           text,
+          ...(typeof item.rawItem?.id === "string" && item.rawItem.id
+            ? { messageId: item.rawItem.id }
+            : {}),
           ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}),
         },
       });
@@ -686,7 +695,7 @@ export function serializeHumanInputRequests(
         input: {
           ...input,
           questions: input.questions.map((question) =>
-            question.kind === "text" || question.allowOther
+            question.kind === "text" || question.allowOther || question.skillReview
               ? question
               : { ...question, allowOther: true },
           ),

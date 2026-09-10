@@ -1,3 +1,4 @@
+export * from "./domain/skills";
 // @opengeni/core — the framework-agnostic OpenGeni core.
 //
 // WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved
@@ -60,6 +61,13 @@ export * from "./sandbox/runtime-settings";
 
 // Access layer (transport-neutral grant resolution + permission checks).
 export * from "./access";
+export * from "./application/external-workspace-members";
+export * from "./application/external-identity-lifecycle";
+export * from "./application/external-continuation";
+export * from "./application/external-link-work-admission";
+export * from "./application/connect-authority";
+export * from "./application/host-mcp-owner";
+export * from "./application/connect-operation";
 export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
@@ -71,14 +79,18 @@ export * from "./billing/limits";
 export * from "./domain/capabilities";
 export * from "./domain/host-mcp-authority-source-admission";
 export * from "./domain/skill-imports";
+export * from "./domain/skill-search";
+export * from "./domain/github-skill-source";
 export * from "./domain/environments";
 export * from "./rigs";
 export * from "./domain/packs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
+export * from "./domain/product-integration-pack";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
+export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
@@ -105,9 +117,11 @@ export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/session-tenancy";
 export * from "./application/user-resource-grants";
+export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
 export * from "./editable-artifact-live";
 
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
+export { withSiteSessionOrigin } from "./site-session-origin";

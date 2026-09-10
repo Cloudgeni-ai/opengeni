@@ -90,14 +90,15 @@ describe("Codemode declarations", () => {
   });
 
   test("rejects a namespace/tool prefix collision instead of emitting invalid declarations", () => {
-    const catalog = createAttemptToolEnvironment({
-      scope,
-      generation: 1,
-      definitions: [
-        definition("one", { codemodePath: ["docs", "search"] }),
-        definition("two", { codemodePath: ["docs", "search", "advanced"] }),
-      ],
-    }).catalog;
-    expect(() => generateCodemodeDeclarations(catalog)).toThrow("extends a tool leaf");
+    expect(() =>
+      createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [
+          definition("one", { codemodePath: ["docs", "search"] }),
+          definition("two", { codemodePath: ["docs", "search", "advanced"] }),
+        ],
+      }),
+    ).toThrow("extends a tool leaf");
   });
 });

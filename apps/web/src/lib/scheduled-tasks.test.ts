@@ -14,6 +14,7 @@ import {
   scheduleFromFormState,
   scheduleLabel,
   scheduledTaskCadence,
+  loadSessionSchedules,
   scheduledTaskDescription,
   scheduledTaskRunLabel,
   scheduledTaskRunSessionAccess,
@@ -720,4 +721,28 @@ describe("malformed scheduled tasks degrade instead of throwing", () => {
       partial.id,
     ]);
   });
+});
+
+test("session schedule navigation includes matches beyond the first page", async () => {
+  const fixture = scheduledTask();
+  const tasks = Array.from({ length: 205 }, (_, i) => ({
+    ...fixture,
+    id: `task-${i}`,
+    status: i === 204 ? ("paused" as const) : ("active" as const),
+  }));
+  const offsets: number[] = [];
+  const result = await loadSessionSchedules(
+    {
+      listScheduledTasks: async (workspaceId, options = {}) => {
+        expect(workspaceId).toBe(fixture.workspaceId);
+        expect(options.sessionId).toBe("target-session");
+        offsets.push(options.offset ?? 0);
+        return tasks.slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
+      },
+    },
+    fixture.workspaceId,
+    "target-session",
+  );
+  expect(offsets).toEqual([0, 100, 200]);
+  expect(result).toEqual(tasks);
 });

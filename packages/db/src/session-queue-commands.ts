@@ -1,3 +1,4 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -1766,6 +1767,13 @@ export async function submitHumanPromptInTransaction(
     /** Trusted database-only admission seam. It runs only after a completed
      * operation replay has been ruled out; throwing rolls the prompt back. */
     beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    /** Backend-only authority capture, atomic with the newly accepted turn. */
+    captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
+    selectedHostMcpDelegations?: Array<{
+      serverId: string;
+      delegationId: string;
+      generation: number;
+    }>;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -1822,6 +1830,9 @@ export async function submitHumanPromptInTransaction(
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
+    ...(input.selectedHostMcpDelegations?.length
+      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
+      : {}),
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -1875,7 +1886,9 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  const [session] = await withLatestStartedSessionPolicy(db, input.workspaceId, [storedSession]);
+  if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -1956,9 +1969,15 @@ export async function submitHumanPromptInTransaction(
           resources: withCanonicalResourceMountPaths(
             input.composerDraftResources ?? input.resources,
           ),
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
         })
     ) {
       throw new QueueCommandConflictError(
@@ -2156,9 +2175,15 @@ export async function submitHumanPromptInTransaction(
           resources: input.resources,
           tools: [],
           toolsProvided: false,
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
             ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
@@ -2179,6 +2204,7 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  await input.captureTurnAuthority?.(db, turn.id);
   let committedTurn = turn;
   const personalResourceExpectedAuthorityEpoch =
     input.personalResourceAttachment?.expectedAuthorityEpoch;

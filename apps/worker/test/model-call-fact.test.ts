@@ -21,10 +21,11 @@ function billedSettings() {
     vercelAiGatewayApiKey: "test-gateway-key",
     modelPricingJson: JSON.stringify({
       "gpt-5.6-sol": {
-        inputMicrosPerMillionTokens: 5_000_000,
-        cachedInputMicrosPerMillionTokens: 500_000,
-        outputMicrosPerMillionTokens: 30_000_000,
-        marginBps: 2_500,
+        inputMicrosPerMillionTokens: 4_000_000,
+        cachedInputMicrosPerMillionTokens: 400_000,
+        cacheWriteMicrosPerMillionTokens: 5_000_000,
+        outputMicrosPerMillionTokens: 20_000_000,
+        marginBps: 500,
       },
     }),
   });
@@ -69,6 +70,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "opengeni_credits",
         pricedCostMicros: 1000,
         estimatedProviderCostMicros: 800,
+        equivalentCreditCostMicros: 1000,
         pricingSource: "configured_list_price",
         normalizedUsage: {
           telemetry: {
@@ -130,6 +132,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "opengeni_credits",
         pricedCostMicros: 5,
         estimatedProviderCostMicros: 4,
+        equivalentCreditCostMicros: 5,
         pricingSource: "gateway_reported",
         upstreamProvider: "baseten",
         normalizedUsage: {
@@ -177,8 +180,43 @@ describe("recordAuthoritativeModelCallFact", () => {
     });
     expect(billing.billingPath).toBe("external");
     expect(billing.pricedCostMicros).toBe(0);
-    expect(billing.estimatedProviderCostMicros).toBe(20_000);
+    expect(billing.estimatedProviderCostMicros).toBe(14_000);
+    expect(billing.equivalentCreditCostMicros).toBe(14_700);
     expect(billing.pricingSource).toBe("configured_list_price");
+    expect(debitSpy).not.toHaveBeenCalled();
+  });
+
+  test("external Codex ignores non-Gateway billing metadata and uses product list pricing", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => recordSpy.mockRestore());
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("credits must NOT be debited for an externally billed turn");
+      },
+    );
+    restores.push(() => debitSpy.mockRestore());
+
+    const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-codex-gateway",
+      turnId: "turn-codex-gateway",
+      turnAttemptId: "attempt-codex-gateway",
+      model: "codex/gpt-5.6-sol",
+      externallyBilled: true,
+      gatewayBilling: { finalProvider: "openai", inferenceCostUsd: "0.014" },
+      usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+      sourceKey: "response-codex-gateway",
+    });
+
+    expect(billing).toMatchObject({
+      billingPath: "external",
+      pricedCostMicros: 0,
+      estimatedProviderCostMicros: 14_000,
+      equivalentCreditCostMicros: 14_700,
+      pricingSource: "configured_list_price",
+    });
+    expect(billing).not.toHaveProperty("upstreamProvider");
     expect(debitSpy).not.toHaveBeenCalled();
   });
 
@@ -307,6 +345,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: 60_000,
+      equivalentCreditCostMicros: 63_000,
       pricingSource: "configured_list_price",
     });
   });
@@ -344,6 +383,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "external",
         pricedCostMicros: 0,
         estimatedProviderCostMicros: null,
+        equivalentCreditCostMicros: null,
         pricingSource: null,
       });
     }
@@ -385,8 +425,9 @@ describe("recordAuthoritativeModelCallFact", () => {
 
     expect(billing).toMatchObject({
       billingPath: "opengeni_credits",
-      pricedCostMicros: 5,
+      pricedCostMicros: 4,
       estimatedProviderCostMicros: 4,
+      equivalentCreditCostMicros: 4,
       pricingSource: "gateway_reported",
       upstreamProvider: "baseten",
     });
@@ -411,6 +452,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: null,
+      equivalentCreditCostMicros: null,
       pricingSource: null,
     });
   });

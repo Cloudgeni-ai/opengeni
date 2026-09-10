@@ -239,6 +239,26 @@ export const CreateOrganizationResponse = z.object({
 });
 export type CreateOrganizationResponse = z.infer<typeof CreateOrganizationResponse>;
 
+export const CreateAdditionalOrganizationRequest = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    workspaceName: z.string().trim().min(1).max(120),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type CreateAdditionalOrganizationRequest = z.infer<
+  typeof CreateAdditionalOrganizationRequest
+>;
+
+export const CreateAdditionalOrganizationResponse = z.object({
+  organization: OrganizationSummary,
+  workspaceId: z.string().uuid(),
+  personalWorkspaceId: z.string().uuid(),
+});
+export type CreateAdditionalOrganizationResponse = z.infer<
+  typeof CreateAdditionalOrganizationResponse
+>;
+
 export const UpdateOrganizationNameRequest = z.object({
   name: z.string().trim().min(1).max(120),
   expectedUpdatedAt: z.string().datetime({ offset: true }),

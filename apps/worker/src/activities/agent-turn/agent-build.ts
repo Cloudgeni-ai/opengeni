@@ -6,11 +6,11 @@ import {
   setXaiSessionAccountPin,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
-  beginConnectorActionExecution,
-  completeConnectorActionExecution,
-  prepareConnectorActionApproval,
+  getExternalLinkTurnAuthorization,
+  getSessionTurnForAttempt,
 } from "@opengeni/db";
 import {
+  formatSkillCatalog,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -37,10 +37,7 @@ import { VideoReferenceInputError } from "../video-reference-staging";
 import { rigProviderImageSourceImage } from "../packs";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
-import {
-  modelVisibleCompanyBrainSkillActivations,
-  summarizeCompanyBrainContributions,
-} from "../../model-context-contributions";
+import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
@@ -78,6 +75,7 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
+  skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   runtime: ActivityServices["runtime"];
@@ -112,8 +110,6 @@ export type BuildTurnAgentDeps = {
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
-  packRuntime: GovernanceModelOk["packRuntime"];
-  installedSkillRuntime: GovernanceModelOk["installedSkillRuntime"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
   workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
@@ -128,15 +124,8 @@ export type BuildTurnAgentDeps = {
   sandboxCodemodeToken: string | undefined;
   fileResourceDownloads: SandboxFileDownload[];
   attemptConnectorActionBindings: readonly AttemptConnectorActionBinding[];
-  connectorActionIdentity: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    executionGeneration: number;
-    initiator: Pick<ClaimTurnOk["turn"]["initiator"], "kind" | "subjectId">;
-  };
+  connectorActionPolicy: ConnectorActionPolicyHooks;
+  trigger: ClaimTurnOk["trigger"];
   preparationIndependentToolNames: readonly string[];
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -180,8 +169,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     workspaceMemory,
     rigVersion,
     rigName,
-    packRuntime,
-    installedSkillRuntime,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
     workspaceVariableSet,
@@ -194,7 +181,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     sandboxCodemodeToken,
     fileResourceDownloads,
     attemptConnectorActionBindings,
-    connectorActionIdentity,
+    connectorActionPolicy,
+    trigger,
     preparationIndependentToolNames,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
@@ -567,43 +555,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
   );
-  const connectorActionPolicy: ConnectorActionPolicyHooks = {
-    prepare: async (call) =>
-      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
-    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
-    complete: async ({ requestId, outcome }) =>
-      await completeConnectorActionExecution(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        requestId,
-        attemptId: input.attemptId,
-        outcome,
-      }),
-  };
-  const runtimeSkillActivations = [
-    ...installedSkillRuntime.activations,
-    ...packRuntime.skillActivations,
-    ...session.skills.map((skill) => ({
-      source: "session" as const,
-      id: `session:${session.id}:${skill.name}`,
-      artifact: {
-        name: skill.name,
-        description: skill.description ?? null,
-        files: skill.files.map((file) => ({
-          path: file.path,
-          content: file.content,
-        })),
-      },
-      reason: "attached to session",
-    })),
-  ];
-  const modelVisibleRuntimeSkillActivations = modelVisibleCompanyBrainSkillActivations(
-    eventing.modelRunSettings.sandboxBackend,
-    runtimeSkillActivations,
-  );
+  const approvedToolCallId = approvedConnectorActionCallId(trigger);
+  const modelVisibleSkillCatalogText = formatSkillCatalog(deps.skillCatalog);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
+      buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
     );
   } catch {
     // Contribution telemetry must never change model execution semantics.
@@ -615,11 +571,40 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     outcome: "completed",
     durationSeconds: (performance.now() - postToolPreparationStartedAt) / 1_000,
   });
+  const linkedToolAuthority = await getExternalLinkTurnAuthorization(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    },
+    turn.id,
+  );
+  if (linkedToolAuthority && !linkedToolAuthority.authorized)
+    throw new Error("Native identity link was revoked");
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
     try {
       return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
+        ...(linkedToolAuthority
+          ? {
+              authorizeAttemptExecution: async () => {
+                const current = await getSessionTurnForAttempt(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                  input.attemptId,
+                );
+                if (
+                  !current ||
+                  current.id !== turn.id ||
+                  current.executionGeneration !== turn.executionGeneration
+                )
+                  throw new Error("The linked agent attempt is no longer authorized");
+              },
+            }
+          : {}),
+        ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
@@ -669,6 +654,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         attemptConnectorActionBindings,
+        ...(approvedToolCallId ? { approvedToolCallId } : {}),
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.
@@ -720,9 +706,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               promptCacheKey: input.sessionId,
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
-        ...(runtimeSkillActivations.length > 0
-          ? { skillActivations: runtimeSkillActivations }
-          : {}),
+        skillCatalog: deps.skillCatalog,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
@@ -791,9 +775,23 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   }
   return {
     agent,
-    modelVisibleRuntimeSkillActivations,
+    modelVisibleSkillCatalogText,
     postAgentPreparationStartedAt,
   };
+}
+
+function approvedConnectorActionCallId(trigger: ClaimTurnOk["trigger"]): string | null {
+  if (trigger.type !== "user.approvalDecision") {
+    return null;
+  }
+
+  const payload = trigger.payload as {
+    approvalId?: unknown;
+    decision?: unknown;
+  };
+  return payload.decision === "approve" && typeof payload.approvalId === "string"
+    ? payload.approvalId
+    : null;
 }
 
 export type BuildTurnAgentOk = Awaited<ReturnType<typeof buildTurnAgent>>;

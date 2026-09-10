@@ -9,7 +9,7 @@ import type {
   SessionAuthorizationPort,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -44,7 +44,9 @@ export type SessionWorkflowClient = {
     workflowId: string;
     wakeRevision: number;
     interruptionRequested?: boolean;
-  }) => Promise<void>;
+    /** Called after transport acceptance, before the fallible durable ACK. */
+    onSignalAccepted?: () => void;
+  }) => Promise<SessionWorkflowWakeDeliveryResult | void>;
   /** Trigger one bounded drain of already-committed workflow-wake revisions. */
   requestSessionWorkflowWakeDispatch: () => Promise<void>;
   // Dedicated, revision-carrying nudge for a durable Codex capacity waiter.
@@ -194,6 +196,8 @@ export type AppDependencies = {
   codexFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
   githubPersonalFetch?: typeof fetch;
+  /** Injectable credential-free GitHub transport for public repository verification tests. */
+  githubAnonymousFetch?: typeof fetch;
   /** Injectable xAI OAuth/subscription transport for deterministic API/provider tests. */
   xaiFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */
@@ -204,6 +208,8 @@ export type AppDependencies = {
   fikenFetch?: typeof fetch;
   /** Injectable Integration Definition OAuth/API transport for deterministic tests. */
   apiIntegrationOAuthFetch?: typeof fetch;
+  /** Injectable specification/introspection transport, still network-policy checked. */
+  apiIntegrationSourceFetch?: typeof fetch;
   atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;

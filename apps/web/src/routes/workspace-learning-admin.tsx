@@ -3,40 +3,45 @@ import { useEffect, useState } from "react";
 
 import { LoadErrorState } from "@/components/common";
 import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { canManageWorkspaceSettings } from "@/lib/permissions";
 
 import { useWorkspaceLearningHistory } from "./workspace-learning-loader";
 
 const MODE_COPY: Record<WorkspaceLearningMode, { label: string; description: string }> = {
   off: {
     label: "Off",
-    description: "Keep knowledge available, but do not derive durable behavioral changes.",
+    description: "Agents do not create derived Workspace instruction or Skill proposals.",
   },
   suggest: {
-    label: "Review first",
-    description: "Create auditable proposals and leave activation to a human reviewer.",
+    label: "Require approval",
+    description: "Agents may create proposals, but a person must approve them before activation.",
   },
   automatic: {
     label: "Autonomous",
-    description: "Apply eligible high-confidence changes after stale, conflict, and ACL checks.",
+    description:
+      "Eligible Workspace instruction and Skill proposals activate automatically after safety checks.",
   },
 };
 
 export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const { client } = context;
-  const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const canEdit = canManageWorkspaceSettings(
+    context.accessContext,
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null,
+    context.managedSelfContext,
+  );
   const history = useWorkspaceLearningHistory(client, workspaceId);
   const activeRevision = history.response?.revisions.find(
     (revision) => revision.id === history.response?.head?.revisionId,
   );
-  const [mode, setMode] = useState<WorkspaceLearningMode>("off");
+  const [mode, setMode] = useState<WorkspaceLearningMode>("suggest");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
 
   useEffect(() => {
-    setMode(activeRevision?.workspaceMode ?? "off");
+    setMode(activeRevision?.workspaceMode ?? "suggest");
   }, [activeRevision]);
 
   const save = async (nextMode: WorkspaceLearningMode): Promise<void> => {
@@ -61,12 +66,12 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
         operationId: crypto.randomUUID(),
         expectedCurrentRevisionId: history.response?.head?.revisionId ?? null,
         expectedActivationVersion: history.response?.head?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Learning & autonomy",
+        reason: "Updated from Workspace instructions & Skills",
       });
       await history.reload();
-      setMessage("Learning mode saved. It applies from the next agent run.");
+      setMessage("Instruction and Skill mode saved. It applies from the next agent run.");
     } catch (error) {
-      setMode(activeRevision?.workspaceMode ?? "off");
+      setMode(activeRevision?.workspaceMode ?? "suggest");
       setMutationError(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
@@ -76,7 +81,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
   if (history.loading && !history.response) {
     return (
       <div
-        aria-label="Loading learning policy"
+        aria-label="Loading instruction and Skill settings"
         className="h-48 animate-pulse rounded-lg bg-surface-2"
       />
     );
@@ -84,7 +89,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
   if (history.error && !history.response) {
     return (
       <LoadErrorState
-        title="Couldn't load learning policy"
+        title="Couldn't load instruction and Skill settings"
         error={history.error}
         onRetry={() => void history.reload()}
       />
@@ -93,13 +98,13 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
 
   return (
     <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="text-sm font-semibold text-fg">Learning & autonomy</h2>
+      <h2 className="text-sm font-semibold text-fg">Workspace instruction &amp; Skill autonomy</h2>
       <p className="mt-1 text-xs leading-5 text-fg-muted">
-        Controls derived Skills and workspace instructions. Agent Memory follows the separate
-        Workspace memory toggle.
+        Choose whether agents can activate Workspace instructions and Skills automatically or must
+        get approval. Agent Memory follows the separate Workspace memory toggle.
       </p>
       <fieldset className="mt-4 grid gap-2 sm:grid-cols-3" disabled={!canEdit || saving}>
-        <legend className="sr-only">Workspace learning mode</legend>
+        <legend className="sr-only">Workspace instruction and Skill autonomy</legend>
         {(Object.keys(MODE_COPY) as WorkspaceLearningMode[]).map((candidate) => (
           <label
             key={candidate}
@@ -124,7 +129,8 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
 
       {!canEdit ? (
         <p className="mt-3 text-xs text-status-waiting">
-          Workspace admin access is required to change learning policy.
+          A workspace administrator or Personal workspace owner can change instruction and Skill
+          autonomy.
         </p>
       ) : null}
       {mutationError ? (
@@ -134,7 +140,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
       ) : null}
       {saving ? (
         <p role="status" className="mt-3 text-xs text-fg-muted">
-          Saving learning mode…
+          Saving instruction and Skill mode…
         </p>
       ) : message ? (
         <p role="status" className="mt-3 text-xs text-status-success">

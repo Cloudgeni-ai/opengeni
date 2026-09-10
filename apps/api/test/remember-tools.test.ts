@@ -116,29 +116,16 @@ describe("remember MCP tools", () => {
       scope: "organization",
     });
     expect(h.authorizations()).toBe(1);
-    expect(h.remembers).toEqual([
-      {
-        attempt: ATTEMPT,
-        request: {
-          operationId: OPERATION_ID,
-          content: "Always deploy staging from main.",
-          reason: "The user asked to remember it.",
-          scope: "workspace",
-          lane: "preference",
-          stableKey: `remember.${OPERATION_ID.replaceAll("-", "")}`,
-          title: "Always deploy staging from main.",
-          description: "Always deploy staging from main.",
-        },
-      },
-    ]);
+    expect(h.remembers).toEqual([]);
     await h.handlers.get("remember")!({
       lane: "instruction_policy",
       operationId: OPERATION_ID,
       content: "Never push directly to main.",
       reason: "Hard rule from the user.",
     });
-    expect(h.remembers[1]).toMatchObject({
-      request: { lane: "instruction_policy", target: undefined },
+    expect(h.remembers[0]).toMatchObject({
+      attempt: ATTEMPT,
+      request: { lane: "instruction_policy", scope: "workspace", target: undefined },
     });
     await h.handlers.get("remember")!({
       lane: "knowledge",
@@ -147,31 +134,27 @@ describe("remember MCP tools", () => {
       reason: "Stated by the user.",
       subject: "Acme",
     });
-    expect(h.remembers[2]).toMatchObject({ request: { lane: "knowledge", subject: "Acme" } });
+    expect(h.remembers[1]).toMatchObject({
+      request: { lane: "knowledge", subject: "Acme", scope: "workspace" },
+    });
   });
 
   test("the tool description separates autonomous Memory from governed durable changes", () => {
     const description = harness().configs.get("remember")?.description ?? "";
-    expect(description).toContain("use it instead for ordinary durable facts");
+    expect(description).toContain("use it for ordinary durable facts");
     expect(description).toContain("independent of Learning mode");
     expect(description).toContain(
       "lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge",
     );
-    expect(description).toContain("lane=preference creates a Skill");
+    expect(description).toContain("Skills now use skill_save");
     expect(description).toContain("lane=instruction_policy is only for a universal");
     expect(description).toContain(
       `at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
     );
     expect(description).toContain("normally 1-3 imperative sentences");
     expect(description).toContain("no numbered steps");
-    expect(description).toContain(
-      `Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
-    );
-    expect(description).toContain("one-sentence descriptor");
-    expect(description).toContain(
-      "eligible Skill or workspace instruction may activate immediately",
-    );
-    expect(description).toContain("Under Review first, it remains inactive");
+    expect(description).toContain("eligible workspace instruction may activate immediately");
+    expect(description).toContain("Under Require approval, it remains inactive");
     expect(description).toContain("Off creates no governed change");
     expect(description).toContain("materializes its exact approved text into Memory");
     expect(description).toContain("`memory_search` retrieval");
@@ -205,7 +188,7 @@ describe("remember MCP tools", () => {
     });
     expect(JSON.parse(refusedPreference.content[0]!.text)).toMatchObject({
       status: "not_remembered",
-      code: "content_too_long",
+      code: "use_skill_save",
     });
     expect(h.remembers).toEqual([]);
 
@@ -220,7 +203,7 @@ describe("remember MCP tools", () => {
     expect(h.remembers).toHaveLength(1);
   });
 
-  test("remember returns a bounded stable-key conflict instead of throwing persistence details", async () => {
+  test("legacy Skill requests redirect without entering the remember router", async () => {
     const h = harness({
       rememberError: new PreferenceRegistryStableKeyConflictError(
         "A preference with this stable key already exists for the workspace",
@@ -235,11 +218,11 @@ describe("remember MCP tools", () => {
       description: "Suggested tone for support replies.",
       reason: "The user asked to remember it.",
     });
-    expect(JSON.parse(result.content[0]!.text)).toEqual({
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
       status: "not_remembered",
-      code: "preference_stable_key_conflict",
-      message: "A preference with this stable key already exists for the workspace",
+      code: "use_skill_save",
     });
+    expect(h.remembers).toEqual([]);
   });
 
   test("remember_confirm returns a bounded not_confirmed result instead of throwing on remember errors", async () => {

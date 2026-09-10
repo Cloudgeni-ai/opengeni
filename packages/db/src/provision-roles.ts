@@ -524,6 +524,9 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "ensure_external_identity(uuid,text,text)",
+    "get_external_identity_link_reference(uuid,uuid,text)",
+    "get_external_identity_link_inventory_references(uuid,uuid[])",
     "list_self_organization_memberships(text)",
     "list_self_organization_invitations(text)",
     "list_self_organization_invitations(text,uuid,integer)",
@@ -535,10 +538,13 @@ async function grantAppRoleIfSchemaExists(
     "get_workspace_kind(uuid,uuid)",
     "resolve_workspace_codex_subscription_source(uuid,uuid)",
     "list_organization_workspace_ids(uuid)",
+    "list_organization_codex_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
+    "authorize_organization_shared_workspace_administration(uuid,uuid,text)",
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
     "prepare_organization_workspace_member_removal(jsonb)",
     "record_organization_workspace_member_removal(jsonb,uuid,uuid)",
+    "create_additional_managed_organization(text,text,text,text,uuid)",
     "create_managed_organization(text,text,text,uuid)",
     "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
     "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",
@@ -553,7 +559,9 @@ async function grantAppRoleIfSchemaExists(
     "complete_self_service_organization_setup(jsonb)",
     "ensure_organization_user_setup_intent(jsonb)",
     "claim_organization_user_setup_delivery(jsonb)",
+    "claim_organization_user_setup_delivery_v2(jsonb)",
     "prepare_organization_user_setup_delivery(jsonb)",
+    "prepare_organization_user_setup_delivery_v2(jsonb)",
     "settle_organization_user_setup_delivery(jsonb)",
     "preview_organization_user_setup(text)",
     "get_organization_invitation_for_administration(uuid,text,uuid)",
@@ -809,6 +817,10 @@ BEGIN
         ${literal(schema)},
         ${literal(role)}
       );
+    END IF;
+    IF to_regprocedure(format('%I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_files_valid(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
       format('%I.preference_registry_lock_heads(uuid[])', ${literal(schema)})
@@ -1453,6 +1465,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.replay_applied_session_fork(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)',
         ${literal(schema)}
       )
@@ -2091,6 +2119,15 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'guard_workspace_owned_skill_head_delete()',
+      'guard_workspace_owned_skill_history_delete()'
+    ] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     EXECUTE format(
       'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM %I',
       owner_role,

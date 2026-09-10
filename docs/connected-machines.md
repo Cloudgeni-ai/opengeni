@@ -49,17 +49,32 @@ already reports its absolute launch root; OpenGeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
-`/workspace` has no special meaning on a machine. Durable artifact receipts and
-`sandbox:` UI links may still use their provider-independent `/workspace/...`
-identity, projected to cwd-relative paths when shown to the model.
+`/workspace` has no special meaning on a machine.
+
+The Files surface advertises that effective path as `FileSystem.root`, including
+Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
+in the same namespace and sends the negotiated `{ epoch, root }` identity with
+each list, read, or mutation. The API validates that the path remains beneath
+the advertised root, pins the request to the first resolved active route, and
+uses a contained workspace-relative path for machine execution. Responses keep
+the canonical host-native spelling; a route or root change returns a retryable
+conflict instead of a misleading outside-workspace validation error or a read
+from a different target. Provider-independent artifact receipts may still use
+their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
-so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
-Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
+so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|show|call` works even without
+Bun/Node/`ogtool`. Default text and `list --json` return all authorized tools with
+short summaries, without an aggregate stdout cap or default pagination;
+use `list --query <substring>` to filter, or explicitly opt into a slice with
+`--limit <1..100> --offset <integer>`,
+`list --json` for digest/count/continuation metadata, or `list --full` for the legacy
+complete catalog. `show <path>` returns one tool's details/schema, capped at 64 KiB.
+It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
 This authority follows the session's **active** execution path. The fleet
@@ -83,6 +98,15 @@ that exact closure in the Rust agent. On macOS it also enables the same real
 ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
+
+The Chrome Native Messaging bridge accepts two exact extension origins: the
+development manifest key (`imdmcebcclhibdfolbokjbiibpcnpbel`) and the Chrome Web
+Store item (`phpmmcbeelfkcinjfbbggegjdcdmnnch`). Both the installed native-host
+manifest and the agent's native-host invocation check must include the store
+origin. Older agent releases that only accept the development origin cannot
+connect the store-installed extension; updating the extension alone cannot fix
+that host-side restriction. Store uploads omit the development-only manifest
+`key` field.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
@@ -173,9 +197,12 @@ Rules to keep in mind:
   **422**.
 - When a child omits both `sandbox` and `machineTarget`, sharing a parent that is
   currently routed to a Connected Machine automatically copies that exact
-  machine and working directory to the child before its first turn. The model
-  does not choose the machine again. A selfhosted-only create with neither an
-  inherited nor explicit machine is rejected before an unusable session starts.
+  machine and working directory to the child before its first turn. A
+  `backend:none` parent remains a backend-none shared home; its valid attached
+  machine is an independent active route and is inherited without relabeling the
+  child. The model does not choose the machine again. A selfhosted-only create
+  with neither an inherited nor explicit machine is rejected before an unusable
+  session starts.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
@@ -198,7 +225,10 @@ seeds the generated session's active pointer before its first turn. A deployment
 whose default backend is `selfhosted` rejects a generated-session schedule that
 does not select a machine instead of creating a session that cannot execute.
 Manual runs also preflight current liveness and the reported workspace root
-before consuming run capacity.
+before consuming run capacity. After that preflight, session creation rechecks
+durable target authority and commits the active pointer in the same transaction
+as the new session row. If the target is invalid, removed, revoked, or otherwise
+no longer attachable, the create fails without leaving a queued session shell.
 
 Unattended schedules currently accept workspace- and organization-scoped
 machines only. User-scoped machines require an owning human's explicit personal

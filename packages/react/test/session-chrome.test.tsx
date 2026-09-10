@@ -6,6 +6,8 @@ import {
   sessionChromeGoalPillExplanation,
   sessionChromeGoalPillLabel,
   sessionChromeGoalPillState,
+  sessionChromeInitialActive,
+  sessionChromeShouldOfferQueue,
 } from "../src/components/session-chrome";
 import { formatClockTime } from "../src/lib/format";
 import type { ComposerState } from "../src/hooks/use-composer";
@@ -17,6 +19,14 @@ import { registerDom, renderComponent, type RenderedComponent } from "./render-h
 registerDom();
 
 let mounted: RenderedComponent | null = null;
+
+/** Collapsed chrome. Do not require the queue panel node to unmount — AnimatePresence may keep an exiting frame. */
+function expectChromeCollapsed(container: HTMLElement) {
+  expect(container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();
+  expect(container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  const queueChip = container.querySelector('[data-og-session-chrome-signal="queue"]');
+  if (queueChip) expect(queueChip.getAttribute("aria-expanded")).toBe("false");
+}
 
 afterEach(async () => {
   if (mounted) {
@@ -202,6 +212,16 @@ describe("sessionChromeGoalPillState", () => {
     expect(
       sessionChromeGoalPillState("active", {
         state: "blocked",
+        reason: "human_turn_running",
+        wakeRevision: 1,
+        observedRevision: 1,
+        nextAttemptAt: null,
+        lastError: null,
+      }),
+    ).toBe("waiting");
+    expect(
+      sessionChromeGoalPillState("active", {
+        state: "blocked",
         reason: "workstream_paused",
         wakeRevision: 1,
         observedRevision: 1,
@@ -209,7 +229,7 @@ describe("sessionChromeGoalPillState", () => {
         lastError: null,
       }),
     ).toBe("held");
-    // An agent-declared goal_wait hold shares the Held pill: the goal is
+    // An agent-declared wait_for_input hold shares the Held pill: the goal is
     // deliberately waiting for child results / external input until a deadline.
     expect(
       sessionChromeGoalPillState("active", {
@@ -233,6 +253,83 @@ describe("sessionChromeGoalPillState", () => {
         lastError: null,
       }),
     ).toBe("scheduled");
+  });
+});
+
+describe("session chrome idle queue offer", () => {
+  test("opens an authoritative idle queue on first paint", () => {
+    expect(
+      sessionChromeInitialActive({
+        defaultActive: null,
+        authoritativeQueuedCount: 1,
+      }),
+    ).toBe("queue");
+  });
+
+  test("keeps first paint closed without an authoritative queue", () => {
+    expect(
+      sessionChromeInitialActive({
+        defaultActive: null,
+        authoritativeQueuedCount: 0,
+      }),
+    ).toBeNull();
+  });
+
+  test("does not steal a host-chosen default segment", () => {
+    expect(
+      sessionChromeInitialActive({
+        defaultActive: "goal",
+        authoritativeQueuedCount: 2,
+      }),
+    ).toBe("goal");
+  });
+
+  test("offers when idle, uncontrolled, and occupied", () => {
+    expect(
+      sessionChromeShouldOfferQueue({
+        controlled: false,
+        active: null,
+        activityOpen: false,
+        authoritativeQueuedCount: 1,
+        suppressed: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not steal an already-open segment", () => {
+    expect(
+      sessionChromeShouldOfferQueue({
+        controlled: false,
+        active: "goal",
+        activityOpen: false,
+        authoritativeQueuedCount: 1,
+        suppressed: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("does not re-offer after an explicit queue close", () => {
+    expect(
+      sessionChromeShouldOfferQueue({
+        controlled: false,
+        active: null,
+        activityOpen: false,
+        authoritativeQueuedCount: 1,
+        suppressed: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("does not offer when the host controls the segment", () => {
+    expect(
+      sessionChromeShouldOfferQueue({
+        controlled: true,
+        active: null,
+        activityOpen: false,
+        authoritativeQueuedCount: 1,
+        suppressed: false,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -300,9 +397,6 @@ describe("SessionChrome", () => {
     expect(queueChip?.textContent).not.toContain("realtime_delegation");
     expect(queueChip?.querySelector(".lucide-audio-lines")).not.toBeNull();
 
-    await act(async () => {
-      queueChip?.click();
-    });
     const panel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
     expect(panel?.textContent).toContain(transcript);
     expect(panel?.textContent).not.toContain("realtime_delegation");
@@ -331,8 +425,6 @@ describe("SessionChrome", () => {
       mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
     ).toBeNull();
     expect(queueChip?.textContent).toContain("1 queued prompt");
-
-    await act(async () => queueChip?.click());
     const queuePanel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
     expect(queuePanel?.textContent).toContain("Then update the documentation");
     expect(queuePanel?.textContent).not.toContain("Focus on the authentication failure first");
@@ -699,9 +791,6 @@ describe("SessionChrome", () => {
       '[data-og-session-chrome-signal="queue"]',
     );
     expect(queueChip).not.toBeNull();
-    await act(async () => {
-      queueChip?.click();
-    });
     expect(
       mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
     ).not.toBeNull();
@@ -745,6 +834,55 @@ describe("SessionChrome", () => {
     expect(
       calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:")),
     ).toBe(true);
+  });
+
+  test("explains pending child receipts and opens only their typed source", async () => {
+    const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const opened: string[] = [];
+    const inputs = [
+      {
+        ...pendingInput(),
+        id: "pending-1",
+        kind: "child_terminal_result" as const,
+        sourceId: childId,
+        summary: "Waiting for CI.",
+      },
+      {
+        ...pendingInput(),
+        id: "pending-2",
+        kind: "child_terminal_result" as const,
+        sourceId: childId,
+        summary: "PR merged; parent has not consumed this result.",
+      },
+      { ...pendingInput(), id: "pending-3", sourceId: childId },
+      {
+        ...pendingInput(),
+        id: "pending-4",
+        kind: "child_terminal_result" as const,
+        sourceId: "invalid",
+      },
+    ];
+    mounted = await renderComponent(
+      <SessionChrome
+        readOnly
+        defaultActive="incoming"
+        queue={queue({ queue: [], pendingInputs: inputs })}
+        onOpenSession={(id) => opened.push(id)}
+      />,
+    );
+    expect(mounted.container.textContent).toContain("Waiting to be included in an agent turn.");
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    const links = [...panel.querySelectorAll("button")].filter(
+      (button) => button.textContent === "View session",
+    );
+    expect(links).toHaveLength(2);
+    await act(async () => {
+      links[0]?.click();
+      links[1]?.click();
+    });
+    expect(opened).toEqual([childId, childId]);
+    expect(panel.textContent).toContain(inputs[1]!.summary);
+    expect(panel.querySelectorAll("li")).toHaveLength(4);
   });
 
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
@@ -936,13 +1074,13 @@ describe("SessionChrome goal pill reasons", () => {
         lastError: null,
       },
     }).goal;
-    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Scheduled");
+    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Waiting");
     expect(sessionChromeGoalPillExplanation("scheduled", record)).toBe(
-      `Next goal check at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
+      `Continues at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
     );
   });
 
-  test("explains an agent goal_wait hold with its reason and deadline", () => {
+  test("explains an agent wait_for_input hold with its reason and deadline", () => {
     const record = goal({
       continuation: {
         state: "blocked",
@@ -987,4 +1125,436 @@ describe("SessionChrome goal pill reasons", () => {
       panel?.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
     ).toContain("New input");
   });
+});
+
+describe("SessionChrome compact actions", () => {
+  test("visibly identifies the goal when its continuation needs attention", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [] })}
+        goal={goal({ continuation: undefined })}
+      />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    expect(chip?.textContent).toBe("Goal · Needs attention");
+    expect(chip?.getAttribute("aria-label")).toBe("Goal · Needs attention");
+  });
+
+  test("opens an idle authoritative queue without a click", async () => {
+    mounted = await renderComponent(
+      <SessionChrome compact queue={queue()} composer={composer()} />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+    ).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')?.textContent,
+    ).toContain("first queued prompt");
+  });
+
+  test("keeps the compact queue closed after the operator dismisses it", async () => {
+    mounted = await renderComponent(
+      <SessionChrome compact queue={queue()} composer={composer()} />,
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expectChromeCollapsed(mounted.container);
+    await mounted.rerender(<SessionChrome compact queue={queue()} composer={composer()} />);
+    expectChromeCollapsed(mounted.container);
+  });
+
+  test("opens the compact queue after a default-open goal is closed", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        defaultActive="goal"
+        queue={queue()}
+        composer={composer()}
+        goal={goal()}
+      />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="goal"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
+
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="goal"]')
+        ?.click();
+    });
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+    ).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+  });
+
+  test("does not re-offer the queue after a dismiss and a later goal close", async () => {
+    mounted = await renderComponent(
+      <SessionChrome compact queue={queue()} composer={composer()} goal={goal()} />,
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="goal"]')
+        ?.click();
+    });
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="goal"]')).not.toBeNull();
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="goal"]')
+        ?.click();
+    });
+    expectChromeCollapsed(mounted.container);
+  });
+
+  test("keeps a live Send collapsed after the optimistic row becomes authoritative", async () => {
+    mounted = await renderComponent(
+      <SessionChrome compact queue={queue({ queue: [] })} composer={composer()} />,
+    );
+    await mounted.rerender(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-live-1",
+              delivery: "send",
+              destination: "queue",
+              text: "live send",
+              annotations: [],
+              resources: [],
+              occurredAt: new Date().toISOString(),
+              state: "sending",
+            },
+          ],
+        })}
+      />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+
+    await mounted.rerender(
+      <SessionChrome
+        compact
+        queue={queue({
+          queue: [fakeTurn({ id: "turn-live-1", prompt: "live send" })],
+        })}
+        composer={composer()}
+      />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
+  });
+
+  test("leaves a controlled collapsed queue closed even when occupancy exists", async () => {
+    mounted = await renderComponent(
+      <SessionChrome compact active={null} queue={queue()} composer={composer()} />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
+  });
+
+  test("offers the next authoritative wave after the previous occupancy drains", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [fakeTurn({ id: "wave-1", prompt: "first wave" })] })}
+        composer={composer()}
+      />,
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+
+    await mounted.rerender(
+      <SessionChrome compact queue={queue({ queue: [] })} composer={composer()} />,
+    );
+    await mounted.rerender(
+      <SessionChrome
+        compact
+        queue={queue({
+          queue: [fakeTurn({ id: "wave-2", prompt: "later wave" })],
+        })}
+        composer={composer()}
+      />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')?.textContent,
+    ).toContain("later wave");
+  });
+
+  test("re-offers after a dismiss when a different session occupies the same chrome", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({
+          queue: [
+            fakeTurn({
+              id: "session-a-turn",
+              sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              prompt: "session a",
+            }),
+          ],
+        })}
+        composer={composer()}
+      />,
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+
+    await mounted.rerender(
+      <SessionChrome
+        compact
+        queue={queue({
+          queue: [
+            fakeTurn({
+              id: "session-b-turn",
+              sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              prompt: "session b",
+            }),
+          ],
+        })}
+        composer={composer()}
+      />,
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')?.textContent,
+    ).toContain("session b");
+
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    await mounted.rerender(
+      <SessionChrome
+        compact
+        queue={queue({
+          queue: [
+            fakeTurn({
+              id: "session-a-turn",
+              sessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              prompt: "session a",
+            }),
+          ],
+        })}
+        composer={composer()}
+      />,
+    );
+    expectChromeCollapsed(mounted.container);
+  });
+
+  test("steers the first queued message without opening the panel", async () => {
+    const ids: string[] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        composer={composer()}
+        queue={queue({
+          steerTurn: async (id) => {
+            ids.push(id);
+            return true;
+          },
+        })}
+      />,
+    );
+    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+    await act(async () => queueChip?.click());
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+    const action = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer first queued message"]',
+    )!;
+    expect(action.closest("button")).toBe(action);
+    await act(async () => action.click());
+    expect(ids).toEqual(["11111111-1111-4111-8111-111111111111"]);
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("goal pause/resume and clear do not open the panel", async () => {
+    const calls: string[] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        goal={{
+          ...goal({ status: "paused" }),
+          resume: async () => {
+            calls.push("resume");
+            return null;
+          },
+          deleteGoal: async () => {
+            calls.push("clear");
+          },
+        }}
+      />,
+    );
+    await act(async () =>
+      mounted!.container.querySelector<HTMLButtonElement>('[aria-label="Resume goal"]')!.click(),
+    );
+    await act(async () =>
+      mounted!.container.querySelector<HTMLButtonElement>('[aria-label="Clear goal"]')!.click(),
+    );
+    expect(calls).toEqual(["resume", "clear"]);
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("read-only chrome has no compact mutation actions", async () => {
+    mounted = await renderComponent(
+      <SessionChrome queue={queue()} composer={composer()} goal={goal()} readOnly />,
+    );
+    expect(mounted.container.querySelector('[aria-label="Pause goal"]')).toBeNull();
+    expect(mounted.container.querySelector('[aria-label="Clear goal"]')).toBeNull();
+    expect(mounted.container.querySelector('[aria-label="Steer first queued message"]')).toBeNull();
+  });
+
+  test("command body mounts only while opened", async () => {
+    let mounts = 0;
+    function Body() {
+      mounts += 1;
+      return <p>Active command details</p>;
+    }
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} commandsCount={2} commandsPanel={<Body />} />,
+    );
+    expect(mounts).toBe(0);
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-commands"]')!
+        .click(),
+    );
+    expect(mounts).toBeGreaterThan(0);
+    expect(mounted.container.textContent).toContain("Active command details");
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-commands"]')!
+        .click(),
+    );
+    expect(mounted.container.textContent).not.toContain("Active command details");
+  });
+});
+
+describe("compact activity navigation", () => {
+  test("activity opens content, selected tab stays open, and queue hides activity navigation", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [fakeTurn()] })}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    const activity = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    await act(async () => activity.click());
+    expect(activity.getAttribute("aria-expanded")).toBe("true");
+    expect(mounted.container.textContent).toContain("Command body");
+    const tab = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("1 command"),
+    )!;
+    await act(async () => tab.click());
+    expect(tab.getAttribute("aria-expanded")).toBe("true");
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-queue"]')!
+        .click(),
+    );
+    expect(activity.getAttribute("aria-expanded")).toBe("false");
+    expect(mounted.container.textContent).not.toContain("Command body");
+  });
+  test("default command panel includes its navigation", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        defaultActive="commands"
+        queue={queue({ queue: [] })}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    expect(
+      mounted.container
+        .querySelector('[aria-label="Session activity"]')
+        ?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(mounted.container.textContent).toContain("Command body");
+  });
+});
+
+test("controlled compact command selection exposes activity navigation", async () => {
+  mounted = await renderComponent(
+    <SessionChrome
+      compact
+      active="commands"
+      queue={queue({ queue: [] })}
+      commandsCount={1}
+      commandsPanel={<div>Controlled command body</div>}
+    />,
+  );
+  expect(
+    mounted.container
+      .querySelector('[aria-label="Session activity"]')
+      ?.getAttribute("aria-expanded"),
+  ).toBe("true");
+  expect(mounted.container.textContent).toContain("Controlled command body");
+});
+
+test("a failed session blocks only active goal presentation", () => {
+  const continuation = goal().goal!.continuation;
+  const failedState = sessionChromeGoalPillState("active", continuation, "failed");
+  expect(sessionChromeGoalPillLabel(failedState, goal().goal)).toBe("Blocked by session failure");
+  expect(sessionChromeGoalPillExplanation(failedState, goal().goal)).toContain("Continue");
+  expect(sessionChromeGoalPillState("completed", continuation, "failed")).toBe("completed");
+  expect(sessionChromeGoalPillState("paused", continuation, "failed")).toBe("paused");
+  expect(sessionChromeGoalPillState("active", continuation, "idle")).toBe(
+    sessionChromeGoalPillState("active", continuation),
+  );
+});
+
+test("failed-session goal chip and panel explain the block without changing the goal", async () => {
+  const activeGoal = goal({
+    continuation: {
+      state: "scheduled",
+      reason: "wake_pending",
+      wakeRevision: 3,
+      observedRevision: 2,
+      nextAttemptAt: null,
+      lastError: null,
+    },
+  });
+  mounted = await renderComponent(
+    <SessionChrome
+      compact
+      sessionStatus="failed"
+      queue={queue({ queue: [] })}
+      goal={activeGoal}
+      defaultActive="goal"
+    />,
+  );
+  expect(mounted.container.textContent).toContain("Goal · Blocked by session failure");
+  expect(
+    mounted.container.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
+  ).toContain("use Continue or send a message");
+  expect(mounted.container.textContent).not.toContain("Waiting to continue automatically");
+  expect(activeGoal.goal?.status).toBe("active");
 });

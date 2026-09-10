@@ -88,6 +88,17 @@ config:
   OPENGENI_AUTH_ALLOW_METRICS: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
+  # Rolling-safe default. First deploy the compatible web handler, dedicated
+  # setup-account Ingress, and SPA query fallback everywhere. In a later
+  # release/config change, set this to "query" for mail-gateway-compatible
+  # invitation links. See docs/deployment.md before rollback.
+  OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment
+  # Query transport additionally requires a separately proven controller/edge
+  # error-log policy. Access-log and OpenTelemetry annotations do not sanitize
+  # ingress-nginx's error_log request line. Query mode also requires the chart's
+  # dedicated setupAccountIngress to remain enabled so the request cannot fall
+  # through the ordinarily logged/traced primary Ingress.
+  OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
   # Canonical organization-tenancy authority activation. Pinned to the
   # reversible pre-activation posture so an upgrade can never cross the one-way
   # boundary implicitly. Flip to "true" only after proving the preconditions in
@@ -120,13 +131,11 @@ config:
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
-# Digest-pinned Modal Computer/Browser box. Required when
-# config.OPENGENI_SANDBOX_BACKEND=modal and
-# OPENGENI_SANDBOX_DESKTOP_ENABLED=true. Overwrites
-# config.OPENGENI_MODAL_IMAGE_REF. Must be docker/desktop.Dockerfile,
-# never the official headless opengeni-sandbox image.
+# Digest-pinned Modal Computer/Browser box. Defaults to OpenGeni's public image
+# and overwrites config.OPENGENI_MODAL_IMAGE_REF. Override it with another image
+# built from docker/desktop.Dockerfile, never the headless opengeni-sandbox image.
 desktop:
-  imageRef: ""
+  imageRef: "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:c3bd17b8841de1bff9bb2777aad422cf8c75de78e2c30f9ac81d0cd6810a1b78"
 
 secret:
   create: false
@@ -756,8 +765,10 @@ migrations:
     # application username/password consumed by db:provision-roles. During a
     # role rotation, include old and new identities in the login list only for
     # drain detection; the exact application username/password names the sole
-    # target role provisioned after migration. Production must not reuse the
-    # runtime Secret here; API/worker receive only the restricted URL.
+    # target role provisioned after migration. Maintenance migrations 0402,
+    # 0403, and 0404 require this complete list even when MCP OAuth stays disabled.
+    # Production must not reuse the runtime Secret here; API/worker receive only
+    # the restricted URL.
     # Empty reuse is retained only for disposable conformance fixtures.
     existingSecret: ""
   # The pre-upgrade hook is the rollout gate: schema first, then exact runtime
@@ -1012,6 +1023,18 @@ ingress:
           pathType: Prefix
           service: api
   tls: []
+  # Managed invitation emails use a query bearer because mail security
+  # gateways may discard URL fragments. A separate exact route lets
+  # ingress-nginx disable access logs and request tracing while the first inline
+  # browser bootstrap rejects ambiguity and scrubs the URL. These annotations
+  # do not sanitize ingress-nginx error_log output; query activation separately
+  # requires proven controller/edge error-log handling. This map is for the
+  # required deployment-specific mitigation and other annotations.
+  setupAccountIngress:
+    # Required when setup email token transport is "query". Disabling this
+    # while query mode is selected aborts rendering with an operator error.
+    enabled: true
+    annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
   # (e.g. the preview environment, whose primary Ingress sits behind nginx

@@ -15,7 +15,16 @@ import {
 
 /** Events that change which Codex account a session runs on (or just ran). */
 export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type === "codex.account.switched";
+  return [
+    "codex.account.switched",
+    "codex.account.selection.changed",
+    "codex.capacity.waiting",
+    "codex.capacity.resumed",
+    "codex.capacity.superseded",
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+  ].includes(event.type);
 }
 
 /**
@@ -30,12 +39,16 @@ export type CodexAccountsClientLike = {
   getSession?: (
     workspaceId: string,
     sessionId: string,
-  ) => Promise<{ codexPinnedCredentialId?: string | null; codexLastCredentialId?: string | null }>;
+  ) => Promise<{
+    codexPinnedCredentialId?: string | null;
+    codexLastCredentialId?: string | null;
+    codexCurrentSelection?: { credentialId: string | null; waiting: boolean } | null;
+  }>;
   pinSessionCodexAccount?: (
     workspaceId: string,
     sessionId: string,
     target: string,
-  ) => Promise<{ pinned: string }>;
+  ) => Promise<{ pinned: string; appliedTo?: "waiting_turn" | "next_turn" }>;
   /** Optional (absent ⇒ the card hides live refresh): batched live /wham/usage refresh. */
   refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: Record<string, unknown> }>;
 };
@@ -55,8 +68,10 @@ export type UseCodexAccountsResult = {
   activeAccountId: string | null;
   /** The session's PINNED account (null ⇒ following workspace active). */
   pinnedAccountId: string | null;
-  /** The account the next turn will run on: pin > workspace active. */
+  /** Current preference only; automatic allocation can choose another account. */
   effectiveAccountId: string | null;
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
+  switchAppliedTo: "waiting_turn" | "next_turn" | null;
   /** The account the session's last turn ACTUALLY ran on (the "Running on:" source). */
   lastAccountId: string | null;
   settings: CodexRotationSettings;
@@ -85,6 +100,7 @@ const EMPTY_SETTINGS: CodexRotationSettings = {
 };
 
 type CodexAccountsState = {
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
   accounts: CodexAccount[];
   activeAccountId: string | null;
   settings: CodexRotationSettings;
@@ -93,6 +109,7 @@ type CodexAccountsState = {
 };
 
 const EMPTY_STATE: CodexAccountsState = {
+  currentSelection: null,
   accounts: [],
   activeAccountId: null,
   settings: EMPTY_SETTINGS,
@@ -121,6 +138,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
         : Promise.resolve(null);
     const [acc, session] = await Promise.all([accountsP, sessionP]);
     return {
+      currentSelection: session?.codexCurrentSelection ?? null,
       accounts: acc.accounts,
       activeAccountId: acc.activeAccountId,
       settings: acc.settings,
@@ -140,6 +158,10 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   const { run: runMutation, mutating: pinning, mutationError } = useMutationRunner();
   const { run: runUsageMutation, mutating: refreshingUsage } = useMutationRunner();
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
+  const [switchReceipt, setSwitchReceipt] = useState<{
+    sessionId: string;
+    appliedTo: "waiting_turn" | "next_turn";
+  } | null>(null);
 
   // Refresh only after the durable post-selection event. `turn.started` is
   // emitted before account selection settles and races this authoritative read.
@@ -161,8 +183,10 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
         return false;
       }
       setPinningTarget(target);
+      setSwitchReceipt(null);
       const result = await runMutation(async () => {
-        await codexClient.pinSessionCodexAccount!(workspaceId, sessionId, target);
+        const receipt = await codexClient.pinSessionCodexAccount!(workspaceId, sessionId, target);
+        setSwitchReceipt({ sessionId, appliedTo: receipt.appliedTo ?? "next_turn" });
         return true;
       });
       setPinningTarget(null);
@@ -191,6 +215,9 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   const effectiveAccountId = data.pinnedAccountId ?? data.activeAccountId;
 
   return {
+    currentSelection: data.currentSelection,
+    switchAppliedTo:
+      switchReceipt?.sessionId === sessionId ? (switchReceipt?.appliedTo ?? null) : null,
     accounts: data.accounts,
     activeAccountId: data.activeAccountId,
     pinnedAccountId: data.pinnedAccountId,

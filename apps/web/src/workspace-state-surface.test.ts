@@ -19,10 +19,10 @@ describe("Agent Knowledge surface", () => {
   });
 
   test("keeps the default page to four understandable destinations", async () => {
-    const [route, overview, preferences] = await Promise.all([
+    const [route, overview, skills] = await Promise.all([
       source("routes/workspace-state.tsx"),
       source("routes/agent-brain-overview.tsx"),
-      source("routes/preference-registry-admin.tsx"),
+      source("routes/skills-panel.tsx"),
     ]);
     for (const required of [
       "Agent Knowledge",
@@ -56,19 +56,19 @@ describe("Agent Knowledge surface", () => {
     }
     expect(overview).toContain('view="instructions"');
     expect(overview).toContain('view="skills"');
-    expect(route).toContain("compact");
-    expect(preferences).toContain("Add skill manually");
-    expect(preferences).toContain("Save skill");
-    expect(preferences).toContain("Skill instructions");
-    expect(preferences).toContain("SkillSummary");
+    expect(route).toContain("<SkillsPanel");
+    expect(route).not.toContain("PreferenceRegistryAdministration");
+    expect(skills).toContain("Save Skill");
+    expect(skills).toContain("SKILL.md");
+    expect(skills).toContain("personalWorkspace");
     expect(route).toContain("Your Agent Knowledge");
     expect(overview).toContain("Your personal workspace");
     expect(overview).toContain("Personal workspace instructions");
-    expect(preferences).toContain("Your personal Skills");
-    expect(preferences).toContain("Company and workspace Skills available here");
+    expect(skills).toContain('personalWorkspace ? "user" : "workspace"');
+    expect(skills).toContain('scope === "organization"');
   });
 
-  test("routes organization profile and learning autonomy to settings", async () => {
+  test("routes organization profile and instruction and Skill autonomy to settings", async () => {
     const [organization, shell, workspaceSettings, learning, memory] = await Promise.all([
       source("routes/org-settings.tsx"),
       source("components/settings/organization-settings-shell.tsx"),
@@ -83,9 +83,11 @@ describe("Agent Knowledge surface", () => {
     expect(organization).toContain("Organization identity");
     expect(organization).toContain("Open documents");
     expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
+    expect(workspaceSettings).toContain("resolveWorkspaceMemoryEnabled");
     expect(workspaceSettings).toContain("Let agents autonomously save and correct durable facts");
     expect(workspaceSettings).not.toContain("editable on Documents");
-    expect(learning).toContain("Learning & autonomy");
+    expect(learning).toContain("Workspace instruction &amp; Skill autonomy");
+    expect(learning).toContain("Require approval");
     expect(memory).toContain('preference: "Legacy preference"');
     expect(memory).toContain('procedural: "Legacy procedure"');
     expect(memory).toContain('episodic: "Incident or outcome"');
@@ -103,12 +105,15 @@ describe("Agent Knowledge surface", () => {
     expect(prompt).toContain("one-sentence always-visible summary");
     expect(prompt).toContain("necessary prerequisites, executable steps, verification");
     expect(prompt).toContain("Under Autonomous it may activate immediately");
-    expect(remember).toContain("use it instead for ordinary durable facts");
+    expect(prompt).toContain("discover the lazy skill_save tool");
+    expect(prompt).toContain("Require approval leaves it pending in the Skills editor");
+    expect(prompt).not.toContain("call remember with lane=preference");
+    expect(remember).toContain("use it for ordinary durable facts");
     expect(remember).toContain("independent of Learning mode");
     expect(remember).toContain("lane=knowledge only when memory_save is unavailable");
-    expect(remember).toContain("lane=preference creates a Skill");
+    expect(remember).toContain("Skills now use skill_save");
     expect(governance).toContain("Use this only for a minimal universal rule");
     expect(governance).toContain("Autonomous may activate an eligible proposal");
-    expect(governance).toContain("workspace Skill proposal");
+    expect(governance).toContain("Returns a redirect without writing");
   });
 });

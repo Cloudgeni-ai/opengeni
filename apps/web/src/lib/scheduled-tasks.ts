@@ -1,3 +1,4 @@
+import type { OpenGeniClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
   ReasoningEffort,
@@ -719,4 +720,21 @@ export function knowledgeSyncSourceLabel(action: KnowledgeSyncAction): string {
   const provider = (action.connection as { providerDomain?: string } | undefined)?.providerDomain;
   const reach = action.allDescendants ? "with descendants" : "selected only";
   return [scope, provider, reach].filter((part) => Boolean(part)).join(" · ");
+}
+
+/** Fetch every matching schedule without truncating the session navigation at one page. */
+export async function loadSessionSchedules(
+  client: Pick<OpenGeniClient, "listScheduledTasks">,
+  workspaceId: string,
+  sessionId: string,
+): Promise<ScheduledTask[]> {
+  const tasks = new Map<string, ScheduledTask>();
+  const limit = 100;
+  let offset = 0;
+  while (true) {
+    const page = await client.listScheduledTasks(workspaceId, { sessionId, limit, offset });
+    for (const task of page) tasks.set(task.id, task);
+    if (page.length < limit) return [...tasks.values()];
+    offset += page.length;
+  }
 }

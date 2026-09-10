@@ -75,6 +75,7 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  crossTabReloadStartedAt?: number;
   acceptedRequestTerminals: Array<{
     observedAt: number;
     pathnameAndSearch: string;
@@ -313,6 +314,7 @@ type ActorMutationAcceptance = {
 };
 
 type BrowserRequestFailureInput = {
+  crossTabReloadStartedAt?: number | undefined;
   acceptedActorTransitions?: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
   dispatchPhase: string;
@@ -406,6 +408,10 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     (pathname === "/v1/auth/get-session" ||
       pathname === "/v1/auth/session-set" ||
       pathname === "/v1/workspaces" ||
+      (pathname === "/v1/billing" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+          requestUrl.searchParams.get("accountId") ?? "",
+        )) ||
       pathname.startsWith("/v1/workspaces/"));
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
@@ -418,6 +424,31 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     allowedDispatchPhases?.has(input.dispatchPhase) === true;
   const startedAt = input.startedAt;
   const failedAt = input.failedAt;
+  const reloadStartedAt = input.crossTabReloadStartedAt;
+  const isExpectedNeutralRaceReloadCancellation =
+    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) &&
+    input.method === "GET" &&
+    pathname === "/v1/auth/session-set" &&
+    input.actorEpoch === null &&
+    input.sessionSetAuthorityHash !== null &&
+    input.dispatchPhase === "cross-tab-select-race" &&
+    input.responsePhase === "cross-tab-select-race" &&
+    typeof startedAt === "number" &&
+    typeof failedAt === "number" &&
+    typeof reloadStartedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    Number.isFinite(failedAt) &&
+    Number.isFinite(reloadStartedAt) &&
+    failedAt >= reloadStartedAt &&
+    failedAt - reloadStartedAt <= 10_000 &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/select" &&
+        transition.actorEpoch !== null &&
+        transition.sessionSetAuthorityHash === input.sessionSetAuthorityHash &&
+        startedAt <= transition.acceptedAt &&
+        transition.acceptedAt <= reloadStartedAt,
+    ) === true;
   const isAcceptedActorTransitionCancellation =
     isCancellation &&
     isActorOwnedRead &&
@@ -492,6 +523,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     /^\/assets\/realtime-[A-Za-z0-9_-]+\.js$/u.test(pathname);
   if (
     isExpectedScopedActorReadCancellation ||
+    isExpectedNeutralRaceReloadCancellation ||
     isAcceptedActorTransitionCancellation ||
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
@@ -993,6 +1025,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     const check = (async () => {
       const problem = requestFailureProblem({
+        crossTabReloadStartedAt: problems.crossTabReloadStartedAt,
         acceptedActorTransitions: actorMutationAcceptances,
         actorEpoch: dispatch?.actorEpoch ?? null,
         dispatchPhase: dispatch?.phase ?? "unknown",
@@ -1611,6 +1644,7 @@ async function expectAndConsumeActorTransitionResponse(
     status: number;
     statusLabel: string;
     allowedConsoleErrors?: readonly string[];
+    allowedPageErrors?: readonly string[] | (() => string[]);
     workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
@@ -1685,7 +1719,92 @@ async function expectAndConsumeActorTransitionResponse(
     [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
+  consumeAllowedPageErrors(problems, input.allowedPageErrors);
   problems.actorTransitionResponses.splice(0);
+}
+
+function isFirefoxNativeAbortPageError(message: string, phase: string): boolean {
+  // Firefox reports the native AbortError as a pageerror when the live-events
+  // stream is torn down by a raced actor change. Chromium reports the same
+  // expected abort as `net::ERR_CONNECTION_RESET` on that stream. Gecko's
+  // DOMException message includes a trailing space in some versions.
+  return (
+    message === `[${phase}] The operation was aborted.` ||
+    message === `[${phase}] The operation was aborted. `
+  );
+}
+
+function consumeAllowedPageErrors(
+  problems: Pick<BrowserProblems, "pageErrors" | "pageErrorEvidence">,
+  allowed: readonly string[] | (() => string[]) | undefined,
+): void {
+  if (allowed === undefined) return;
+  const allowedMessages = [...(typeof allowed === "function" ? allowed() : allowed)];
+  if (allowedMessages.length === 0) return;
+  // Identical abort strings are not a set: one allowlisted copy removes one
+  // ledger entry from each array independently. A second same-phase abort
+  // stays red unless the validated race produced a second expected count.
+  const remainingPageErrors = [...allowedMessages];
+  problems.pageErrors = problems.pageErrors.filter((message) => {
+    const index = remainingPageErrors.indexOf(message);
+    if (index === -1) return true;
+    remainingPageErrors.splice(index, 1);
+    return false;
+  });
+  const remainingEvidence = [...allowedMessages];
+  problems.pageErrorEvidence = problems.pageErrorEvidence.filter((evidence) => {
+    const index = remainingEvidence.indexOf(evidence.message);
+    if (index === -1) return true;
+    remainingEvidence.splice(index, 1);
+    return false;
+  });
+}
+
+function firefoxLiveEventsAbortPageErrorsForValidatedRace(
+  problems: Pick<
+    BrowserProblems,
+    "acceptedRequestTerminals" | "actorTransitionResponses" | "pageErrorEvidence"
+  >,
+  input: {
+    acceptedAt: number;
+    pathname: string;
+    phase: string;
+    settledAt: number;
+  },
+): string[] {
+  // Firefox's pageerror is the generic AbortError text with no URL. Correlate
+  // by the validated old-workspace live-events stream race (exact pathname 409
+  // or, if that 409 never landed, one same-phase request terminal) and consume
+  // only that many matching pageerrors inside the acceptance window.
+  const matchingResponses = problems.actorTransitionResponses.filter(
+    (response) => response.pathname === input.pathname,
+  );
+  const matchingTerminals = problems.acceptedRequestTerminals.filter(
+    (terminal) =>
+      terminal.responsePhase === input.phase &&
+      (terminal.pathnameAndSearch === input.pathname ||
+        terminal.pathnameAndSearch.startsWith(`${input.pathname}?`)),
+  );
+  const expectedCount =
+    matchingResponses.length > 0 ? matchingResponses.length : matchingTerminals.length > 0 ? 1 : 0;
+  if (expectedCount === 0) return [];
+  const windowStart = Math.min(
+    ...[
+      input.acceptedAt,
+      ...matchingResponses.map((response) => response.startedAt),
+      ...matchingTerminals.map((terminal) => terminal.observedAt),
+    ].filter((value) => Number.isFinite(value)),
+  );
+  const windowEnd = input.settledAt + 1_000;
+  return problems.pageErrorEvidence
+    .filter(
+      (evidence) =>
+        isFirefoxNativeAbortPageError(evidence.message, input.phase) &&
+        evidence.observedAt >= windowStart &&
+        evidence.observedAt <= windowEnd,
+    )
+    .slice(0, expectedCount)
+    .map((evidence) => evidence.message);
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -1859,6 +1978,8 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     }
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    await page.getByRole("button", { name: "Skip for now" }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
       { timeout: 30_000 },
@@ -2136,45 +2257,60 @@ async function selectAccount(
   current: AccountFixture,
   target: AccountFixture,
 ): Promise<void> {
-  let lastGestureError: unknown;
-  let clicked = false;
-  for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
+  const targetWorkspace = new RegExp(`/workspaces/${target.workspaceId}(?:/|$)`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const targetTriggerVisible = await accountMenuTrigger(page, target.displayName)
+      .isVisible()
+      .catch(() => false);
+    if (targetTriggerVisible && targetWorkspace.test(page.url())) return;
+    if (targetTriggerVisible) {
+      try {
+        await page.waitForURL(targetWorkspace, { timeout: 12_000 });
+        return;
+      } catch (error) {
+        lastError = error;
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(150);
+        continue;
+      }
+    }
+    let clicked = false;
     try {
       const menu = await openAccountMenu(page, current.displayName);
       const slot = menu.getByRole("menuitem", {
         name: new RegExp(target.displayName),
       });
       await slot.hover({ timeout: 5_000 });
+      // Current-slot "Use this account" is disabled. Clicking `.last()` can
+      // hit that inert item when WebKit keeps a previous submenu mounted.
       await page
-        .getByRole("menuitem", { name: "Use this account" })
-        .last()
+        .getByRole("menuitem", { name: "Use this account", disabled: false })
         .click({ timeout: 5_000 });
       clicked = true;
     } catch (error) {
-      lastGestureError = error;
+      lastError = error;
       await page.keyboard.press("Escape").catch(() => undefined);
       await page.waitForTimeout(100);
     }
+    if (!clicked) continue;
+    try {
+      await Promise.all([
+        accountMenuTrigger(page, target.displayName).waitFor({ timeout: 12_000 }),
+        page.waitForURL(targetWorkspace, { timeout: 12_000 }),
+      ]);
+      return;
+    } catch (error) {
+      lastError = error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(150);
+    }
   }
-  if (!clicked) {
-    throw new Error(`account selection gesture did not settle for ${target.displayName}`, {
-      cause: lastGestureError,
-    });
-  }
-  try {
-    await Promise.all([
-      accountMenuTrigger(page, target.displayName).waitFor({ timeout: 30_000 }),
-      page.waitForURL(new RegExp(`/workspaces/${target.workspaceId}(?:/|$)`), {
-        timeout: 30_000,
-      }),
-    ]);
-  } catch (error) {
-    const projection = await sessionSet(page);
-    throw new Error(
-      `account selection did not reach ${target.displayName}: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName ?? null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
-      { cause: error },
-    );
-  }
+  const projection = await sessionSet(page);
+  throw new Error(
+    `account selection did not reach ${target.displayName}: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName ?? null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
+    { cause: lastError },
+  );
 }
 
 async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> {
@@ -2672,6 +2808,43 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("neutral race cancellations require the exact accepted select and explicit reload window", () => {
+    const input: BrowserRequestFailureInput = {
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      failure: "NS_BINDING_ABORTED",
+      method: "GET",
+      url: `${publicOrigin}/v1/auth/session-set`,
+      sessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      failedAt: 400,
+      crossTabReloadStartedAt: 300,
+      acceptedActorTransitions: [
+        {
+          path: "/v1/auth/session-set/select",
+          actorEpoch: "new",
+          sessionSetAuthorityHash: "a".repeat(64),
+          acceptedAt: 200,
+        },
+      ],
+    };
+    expect(requestFailureProblem(input)).toBeNull();
+    for (const changed of [
+      { failure: "NS_ERROR_NET_RESET" },
+      { method: "POST" },
+      { sessionSetAuthorityHash: null },
+      { crossTabReloadStartedAt: undefined },
+      { crossTabReloadStartedAt: 500 },
+      { startedAt: 250 },
+      { failedAt: 20_000 },
+      { acceptedActorTransitions: [] },
+      { responsePhase: "settled" },
+      { sessionSetAuthorityHash: "b".repeat(64) },
+    ])
+      expect(requestFailureProblem({ ...input, ...changed })).not.toBeNull();
+  });
+
   test("the strict browser ledger only permits scoped old-actor read cancellations", () => {
     const oldActorRead = {
       actorEpoch: "old-actor-epoch",
@@ -2683,6 +2856,26 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const billingRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
+    };
+    expect(requestFailureProblem(billingRead)).toBeNull();
+    expect(requestFailureProblem({ ...billingRead, method: "POST" })).toContain("POST");
+    expect(requestFailureProblem({ ...billingRead, actorEpoch: null })).toContain("actor=missing");
+    expect(requestFailureProblem({ ...billingRead, url: `${publicOrigin}/v1/billing` })).toContain(
+      "/v1/billing",
+    );
+    expect(
+      requestFailureProblem({
+        ...billingRead,
+        dispatchPhase: "initialization",
+        responsePhase: "initialization",
+      }),
+    ).toContain("/v1/billing");
+    expect(requestFailureProblem({ ...billingRead, failure: "NS_ERROR_NET_RESET" })).toContain(
+      "/v1/billing",
+    );
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
@@ -3565,6 +3758,131 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(false);
   });
 
+  test("the strict browser ledger consumes Firefox's native live-events abort pageerror", () => {
+    const phase = "cross-tab-select-race";
+    const liveEventsPath = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const trailingAbort = `[${phase}] The operation was aborted. `;
+    const canonicalAbort = `[${phase}] The operation was aborted.`;
+    const unrelated = `[${phase}] TypeError: unexpected`;
+    const laterPhaseAbort = `[late-old-epoch-setup-beta-to-alpha] The operation was aborted. `;
+    expect(isFirefoxNativeAbortPageError(trailingAbort, phase)).toBe(true);
+    expect(isFirefoxNativeAbortPageError(canonicalAbort, phase)).toBe(true);
+    expect(isFirefoxNativeAbortPageError(unrelated, phase)).toBe(false);
+    expect(isFirefoxNativeAbortPageError(laterPhaseAbort, phase)).toBe(false);
+
+    const acceptedAt = 100;
+    const settledAt = 200;
+    const inWindow = 150;
+    const outsideWindow = settledAt + 1_000 + 1;
+    const matchingLiveEventsResponse = {
+      actorEpoch: "epoch-a",
+      dispatchPhase: phase,
+      endedAt: 180,
+      method: "GET",
+      pathname: liveEventsPath,
+      request: {},
+      responsePhase: phase,
+      startedAt: 90,
+      status: 409,
+    };
+    const matchingSessionsResponse = {
+      ...matchingLiveEventsResponse,
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
+    };
+
+    const problems = {
+      acceptedRequestTerminals: [] as BrowserProblems["acceptedRequestTerminals"],
+      actorTransitionResponses: [matchingLiveEventsResponse, matchingSessionsResponse],
+      pageErrors: [trailingAbort, unrelated, canonicalAbort, laterPhaseAbort, trailingAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: unrelated, observedAt: inWindow + 1 },
+        { message: canonicalAbort, observedAt: inWindow + 2 },
+        { message: laterPhaseAbort, observedAt: inWindow + 3 },
+        { message: trailingAbort, observedAt: outsideWindow },
+      ],
+    };
+    consumeAllowedPageErrors(problems, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(problems, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(problems.pageErrors).toEqual([
+      unrelated,
+      canonicalAbort,
+      laterPhaseAbort,
+      trailingAbort,
+    ]);
+    expect(problems.pageErrorEvidence).toEqual([
+      { message: unrelated, observedAt: inWindow + 1 },
+      { message: canonicalAbort, observedAt: inWindow + 2 },
+      { message: laterPhaseAbort, observedAt: inWindow + 3 },
+      { message: trailingAbort, observedAt: outsideWindow },
+    ]);
+
+    const noRace = {
+      acceptedRequestTerminals: [] as BrowserProblems["acceptedRequestTerminals"],
+      actorTransitionResponses: [matchingSessionsResponse],
+      pageErrors: [trailingAbort],
+      pageErrorEvidence: [{ message: trailingAbort, observedAt: inWindow }],
+    };
+    consumeAllowedPageErrors(noRace, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(noRace, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(noRace.pageErrors).toEqual([trailingAbort]);
+    expect(noRace.pageErrorEvidence).toEqual([{ message: trailingAbort, observedAt: inWindow }]);
+
+    const terminalOnly = {
+      acceptedRequestTerminals: [
+        {
+          observedAt: inWindow,
+          pathnameAndSearch: `${liveEventsPath}?transport=http1`,
+          responsePhase: phase,
+          terminal: "failed" as const,
+        },
+      ],
+      actorTransitionResponses: [] as BrowserProblems["actorTransitionResponses"],
+      pageErrors: [trailingAbort, canonicalAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: canonicalAbort, observedAt: inWindow + 1 },
+      ],
+    };
+    consumeAllowedPageErrors(terminalOnly, () =>
+      firefoxLiveEventsAbortPageErrorsForValidatedRace(terminalOnly, {
+        acceptedAt,
+        pathname: liveEventsPath,
+        phase,
+        settledAt,
+      }),
+    );
+    expect(terminalOnly.pageErrors).toEqual([canonicalAbort]);
+    expect(terminalOnly.pageErrorEvidence).toEqual([
+      { message: canonicalAbort, observedAt: inWindow + 1 },
+    ]);
+
+    const duplicate = {
+      pageErrors: [trailingAbort, trailingAbort],
+      pageErrorEvidence: [
+        { message: trailingAbort, observedAt: inWindow },
+        { message: trailingAbort, observedAt: inWindow + 1 },
+      ],
+    };
+    consumeAllowedPageErrors(duplicate, [trailingAbort]);
+    expect(duplicate.pageErrors).toEqual([trailingAbort]);
+    expect(duplicate.pageErrorEvidence).toEqual([
+      { message: trailingAbort, observedAt: inWindow + 1 },
+    ]);
+  });
+
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
     expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
@@ -3838,6 +4156,8 @@ describe("provider-neutral browser account acceptance", () => {
         raceSelect(secondTab, tabProjection, betaSlot.id),
       ]);
       expect(raced.sort()).toEqual([200, 409]);
+      pageProblems.crossTabReloadStartedAt = performance.now();
+      secondTabProblems.crossTabReloadStartedAt = pageProblems.crossTabReloadStartedAt;
       await Promise.all([
         page.reload({ waitUntil: "domcontentloaded" }),
         secondTab.reload({ waitUntil: "domcontentloaded" }),
@@ -3881,6 +4201,16 @@ describe("provider-neutral browser account acceptance", () => {
                   `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
                 ]
               : [],
+          allowedPageErrors:
+            engine === "firefox"
+              ? () =>
+                  firefoxLiveEventsAbortPageErrorsForValidatedRace(observedProblems, {
+                    acceptedAt: racedSelectAcceptedAt,
+                    pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                    phase: "cross-tab-select-race",
+                    settledAt: racedSelectionSettledAt,
+                  })
+              : undefined,
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
@@ -3993,6 +4323,11 @@ describe("provider-neutral browser account acceptance", () => {
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${alpha.workspaceId}/sessions/${beta.sessionId}`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          // As on the full-document slot-revocation transition below, development
+          // StrictMode can mount these bounded reads twice. Only these exact
+          // post-selection fail-closed endpoints get the second receipt budget.
+          `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
         ],
         engine === "chromium" || engine === "webkit"
@@ -4021,6 +4356,21 @@ describe("provider-neutral browser account acceptance", () => {
         replacementStartedAt: slotRevocationReloadStartedAt,
         workspaceId: beta.workspaceId,
       });
+      // A replacement document and a later re-authentication are separate
+      // mounts. Consume the exact denied metadata reads from the reload now,
+      // rather than accumulating both transitions in one allowance window.
+      await expectAndConsumeConsoleErrors(
+        page,
+        pageProblems,
+        [
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+        ],
+        [],
+      );
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -4041,6 +4391,14 @@ describe("provider-neutral browser account acceptance", () => {
         [
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          // WebKit can restore page visibility after closing the popup as well
+          // as remounting the actor. useSessionCapabilities renegotiates once
+          // on that page-live transition. Budget only this exact denied read.
+          ...(engine === "webkit"
+            ? [
+                `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+              ]
+            : []),
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,

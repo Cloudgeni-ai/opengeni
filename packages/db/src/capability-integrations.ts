@@ -176,6 +176,8 @@ export type ApiIntegrationRuntime = {
   providerDomain: string;
   authScheme: Record<string, unknown>;
   connectionRef: McpServerConnectionRef | null;
+  /** Live credential authority revision used to invalidate stale human approvals. */
+  connectionAuthorityGeneration: number | null;
   allowedTools: string[];
   requireApproval: true | string[];
   revision: StoredApiIntegrationRevision;
@@ -843,6 +845,7 @@ export async function listInstalledApiIntegrationsInRlsContext(
       runtimeKey: schema.integrationFacetBindings.runtimeKey,
       bindingConfig: schema.integrationFacetBindings.config,
       connectionId: schema.integrationFacetBindings.connectionId,
+      connectionAuthorityGeneration: schema.connections.authorityGeneration,
       revision: schema.integrationSpecRevisions.spec,
     })
     .from(schema.integrationFacetBindings)
@@ -889,6 +892,10 @@ export async function listInstalledApiIntegrationsInRlsContext(
         eq(schema.integrationSpecRevisions.apiFacetId, schema.capabilityApiFacets.facetId),
         eq(schema.integrationSpecRevisions.status, "active"),
       ),
+    )
+    .leftJoin(
+      schema.connections,
+      eq(schema.connections.id, schema.integrationFacetBindings.connectionId),
     )
     .where(
       and(
@@ -998,6 +1005,7 @@ export async function listInstalledApiIntegrationsInRlsContext(
         providerDomain: row.providerDomain,
         authScheme: objectValue(row.authScheme),
         connectionRef,
+        connectionAuthorityGeneration: row.connectionAuthorityGeneration,
         allowedTools,
         requireApproval,
         revision,

@@ -202,7 +202,9 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
   return (
     pathname === "/v1/config/client" ||
     pathname === "/v1/auth/get-session" ||
-    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname)
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname) ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft)$/u.test(pathname) ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname)
   );
 }
 
@@ -222,6 +224,13 @@ async function expectNoAxeViolations(page: Page, include = "body"): Promise<void
     .include(include)
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  if (report.violations.length) {
+    await writeFile(
+      `${EVIDENCE_DIR}/contrast-failure.json`,
+      JSON.stringify(report.violations, null, 2),
+    );
+    await page.screenshot({ path: `${EVIDENCE_DIR}/contrast-failure.png` });
+  }
   expect(
     report.violations.map((violation) => ({
       id: violation.id,
@@ -229,6 +238,35 @@ async function expectNoAxeViolations(page: Page, include = "body"): Promise<void
       nodes: violation.nodes.map((node) => node.target),
     })),
   ).toEqual([]);
+}
+
+async function settleDocumentAnimations(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const nextFrame = async () =>
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    for (let pass = 0; pass < 8; pass += 1) {
+      await nextFrame();
+      const running = document
+        .getAnimations()
+        .filter((animation) => animation.playState === "running");
+      if (running.length > 0) {
+        await Promise.all(
+          running.map(async (animation) => {
+            try {
+              await animation.finished;
+            } catch {
+              // A replaced animation is already settled for this visual gate.
+            }
+          }),
+        );
+        continue;
+      }
+      await nextFrame();
+      await nextFrame();
+      if (document.getAnimations().every((animation) => animation.playState !== "running")) return;
+    }
+    throw new Error("document animations did not settle");
+  });
 }
 
 async function cookieHeader(context: BrowserContext): Promise<string> {
@@ -269,8 +307,9 @@ function firstUrl(message: CapturedManagedEmail): string {
 
 function setupToken(message: CapturedManagedEmail): string {
   const url = new URL(firstUrl(message));
-  const token = new URLSearchParams(url.hash.slice(1)).get("token");
-  if (!token) throw new Error("organization setup URL did not contain a fragment token");
+  const token =
+    url.searchParams.get("token") ?? new URLSearchParams(url.hash.slice(1)).get("token");
+  if (!token) throw new Error("organization setup URL did not contain a token");
   return token;
 }
 
@@ -354,6 +393,8 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
+    organizationUserSetupEmailTokenTransport: "query",
+    organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
   });
   const api = createApp({
@@ -446,6 +487,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await page.getByRole("button", { name: "Create organization" }).click();
     expect((await setupSettled).ok()).toBe(true);
+    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
+    expect(await page.getByLabel("Organization name").count()).toBe(0);
+    await page.getByRole("button", { name: "Skip for now" }).click();
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);
@@ -629,7 +673,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.goto(firstUrl(setupEmail), {
       waitUntil: "domcontentloaded",
     });
-    await setupPage.getByRole("heading", { name: "Set up your account" }).waitFor();
+    await setupPage.getByRole("heading", { name: "Join Onboarding Greenfield Org" }).waitFor();
     let observedSetupCopy = "";
     await waitFor(
       async () => {
@@ -671,7 +715,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.getByLabel("Your name").fill("Onboarding Invited");
     await setupPage.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await setupPage.getByLabel("Confirm password").fill(PASSWORD);
-    await setupPage.getByRole("button", { name: "Create account" }).click();
+    await setupPage.getByRole("button", { name: "Create account and join" }).click();
     await setupPage
       .getByText("Your email is verified and your organization access is ready.")
       .waitFor();
@@ -764,6 +808,30 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     });
     expect(changedCompletionReplay.status).toBe(409);
 
+    // Real member journey must not make admin-only fleet/connection reads.
+    const deniedReads: string[] = [];
+    setupPage.on("response", (response) => {
+      if (response.status() === 403) deniedReads.push(new URL(response.url()).pathname);
+    });
+    await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/sessions`);
+    await setupPage.getByRole("heading", { name: "What should the agent do?" }).waitFor();
+
+    expect(await setupPage.locator("body").textContent()).not.toContain(
+      "GitHub account is unavailable",
+    );
+    expect(await setupPage.locator("body").textContent()).not.toContain(
+      "Couldn't load your connected machines",
+    );
+    await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/machines`);
+    await setupPage
+      .getByText("Machines are managed by your workspace admin", { exact: true })
+      .waitFor();
+    expect(await setupPage.getByRole("button", { name: /Connect a machine/ }).count()).toBe(0);
+    expect(deniedReads).toEqual([]);
+    await setupPage.screenshot({
+      path: `${EVIDENCE_DIR}/member-machines-restricted.png`,
+      fullPage: true,
+    });
     expectNoBrowserProblems(ownerProblems);
     expectNoBrowserProblems(setupProblems);
     expect(transport.size()).toBeLessThanOrEqual(80);
@@ -1013,6 +1081,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       },
     );
     expect(alternateInvite.targetEmail).toBe(registeredEmail);
+    const registeredInvitationEmails = [
+      await takeEmail("organization_user_setup", registeredEmail),
+      await takeEmail("organization_user_setup", registeredEmail),
+    ];
+    const alternateSetupEmail = registeredInvitationEmails.find((message) =>
+      message.text.includes("Onboarding Alternate Org"),
+    );
+    if (!alternateSetupEmail) throw new Error("alternate invitation email was not captured");
     await registeredPage.reload({ waitUntil: "domcontentloaded" });
     await registeredPage.getByRole("heading", { name: "Invitation pending" }).waitFor();
     await registeredPage.getByText("Onboarding Greenfield Org").waitFor();
@@ -1045,21 +1121,73 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       organizationId: alternateOrganizationId,
       status: "pending",
     });
+    await alternatePage.goto(firstUrl(alternateSetupEmail), { waitUntil: "domcontentloaded" });
+    await alternatePage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
+    await alternatePage.getByRole("link", { name: `Sign in as ${registeredEmail}` }).click();
+    await alternatePage
+      .getByRole("heading", { name: `This invitation is for ${registeredEmail}` })
+      .waitFor();
+    await alternatePage.getByText(`You're signed in as ${alternateOwnerEmail}`).waitFor();
+    await alternatePage.getByRole("button", { name: "Switch account" }).click();
+    await alternatePage.getByRole("heading", { name: "Sign in" }).waitFor();
+    const invitedEmailInput = alternatePage.getByLabel("Email");
+    expect(await invitedEmailInput.inputValue()).toBe(registeredEmail);
+    expect(await invitedEmailInput.isEditable()).toBe(false);
+    await alternatePage.getByLabel("Password").fill(PASSWORD);
+    await alternatePage.getByRole("button", { name: "Sign in", exact: true }).last().click();
+    await alternatePage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
+    await alternatePage
+      .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
+      .waitFor();
+    await settleDocumentAnimations(alternatePage);
+    await expectNoAxeViolations(alternatePage, "body");
+    await alternatePage.screenshot({
+      path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
+      fullPage: true,
+    });
+    await alternatePage
+      .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
+      .click();
+    await alternatePage.getByRole("button", { name: "Account menu" }).waitFor();
+    const resignedCookie = await cookieHeader(alternateContext);
+    const joinedMemberships = await sdk(resignedCookie).listOrganizationMemberships();
+    expect(joinedMemberships.memberships).toHaveLength(2);
+    expect(joinedMemberships.memberships.map((membership) => membership.organizationId)).toEqual(
+      expect.arrayContaining([organizationId, alternateOrganizationId]),
+    );
+    const acceptedInvitationHistory = await sdk(resignedCookie).listOrganizationInvitations({
+      limit: 20,
+    });
+    expect(
+      acceptedInvitationHistory.invitations.find(
+        (invitation) => invitation.id === alternateInvite.id,
+      ),
+    ).toMatchObject({
+      organizationId: alternateOrganizationId,
+      status: "accepted",
+    });
     expectNoBrowserProblems(alternateProblems);
     await alternateContext.close();
 
-    const forget = await fetch(`${publicOrigin}/v1/auth/request-password-reset`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        email: registeredEmail,
-        redirectTo: "/reset-password",
-      }),
+    const resetRequestContext = await browser.newContext();
+    const resetRequestPage = await resetRequestContext.newPage();
+    await resetRequestPage.goto(publicOrigin);
+    await resetRequestPage.getByRole("button", { name: "Forgot password?" }).click();
+    await resetRequestPage.getByLabel("Email", { exact: true }).fill(registeredEmail);
+    expect(await resetRequestPage.getByLabel("Password", { exact: true }).count()).toBe(0);
+    await resetRequestPage.getByRole("button", { name: "Send reset link", exact: true }).click();
+    await resetRequestPage.getByText("If this email has an account,", { exact: false }).waitFor();
+    await expectNoAxeViolations(resetRequestPage, "body");
+    await resetRequestPage.screenshot({
+      path: `${EVIDENCE_DIR}/password-reset-request.png`,
+      fullPage: true,
     });
-    expect(forget.status).toBe(200);
+    await resetRequestContext.close();
     const resetEmail = await takeEmail("password_reset", registeredEmail);
     const resetUrl = new URL(firstUrl(resetEmail));
     expect(resetUrl.pathname.startsWith("/v1/auth/reset-password/")).toBe(true);
+    // Stop authenticated background reads before removing their credentials.
+    await registeredPage.goto("about:blank");
     await registeredContext.clearCookies();
     await registeredPage.goto(resetUrl.toString(), {
       waitUntil: "domcontentloaded",
@@ -1194,6 +1322,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
             "onboarding-owner-desktop-1440.png",
             "onboarding-setup-mobile-390.png",
             "onboarding-registered-mobile-320.png",
+            "onboarding-existing-account-invitations-desktop-1024.png",
           ],
         },
         null,

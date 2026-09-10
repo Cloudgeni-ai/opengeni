@@ -123,9 +123,13 @@ function usePrivateForkCapability(options: {
 export function SessionTenancyRouteControl({
   session,
   events,
+  sourceEventId,
+  onForkClose,
 }: {
   session: Session;
   events: SessionEvent[];
+  sourceEventId?: string;
+  onForkClose?: () => void;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -150,6 +154,8 @@ export function SessionTenancyRouteControl({
       key={`${context.accessContext.subjectId}:${transition.revision}:${session.workspaceId}:${session.id}`}
       session={session}
       events={events}
+      sourceEventId={sourceEventId}
+      onForkClose={onForkClose}
       client={context.client}
       managedSession={managedSession}
       canForkPrivately={canForkPrivately}
@@ -174,6 +180,8 @@ export function SessionTenancyRouteControl({
 }
 
 export function SessionTenancyControl({
+  sourceEventId,
+  onForkClose,
   session,
   events,
   client,
@@ -188,6 +196,8 @@ export function SessionTenancyControl({
 }: {
   session: Session;
   events?: SessionEvent[] | undefined;
+  sourceEventId?: string | undefined;
+  onForkClose?: (() => void) | undefined;
   client: OpenGeniBrowserClient;
   managedSession: boolean;
   /** False also covers "not yet known": a private fork is never offered on a
@@ -214,7 +224,16 @@ export function SessionTenancyControl({
   const pendingVisibility = operationSnapshot.visibility;
   const pendingFork = operationSnapshot.fork;
   const [override, setOverride] = useState(session.tenancy);
-  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(() =>
+    sourceEventId
+      ? {
+          kind: "fork",
+          visibility:
+            operationSnapshot.fork?.visibility ??
+            (canForkPrivately ? (session.tenancy?.visibility ?? "workspace") : "workspace"),
+        }
+      : null,
+  );
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -232,8 +251,8 @@ export function SessionTenancyControl({
     operationSequenceRef.current += 1;
     setBusy(false);
     setFailure(null);
-    setConfirmation(null);
-  }, [session.id, session.workspaceId]);
+    if (!sourceEventId) setConfirmation(null);
+  }, [session.id, session.workspaceId, sourceEventId]);
 
   useEffect(() => {
     if (!session.tenancy) {
@@ -486,6 +505,12 @@ export function SessionTenancyControl({
   const forkSession = useCallback(
     async (visibility: SessionVisibility): Promise<boolean> => {
       if (!displayedTenancy || !mayFork) return true;
+      if (sourceEventId && pendingFork && pendingFork.sourceEventId !== sourceEventId) {
+        setFailure(
+          "A previous fork still needs a retry. Resolve it from the session menu before choosing another message.",
+        );
+        return false;
+      }
       const acceptedTransition = captureWorkspaceInvocation(target.workspaceId);
       if (!acceptedTransition) return true;
       const operationSequence = operationSequenceRef.current + 1;
@@ -494,7 +519,7 @@ export function SessionTenancyControl({
         displayedTenancy.visibility === "private" && visibility === "workspace";
       const attempt = operationController.prepareFork(
         operationScope,
-        { visibility, workspaceSharedAcknowledged },
+        { visibility, workspaceSharedAcknowledged, ...(sourceEventId ? { sourceEventId } : {}) },
         () => crypto.randomUUID(),
       );
       setBusy(true);
@@ -505,6 +530,7 @@ export function SessionTenancyControl({
           isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
           request: async () =>
             await client.forkSession(target.workspaceId, target.sessionId, {
+              ...(attempt.sourceEventId ? { sourceEventId: attempt.sourceEventId } : {}),
               visibility: attempt.visibility,
               workspaceSharedAcknowledged: attempt.workspaceSharedAcknowledged,
               idempotencyKey: attempt.idempotencyKey,
@@ -545,9 +571,13 @@ export function SessionTenancyControl({
           classified.retainAttempt ||
           (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
         if (!retainAttempt) operationController.settleFork(operationScope, attempt);
-        setFailure(classified.message);
-        setAnnouncement(classified.message);
-        return !retainAttempt;
+        const message =
+          sourceEventId && isApiErrorStatus(error, 400)
+            ? "This message cannot be used as a fork point. Its history may have been compacted, or it may not have a unique, complete saved boundary. Choose another message or fork the whole session."
+            : classified.message;
+        setFailure(message);
+        setAnnouncement(message);
+        return sourceEventId ? false : !retainAttempt;
       } finally {
         if (isCurrentInvocation(target, acceptedTransition, operationSequence)) setBusy(false);
       }
@@ -558,6 +588,8 @@ export function SessionTenancyControl({
       displayedTenancy,
       isCurrentInvocation,
       mayFork,
+      sourceEventId,
+      pendingFork,
       onOpenSession,
       operationController,
       operationScope,
@@ -603,7 +635,10 @@ export function SessionTenancyControl({
 
   return (
     <TooltipProvider delayDuration={300}>
-      <section aria-label="Session access" className="flex shrink-0 items-center">
+      <section
+        aria-label="Session access"
+        className={sourceEventId ? "hidden" : "flex shrink-0 items-center"}
+      >
         {mayFork ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild disabled={busy}>
@@ -688,7 +723,10 @@ export function SessionTenancyControl({
       <ConfirmDialog
         open={confirmation !== null}
         onOpenChange={(open) => {
-          if (!open) setConfirmation(null);
+          if (!open) {
+            setConfirmation(null);
+            onForkClose?.();
+          }
         }}
         title={
           confirmation?.kind === "fork"
@@ -700,17 +738,19 @@ export function SessionTenancyControl({
               : "Limit this session to you?"
         }
         description={
-          confirmation?.kind === "fork" &&
-          displayedTenancy.visibility === "private" &&
-          confirmation.visibility === "workspace"
-            ? `This private session's complete conversation will be copied into a new session visible to people in ${scopeLabel}. Live credentials, connections, tools, goals, and processes are not copied.`
-            : confirmation?.kind === "fork"
-              ? confirmation.visibility === "workspace"
-                ? `Create an independent copy visible to people in ${scopeLabel}. Live credentials, connections, tools, goals, and processes are not copied.`
-                : "Create an independent copy visible only to you. Live credentials, connections, tools, goals, and processes are not copied."
-              : confirmation?.visibility === "workspace"
-                ? "People who can access this workspace will be able to open the session after all current work has settled."
-                : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
+          (pendingFork ? pendingFork.sourceEventId : sourceEventId)
+            ? `Copy the conversation through the selected message${confirmation?.visibility === "workspace" ? ` into a session visible to people in ${scopeLabel}` : " into a session visible only to you"}. Later messages are excluded. Live credentials, tools, goals, and processes are not copied.`
+            : confirmation?.kind === "fork" &&
+                displayedTenancy.visibility === "private" &&
+                confirmation.visibility === "workspace"
+              ? `This private session's complete conversation will be copied into a new session visible to people in ${scopeLabel}. Live credentials, connections, tools, goals, and processes are not copied.`
+              : confirmation?.kind === "fork"
+                ? confirmation.visibility === "workspace"
+                  ? `Create an independent copy visible to people in ${scopeLabel}. Live credentials, connections, tools, goals, and processes are not copied.`
+                  : "Create an independent copy visible only to you. Live credentials, connections, tools, goals, and processes are not copied."
+                : confirmation?.visibility === "workspace"
+                  ? "People who can access this workspace will be able to open the session after all current work has settled."
+                  : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
         }
         confirmLabel={
           confirmation?.kind === "fork"
@@ -730,7 +770,7 @@ export function SessionTenancyControl({
             : confirmation?.visibility === "workspace"
         }
         cancelAutoFocus
-        restoreFocusRef={accessTriggerRef}
+        restoreFocusRef={sourceEventId ? undefined : accessTriggerRef}
         onConfirm={() => {
           if (!confirmation) return true;
           return confirmation.kind === "visibility"

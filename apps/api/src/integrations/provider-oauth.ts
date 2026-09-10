@@ -18,16 +18,18 @@ import {
   type ApiIntegrationOAuthStartRequest,
   type ConnectionOwnership,
 } from "@opengeni/contracts";
-import { hasPermission, requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
+import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import {
   consumeIntegrationOAuthStateNonce,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
-  getWorkspaceGrant,
   loadConnectionCredentialForBroker,
   persistProviderOAuthConnection,
-  resolveNamedManagedPersonalWorkspaceGrant,
+  getConnectAttempt,
+  claimConnectOperation,
+  finishConnectOperation,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -37,6 +39,7 @@ import {
   type FetchLike,
 } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import { requireConnectOwnerAuthority } from "./connect-authority";
 
 import {
   assertConnectionOwnershipAllowedForPrincipal,
@@ -69,6 +72,8 @@ type ProviderOAuthClient = {
 };
 
 type ProviderOAuthState = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -137,6 +142,8 @@ export async function startApiIntegrationProviderOAuth(
      * route from the live authenticated principal, never inferred here.
      */
     personalOwnershipAllowed: boolean;
+    externalContinuation?: ExternalActorContinuation;
+    connectAttemptId?: string;
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
   },
@@ -230,6 +237,15 @@ export async function startApiIntegrationProviderOAuth(
     clientId: client.clientId,
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
     returnPath,
+    ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(input.externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            key,
+            JSON.stringify(ExternalActorContinuation.parse(input.externalContinuation)),
+          ),
+        }
+      : {}),
     ...(existing
       ? {
           connectionId: existing.id,
@@ -270,12 +286,35 @@ export async function completeApiIntegrationProviderOAuth(
     error?: string | undefined;
     requestUrl: string;
   },
-): Promise<{ redirectTo: string }> {
+): Promise<{ redirectTo: string; exactReturn?: boolean }> {
   const apiBaseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/, "") ?? apiBaseUrl;
   let state: ProviderOAuthState | null = null;
+  let exactReturnUrl: string | undefined;
+  let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   try {
     state = readProviderOAuthState(input.state, deps.settings);
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+      if (
+        stored.attempt.providerId !== state.definitionId ||
+        stored.attempt.ownership !== state.ownership
+      )
+        throw new ProviderOAuthCallbackError("state_invalid");
+      exactReturnUrl = stored.returnUrl;
+      connectOperation = {
+        attemptId: state.connectAttemptId,
+        operationId: `oauth:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state!).digest("hex"),
+      };
+      const claim = await claimConnectOperation(deps.db, state, {
+        ...connectOperation,
+        expectedRevision: stored.attempt.revision,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+      });
+      if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
+    }
     requireProviderOAuthOwner(state);
     await requireProviderOAuthGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
@@ -287,6 +326,25 @@ export async function completeApiIntegrationProviderOAuth(
       now: new Date(),
     });
     if (!consumed) throw new ProviderOAuthCallbackError("state_replayed");
+    if (connectOperation && (input.error || !input.code)) {
+      await finishConnectOperation(deps.db, state, {
+        ...connectOperation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          state: input.error === "access_denied" ? "cancelled" : "failed",
+          nextAction: { type: "none" },
+          error: {
+            code: input.error ? "provider_denied" : "missing_code",
+            message: "Authorization was not completed. Start a new connection attempt.",
+            retryable: false,
+          },
+        }),
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
     if (input.error) throw new ProviderOAuthCallbackError("provider_denied");
     if (!input.code) throw new ProviderOAuthCallbackError("missing_code");
 
@@ -389,7 +447,8 @@ export async function completeApiIntegrationProviderOAuth(
       ]),
       verifiedAt: new Date().toISOString(),
     });
-    const connection = await persistProviderOAuthConnection(deps.db, {
+    const persistenceInput: import("@opengeni/db").PersistProviderOAuthConnectionInput = {
+      authorize: (tx: import("@opengeni/db").Database) => requireConnectOwnerAuthority(tx, state!),
       accountId: state.accountId,
       workspaceId: state.workspaceId,
       subjectId: ownerSubjectId,
@@ -412,7 +471,36 @@ export async function completeApiIntegrationProviderOAuth(
             requestedConnectionVersion: state.connectionVersion,
           }
         : {}),
-    });
+    };
+    const persist = (database: import("@opengeni/db").Database) =>
+      persistProviderOAuthConnection(database, persistenceInput);
+    if (connectOperation) {
+      await finishConnectOperation(deps.db, state, {
+        ...connectOperation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (tx, current) => {
+          const connection = await persist(tx);
+          if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
+          return {
+            ...current,
+            revision: current.revision + 1,
+            state: "connected_but_incomplete",
+            credentialsCommitted: true,
+            nextAction: { type: "none" },
+            account: {
+              id: connection.id,
+              providerId: current.providerId,
+              label: identity.displayName ?? identity.email ?? identity.principalId,
+              ownership: current.ownership,
+              status: "connected",
+            },
+          };
+        },
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
+    const connection = await persist(deps.db);
     if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
     return {
       redirectTo: providerOAuthReturnUrl(returnBaseUrl, state.returnPath, "success", {
@@ -423,6 +511,7 @@ export async function completeApiIntegrationProviderOAuth(
       }),
     };
   } catch (error) {
+    if (exactReturnUrl !== undefined) return { redirectTo: exactReturnUrl, exactReturn: true };
     return {
       redirectTo: providerOAuthReturnUrl(
         returnBaseUrl,
@@ -463,6 +552,26 @@ function requiredDefinition(id: string): IntegrationDefinition {
   const definition = integrationDefinitionById(id);
   if (!definition) throw new HTTPException(404, { message: "Unknown Integration definition" });
   return definition;
+}
+
+/** Configuration readiness only: consent and installation are still separate. */
+export function curatedOAuthReadiness(
+  settings: Settings,
+  definition: IntegrationDefinition,
+): { configured: boolean; ownership: ConnectionOwnership[] } {
+  const ownership = [
+    ...providerOAuthProfile(definition, integrationDefinitionProviderDomain(definition))
+      .allowedOwnership,
+  ];
+  try {
+    if (!settings.integrationsEnabled) return { configured: false, ownership };
+    requireEnvironmentEncryption(settings);
+    requireIntegrationsStateSecret(settings);
+    providerClientForDefinition(settings, definition);
+    return { configured: true, ownership };
+  } catch {
+    return { configured: false, ownership };
+  }
 }
 
 function providerClientForDefinition(
@@ -594,6 +703,21 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
   }
   return {
     accountId: requiredStateString(payload.accountId),
+    ...(optionalString(payload.connectAttemptId)
+      ? { connectAttemptId: optionalString(payload.connectAttemptId)! }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     workspaceId: requiredStateString(payload.workspaceId),
     subjectId: requiredStateString(payload.subjectId),
     ownership,
@@ -742,23 +866,10 @@ async function requireProviderOAuthGrant(
   deps: ApiRouteDeps,
   state: Pick<
     ProviderOAuthState,
-    "accountId" | "workspaceId" | "subjectId" | "personalOwnerVerified"
+    "accountId" | "workspaceId" | "subjectId" | "personalOwnerVerified" | "externalContinuation"
   >,
 ): Promise<void> {
-  const membershipGrant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
-  const grant =
-    membershipGrant?.accountId === state.accountId
-      ? membershipGrant
-      : state.personalOwnerVerified
-        ? await resolveNamedManagedPersonalWorkspaceGrant(deps.db, state)
-        : null;
-  if (
-    !grant ||
-    grant.accountId !== state.accountId ||
-    !hasPermission(grant.permissions, "connections:write")
-  ) {
-    throw new ProviderOAuthCallbackError("connection_conflict");
-  }
+  await deps.db.transaction((tx) => requireConnectOwnerAuthority(tx, state));
 }
 
 /**

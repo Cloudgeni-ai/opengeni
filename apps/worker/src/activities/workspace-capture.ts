@@ -346,6 +346,62 @@ export async function readCaptureRepository(
 
 let loggedStorageNullOnce = false;
 
+/** Review work may use idle time, but must yield to the next turn. Poll durable
+ * queue state rather than relying on best-effort event delivery. The capture
+ * already fences every continuation on this signal; no replacement writer is
+ * admitted until its caller returns. */
+export async function captureWhileIdle(input: {
+  hasPendingWork: () => Promise<boolean>;
+  capture: (signal: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+}): Promise<void> {
+  if (input.signal?.aborted) return;
+  const controller = new AbortController();
+  const signal = input.signal
+    ? AbortSignal.any([input.signal, controller.signal])
+    : controller.signal;
+  let checking = false;
+  let stopped = false;
+  const check = async (): Promise<void> => {
+    if (checking || stopped || signal.aborted) return;
+    checking = true;
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      try {
+        const pending = await Promise.race([
+          input.hasPendingWork(),
+          new Promise<boolean>((resolve) => {
+            onAbort = () => resolve(true);
+            signal.addEventListener("abort", onAbort, { once: true });
+            timer = setTimeout(() => resolve(true), 1_000);
+          }),
+        ]);
+        if (pending) controller.abort();
+      } finally {
+        clearTimeout(timer);
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+      }
+    } catch {
+      // A failed queue read is not permission to delay accepted user work.
+      controller.abort();
+    } finally {
+      checking = false;
+    }
+  };
+  await check();
+  if (signal.aborted) return;
+  const timer = setInterval(() => void check(), 250);
+  timer.unref?.();
+  try {
+    await input.capture(signal);
+  } finally {
+    stopped = true;
+    clearInterval(timer);
+    controller.abort();
+  }
+}
+
 /**
  * Turn-end entrypoint. Gates on the flag + configured object storage, races the
  * whole capture against a 120s cap, and swallows every failure ("turn outcome
@@ -399,13 +455,25 @@ export async function captureWorkspaceRevision(
     name: "opengeni_workspace_captures_inflight",
     help: "Current workspace-capture operations still resident in this worker process.",
   });
+  const ownership = { keys: new Set<string>(), retain: false };
   const capture = runCapture(
     input,
     { ...input, objectStorage: input.objectStorage },
     startedAt,
     controller.signal,
     stage,
-  ).finally(() => {
+    ownership,
+  ).finally(async () => {
+    // Cleanup follows physical write settlement, even after inference resumes.
+    // Unique keys cannot belong to a successor capture.
+    if (!ownership.retain && ownership.keys.size > 0) {
+      await safeDelete(
+        input.objectStorage!,
+        [...ownership.keys],
+        observability,
+        new AbortController().signal,
+      );
+    }
     observability.incrementGauge({
       name: "opengeni_workspace_captures_inflight",
       help: "Current workspace-capture operations still resident in this worker process.",
@@ -434,13 +502,25 @@ export async function captureWorkspaceRevision(
     }
     // The one and only place a capture failure surfaces — as a log line, never
     // an exception past this boundary (the turn already completed).
-    observability.warn("workspace capture failed — turn outcome unaffected", {
-      "opengeni.session_id": input.sessionId,
-      "opengeni.turn_id": input.turnId ?? "",
-      "error.message": error instanceof Error ? error.message : String(error),
-      "workspace_capture.duration_ms": Date.now() - startedAt,
-      "workspace_capture.stage": stage.value,
-    });
+    // Public telemetry intentionally strips arbitrary error text and unknown
+    // attributes. Keep the bounded stage/reason in the message so operators can
+    // distinguish a deadline from provider loss without logging file contents,
+    // credentials, paths, or upstream exception messages.
+    const reason = controller.signal.aborted
+      ? "deadline_exceeded"
+      : isBoxExitingError(error)
+        ? "sandbox_exited"
+        : "operation_failed";
+    observability.warn(
+      `workspace capture failed — stage=${stage.value} reason=${reason} durationMs=${Date.now() - startedAt}; review cache not updated`,
+      {
+        "opengeni.session_id": input.sessionId,
+        "opengeni.turn_id": input.turnId ?? "",
+        "error.message": error instanceof Error ? error.message : String(error),
+        "workspace_capture.duration_ms": Date.now() - startedAt,
+        "workspace_capture.stage": stage.value,
+      },
+    );
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
       labels: { result: "failed" },
@@ -459,7 +539,9 @@ async function runCapture(
   startedAt: number,
   signal: AbortSignal,
   stage: { value: string },
+  ownership: { keys: Set<string>; retain: boolean },
 ): Promise<void> {
+  const ownedKeys = ownership.keys;
   const { observability } = input;
   const storage = ctx.objectStorage;
   const keepN = input.keepLatest ?? KEEP_LATEST_REVISIONS;
@@ -581,11 +663,20 @@ async function runCapture(
   // dirty tree on every read-only turn. Instead we skip when the change surface
   // is byte-identical to the previous revision — "no new revision when nothing
   // changed" holds even with a persistently dirty tree, and content-addressed
-  // blobs already dedupe storage. This preserves the intended empty-turn behavior
+  // blobs dedupe against the latest retained capture. This preserves empty-turn revision behavior
   // while correctly handling a persistently dirty tree.
   // ── 3. after-images of touched files (size-gated), content-addressed ───────
   const files: WorkspaceCaptureFile[] = [];
   const blobKeys = new Set<string>();
+  const captureId = crypto.randomUUID();
+  // A predecessor GC plan keeps the latest revision's refs. Never reuse refs
+  // from older revisions: an already-issued delete may still target those.
+  const retainedRefs = retainedCaptureBlobRefs(
+    input.workspaceId,
+    input.sessionId,
+    prev?.blobKeys ?? [],
+  );
+  const storedKeys = new Set(retainedRefs.values());
   let totalBytes = 0;
   let tooLargeCount = 0;
   let binaryCount = 0;
@@ -626,6 +717,7 @@ async function runCapture(
       });
       throwIfCaptureAborted(signal);
     } catch (error) {
+      if (signal.aborted) throw error;
       const boxExiting = classifyCaptureEntryError(error);
       if (boxExiting) throw boxExiting;
       continue; // vanished/unreadable single file — omit it, capture continues
@@ -647,11 +739,12 @@ async function runCapture(
     }
     const bytes = Buffer.from(read.content, "base64");
     const hash = sha256(bytes);
-    const contentRef = blobKey(input.workspaceId, input.sessionId, hash);
+    const contentRef =
+      retainedRefs.get(hash) ?? blobKey(input.workspaceId, input.sessionId, `${captureId}/${hash}`);
     if (read.isBinary) binaryCount += 1;
     if (!blobKeys.has(contentRef)) {
       totalBytes += bytes.byteLength;
-      // Whole-capture guard: bail before writing anything (fall back to live).
+      // Never publish a revision exceeding the whole-capture byte limit.
       if (totalBytes > WHOLE_CAPTURE_GUARD_BYTES) {
         observability.warn("workspace capture skipped — whole-capture guard tripped", {
           "opengeni.session_id": input.sessionId,
@@ -665,6 +758,17 @@ async function runCapture(
       }
     }
     blobKeys.add(contentRef);
+    if (!storedKeys.has(contentRef)) {
+      stage.value = "content_upload";
+      ownedKeys.add(contentRef);
+      await storage.putObject({
+        key: contentRef,
+        contentType: "application/octet-stream",
+        body: bytes,
+      });
+      throwIfCaptureAborted(signal);
+      storedKeys.add(contentRef);
+    }
     files.push({
       // baseHash (git HEAD blob sha) is intentionally null in M1: the wake-on-edit
       // flush guard (M3/C2) compares live content against the after-image `hash`,
@@ -684,10 +788,11 @@ async function runCapture(
 
   // ── 4. empty-turn gate (B3) ───────────────────────────────
   // Skip when the change surface is byte-identical to the previous revision.
-  // Fires BEFORE the tree BFS + storage PUTs (the expensive parts) so a no-op
-  // read-only turn on a persistently dirty tree costs only the (small) status/
-  // diff/after-image probes.
-  let fingerprint = changeFingerprint(repos, files);
+  // New writes use unique keys; reused refs belong to the latest retained revision.
+  // An unchanged dirty turn therefore performs no object-storage writes.
+  // Each file is read once and its exact bytes are hashed and uploaded together;
+  // peak memory remains one guarded file rather than the entire workspace.
+  const fingerprint = changeFingerprint(repos, files);
   if (prev && prev.stats.fingerprint === fingerprint) {
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
@@ -703,116 +808,10 @@ async function runCapture(
 
   // ── 6. PUT blobs + tree + manifest (F9: all writes BEFORE any delete) ──────
   // Key manifest/tree by the turn (one capture per turn) so the key is known
-  // before the revision is committed; content blobs are content-addressed.
-  const turnKey = input.turnId;
+  // before commit. Unique capture namespaces make late deletes safe across workers.
+  const turnKey = `${input.turnId}/${captureId}`;
   const treeKey = `workspace-captures/${input.workspaceId}/${input.sessionId}/trees/${turnKey}.json`;
   const manifestKey = `workspace-captures/${input.workspaceId}/${input.sessionId}/manifests/${turnKey}.json`;
-
-  // Re-read and upload ONE after-image at a time. The first pass above computes
-  // the stable capture fingerprint without retaining every changed file. This
-  // second pass takes the actual after-image that will be uploaded, refreshing
-  // metadata when a live process changed a file between passes. Peak worker
-  // memory is bounded by PER_FILE_CONTENT_GUARD_BYTES instead of
-  // WHOLE_CAPTURE_GUARD_BYTES per concurrent turn.
-  const uploadedKeys = new Set<string>();
-  blobKeys.clear();
-  totalBytes = 0;
-  let refreshedFiles = 0;
-  const omittedFiles = new Set<string>();
-  for (const file of files) {
-    stage.value = "content_upload";
-    throwIfCaptureAborted(signal);
-    if (file.deleted || file.tooLarge || !file.contentRef || !file.hash) {
-      continue;
-    }
-    let reread: Awaited<ReturnType<typeof svc.fsRead>>;
-    try {
-      reread = await svc.fsRead({
-        path: file.path,
-        encoding: "base64",
-        maxBytes: PER_FILE_CONTENT_GUARD_BYTES,
-      });
-      throwIfCaptureAborted(signal);
-    } catch (error) {
-      if (signal.aborted) throw error;
-      const boxExiting = classifyCaptureEntryError(error);
-      if (boxExiting) throw boxExiting;
-      // Match the first pass: a single vanished or unreadable file is omitted,
-      // never misreported as deleted and never allowed to fail the full capture.
-      omittedFiles.add(file.path);
-      refreshedFiles += 1;
-      continue;
-    }
-    if (reread.truncated) {
-      file.hash = null;
-      file.contentRef = null;
-      file.sizeBytes = reread.sizeBytes;
-      file.isBinary = reread.isBinary;
-      file.tooLarge = true;
-      refreshedFiles += 1;
-      continue;
-    }
-    const bytes = Buffer.from(reread.content, "base64");
-    const hash = sha256(bytes);
-    const contentRef = blobKey(input.workspaceId, input.sessionId, hash);
-    if (
-      hash !== file.hash ||
-      bytes.byteLength !== file.sizeBytes ||
-      reread.isBinary !== file.isBinary
-    ) {
-      file.hash = hash;
-      file.contentRef = contentRef;
-      file.sizeBytes = bytes.byteLength;
-      file.isBinary = reread.isBinary;
-      refreshedFiles += 1;
-    }
-    if (!blobKeys.has(contentRef)) {
-      totalBytes += bytes.byteLength;
-      if (totalBytes > WHOLE_CAPTURE_GUARD_BYTES) {
-        observability.warn("workspace capture skipped — whole-capture guard tripped", {
-          "opengeni.session_id": input.sessionId,
-          "workspace_capture.total_bytes": totalBytes,
-        });
-        observability.incrementCounter({
-          name: "opengeni_workspace_capture_total",
-          labels: { result: "guard_tripped" },
-        });
-        return;
-      }
-    }
-    blobKeys.add(contentRef);
-    if (!uploadedKeys.has(contentRef)) {
-      await storage.putObject({
-        key: contentRef,
-        contentType: "application/octet-stream",
-        body: bytes,
-      });
-      throwIfCaptureAborted(signal);
-      uploadedKeys.add(contentRef);
-    }
-  }
-  if (omittedFiles.size > 0) {
-    for (let index = files.length - 1; index >= 0; index -= 1) {
-      const file = files[index];
-      if (file && omittedFiles.has(file.path)) files.splice(index, 1);
-    }
-  }
-  if (refreshedFiles > 0) {
-    observability.incrementCounter({
-      name: "opengeni_workspace_capture_files_refreshed_total",
-      amount: refreshedFiles,
-    });
-  }
-  tooLargeCount = files.filter((file) => file.tooLarge).length;
-  binaryCount = files.filter((file) => !file.deleted && file.isBinary).length;
-  fingerprint = changeFingerprint(repos, files);
-  if (prev && prev.stats.fingerprint === fingerprint) {
-    observability.incrementCounter({
-      name: "opengeni_workspace_capture_total",
-      labels: { result: "skipped_empty" },
-    });
-    return;
-  }
 
   // ── 7. serialize the exact uploaded after-images ──────────────────────────
   const capturedAt = new Date();
@@ -850,11 +849,13 @@ async function runCapture(
     }),
   );
   stage.value = "tree_upload";
+  ownedKeys.add(treeKey);
   await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
   throwIfCaptureAborted(signal);
   stats.durationMs = Date.now() - startedAt;
   const manifestBytes = utf8(JSON.stringify(manifest));
   stage.value = "manifest_upload";
+  ownedKeys.add(manifestKey);
   await storage.putObject({
     key: manifestKey,
     contentType: "application/json",
@@ -865,6 +866,9 @@ async function runCapture(
 
   // ── 8. epoch-fenced insert (superseded lease → zero rows) ─────────────────
   stage.value = "database_commit";
+  // A transport failure during commit has an unknown outcome: retain rather
+  // than risk deleting a published review. A definite rejected commit is safe.
+  ownership.retain = true;
   const inserted = await insertWorkspaceCapture(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -881,6 +885,7 @@ async function runCapture(
     stats,
     capturedAt,
   });
+  ownership.retain = inserted !== null;
   if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
     console.log(
       `[sandbox-e2e] capture commit inserted=${Boolean(inserted)} revision=${revision} epoch=${input.leaseEpoch} group=${input.sandboxGroupId}`,
@@ -889,8 +894,8 @@ async function runCapture(
   throwIfCaptureAborted(signal);
   if (!inserted) {
     // Lease superseded/released between capture and commit. Best-effort clean up
-    // the turn-keyed blobs we just PUT (content blobs may be shared with a
-    // surviving revision — leave them for the next GC); never throw.
+    // the turn-keyed blobs we just PUT. The finalizer also cleans newly owned
+    // content blobs, leaving reused refs untouched; never throw.
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
       labels: { result: "superseded" },
@@ -904,6 +909,7 @@ async function runCapture(
   }
 
   // ── 9. inline keep-latest-N GC (best-effort; F9 — after the commit) ────────
+  stage.value = "garbage_collection";
   let gcDeleted = 0;
   try {
     throwIfCaptureAborted(signal);
@@ -1106,9 +1112,25 @@ function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
-/** Content-addressed after-image blob key (shared across revisions → GC input). */
+/** Content-addressed after-image blob key, optionally in a unique capture namespace. */
 export function blobKey(workspaceId: string, sessionId: string, sha256Hex: string): string {
   return `workspace-captures/${workspaceId}/${sessionId}/blobs/${sha256Hex}`;
+}
+
+/** Only pass the latest retained revision's keys: older refs may be under deletion. */
+export function retainedCaptureBlobRefs(
+  workspaceId: string,
+  sessionId: string,
+  latestKeys: string[],
+): Map<string, string> {
+  const prefix = blobKey(workspaceId, sessionId, "");
+  const refs = new Map<string, string>();
+  for (const key of latestKeys) {
+    if (!key.startsWith(prefix)) continue;
+    const match = /^(?:[0-9a-f-]{36}\/)?([0-9a-f]{64})$/.exec(key.slice(prefix.length));
+    if (match?.[1]) refs.set(match[1], key);
+  }
+  return refs;
 }
 
 async function safeDelete(

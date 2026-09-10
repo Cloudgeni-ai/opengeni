@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   CapabilityPack,
+  StoredCapabilityPack,
   OPENGENI_PR_REVIEW_PACK_ID,
   OPENGENI_PR_REVIEW_SESSION_ROLE,
   stableJson,
@@ -31,6 +32,7 @@ import {
   PR_REVIEW_AUTOMATION_ADAPTER_ID,
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
 } from "./pr-review";
+import { OPENGENI_PRODUCT_INTEGRATION_PACK } from "./product-integration-pack";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 
@@ -277,7 +279,11 @@ const openGeniPrReviewPack: CapabilityPack = {
   },
 };
 
-const packs = [marketingSocialPack, openGeniPrReviewPack] satisfies CapabilityPack[];
+const packs = [
+  marketingSocialPack,
+  openGeniPrReviewPack,
+  OPENGENI_PRODUCT_INTEGRATION_PACK,
+] satisfies CapabilityPack[];
 
 export function listCapabilityPacks(): CapabilityPack[] {
   return packs;
@@ -293,9 +299,8 @@ export function isBuiltInCapabilityPack(packId: string): boolean {
 
 /**
  * Built-in packs plus the manifests registered for this workspace. Stored
- * manifests were validated at registration time; rows that no longer parse
- * (for example after a contract tightening) are skipped instead of breaking
- * the whole catalog.
+ * manifests retain exact historical bytes. Execution views derive Skill labels
+ * from their files, but malformed content needs explicit repair, not omission.
  */
 export async function listWorkspaceCapabilityPacks(
   db: Database,
@@ -305,9 +310,13 @@ export async function listWorkspaceCapabilityPacks(
   const builtInIds = new Set(packs.map((pack) => pack.id));
   const registeredPacks = registered
     .filter((registration) => !builtInIds.has(registration.pack.id))
-    .flatMap((registration) => {
-      const parsed = CapabilityPack.safeParse(registration.pack);
-      return parsed.success ? [parsed.data] : [];
+    .map((registration) => {
+      const parsed = StoredCapabilityPack.safeParse(registration.pack);
+      if (!parsed.success)
+        throw new HTTPException(422, {
+          message: `Stored Pack ${registration.pack.id} requires repair before it can be used: ${parsed.error.message}`,
+        });
+      return parsed.data;
     });
   return [...packs, ...registeredPacks];
 }
@@ -325,8 +334,12 @@ export async function resolveCapabilityPack(
   if (!registration) {
     return null;
   }
-  const parsed = CapabilityPack.safeParse(registration.pack);
-  return parsed.success ? parsed.data : null;
+  const parsed = StoredCapabilityPack.safeParse(registration.pack);
+  if (!parsed.success)
+    throw new HTTPException(422, {
+      message: `Stored Pack ${packId} requires repair before it can be used: ${parsed.error.message}`,
+    });
+  return parsed.data;
 }
 
 export function capabilityPackManifestDigest(pack: CapabilityPack): string {
@@ -355,6 +368,7 @@ export type InlinePackSkillInstall = {
   sourcePath: string;
   name: string;
   description: string;
+  activationMode: "workspace_managed" | "session_selected";
   contentSha256: string;
   totalBytes: number;
   files: Array<{ path: string; content: string; byteSize: number; contentSha256: string }>;
@@ -372,19 +386,22 @@ export function inlinePackSkillInstall(
     });
   }
   const normalizedName = skill.name.toLowerCase();
+  const activationMode = skill.activationMode ?? "workspace_managed";
+  const activationIdentity = activationMode === "session_selected" ? "session-selected/" : "";
   const encodedSkill = encodeURIComponent(normalizedName);
-  const sourceUrl = `https://opengeni.invalid/pack-inline-skills/${encodedSkill}/${artifact.contentSha256}`;
-  const capabilityId = `skill:pack-inline/${normalizedName}@${artifact.contentSha256}`;
+  const sourceUrl = `https://opengeni.invalid/pack-inline-skills/${activationIdentity}${encodedSkill}/${artifact.contentSha256}`;
+  const capabilityId = `skill:pack-inline/${activationIdentity}${normalizedName}@${artifact.contentSha256}`;
   return {
     componentKey: `inline-skill/${normalizedName}`,
     capabilityId,
-    pluginKey: `pack-skill/${normalizedName}/${artifact.contentSha256}`,
+    pluginKey: `pack-skill/${activationIdentity}${normalizedName}/${artifact.contentSha256}`,
     sourceUrl,
     repositoryUrl: "https://opengeni.invalid/pack-inline-skills",
     sourceCommit: artifact.contentSha256,
     sourcePath: normalizedName,
     name: artifact.name,
     description: artifact.description,
+    activationMode,
     contentSha256: artifact.contentSha256,
     totalBytes: artifact.totalBytes,
     files: artifact.files.map((file) => ({
@@ -405,21 +422,42 @@ export async function previewCapabilityPackInstallation(
   const { workspaceId } = access;
   const installation = await getPackInstallation(db, workspaceId, pack.id);
   const inlineInstalls = pack.skills.map((skill) => inlinePackSkillInstall(pack, skill));
-  const [referencedComponents, inlineComponents] = await Promise.all([
-    resolvePackComponentReferences(db, workspaceId, pack.components),
-    resolvePackInlineSkillReferences(
-      db,
-      workspaceId,
-      inlineInstalls.map((inline) => ({
-        key: inline.componentKey,
-        capabilityId: inline.capabilityId,
-        name: inline.name,
-        contentSha256: inline.contentSha256,
-      })),
-      installation?.id,
-    ),
-  ]);
   const manifestDigest = capabilityPackManifestDigest(pack);
+  const inlineRequirements = inlineInstalls.map((inline) => ({
+    key: inline.componentKey,
+    capabilityId: inline.capabilityId,
+    name: inline.name,
+    activationMode: inline.activationMode,
+    contentSha256: inline.contentSha256,
+  }));
+  const [referencedComponents, plannedInlineComponents, installedSessionSelectedComponents] =
+    await Promise.all([
+      resolvePackComponentReferences(db, workspaceId, pack.components),
+      resolvePackInlineSkillReferences(db, workspaceId, inlineRequirements, installation?.id),
+      installation?.status === "active" && installation.manifestDigest === manifestDigest
+        ? resolvePackInlineSkillReferences(
+            db,
+            workspaceId,
+            inlineRequirements.filter(
+              (requirement) => requirement.activationMode === "session_selected",
+            ),
+          )
+        : Promise.resolve([]),
+    ]);
+  const installedSessionSelectedByKey = new Map(
+    installedSessionSelectedComponents.map((component) => [component.key, component]),
+  );
+  // Installation planning excludes the Pack's own current ownership so an
+  // update can replace old inline content. For launch affordances, preserve an
+  // independently resolved active facet-installation id on an exact installed
+  // manifest. A missing facet retains the future capability id and therefore
+  // cannot be mistaken for something a new session can select right now.
+  const inlineComponents = plannedInlineComponents.map((component) => {
+    const installed = installedSessionSelectedByKey.get(component.key);
+    return installed?.status === "ready" && installed.resolvedId
+      ? { ...component, resolvedId: installed.resolvedId }
+      : component;
+  });
   const components: PackComponentResolution[] = [...referencedComponents, ...inlineComponents];
   const blockers = components
     .filter((component) => component.required && component.status !== "ready")

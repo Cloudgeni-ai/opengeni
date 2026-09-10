@@ -1,0 +1,71 @@
+---
+title: "Connect a machine"
+description: "Enroll your own computer and run sessions on it directly."
+icon: "laptop"
+---
+
+A Connected Machine is your own always-on computer, enrolled once and then usable as a session target. The agent runs there directly, with no cloud box in between. See [Compute targets](/concepts/compute-targets) for how it differs from a managed sandbox.
+
+<Note>
+  On a self-hosted deployment, Connected Machines are off until an operator enables them. Setting
+  `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` alone is not enough: the deployment also needs the
+  stream relay, NATS with auth-callout, public WebSocket ingress for both, and their secrets. The
+  [Connected Machines section of the deployment
+  guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#connected-machines)
+  enumerates them. Managed OpenGeni has them enabled.
+</Note>
+
+## Enroll interactively
+
+<Steps>
+  <Step title="Run the installer">
+    Open the Machines page in your workspace and copy the one-line installer. Run it on the machine.
+    It installs or updates the `opengeni-agent` binary, registers it as a background service, and
+    starts a device flow.
+  </Step>
+  <Step title="Approve the device">
+    The agent prints a short code and a verification URL. Open the URL, confirm the code, and choose
+    who may use the machine: only you (the default), the workspace, or the whole organization.
+    Screen control is a separate consent.
+  </Step>
+  <Step title="Done">
+    The machine appears in the Machines list with its status and metrics and is immediately
+    available as a session target.
+  </Step>
+</Steps>
+
+## Enroll headlessly
+
+For fleets and CI boxes, mint a short-lived enrollment token in the workspace and pass it to the installer. The token is shown once and exchanged on the machine for its own long-lived credential.
+
+```bash
+OPENGENI_API_URL=https://your-deployment.example.com \
+OPENGENI_ENROLL_TOKEN=<token> \
+  sh -c 'curl -fsSL "$OPENGENI_API_URL/install.sh" | sh'
+```
+
+## Use it in a session
+
+- **At creation**: pick the machine, and optionally a working directory on it, when starting a session. The first turn runs there.
+- **Later**: swap a running session's active compute target to the machine, or back to its managed sandbox. The session's history is unaffected.
+
+The agent works under the chosen folder, creating its own worktrees as needed, and uses the machine's existing git configuration. OpenGeni never clones repositories onto it.
+
+## One agent, many connections
+
+The agent binary is multi-connection. Installing it once and connecting another workspace, even on a different OpenGeni deployment, adds an independent link without disturbing the existing ones.
+
+```bash
+opengeni-agent connections
+opengeni-agent disconnect <connection-id>
+```
+
+`disconnect` stops only the local link. The enrollment remains visible offline in the workspace until an administrator removes it, so possessing the machine never grants workspace authority.
+
+## Revoke
+
+Revoke a machine from the Machines page. Revocation invalidates every existing grant and refuses further use until the machine is enrolled again.
+
+## Programmatic enrollment
+
+Products embedding OpenGeni can render their own approval page and drive enrollment through the SDK. The repository's [Connected Machines guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/connected-machines.md) documents the device-flow lookup, approve, deny, token minting, and swap methods.

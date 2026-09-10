@@ -1,6 +1,23 @@
+import {
+  createChannel,
+  listChannels,
+  getChannel,
+  updateChannel,
+  reorderChannels,
+  deleteChannel,
+  setSessionChannel,
+} from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  prepareWorkspaceArtifactUpload,
+  prepareWorkspaceArtifactPublication,
+  workspaceArtifactDownloads,
+} from "../site-uploads";
+import {
   CreateScheduledTaskRequest,
+  boundSessionMcpText as capSessionDiscoveryText,
+  compactSessionMcpListRow,
+  sessionMcpIncludesRelatedWork,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -30,10 +47,13 @@ import {
   type SessionAuthorizationSurface,
   type Session,
   type WorkspaceMemoryPromptMode,
+  type WorkspaceArtifactMutationResponse,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
@@ -67,6 +87,7 @@ import {
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
   getSessionTurn,
   getOrCreatePreferenceRegistrySnapshot,
@@ -98,12 +119,14 @@ import {
   requireScheduledTask,
   requireSession,
   searchWorkspaceMemories,
+  memoryWriteScopeForAgentScope,
+  type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
-  holdSessionGoalContinuationWithEvent,
-  SESSION_GOAL_HOLD_MAX_SECONDS,
-  SESSION_GOAL_HOLD_MIN_SECONDS,
+  waitForSessionInputWithEvent,
+  SESSION_INPUT_WAIT_MAX_SECONDS,
+  SESSION_INPUT_WAIT_MIN_SECONDS,
   setVariableSetVariable,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
@@ -114,6 +137,7 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  setWorkspaceArtifactStatus,
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
@@ -144,6 +168,10 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import {
+  FIRST_PARTY_TOOL_AUTHORIZATION,
+  type FirstPartyToolAuthorization,
+} from "./first-party-tool-permissions";
+import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
@@ -161,9 +189,8 @@ import {
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit, workflowIdForSession } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { retryWhileMissing } from "@opengeni/storage";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -171,6 +198,12 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
+  projectWorkspaceArtifactVersionProvenance,
+  redactWorkspaceArtifactListProvenance,
+} from "../workspace-artifact-provenance";
 import {
   assertSocialConnectionProvider,
   socialMentionsLive,
@@ -233,9 +266,19 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  readSessionBackgroundCommandOutput,
+  COMMAND_OUTPUT_MAX_BYTES,
+} from "@opengeni/db/session-background-commands";
+import {
+  readCommandWithWait,
+  COMMAND_READ_MAX_WAIT_SECONDS,
+  COMMAND_WAIT_DEFAULT_SECONDS,
+} from "./command-read";
+import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
+  boundSessionCompactDetailMcp,
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
@@ -285,6 +328,13 @@ export type McpServerOptions = {
   requestOrigin?: string | null;
   workspaceMemoryEnabled?: boolean | undefined;
   workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
+  /**
+   * The bound session's typed Memory selector (migration 0427), resolved by
+   * the route from the session row. `off` registers no Memory tools; `user`
+   * and `session` read the workspace layer plus their own private layer and
+   * save into that private layer. Omitted/null keeps the workspace layer.
+   */
+  sessionMemory?: MemoryAgentScope | null | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -409,247 +459,6 @@ function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown)
   };
 }
 
-type FirstPartyToolAuthorization = {
-  sessionRequired?: true;
-  allOf?: readonly Permission[];
-  anyOf?: readonly Permission[];
-};
-
-/**
- * Authorization is deliberately complete and separate from visibility. The
- * `satisfies Record` check makes every catalog addition choose an explicit
- * registration predicate before it can compile.
- */
-const FIRST_PARTY_TOOL_AUTHORIZATION = {
-  set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
-  goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_wait: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
-  memory_search: { sessionRequired: true, allOf: ["documents:search"] },
-  memory_save: { sessionRequired: true, allOf: ["documents:search"] },
-  memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  preference_registry_summary: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
-  task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
-  task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
-  task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
-  task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
-  work_claim_upsert: { sessionRequired: true, allOf: ["sessions:control"] },
-  work_claim_release: { sessionRequired: true, allOf: ["sessions:control"] },
-  knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
-  knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
-  task_note_promote_knowledge: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control"],
-  },
-  task_note_promote_instruction_policy: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  task_note_promote_preference: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  instruction_policy_propose: {
-    sessionRequired: true,
-    allOf: ["documents:search", "workspace:read"],
-  },
-  preference_propose: {
-    sessionRequired: true,
-    allOf: ["documents:search", "workspace:read"],
-  },
-  // Explicit user-directed remember composes task-note evidence with the
-  // governed promotion path, so it needs the union of both permission sets.
-  remember: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  remember_confirm: {
-    sessionRequired: true,
-    allOf: ["documents:search", "sessions:control", "workspace:read"],
-  },
-  company_profile_propose: {
-    sessionRequired: true,
-    allOf: ["sessions:control", "workspace:read"],
-  },
-  company_profile_confirm: {
-    sessionRequired: true,
-    allOf: ["sessions:control", "workspace:read"],
-  },
-  sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
-  sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
-  sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
-  run_on: { sessionRequired: true, allOf: ["sessions:control"] },
-  sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
-  connected_machine_remove: { allOf: ["enrollments:manage"] },
-  rig_list: { allOf: ["rigs:use"] },
-  rig_get: { allOf: ["rigs:use"] },
-  rig_propose_change: { allOf: ["rigs:use"] },
-  rig_verify: { allOf: ["rigs:use"] },
-  rig_promote: { allOf: ["rigs:manage"] },
-  sessions_list: { allOf: ["sessions:read"] },
-  session_get: { allOf: ["sessions:read"] },
-  session_events: { allOf: ["sessions:read"] },
-  // Blocking wait inside a running turn: the live attempt's own session is the
-  // self target, so the tool exists only for session-scoped grants.
-  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
-  session_create: { allOf: ["sessions:create"] },
-  session_send_message: { allOf: ["sessions:control"] },
-  session_pause: { allOf: ["sessions:control"] },
-  session_resume: { allOf: ["sessions:control"] },
-  session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
-  // A live attempt may answer another session's structured human-input
-  // request (never a tool approval, which stays human-only).
-  session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
-  set_other_session_title: { allOf: ["sessions:control"] },
-  interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_observe: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
-  browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
-  interaction_request_human: {
-    sessionRequired: true,
-    allOf: ["sessions:control"],
-  },
-  browser_identity: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_publish: { sessionRequired: true, allOf: ["sessions:control"] },
-  browser_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_open: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_targets: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
-  computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
-  computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
-  variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
-  environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
-  variable_set_get_variable: {
-    sessionRequired: true,
-    allOf: ["variable-sets:read", "secrets:read"],
-  },
-  variable_set_set_variable: {
-    allOf: ["variable-sets:write", "secrets:write"],
-  },
-  environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
-  capability_catalog_search: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  capability_authorization_request: {
-    sessionRequired: true,
-    allOf: ["workspace:read"],
-  },
-  github_connect_link: { allOf: ["github:use"] },
-  github_repositories_list: { allOf: ["github:use"] },
-  social_connections_list: { allOf: ["connections:read"] },
-  social_posts_recent: { allOf: ["connections:read"] },
-  social_daily_analysis_context: { allOf: ["connections:read"] },
-  social_search_live: { allOf: ["connections:read"] },
-  social_mentions_live: { allOf: ["connections:read"] },
-  social_thread_fetch: { allOf: ["connections:read"] },
-  // Writes the social_posts store, so it takes the write scope like the REST
-  // equivalent (POST /social/posts is workspace:admin).
-  social_posts_sync: { allOf: ["connections:write"] },
-  // Publishes under the user's identity: connections:write keeps it out of the
-  // default agent permission set, unlike the read-only social tools above.
-  social_post_reply: { allOf: ["connections:write"] },
-  x_accounts_list: { allOf: ["connections:read"] },
-  x_search_live: { allOf: ["connections:read"] },
-  x_mentions_live: { allOf: ["connections:read"] },
-  x_thread_fetch: { allOf: ["connections:read"] },
-  x_posts_sync: { allOf: ["connections:write"] },
-  x_post_reply: { allOf: ["connections:write"] },
-  reddit_accounts_list: { allOf: ["connections:read"] },
-  reddit_search_live: { allOf: ["connections:read"] },
-  reddit_mentions_live: { allOf: ["connections:read"] },
-  reddit_thread_fetch: { allOf: ["connections:read"] },
-  reddit_posts_sync: { allOf: ["connections:write"] },
-  reddit_post_reply: { allOf: ["connections:write"] },
-  scheduled_tasks_list: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  scheduled_tasks_get: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_update: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_pause: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_resume: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_tasks_trigger: { allOf: ["scheduled_tasks:run"] },
-  scheduled_tasks_delete: { allOf: ["scheduled_tasks:manage"] },
-  scheduled_task_runs_list: {
-    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-  },
-  slack_bot_list_channels: { allOf: ["connections:read"] },
-  slack_bot_search: { allOf: ["connections:read"] },
-  slack_bot_channel_history: { allOf: ["connections:read"] },
-  slack_bot_thread_replies: { allOf: ["connections:read"] },
-  slack_bot_list_users: { allOf: ["connections:read"] },
-  slack_bot_list_files: { allOf: ["connections:read"] },
-  slack_bot_file_info: { allOf: ["connections:read"] },
-  slack_bot_file_content: { allOf: ["connections:read"] },
-  slack_bot_post_message: { allOf: ["connections:read"] },
-  slack_bot_delete_message: { allOf: ["connections:read"] },
-  fiken_companies_list: { allOf: ["connections:read"] },
-  fiken_contacts_list: { allOf: ["connections:read"] },
-  fiken_products_list: { allOf: ["connections:read"] },
-  fiken_invoices_list: { allOf: ["connections:read"] },
-  fiken_invoice_get: { allOf: ["connections:read"] },
-  fiken_bank_accounts_list: { allOf: ["connections:read"] },
-  fiken_purchases_list: { allOf: ["connections:read"] },
-  fiken_sales_list: { allOf: ["connections:read"] },
-  // Writes into the workspace's real accounting ledger surface take the write
-  // scope, keeping them out of the default agent permission set.
-  fiken_contact_create: { allOf: ["connections:write"] },
-  fiken_invoice_draft_create: { allOf: ["connections:write"] },
-  atlassian_sources_list: { allOf: ["connections:read"] },
-  atlassian_search: { allOf: ["connections:read"] },
-  atlassian_get: { allOf: ["connections:read"] },
-  artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
-  artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
-  sandbox_file_publish: {
-    sessionRequired: true,
-    allOf: ["files:read", "files:upload"],
-  },
-  editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_create: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish"],
-  },
-  editable_artifact_import: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish", "files:read"],
-  },
-  editable_artifact_get: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_inspect: {
-    sessionRequired: true,
-    allOf: ["artifacts:read"],
-  },
-  editable_artifact_apply: {
-    sessionRequired: true,
-    allOf: ["artifacts:publish"],
-  },
-  editable_artifact_export: {
-    sessionRequired: true,
-    allOf: ["artifacts:read"],
-  },
-  editable_artifact_export_status: {
-    sessionRequired: true,
-    allOf: ["artifacts:read", "files:upload"],
-  },
-} satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
-
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
 
 class PolicyMcpServer extends McpServer {
@@ -765,13 +574,20 @@ export function buildOpenGeniMcpServer(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  // A session-scoped grant carries its model-visible selection as a signed
+  // claim. When that claim is absent the grant was not minted for the ordinary
+  // first-party MCP surface (today only the sandbox Codemode bearer has that
+  // shape), so it resolves to no session tools rather than the deployment
+  // default catalog: an omitted claim must never widen.
+  const signedSelection = grant.metadata?.["firstPartyMcpTools"] as
+    | FirstPartyMcpToolName[]
+    | undefined;
   const selectedTools =
     sessionId !== null
       ? new Set(
-          allowedFirstPartyMcpToolsForSession(
-            deps.settings,
-            grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined,
-          ),
+          signedSelection === undefined
+            ? []
+            : allowedFirstPartyMcpToolsForSession(deps.settings, signedSelection),
         )
       : null;
   const nestedAgentDepth = grant.metadata?.["nestedAgentDepth"];
@@ -806,11 +622,20 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // Goal tools require goals:manage (in the default first-party permission set).
-  if (sessionId !== null && can("goals:manage")) {
+  // PolicyMcpServer applies each tool's own permission contract. Register this
+  // mixed group for every session so session-level wait_for_input remains
+  // available with sessions:control even when goals:manage is intentionally
+  // absent.
+  if (sessionId !== null) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
-  if (sessionId !== null && options.workspaceMemoryEnabled === true) {
+  // A session frozen with memoryScope "off" receives no Memory tools at all,
+  // independent of the workspace-level Memory setting.
+  if (
+    sessionId !== null &&
+    options.workspaceMemoryEnabled === true &&
+    options.sessionMemory?.mode !== "off"
+  ) {
     registerMemoryTools(
       server,
       deps,
@@ -818,8 +643,27 @@ export function buildOpenGeniMcpServer(
       sessionId,
       json,
       options.workspaceMemoryPromptMode ?? "retrieval_only",
+      options.sessionMemory ?? null,
     );
   }
+  server.registerTool(
+    "artifacts_list",
+    {
+      description:
+        "List the generic published artifacts in this workspace and their current versions.",
+      inputSchema: {},
+    },
+    async () => {
+      if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+        ),
+      );
+    },
+  );
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
@@ -919,6 +763,7 @@ export function buildOpenGeniMcpServer(
     sessionCreateVisible,
     json,
   );
+  registerProjectTools(server, deps, grant, can, json);
   registerVariableSetTools(server, deps, grant, can, sessionId, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
@@ -1530,7 +1375,8 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_create",
       {
-        description: "Create a scheduled task.",
+        description:
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -2572,6 +2418,12 @@ function registerGoalTools(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
   );
+  const inputWaitReasonSchema = boundedGoalToolString(2 * 1024, "session input wait reason").refine(
+    (value) => value.trim().length > 0,
+    {
+      message: "session input wait reason must not be blank",
+    },
+  );
   server.registerTool(
     "goal_set",
     {
@@ -2730,38 +2582,38 @@ function registerGoalTools(
   );
 
   server.registerTool(
-    "goal_wait",
+    "wait_for_input",
     {
       description:
-        "Hold the active goal's automatic continuation while progress depends on child sessions or an external event. Use it instead of sleeping or polling sessions_list/session_get/session_events, and only after re-checking the child or external state once. Always end your turn right after calling it: you will be woken by a child result, an agent message, a human prompt, or at the deadline, and the goal stays active. The deadline (untilSeconds) is mandatory and capped at 7 days. Never use goal_wait instead of goal_pause when you are blocked on a human decision.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
-        reason: goalRationale,
-        untilSeconds: z4
+        reason: inputWaitReasonSchema.describe(
+          "Shown directly to the user. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
+        ),
+        timeoutSeconds: z4
           .number()
           .int()
-          .min(SESSION_GOAL_HOLD_MIN_SECONDS)
-          .max(SESSION_GOAL_HOLD_MAX_SECONDS),
+          .min(SESSION_INPUT_WAIT_MIN_SECONDS)
+          .max(SESSION_INPUT_WAIT_MAX_SECONDS),
         idempotencyKey: z4.string().uuid().optional(),
       },
     },
-    async ({ reason, untilSeconds, idempotencyKey }) => {
-      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+    async ({ reason, timeoutSeconds, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
       const context = exactAgentCommandContext(grant, sessionId);
-      // Without a caller-supplied key the operation is idempotent per (goal
-      // target, turn, exact arguments): a replacement attempt replaying the
-      // same call receives the stored result instead of re-stamping the hold,
-      // while a genuinely new same-turn wait (different reason/deadline) is a
-      // new operation whose later hold wins.
       const operationKey =
         idempotencyKey ??
-        `goal-wait:${context.callerTurnId}:${createHash("sha256")
-          .update(JSON.stringify({ reason, untilSeconds }))
+        `wait-for-input:${context.callerTurnId}:${createHash("sha256")
+          .update(JSON.stringify({ reason, timeoutSeconds }))
           .digest("hex")
           .slice(0, 32)}`;
-      const { goal, events, operationId, replay, untilAt } =
-        await holdSessionGoalContinuationWithEvent(deps.db, grant.workspaceId, sessionId, {
+      const { events, operationId, replay, deadlineAt } = await waitForSessionInputWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
           reason,
-          untilSeconds,
+          timeoutSeconds,
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2773,16 +2625,16 @@ function registerGoalTools(
             },
             operationKey,
           },
-        });
+        },
+      );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
       return json({
-        status: "held",
-        goalId: goal.id,
-        untilAt,
+        status: "waiting_for_input",
+        deadlineAt,
         operationId,
         replay,
         nextAction:
-          "End your turn now; you will be woken by a child result, a message, a human prompt, or at untilAt.",
+          "The runtime yields this turn after the tool batch settles. Relevant input or the timeout deadline will start a new turn; the timeout does not cancel commands.",
       });
     },
   );
@@ -2888,6 +2740,61 @@ function registerGoalTools(
       );
     },
   );
+  server.registerTool(
+    "goal_resume",
+    {
+      description:
+        "Resume this session's paused goal regardless of who paused it or why. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
+      inputSchema: {},
+    },
+    async () => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      await requireSession(deps.db, grant.workspaceId, sessionId);
+      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+      if (!existing) {
+        throw new Error("this session has no goal; use goal_set first");
+      }
+      const { goal, events, workflowWakeRevision } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "active",
+          event: { type: "goal.resumed", actor: "agent" },
+        },
+      );
+      const changed = events.length > 0;
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
+      if (workflowWakeRevision !== null) {
+        await deps.workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+          wakeRevision: workflowWakeRevision,
+        });
+      }
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_resume",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
+    },
+  );
 }
 
 type JsonResult = (value: unknown) => {
@@ -2922,42 +2829,44 @@ function registerWorkspaceArtifactTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
-  const prepare = (html: string) => {
+  const canReadProvenanceSession = (sourceSessionId: string): Promise<boolean> =>
+    authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
+      .then(() => true)
+      .catch((error) => {
+        if (error instanceof SessionAuthorizationDeniedError) return false;
+        throw error;
+      });
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const prepare = (
+    html: string | undefined,
+    source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
+    requestedTools?: Array<{ serverId: string; toolName: string }>,
+    uploadId?: string,
+  ) => {
     if (!deps.objectStorage) throw new Error("Object storage is not configured");
-    const bytes = new TextEncoder().encode(html);
-    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
-      throw new Error(
-        `Artifact HTML must be 1-${WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES} UTF-8 bytes`,
-      );
-    }
-    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-    const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
-    return {
-      contentKey,
-      contentSha256,
-      sizeBytes: bytes.byteLength,
-      persistContent: async () => {
-        await deps.objectStorage!.putObject({
-          key: contentKey,
-          contentType: "text/html; charset=utf-8",
-          body: bytes,
-          sha256: contentSha256,
-        });
-      },
-    };
+    return prepareWorkspaceArtifactPublication(deps, grant, {
+      ...(html === undefined ? {} : { html }),
+      ...(uploadId ? { uploadId } : {}),
+      ...(source ? { source } : {}),
+      ...(requestedTools ? { requestedTools } : {}),
+    });
   };
   const provenance = (
     idempotencyKey: string,
-    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+    sourceToolName:
+      | "artifacts_create"
+      | "artifacts_publish"
+      | "artifacts_rollback"
+      | "artifacts_archive"
+      | "artifacts_restore",
   ) => {
     const claims = attempt();
     return {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       operationKey: `attempt:${createHash("sha256")
-        .update(
-          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
-        )
+        .update(`${claims.sessionId}:${claims.turnId}:${idempotencyKey}`)
         .digest("hex")}`,
       actorSubjectId: grant.subjectId,
       sourceSessionId: claims.sessionId,
@@ -2969,15 +2878,15 @@ function registerWorkspaceArtifactTools(
   };
 
   server.registerTool(
-    "artifacts_list",
+    "artifacts_prepare_upload",
     {
       description:
-        "List the generic published artifacts in this workspace and their current versions.",
+        "Get signed upload URLs for a Site's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only Sites.",
       inputSchema: {},
     },
     async () => {
       await authorize();
-      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+      return json(await prepareWorkspaceArtifactUpload(deps, grant));
     },
   );
 
@@ -2985,7 +2894,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Read an artifact's metadata and exact HTML source. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and signed download URLs for HTML and optional source JSON. Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -2994,21 +2903,27 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
-      const [detail, ref] = await Promise.all([
+      const [rawDetail, ref] = await Promise.all([
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
       ]);
-      const object = await retryWhileMissing(async () =>
-        deps.objectStorage!.getObjectBytes(ref.contentKey),
-      );
-      if (!object) throw new Error("Artifact content is unavailable");
-      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
-      if (actualHash !== ref.version.contentSha256)
-        throw new Error("Artifact content failed integrity verification");
+      const sourceAuthorizations = new Map<string, Promise<boolean>>();
+      const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
+        const existing = sourceAuthorizations.get(sourceSessionId);
+        if (existing) return existing;
+        const decision = canReadProvenanceSession(sourceSessionId);
+        sourceAuthorizations.set(sourceSessionId, decision);
+        return decision;
+      };
+      const [detail, projectedVersion] = await Promise.all([
+        projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
+        projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
+      ]);
+      const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
       return json({
         detail,
-        version: ref.version,
-        html: new TextDecoder().decode(object.bytes),
+        version: projectedVersion,
+        downloads,
       });
     },
   );
@@ -3026,24 +2941,60 @@ function registerWorkspaceArtifactTools(
           .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
           .max(96)
           .optional(),
-        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).optional(),
+        uploadId: z4.string().uuid().optional(),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ title, description, slug, html, idempotencyKey }) => {
+    async ({
+      title,
+      description,
+      slug,
+      html,
+      source,
+      requestedTools,
+      idempotencyKey,
+      uploadId,
+    }) => {
       await authorize();
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await createWorkspaceArtifact(deps.db, {
-          artifactId,
-          slug: resolvedSlug,
-          title,
-          description: description ?? null,
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_create"),
-        }),
+        await mutation(
+          await createWorkspaceArtifact(deps.db, {
+            artifactId,
+            slug: resolvedSlug,
+            requestedSlug: slug ?? null,
+            title,
+            description: description ?? null,
+            ...(await prepare(html, source, requestedTools, uploadId)),
+            ...provenance(idempotencyKey, "artifacts_create"),
+          }),
+        ),
       );
     },
   );
@@ -3058,21 +3009,57 @@ function registerWorkspaceArtifactTools(
         expectedCurrentVersionId: z4.string().uuid(),
         title: z4.string().min(1).max(120).optional(),
         description: z4.string().max(2000).nullable().optional(),
-        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).optional(),
+        uploadId: z4.string().uuid().optional(),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ artifactId, expectedCurrentVersionId, title, description, html, idempotencyKey }) => {
+    async ({
+      artifactId,
+      expectedCurrentVersionId,
+      title,
+      description,
+      html,
+      uploadId,
+      source,
+      requestedTools,
+      idempotencyKey,
+    }) => {
       await authorize();
       return json(
-        await publishWorkspaceArtifactVersion(deps.db, {
-          artifactId,
-          expectedCurrentVersionId,
-          ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_publish"),
-        }),
+        await mutation(
+          await publishWorkspaceArtifactVersion(deps.db, {
+            artifactId,
+            expectedCurrentVersionId,
+            ...(title !== undefined ? { title } : {}),
+            ...(description !== undefined ? { description } : {}),
+            ...(await prepare(html, source, requestedTools, uploadId)),
+            ...provenance(idempotencyKey, "artifacts_publish"),
+          }),
+        ),
       );
     },
   );
@@ -3093,13 +3080,71 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await rollbackWorkspaceArtifact(deps.db, {
-          artifactId,
-          versionId,
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_rollback"),
-        }),
+        await mutation(
+          await rollbackWorkspaceArtifact(deps.db, {
+            artifactId,
+            versionId,
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_rollback"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_archive",
+    {
+      description:
+        "Unpublish an active workspace artifact without deleting its immutable versions or retained source.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "archived",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_archive"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_restore",
+    {
+      description:
+        "Republish an archived workspace artifact at its unchanged current immutable version.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "active",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_restore"),
+          }),
+        ),
       );
     },
   );
@@ -3562,7 +3607,17 @@ function registerMemoryTools(
   sessionId: string,
   json: JsonResult,
   promptMode: WorkspaceMemoryPromptMode,
+  sessionMemory: MemoryAgentScope | null,
 ): void {
+  // Read layers: workspace plus the session's private layer. Write layer: the
+  // session's narrowest layer. A null scope is the pre-0426 workspace path.
+  const agentScope: MemoryAgentScope = sessionMemory ?? {
+    mode: "workspace",
+    userSubjectId: null,
+    rootSessionId: null,
+  };
+  const writeScope = memoryWriteScopeForAgentScope(agentScope);
+  if (!writeScope) return;
   const publicationInputSchema = z4.object({
     importance: z4.enum(["major", "normal", "minor"]),
     audience: z4.literal("workspace"),
@@ -3590,6 +3645,7 @@ function registerMemoryTools(
             ...(kind ? { kind } : {}),
             ...(limit ? { limit } : {}),
             agentPromptMode: promptMode,
+            agentScope,
           },
           deps.getDocumentServices().embedder,
         ),
@@ -3625,6 +3681,7 @@ function registerMemoryTools(
           ...(confidence !== undefined ? { confidence } : {}),
           ...(replaces_id ? { replacesId: replaces_id } : {}),
           origin: "agent",
+          scope: writeScope,
         },
         slack_publication
           ? {
@@ -3743,6 +3800,7 @@ function registerMemoryTools(
           ...(reason ? { reason } : {}),
           ...(replacement_text ? { replacementText: replacement_text } : {}),
           origin: "agent",
+          agentScope,
         },
         slack_publication
           ? {
@@ -4423,10 +4481,17 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status and advisory related-work evidence in this workspace. query searches semantic titles, active goals, and typed work claims; subject performs one exact provider-neutral claim lookup and ranks it ahead of text. Neither path searches initialMessage or grants access to a result. Claims are nonexclusive evidence, never locks or instructions. Relevance cursors are bound to normalized filters and a workspace activity-revision snapshot. Without search, the tool defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get only when ordinary target authorization allows it. The list never returns full session objects, instructions, resources, tools, files, or history.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
+          detail: z4
+            .enum(["compact", "full"])
+            .optional()
+            .describe(
+              "compact (default) omits empty diagnostics but retains positive descendant attention counts and incomplete-tree loss facts; full restores the legacy bounded rows and pagination diagnostics.",
+            ),
+          includeRelatedWork: z4.boolean().optional(),
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
@@ -4447,7 +4512,22 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          originSiteId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Conversations created through this Site, regardless of their project. Keep unchanged when paging.",
+            ),
           recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
+          projectId: z4
+            .string()
+            .uuid()
+            .nullable()
+            .optional()
+            .describe(
+              "Filter by workspace project; null selects unfiled sessions. Keep unchanged when paging.",
+            ),
           rootSessionId: z4.string().uuid().optional(),
           parentSessionId: z4.string().uuid().nullable().optional(),
           subject: z4
@@ -4464,14 +4544,18 @@ function registerWorkspaceOrchestrationTools(
       async ({
         limit,
         cursor,
+        detail,
+        includeRelatedWork,
         includeLastMessage,
         orderBy: requestedOrderBy,
         updatedAfter,
         query,
         statuses,
         activeOnly,
+        originSiteId,
         recentHours,
         rootSessionId,
+        projectId,
         parentSessionId,
         subject,
         claimLimit,
@@ -4487,6 +4571,12 @@ function registerWorkspaceOrchestrationTools(
           authorizationScope?.kind === "scoped" ? "scoped" : "workspace";
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const relevanceRequested = Boolean(query?.trim() || subject);
+        const relatedWorkRequested = sessionMcpIncludesRelatedWork({
+          detail,
+          includeRelatedWork,
+          query,
+          subject,
+        });
         if (relevanceRequested && !deps.settings.workDiscoveryEnabled) {
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
@@ -4528,23 +4618,31 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
+            ...(projectId !== undefined ? { channelId: projectId } : {}),
             ...(parentSessionId !== undefined ? { parentSessionId } : {}),
             ...(subject ? { subject: subject as WorkClaimSubjectFilter } : {}),
             ...(claimLimit !== undefined ? { claimLimit } : {}),
-            includeWorkDiscovery: deps.settings.workDiscoveryEnabled,
+            includeWorkDiscovery: deps.settings.workDiscoveryEnabled && relatedWorkRequested,
             subjectId: grant.subjectId,
             ...(authorizationScope ? { authorizationScope } : {}),
           });
-          const result = capSessionDiscoveryPage(page, includeLastMessage === true);
+          const result =
+            detail === "full"
+              ? capSessionDiscoveryPage(page, includeLastMessage === true)
+              : capSessionDiscoveryCompactPage(page, {
+                  includeLastMessage: includeLastMessage === true,
+                  includeRelatedWork: relatedWorkRequested,
+                });
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
             mode,
             outcome: result.sessions.length === 0 ? "empty" : "ok",
             authorizationScope: metricAuthorizationScope,
             durationMs: performance.now() - startedAtMs,
-            responseBytes: result.bytes,
+            responseBytes: Buffer.byteLength(JSON.stringify(result, null, 2), "utf8"),
             ...summarizeWorkDiscoveryRows(result.sessions),
           });
           return json(result);
@@ -4569,10 +4667,25 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get another session you are managing: status, goal-bearing metadata, resources, persisted tool refs, exact bounded effectiveToolPolicy, and variableSet attachment (names/ids only, never variable values). effectiveToolPolicy distinguishes selected refs from workspace defaults, mandatory carriers, configured/deferred refs, and dropped refs. Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
-        inputSchema: { sessionId: z4.string().uuid() },
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Queued status and updatedAt are not proof of execution; inspect the active turn and durable results. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+        inputSchema: {
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Omit only to read the authenticated current agent session, never its parent or root. Sessionless callers must provide an explicit ID.",
+            ),
+          detail: z4.enum(["compact", "full"]).optional(),
+        },
       },
-      async ({ sessionId }) => {
+      async ({ sessionId: requestedSessionId, detail }) => {
+        const sessionId = requestedSessionId ?? exactAgentAttemptClaims(grant)?.sessionId;
+        if (sessionId === undefined) {
+          throw new Error(
+            "session_get requires an explicit sessionId without authenticated current agent session context",
+          );
+        }
         const authorization = await authorizeFirstPartySession(
           deps,
           grant,
@@ -4591,12 +4704,18 @@ function registerWorkspaceOrchestrationTools(
           },
           authorization?.relatedSessionAccess ?? "root",
         );
+        if (detail !== "full") {
+          return json(
+            boundSessionCompactDetailMcp(
+              projected,
+              await getSessionMcpMonitoringSummary(deps.db, grant.workspaceId, sessionId),
+              queue,
+            ),
+          );
+        }
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, {
-              ...projected,
-              effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
-            }),
+            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, projected),
           ),
         );
       },
@@ -4606,9 +4725,14 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Monitoring mode also omits a human/API user.message whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim; waiting work is represented by sessions_list queuedPromptCount); the row appears at its own sequence once the turn is claimed. Use `latest` as an exclusive lookup for the authoritative newest durable sequence in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads, including unclaimed prompt rows, require mode=forensic or the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it binds the view, detail and direction. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
+          view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
+          cursor: z4.string().max(4096).optional(),
+          callId: z4.string().max(512).optional(),
+          includeArguments: z4.boolean().optional(),
+          includeOutput: z4.boolean().optional(),
           after: z4.number().int().nonnegative().optional(),
           before: z4.number().int().positive().optional(),
           limit: z4.number().int().positive().optional(),
@@ -4616,8 +4740,34 @@ function registerWorkspaceOrchestrationTools(
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
           resultMode: z4.enum(SessionEventResultMode.options).optional(),
-          includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
-          excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          includeTypes: z4
+            .array(
+              z4
+                .string()
+                .refine(
+                  (value) => SessionEventType.safeParse(value).success,
+                  "Unknown session event type",
+                ),
+            )
+            .max(100)
+            .describe(
+              "Debug audit event types, e.g. turn.completed, user.message, agent.message.completed, agent.toolCall.output. Validated against the canonical event-type registry.",
+            )
+            .optional(),
+          excludeTypes: z4
+            .array(
+              z4
+                .string()
+                .refine(
+                  (value) => SessionEventType.safeParse(value).success,
+                  "Unknown session event type",
+                ),
+            )
+            .max(100)
+            .describe(
+              "Debug audit event types to exclude; validated against the canonical event-type registry.",
+            )
+            .optional(),
           includeClasses: z4
             .array(z4.enum(SessionEventSemanticClass.options))
             .max(SessionEventSemanticClass.options.length)
@@ -4631,6 +4781,11 @@ function registerWorkspaceOrchestrationTools(
       },
       async ({
         sessionId,
+        view,
+        cursor,
+        callId,
+        includeArguments,
+        includeOutput,
         after,
         before,
         limit,
@@ -4638,19 +4793,75 @@ function registerWorkspaceOrchestrationTools(
         mode: requestedMode,
         payloadMode: requestedPayloadMode,
         resultMode: requestedResultMode,
-        includeTypes,
-        excludeTypes,
+        includeTypes: requestedIncludeTypes,
+        excludeTypes: requestedExcludeTypes,
         includeClasses,
         excludeClasses,
         latest,
       }) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        // Keep the model schema compact without weakening either MCP validation
+        // or direct adapter calls: the canonical registry owns accepted types.
+        const includeTypes = requestedIncludeTypes?.map((type) => SessionEventType.parse(type));
+        const excludeTypes = requestedExcludeTypes?.map((type) => SessionEventType.parse(type));
         const latestClass =
           latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
         if (requestedResultMode === "compact" && latestClass === undefined) {
           throw new Error("resultMode=compact requires latest");
         }
         await requireSession(deps.db, grant.workspaceId, sessionId);
+        const auditRequested = [
+          requestedMode,
+          requestedPayloadMode,
+          requestedResultMode,
+          includeTypes,
+          excludeTypes,
+          includeClasses,
+          excludeClasses,
+          latest,
+        ].some((value) => value !== undefined);
+        if (((view !== undefined && view !== "debug") || cursor !== undefined) && auditRequested) {
+          throw new Error(
+            "Audit selectors require view=debug and cannot change a conversation cursor",
+          );
+        }
+        if (view !== "debug" && !auditRequested) {
+          const { readSessionEventView } = await import("./session-event-view");
+          const { listSessionEventSlices } = await import("@opengeni/db/session-event-slices");
+          return json(
+            await readSessionEventView(
+              {
+                sessionId,
+                view,
+                cursor,
+                callId,
+                includeArguments,
+                includeOutput,
+                after,
+                before,
+                direction: requestedDirection,
+                limit,
+              },
+              (options) =>
+                listSessionEventSlices(
+                  deps.db,
+                  grant.workspaceId,
+                  sessionId,
+                  options,
+                  (legacyOptions) =>
+                    listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
+                ),
+            ),
+          );
+        }
+        if (
+          cursor !== undefined ||
+          callId !== undefined ||
+          includeArguments !== undefined ||
+          includeOutput !== undefined
+        ) {
+          throw new Error("cursor/callId/includeArguments/includeOutput require a non-debug view");
+        }
         if (
           latest &&
           [includeTypes, excludeTypes, includeClasses, excludeClasses].some(
@@ -4659,7 +4870,7 @@ function registerWorkspaceOrchestrationTools(
         ) {
           throw new Error("latest cannot be combined with event filters");
         }
-        const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
+        const mode = requestedMode ?? "monitoring";
         const direction = latestClass
           ? "before"
           : (requestedDirection ??
@@ -4718,7 +4929,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, completed messages, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence. For long or uncertain waits call wait_for_input once and end the turn.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4818,12 +5029,70 @@ function registerWorkspaceOrchestrationTools(
         );
       },
     );
+
+    if (callerSessionId !== null) {
+      for (const toolName of ["command_read", "command_wait"] as const) {
+        server.registerTool(
+          toolName,
+          {
+            description: `${toolName === "command_read" ? "Read retained output immediately, or briefly wait" : "Briefly wait using the same read operation as command_read"} for one command owned by the current session, across sandbox and Connected Machine providers. Returns bounded stdout/stderr chunks, durable state and exitCode, nextCursor and hasMore, plus explicit retention limitations. Pass nextCursor to continue; output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. waitSeconds is at most 50; command_wait defaults to 45, command_read to 0. For long waits use wait_for_input. Neither tool sends stdin or cancels the command.`,
+            inputSchema: {
+              commandId: z4.string().uuid(),
+              cursor: z4.string().max(128).optional(),
+              waitSeconds: z4.number().int().min(0).max(COMMAND_READ_MAX_WAIT_SECONDS).optional(),
+              maxOutputBytes: z4.number().int().min(4).max(COMMAND_OUTPUT_MAX_BYTES).optional(),
+            },
+          },
+          async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+            let initialRead = true;
+            return json(
+              await readCommandWithWait({
+                commandId,
+                waitSeconds:
+                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
+                ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+                ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+                read: async () => {
+                  if (!initialRead)
+                    await authorizeFirstPartySession(
+                      deps,
+                      grant,
+                      callerSessionId,
+                      "session.events.read",
+                    );
+                  initialRead = false;
+                  return await readSessionBackgroundCommandOutput(deps.db, {
+                    accountId: grant.accountId,
+                    workspaceId: grant.workspaceId,
+                    sessionId: callerSessionId,
+                    commandId,
+                    ...(cursor === undefined ? {} : { cursor }),
+                    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+                  });
+                },
+                subscribe: (onEvents) =>
+                  deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+              }),
+            );
+          },
+        );
+      }
+    }
   }
 
   if (can("sessions:create") && sessionCreateVisible) {
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
+        projectId: z4
+          .string()
+          .uuid()
+          .nullable()
+          .optional()
+          .describe(
+            "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
+          ),
         title: z4
           .string()
           .min(1)
@@ -4834,7 +5103,12 @@ function registerWorkspaceOrchestrationTools(
           ),
         instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
         goal: z4.unknown().optional(),
-        resources: z4.array(z4.unknown()).optional(),
+        resources: z4
+          .array(z4.unknown())
+          .optional()
+          .describe(
+            "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+          ),
         tools: z4.array(z4.unknown()).optional(),
         mcpServers: z4.array(z4.unknown()).optional(),
         variableSetId: z4.string().uuid().optional(),
@@ -4879,7 +5153,16 @@ function registerWorkspaceOrchestrationTools(
           .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
           .optional()
           .describe(
-            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+          ),
+        // The child's agent-access scope and end-user label are never model
+        // choices: it inherits this session's exactly. Only the Memory
+        // selector may be narrowed here (workspace > user > off).
+        memoryScope: z4
+          .enum(["workspace", "user", "off"])
+          .optional()
+          .describe(
+            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
           ),
         // Omission is the ordinary safe sharing path. Literal "shared" remains
         // available to advanced REST/SDK callers but is intentionally absent
@@ -4914,7 +5197,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
@@ -4927,13 +5210,14 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const { machineTarget, title, ...request } = args;
+          const { machineTarget, title, projectId, ...request } = args;
           const result = await createSessionForRequestWithOutcome(
             deps,
             grant,
             grant.workspaceId,
             {
               ...request,
+              ...(projectId !== undefined ? { channelId: projectId } : {}),
               ...(machineTarget
                 ? {
                     targetSandboxId: machineTarget.targetSandboxId,
@@ -4959,7 +5243,7 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Send information to another session. From an OpenGeni worker this becomes a canonical coalescible machine input: it appears in the target's compact incoming queue group, is durably added to model history when claimed, and remains visible in the timeline. A sessionless operator call appends one human/API prompt.",
+          "Acceptance is not execution. Keep resource.id: for agent messages, match that ID in payload.updateIds from session_events view=debug, includeTypes=[system.update.delivered], payloadMode=full; retain the event turnId and read its relevant result. An unrelated in-flight turn completing does not prove delivery. Do not resend an unconsumed message; inspect blockers. Worker messages are coalescible machine input, added to history when claimed. Sessionless operator calls append a human/API prompt and resource.id is its turn ID. Use your last consumed event sequence. Report stalled delivery if it cannot safely progress.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
@@ -5061,7 +5345,8 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_pause",
       {
-        description: "Pause this session. Waiting prompts stay saved and inert until Resume.",
+        description:
+          "Pause the selected session workstream, including descendants. From an agent, pausing an ancestor also stops this caller; it cannot then issue its own Resume. Do not use ancestor Pause merely to prevent concurrent edits. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           idempotencyKey: z4.string().uuid(),
@@ -5337,6 +5622,130 @@ function registerWorkspaceOrchestrationTools(
           updated: result.updated,
           title: result.title ?? title,
         });
+      },
+    );
+  }
+}
+
+function registerProjectTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  can: (permission: Permission) => boolean,
+  json: JsonResult,
+): void {
+  const projectIdSchema = z4.string().uuid();
+  const nameSchema = z4.string().trim().min(1).max(80);
+  const descriptionSchema = z4.string().max(2000);
+  if (can("sessions:read")) {
+    server.registerTool(
+      "project_list",
+      {
+        description:
+          "List workspace-shared projects in sidebar order (pinned first). Projects group sessions in the user's sidebar; they do not change execution or access. Use before creating a project to reuse an existing group.",
+        inputSchema: {},
+      },
+      async () => json({ projects: await listChannels(deps.db, grant.workspaceId) }),
+    );
+    server.registerTool(
+      "project_get",
+      {
+        description:
+          "Read one workspace project: name, description, pin state and order. Use sessions_list with projectId to find its visible sessions.",
+        inputSchema: { projectId: projectIdSchema },
+      },
+      async ({ projectId }) => {
+        const project = await getChannel(deps.db, grant.workspaceId, projectId);
+        if (!project) throw new Error("Project not found");
+        return json({ project });
+      },
+    );
+  }
+  if (can("sessions:create")) {
+    server.registerTool(
+      "project_create",
+      {
+        description:
+          "Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration.",
+        inputSchema: { name: nameSchema, description: descriptionSchema.optional() },
+      },
+      async ({ name, description }) =>
+        json({
+          project: await createChannel(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            name,
+            description: description ?? null,
+            createdBy: grant.subjectId,
+          }),
+        }),
+    );
+    server.registerTool(
+      "project_update",
+      {
+        description:
+          "Rename, describe or pin/unpin a workspace project. Pin state is shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description.",
+        inputSchema: {
+          projectId: projectIdSchema,
+          name: nameSchema.optional(),
+          description: descriptionSchema.nullable().optional(),
+          pinned: z4.boolean().optional(),
+        },
+      },
+      async ({ projectId, ...update }) => {
+        const project = await updateChannel(deps.db, grant.workspaceId, projectId, update);
+        if (!project) throw new Error("Project not found");
+        return json({ project });
+      },
+    );
+    server.registerTool(
+      "project_reorder",
+      {
+        description:
+          "Replace the shared sidebar project order. Pass every current project ID exactly once, from project_list. Pinned projects still appear first. If projects changed, list again before retrying.",
+        inputSchema: { projectIds: z4.array(projectIdSchema).min(1).max(200) },
+      },
+      async ({ projectIds }) => {
+        const projects = await reorderChannels(deps.db, grant.workspaceId, projectIds);
+        if (!projects)
+          throw new Error("Projects changed or order is invalid; call project_list and retry");
+        return json({ projects });
+      },
+    );
+    server.registerTool(
+      "project_delete",
+      {
+        description:
+          "Delete a workspace-shared project. Its sessions are preserved and become unfiled; no running work is stopped.",
+        inputSchema: { projectId: projectIdSchema },
+      },
+      async ({ projectId }) => {
+        if (!(await deleteChannel(deps.db, grant.workspaceId, projectId)))
+          throw new Error("Project not found");
+        return json({ ok: true, projectId });
+      },
+    );
+  }
+  if (can("sessions:control")) {
+    server.registerTool(
+      "session_set_project",
+      {
+        description:
+          "File a session into a workspace project, or pass projectId=null to unfile it. Projects group root sessions in the user's sidebar. Filing changes organization only, not visibility, instructions, runtime, or history.",
+        inputSchema: { sessionId: z4.string().uuid(), projectId: projectIdSchema.nullable() },
+      },
+      async ({ sessionId, projectId }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
+        await requireSession(deps.db, grant.workspaceId, sessionId);
+        if (
+          !(await setSessionChannel(deps.db, {
+            workspaceId: grant.workspaceId,
+            sessionId,
+            channelId: projectId,
+          }))
+        )
+          throw new Error("Session not found");
+        return json({ ok: true, sessionId, projectId });
       },
     );
   }
@@ -5995,6 +6404,7 @@ const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as co
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
 const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
 const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  view: "debug",
   direction: "before",
   limit: 1,
   mode: "monitoring",
@@ -6018,7 +6428,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
   const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
-      v: relevance ? 3 : 2,
+      v: cursor.originSiteId ? 4 : relevance ? 3 : 2,
+      ...(cursor.originSiteId ? { originSiteId: cursor.originSiteId } : {}),
       orderBy: cursor.orderBy,
       ...(relevance ? { sortRank: cursor.sortRank, filterHash: cursor.filterHash } : {}),
       sortRevision: cursor.sortRevision,
@@ -6072,6 +6483,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       updatedAfter?: unknown;
       sortRank?: unknown;
       filterHash?: unknown;
+      originSiteId?: unknown;
     };
     if (
       parsed.v === undefined &&
@@ -6121,8 +6533,14 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     }
     const isV2 = parsed.v === 2;
     const isV3 = parsed.v === 3;
+    const isV4 = parsed.v === 4;
+    const relevance = parsed.orderBy === "relevance";
     if (
-      (!isV2 && !isV3) ||
+      (!isV2 && !isV3 && !isV4) ||
+      (isV4 &&
+        (typeof parsed.originSiteId !== "string" ||
+          !SESSION_DISCOVERY_UUID.test(parsed.originSiteId) ||
+          !["createdAt", "updatedAt", "relevance"].includes(parsed.orderBy as string))) ||
       (isV2 && parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
       (isV3 && parsed.orderBy !== "relevance") ||
       typeof parsed.sortRevision !== "string" ||
@@ -6136,7 +6554,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       throw new Error("invalid cursor fields");
     }
     if (
-      isV3 &&
+      relevance &&
       (!Number.isSafeInteger(parsed.sortRank) ||
         (parsed.sortRank as number) < 0 ||
         typeof parsed.filterHash !== "string" ||
@@ -6144,7 +6562,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     ) {
       throw new Error("invalid relevance cursor fields");
     }
-    if (isV2 && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
+    if (!relevance && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
       throw new Error("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
@@ -6167,55 +6585,111 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
       throw new Error("creation cursor cannot carry activity revisions");
     }
-    const orderBy: SessionDiscoveryOrderBy = isV3
+    const orderBy: SessionDiscoveryOrderBy = relevance
       ? "relevance"
       : (parsed.orderBy as "createdAt" | "updatedAt");
     return {
       orderBy,
-      sortRank: isV3 ? (parsed.sortRank as number) : null,
+      sortRank: relevance ? (parsed.sortRank as number) : null,
       sortRevision,
       sortAt,
       id: parsed.id,
       snapshotAt,
       snapshotRevision,
       updatedAfter: normalizedUpdatedAfter,
-      filterHash: isV3 ? (parsed.filterHash as string) : null,
+      filterHash: relevance ? (parsed.filterHash as string) : null,
+      ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
     };
   } catch {
     throw new Error("sessions_list cursor is invalid");
   }
 }
 
-function capSessionDiscoveryText(
-  value: string | null,
-  maxChars = SESSION_DISCOVERY_TEXT_CHARS,
-  originalChars?: number | null,
+export function capSessionDiscoveryCompactPage(
+  page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
+  options: { includeLastMessage?: boolean; includeRelatedWork?: boolean } = {},
+  maxBytes = SESSION_DISCOVERY_PAGE_MAX_BYTES,
 ) {
-  if (value === null) {
-    return { text: value, truncated: false };
-  }
-  const projectedChars = Array.from(value);
-  const sourceChars = Math.max(projectedChars.length, originalChars ?? projectedChars.length);
-  if (sourceChars <= maxChars) {
-    return { text: value, truncated: false };
-  }
-
-  // The database supplies only a bounded prefix plus the original character
-  // count. Iterate to a stable marker width so the reported omission includes
-  // the characters replaced by the marker itself.
-  let bodyChars = maxChars;
-  let marker = "";
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const omittedChars = Math.max(0, sourceChars - bodyChars);
-    marker = `…[${omittedChars} chars truncated]…`;
-    const nextBodyChars = Math.max(0, maxChars - Array.from(marker).length);
-    if (nextBodyChars === bodyChars) break;
-    bodyChars = nextBodyChars;
-  }
-  return {
-    text: `${projectedChars.slice(0, bodyChars).join("")}${marker}`,
-    truncated: true,
+  let previewBytes = 0;
+  const projected = page.sessions.map((session) => {
+    const row = {
+      ...compactSessionMcpListRow(session, options.includeRelatedWork),
+      ...(options.includeLastMessage && session.queuedPromptCount > 0
+        ? { queuedPromptCount: session.queuedPromptCount }
+        : {}),
+    };
+    if (!options.includeLastMessage) return row;
+    const preview = capSessionDiscoveryText(
+      session.latestMessage?.preview ?? null,
+      600,
+      session.latestMessage?.previewOriginalChars,
+    );
+    if (!session.latestMessage) return row;
+    const bytes = Buffer.byteLength(preview.text ?? "", "utf8");
+    const omitted = previewBytes + bytes > SESSION_DISCOVERY_PREVIEW_MAX_BYTES;
+    if (!omitted) previewBytes += bytes;
+    return {
+      ...row,
+      latestMessage: {
+        type: session.latestMessage.type,
+        ...(omitted
+          ? {
+              previewOmitted: true,
+              previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+              previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+                session.id,
+                session.latestMessage.type,
+              ),
+            }
+          : {
+              preview: preview.text,
+              ...(preview.truncated ? { previewTruncated: true } : {}),
+            }),
+      },
+    };
+  });
+  let kept = projected;
+  const build = () => {
+    const dropped = kept.length < projected.length;
+    const last = page.sessions[kept.length - 1];
+    const cursor =
+      dropped && last
+        ? {
+            orderBy: page.orderBy,
+            sortRank: last.sortRank,
+            sortRevision: last.sortRevision,
+            sortAt: last.sortAt,
+            id: last.id,
+            snapshotAt: page.snapshotAt,
+            snapshotRevision: page.snapshotRevision,
+            updatedAfter: page.updatedAfter,
+            filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
+          }
+        : page.nextCursor;
+    return {
+      sessions: kept,
+      total: page.total,
+      nextCursor: cursor ? encodeSessionDiscoveryCursor(cursor) : null,
+      ...(page.orderBy === "updatedAt" ? { updatedThrough: page.updatedThrough } : {}),
+      ...(dropped
+        ? {
+            responseTruncated: true,
+            truncationReason: `response exceeded ${maxBytes} bytes; continue with nextCursor`,
+          }
+        : {}),
+    };
   };
+  let result = build();
+  while (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    result = build();
+  }
+  if (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes) {
+    throw new RangeError(`sessions_list compact metadata exceeds its ${maxBytes}-byte envelope`);
+  }
+  return result;
 }
 
 export function capSessionDiscoveryPage(
@@ -6244,6 +6718,7 @@ export function capSessionDiscoveryPage(
       : null;
     return {
       id: session.id,
+      ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,
       parentSessionId: session.parentSessionId,
@@ -6356,6 +6831,7 @@ export function capSessionDiscoveryPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           })
         : null
       : page.nextCursor

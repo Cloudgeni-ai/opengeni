@@ -66,7 +66,10 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  * exact global ingress keys used to discover tenant context before loading the
  * protected automation source or PR-review binding. Their organization
  * boundary is enforced above the database, by authenticated ingress and
- * `@opengeni/core` access resolution.
+ * `@opengeni/core` access resolution. The four account-carrying MCP OAuth
+ * protocol tables are likewise exact hash-keyed state used before the bearer,
+ * authorization code, or consent request can establish tenant context; token
+ * use then revalidates live workspace authority inside the resolved RLS scope.
  *
  * This list is a review gate, not a target. Adding an organization-scoped
  * resource table without RLS must fail this file; removing an entry here
@@ -76,6 +79,10 @@ const ORGANIZATION_AUTHORITY_TABLES = [
 const REVIEWED_UNPROTECTED_ACCOUNT_TABLES = [
   "auth_identities",
   "automation_webhook_endpoints",
+  "mcp_oauth_access_tokens",
+  "mcp_oauth_authorization_codes",
+  "mcp_oauth_authorization_requests",
+  "mcp_oauth_refresh_tokens",
   "pr_review_managed_github_routes",
   "workspace_memberships",
   "workspaces",

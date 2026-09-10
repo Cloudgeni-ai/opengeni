@@ -109,12 +109,21 @@ describe("workspace route scroll ownership", () => {
   });
 
   test("settings shells consume the app canvas remainder instead of reclaiming the viewport", async () => {
+    const sharedSource = await source("components/settings/settings-sidebar.tsx");
+    const shellClasses = sharedSource.match(/export const SETTINGS_SHELL_CLASS =\s*"([^"]+)"/)?.[1];
+    expect(shellClasses, "shared settings layout must fit below persistent app chrome").toContain(
+      "h-full",
+    );
+    expect(shellClasses).toContain("min-h-0");
+    expect(shellClasses).not.toContain("h-dvh");
     for (const path of [
       "components/settings/workspace-settings-shell.tsx",
       "components/settings/organization-settings-shell.tsx",
     ]) {
       const shellSource = await source(path);
-      expect(shellSource, `${path} must fit below persistent app chrome`).toContain("h-full");
+      expect(shellSource, `${path} must use the shared bounded settings layout`).toContain(
+        "className={SETTINGS_SHELL_CLASS}",
+      );
       expect(
         shellSource,
         `${path} must not clip app chrome by reclaiming the viewport`,

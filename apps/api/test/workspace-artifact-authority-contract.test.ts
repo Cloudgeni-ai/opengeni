@@ -17,6 +17,15 @@ const architecture = source("docs/architecture.md");
 
 describe("workspace artifact causal-human authority contract", () => {
   test("keeps artifact publication behind the complete exact-attempt fence", () => {
+    for (const tool of [
+      "artifacts_create",
+      "artifacts_publish",
+      "artifacts_rollback",
+      "artifacts_archive",
+      "artifacts_restore",
+    ]) {
+      expect(workspaceArtifacts).toContain(`| "${tool}"`);
+    }
     for (const required of [
       "turn.initiating_human_subject_id",
       "case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end",
@@ -46,6 +55,8 @@ describe("workspace artifact causal-human authority contract", () => {
       expect(document).toContain("initiating_human_subject_id");
       expect(document).toContain("artifacts:publish");
       expect(document.toLowerCase()).toContain("pure service work");
+      expect(document.toLowerCase()).toContain("archive");
+      expect(document.toLowerCase()).toContain("restore");
     }
     expect(`${agents}\n${lifecycle}`).not.toContain("solely for personal");
   });

@@ -27,6 +27,8 @@ try {
   const versions = workspaceVersionMap();
   const contractsRoot = join(repoRoot, "packages/contracts");
   const sdkRoot = join(repoRoot, "packages/sdk");
+  const connectRoot = join(repoRoot, "packages/connect");
+  await run(["bun", "run", "build"], connectRoot);
   await run(["bun", "run", "build"], contractsRoot);
   await run(["bun", "run", "build"], sdkRoot);
   const contractsTarball = await packBuiltWorkspace(
@@ -36,6 +38,7 @@ try {
     versions,
   );
   const sdkTarball = await packBuiltWorkspace(sdkRoot, stagingRoot, tarballRoot, versions);
+  const connectTarball = await packBuiltWorkspace(connectRoot, stagingRoot, tarballRoot, versions);
 
   const kernelDependencies: Record<string, string> = {};
   for (const modality of modalities) {
@@ -87,7 +90,10 @@ try {
           "@opengeni/sdk": `file:${sdkTarball}`,
           ...kernelDependencies,
         },
-        overrides: { "@opengeni/contracts": `file:${contractsTarball}` },
+        overrides: {
+          "@opengeni/contracts": `file:${contractsTarball}`,
+          "@opengeni/connect": `file:${connectTarball}`,
+        },
       },
       null,
       2,
