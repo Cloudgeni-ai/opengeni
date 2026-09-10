@@ -1647,3 +1647,15 @@ Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause rea
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
+
+### In-conversation connection setup
+
+The stock session's `SessionCapabilityCard` uses `MessageTimeline.renderAuthNeeded`;
+embedding hosts retain their authorization. Live catalog forms share
+`performCapabilityAction` with Capabilities and send credentials only to the
+human-authorized Connection API. OAuth returns here without replaying tools.
+`attachSessionCapability` preserves existing tool selection through CAS.
+Library Skills retain workspace scope and reviewed version/hash.
+Personal MCP use requires an owner-issued exact-session grant, with shared-results
+acknowledgement for shared conversations. The composer restores only active grants
+matching visibility and authority epoch; credentials alone grant no use.

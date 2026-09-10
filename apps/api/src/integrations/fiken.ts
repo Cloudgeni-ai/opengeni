@@ -1,3 +1,4 @@
+import { safeReturnPath } from "./oauth-return-path";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
@@ -1028,7 +1029,9 @@ export async function startFikenOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
-    returnPath: `/workspaces/${input.workspaceId}/capabilities`,
+    returnPath: safeReturnPath(
+      input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
+    ),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const authorizationUrl = new URL(FIKEN_AUTHORIZE_URL);
