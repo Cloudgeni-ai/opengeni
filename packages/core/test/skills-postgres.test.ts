@@ -57,6 +57,7 @@ import {
   type SkillReviewReference,
 } from "@opengeni/contracts";
 import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "../src/domain/skills";
+import { serializeHumanInputRequests } from "../../runtime/src/run-events";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -1686,13 +1687,37 @@ async function answeredSkillInput(
   review: SkillReviewReference,
   values = ["save"],
   respondedBy = f.human.actor.subjectId,
-  options: { label?: string; authorized?: boolean; pending?: boolean } = {},
+  options: {
+    label?: string;
+    authorized?: boolean;
+    pending?: boolean;
+    legacyWire?: boolean;
+    serializeWire?: boolean;
+  } = {},
 ) {
   const id = crypto.randomUUID();
-  const questions = skillReviewHumanInput(review).questions.map((question) => ({
+  let questions = skillReviewHumanInput(review).questions.map((question) => ({
     ...question,
     ...(options.label ? { label: options.label } : {}),
+    ...(options.legacyWire
+      ? {
+          allowOther: true,
+          options: question.options.map((option) => ({ ...option, description: null })),
+          validation: { minSelections: null, maxSelections: null },
+        }
+      : {}),
   }));
+  if (options.serializeWire) {
+    questions = serializeHumanInputRequests([
+      {
+        name: "request_human_input",
+        rawItem: {
+          callId: `skill-${id}`,
+          arguments: JSON.stringify({ questions, allowSkip: false, expiresInSeconds: null }),
+        },
+      },
+    ])[0]!.input.questions as typeof questions;
+  }
   await shared!.admin`
     insert into session_human_input_requests (
       id,account_id,workspace_id,session_id,turn_id,turn_generation,creation_attempt_id,
@@ -1890,70 +1915,150 @@ describe("one chat Skill confirmation", () => {
     }
   }, 180000);
 
-  test("real response admission activates atomically and failure leaves the question unanswered", async () => {
+  test.each([false, true])(
+    "real response admission for reported wire (serialized=%s) activates atomically and failure leaves the question unanswered",
+    async (serializeWire) => {
+      if (!client || !shared) return;
+      const f = await fixture("suggest");
+      const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+      const requestId = await answeredSkillInput(
+        f,
+        pending.skillReview!,
+        ["save"],
+        f.human.actor.subjectId,
+        { pending: true, legacyWire: true, serializeWire },
+      );
+      const [trigger] = await appendSessionEvents(
+        client.db,
+        f.context.workspaceId,
+        f.agent.actor.sessionId,
+        [{ type: "user.message", payload: { text: "Create Skill" } }],
+      );
+      await shared.admin`update session_turns set trigger_event_id=${trigger!.id} where id=${f.agent.actor.turnId}`;
+      await shared.admin`update sessions set status='requires_action' where id=${f.agent.actor.sessionId}`;
+      await shared.admin`update session_turns set status='requires_action' where id=${f.agent.actor.turnId}`;
+      await shared.admin`update session_turn_attempts set state='closed',outcome='requires_action',closed_at=now()
+      where id=${f.agent.actor.attemptId}`;
+      const response = {
+        outcome: "answered",
+        answers: [{ questionId: `skill:${pending.revisionId}`, values: ["save"] }],
+      };
+      const input = {
+        ...f.context,
+        sessionId: f.agent.actor.sessionId,
+        requestId,
+        response,
+        respondedBy: f.human.actor.subjectId,
+      };
+      const [originalCard] =
+        await shared.admin`select questions from session_human_input_requests where id=${requestId}`;
+      await expect(
+        acceptSessionHumanInputResponse(client.db, {
+          ...input,
+          canonicalHumanSession: true,
+          response: { ...response, answers: [{ ...response.answers[0]!, other: "save anyway" }] },
+        }),
+      ).rejects.toThrow();
+      await expect(acceptSessionHumanInputResponse(client.db, input)).rejects.toThrow();
+      await expect(
+        acceptSessionHumanInputResponse(client.db, {
+          ...input,
+          canonicalHumanSession: true,
+          respondedBy: "user:another",
+        }),
+      ).rejects.toThrow();
+      const [stillPending] =
+        await shared.admin`select status,skill_review_human_authorized from session_human_input_requests where id=${requestId}`;
+      expect(stillPending).toMatchObject({
+        status: "pending",
+        skill_review_human_authorized: false,
+      });
+      const accepted = await acceptSessionHumanInputResponse(client.db, {
+        ...input,
+        canonicalHumanSession: true,
+      });
+      expect(accepted.action).toBe("accepted");
+      expect(
+        (
+          await readSkill(
+            client.db,
+            { ...f.context, subjectId: f.human.actor.subjectId },
+            pending.skillId,
+          )
+        )?.activeRevisionId,
+      ).toBe(pending.revisionId);
+      const replay = await acceptSessionHumanInputResponse(client.db, {
+        ...input,
+        canonicalHumanSession: true,
+      });
+      expect(replay.action).toBe("completed");
+      expect(replay.events).toEqual([]);
+      const [retainedCard] =
+        await shared.admin`select questions from session_human_input_requests where id=${requestId}`;
+      expect(retainedCard!.questions).toEqual(originalCard!.questions);
+    },
+    180000,
+  );
+
+  test("legacy-wire compatibility keeps exact option semantics and rejects Other at the SQL boundary", async () => {
+    if (!client || !shared) return;
+    for (const mutation of [
+      "description",
+      "label",
+      "extra-option",
+      "extra-field",
+      "other",
+    ] as const) {
+      const f = await fixture("suggest");
+      const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+      const requestId = await answeredSkillInput(
+        f,
+        pending.skillReview!,
+        ["save"],
+        f.human.actor.subjectId,
+        { legacyWire: true },
+      );
+      const [row] =
+        await shared.admin`select questions,response from session_human_input_requests where id=${requestId}`;
+      const questions = row!.questions;
+      const response = row!.response;
+      if (mutation === "description") questions[0].options[0].description = "Only saves metadata";
+      if (mutation === "label") questions[0].options[0].label = "Preview";
+      if (mutation === "extra-option") questions[0].options.push({ id: "other", label: "Other" });
+      if (mutation === "extra-field") questions[0].options[0].extra = null;
+      if (mutation === "other") response.answers[0].other = "do not activate";
+      await shared.admin`update session_human_input_requests set questions=${shared.admin.json(questions)}::jsonb,
+        response=${shared.admin.json(response)}::jsonb where id=${requestId}`;
+      await expectDatabaseGuard(
+        confirmSkillHumanResponse(client.db, {
+          ...f.context,
+          subjectId: f.human.actor.subjectId,
+          requestId,
+        }),
+        "Exact human Skill confirmation unavailable",
+      );
+      expect((await readSkill(client.db, f.context, pending.skillId))?.activeRevisionId).toBeNull();
+    }
+  }, 180000);
+
+  test("legacy-wire Don't save declines without activation", async () => {
     if (!client || !shared) return;
     const f = await fixture("suggest");
     const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
     const requestId = await answeredSkillInput(
       f,
       pending.skillReview!,
-      ["save"],
+      ["skip"],
       f.human.actor.subjectId,
-      { pending: true },
+      { legacyWire: true },
     );
-    const [trigger] = await appendSessionEvents(
-      client.db,
-      f.context.workspaceId,
-      f.agent.actor.sessionId,
-      [{ type: "user.message", payload: { text: "Create Skill" } }],
-    );
-    await shared.admin`update session_turns set trigger_event_id=${trigger!.id} where id=${f.agent.actor.turnId}`;
-    await shared.admin`update sessions set status='requires_action' where id=${f.agent.actor.sessionId}`;
-    await shared.admin`update session_turns set status='requires_action' where id=${f.agent.actor.turnId}`;
-    await shared.admin`update session_turn_attempts set state='closed',outcome='requires_action',closed_at=now()
-      where id=${f.agent.actor.attemptId}`;
-    const response = {
-      outcome: "answered",
-      answers: [{ questionId: `skill:${pending.revisionId}`, values: ["save"] }],
-    };
-    const input = {
+    const result = await confirmSkillHumanResponse(client.db, {
       ...f.context,
-      sessionId: f.agent.actor.sessionId,
+      subjectId: f.human.actor.subjectId,
       requestId,
-      response,
-      respondedBy: f.human.actor.subjectId,
-    };
-    await expect(acceptSessionHumanInputResponse(client.db, input)).rejects.toThrow();
-    await expect(
-      acceptSessionHumanInputResponse(client.db, {
-        ...input,
-        canonicalHumanSession: true,
-        respondedBy: "user:another",
-      }),
-    ).rejects.toThrow();
-    const [stillPending] =
-      await shared.admin`select status,skill_review_human_authorized from session_human_input_requests where id=${requestId}`;
-    expect(stillPending).toMatchObject({ status: "pending", skill_review_human_authorized: false });
-    const accepted = await acceptSessionHumanInputResponse(client.db, {
-      ...input,
-      canonicalHumanSession: true,
     });
-    expect(accepted.action).toBe("accepted");
-    expect(
-      (
-        await readSkill(
-          client.db,
-          { ...f.context, subjectId: f.human.actor.subjectId },
-          pending.skillId,
-        )
-      )?.activeRevisionId,
-    ).toBe(pending.revisionId);
-    const replay = await acceptSessionHumanInputResponse(client.db, {
-      ...input,
-      canonicalHumanSession: true,
-    });
-    expect(replay.action).toBe("completed");
-    expect(replay.events).toEqual([]);
+    expect(result?.decision).toBe("rejected");
+    expect((await readSkill(client.db, f.context, pending.skillId))?.activeRevisionId).toBeNull();
   }, 180000);
 
   test("stale Save and Don't save roll back the human response after newer proposed or active edits", async () => {

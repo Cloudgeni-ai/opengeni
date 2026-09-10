@@ -4,6 +4,7 @@ import {
   approvalIdentifier,
   RequestHumanInteractionToolInput,
   RequestHumanInputToolInput,
+  skillReviewHumanInput,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   type SessionEventMediaPreview,
@@ -690,6 +691,22 @@ export function serializeHumanInputRequests(
         throw new Error("Human-input interruption is missing a stable tool-call identity");
       }
       const input = RequestHumanInputToolInput.parse(interruptionArguments(item));
+      const reviews = input.questions.filter((question) => question.skillReview);
+      if (reviews.length > 0) {
+        if (input.questions.length !== 1) {
+          throw new Error("Skill review requires one dedicated human-input question");
+        }
+        // Presentation is host-owned, never agent-authored consent. The DB
+        // still binds this reference to the immutable receipt and live human.
+        return {
+          toolCallId,
+          input: {
+            ...input,
+            ...skillReviewHumanInput(reviews[0]!.skillReview!),
+            allowSkip: false,
+          },
+        };
+      }
       return {
         toolCallId,
         input: {

@@ -530,6 +530,46 @@ describe("structured human-input runtime boundary", () => {
     expect(serialized[0]!.input.questions[0]!.allowOther).toBe(false);
   });
 
+  test("canonicalizes the reported Skill wire envelope without creating consent", () => {
+    const canonical = skillReviewHumanInput({
+      sourceOperationId: "a387ec98-8fb7-4e15-a5ec-b425e9b6a271",
+      skillId: "00000000-0000-4000-8000-000000000002",
+      revisionId: "2a75a1db-01d9-46b3-964e-d226e4e3fc55",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    });
+    const question = canonical.questions[0]!;
+    const wire = {
+      questions: [
+        {
+          ...question,
+          allowOther: true,
+          options: question.options.map((option) => ({ ...option, description: null })),
+          validation: { minSelections: null, maxSelections: null },
+        },
+      ],
+      allowSkip: false,
+      expiresInSeconds: null,
+    };
+    const serialize = (input: unknown) =>
+      serializeHumanInputRequests([
+        {
+          name: HUMAN_INPUT_TOOL_NAME,
+          rawItem: { callId: "reported-skill-review", arguments: JSON.stringify(input) },
+        },
+      ]);
+    expect(serialize(wire)).toEqual([
+      {
+        toolCallId: "reported-skill-review",
+        input: { ...canonical, allowSkip: false, expiresInSeconds: null },
+      },
+    ]);
+    expect(serialize({ ...wire, allowSkip: true })).toEqual(serialize(wire));
+    expect(() =>
+      serialize({ ...wire, questions: [...wire.questions, { ...question, id: "extra" }] }),
+    ).toThrow("one dedicated human-input question");
+  });
+
   test("partitions typed interaction waits while preserving their exact SDK approval", () => {
     const interaction = {
       name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,

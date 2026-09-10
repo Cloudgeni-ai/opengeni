@@ -83,7 +83,9 @@ When save, publish, or install returns `humanInput`, call
 `request_human_input` with that exact payload. The card displays the complete
 immutable Skill files. The initiating human's Save activates that exact revision
 in the response transaction, before the session resumes. No follow-up activation
-tool or second review is needed. Don't save and Other do not activate the Skill.
+tool or second review is needed. The runtime owns the review card's wording and
+Save/Don't save choices; do not combine it with other questions. Don't save does
+not activate the Skill, and Other is not a valid Skill decision.
 If the Skill changes before Save, make a new proposal for a fresh decision.
 Autonomous saves return applied and need no confirmation. Off refuses durable
 agent changes.
