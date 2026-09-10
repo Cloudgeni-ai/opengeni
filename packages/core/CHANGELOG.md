@@ -1,5 +1,12 @@
 # @opengeni/core
 
+## 2.8.4
+
+### Patch Changes
+
+- Updated dependencies [5249b0d]
+  - @opengeni/runtime@2.4.4
+
 ## 2.8.3
 
 ### Patch Changes
