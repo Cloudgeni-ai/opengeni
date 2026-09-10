@@ -167,7 +167,8 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
+            summary: OpenGeni has a worker turn attempt without durable progress for more than 15 minutes
+            description: This worker-local signal tracks physical runAgentTurn attempts. Inspect the exact attempt and recovery state; an overlapping replacement is counted independently.
         - alert: OpenGeniSessionRecoveryBacklogStale
           expr: |
             max(

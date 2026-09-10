@@ -1,5 +1,23 @@
 # @opengeni/react
 
+## 5.0.4
+
+### Patch Changes
+
+- 3d9ab25: Keep wide markdown tables stable while subsequent message text streams by preserving their layout observer and remeasuring content without resetting the expanded width.
+
+## 5.0.3
+
+### Patch Changes
+
+- @opengeni/sdk@5.0.3
+
+## 5.0.2
+
+### Patch Changes
+
+- 05957ee: Keep the workbench's initial tab unresolved while a signed capture manifest is loading, so pending capture metadata cannot permanently select Files instead of Changes. Preserve host overrides, settled empty/error fallbacks, and the user's later tab selection.
+
 ## 5.0.1
 
 ### Patch Changes

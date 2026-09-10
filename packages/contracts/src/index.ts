@@ -1,4 +1,4 @@
-import { SkillReviewReference } from "./skills";
+import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 export * from "./skills";
 export * from "./bundled-skills";
 import { BundledSkillSelection } from "./bundled-skills";
@@ -6803,7 +6803,10 @@ export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
     /** Frozen authority that admitted the calling turn. */
     initiator: TurnInitiator,
     initiatorContext: TurnInitiatorContext,
-    /** Durable causal human for delegated/service work; null for pure service work. */
+    /**
+     * Durable causal-human selector for named human-bound capabilities. It never
+     * authorizes by itself and is null for pure service work.
+     */
     initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
   }),
 ]);
@@ -15201,6 +15204,41 @@ export const HumanInputQuestion = z
     }
   });
 export type HumanInputQuestion = z.infer<typeof HumanInputQuestion>;
+
+/** Only known presentation wire differences are equivalent. This is not
+ * authorization: response admission still binds the immutable source receipt.
+ * Compare original keys as well as parsed values so unknown fields cannot be
+ * hidden by Zod's ordinary object projection during a pending-card re-freeze. */
+export function canonicalSkillReviewQuestion(
+  question: HumanInputQuestion,
+): HumanInputQuestion | null {
+  if (
+    !HumanInputQuestion.safeParse(question).success ||
+    !SkillReviewReference.strict().safeParse(question.skillReview).success
+  )
+    return null;
+  const canonical = skillReviewHumanInput(question.skillReview!).questions[0]!;
+  const normalized = {
+    ...question,
+    allowOther: false,
+    options: question.options.map((option) => {
+      if (option.description != null) return option;
+      const { description: _description, ...rest } = option;
+      return rest;
+    }),
+  };
+  if (
+    normalized.validation == null ||
+    (Object.keys(normalized.validation).every((key) =>
+      ["minSelections", "maxSelections"].includes(key),
+    ) &&
+      normalized.validation.minSelections == null &&
+      normalized.validation.maxSelections == null)
+  ) {
+    delete normalized.validation;
+  }
+  return stableJson(normalized) === stableJson(canonical) ? canonical : null;
+}
 
 export const HumanInputRequestStatus = z.enum([
   "pending",

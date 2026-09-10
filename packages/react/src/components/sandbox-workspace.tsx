@@ -699,7 +699,8 @@ export function useSandboxWorkspaceTabs(
     (captureState.fileCount ?? 0) > 0 ||
     (captureState.capture?.repos.some((repo) => (repo.branchDiff?.length ?? 0) > 0) ?? false);
   const captureUnavailable =
-    (captureState.fileCount === 0 && !captureHasChanges) || captureState.error !== null;
+    !captureState.loading &&
+    ((captureState.fileCount === 0 && !captureHasChanges) || captureState.error !== null);
   if (defaultTabRef.current.value === null) {
     if (initialTab && (!isWorkbenchSurface(initialTab) || surfaceSet.has(initialTab))) {
       defaultTabRef.current.value = initialTab;
@@ -711,7 +712,13 @@ export function useSandboxWorkspaceTabs(
       );
     } else if (captureUnavailable && initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES) {
       defaultTabRef.current.value = sourceDrivenDefaultTab(true, changesEnabled, filesEnabled);
-    } else if (captureState.fileCount !== null || captureState.error !== null) {
+    } else if (
+      !captureState.loading &&
+      (captureState.fileCount !== null || captureState.error !== null)
+    ) {
+      // Metadata may arrive before a signed manifest. While that manifest is
+      // loading, neither a positive count nor zero (committed-only changes)
+      // proves an unavailable capture, so leave the default unresolved.
       // No durable review surface exists. Files owns the explicit live-workspace
       // gate; a user can open Changes deliberately if they need a fresh Git read.
       defaultTabRef.current.value = sourceDrivenDefaultTab(false, changesEnabled, filesEnabled);

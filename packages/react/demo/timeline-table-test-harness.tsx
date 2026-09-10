@@ -17,6 +17,18 @@ const wide = [
   "| Production | Northern Europe region | Reserved monthly allocation | Regional availability target | Infrastructure operations team | Documented recovery objective |",
 ].join("\n");
 const oversized = `| Oversized | Value |\n| --- | --- |\n| ${"Unbreakable".repeat(80)} | Beta |`;
+// Screenshot-derived reproduction; project names and IDs are synthetic.
+const verified = [
+  "### Source and access verification",
+  "",
+  "| Source | Verified scope | Timezone/access |",
+  "| --- | --- | --- |",
+  "| EU PostHog | `OpenDemo`, project `123456` | UTC; accessible; events ingested |",
+  "| EU PostHog | `CloudDemo`, project `654321` | Europe/Oslo; accessible; events ingested |",
+  "| Grafana Production | `OpenDemo Managed Analytics` | Read-only PostgreSQL datasource, production database |",
+  "| Grafana Production | `analytics.product_user_identities` | Present and queryable |",
+  "| Grafana Production | Agent/runtime telemetry | Managed analytics facts and Prometheus metrics queryable |",
+].join("\n");
 const baseline = [
   "Ordinary assistant prose stays in the readable text column before and after a wide table.",
   wide,
@@ -36,12 +48,14 @@ const baseline = [
   oversized,
 ].join("\n\n");
 
-type TableContent = "baseline" | "small" | "wide" | "oversized";
+type TableContent = "baseline" | "small" | "wide" | "oversized" | "verified";
 declare global {
   interface Window {
     timelineTableHarness?: {
       content: (value: TableContent) => void;
       panel: (width: number | null) => void;
+      appendProse: (text: string) => void;
+      finish: () => void;
     };
   }
 }
@@ -49,8 +63,19 @@ declare global {
 function Harness() {
   const [content, setContent] = useState<TableContent>("baseline");
   const [panel, setPanel] = useState<number | null>(null);
+  const [prose, setProse] = useState("");
+  const [finished, setFinished] = useState(false);
   useEffect(() => {
-    window.timelineTableHarness = { content: setContent, panel: setPanel };
+    window.timelineTableHarness = {
+      content: (value) => {
+        setContent(value);
+        setProse("");
+        setFinished(false);
+      },
+      panel: setPanel,
+      appendProse: (text) => setProse((previous) => previous + text),
+      finish: () => setFinished(true),
+    };
     return () => {
       delete window.timelineTableHarness;
     };
@@ -68,8 +93,8 @@ function Harness() {
       kind: "agent-message",
       id: "assistant",
       turnId: "table-turn",
-      text: { baseline, small, wide, oversized }[content],
-      streaming: content !== "baseline",
+      text: { baseline, small, wide, oversized, verified }[content] + (prose ? `\n\n${prose}` : ""),
+      streaming: content !== "baseline" && !finished,
       occurredAt: "2026-01-01T00:00:01.000Z",
     },
   ];

@@ -286,6 +286,8 @@ export function goalContinuationPrompt(
     "Continuation behavior:",
     "- This goal persists across turns. A runtime boundary can end one turn without shrinking the objective; the next continuation resumes the same full objective.",
     "- Keep working until the requested end state is true and verified. Do not end the turn merely because one useful action completed, and do not redefine success around a smaller or easier task.",
+    "- An incomplete-status report is not a substitute for continuing the work. If the remaining problem can be investigated or addressed within your current authority, continue that work in this turn rather than returning another equivalent status-only final.",
+    "- Distinguish unfinished work from a blocker that actually requires human input or external change; use the existing waiting and blocked audits only when their conditions hold.",
     "- Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.",
     "",
     "Work from evidence:",

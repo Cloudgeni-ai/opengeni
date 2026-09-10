@@ -323,6 +323,7 @@ import {
   HostUsageExportBatch as HostUsageExportBatchContract,
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
+  canonicalSkillReviewQuestion,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
   CodexCredentialPolicySnapshotV1,
@@ -70395,6 +70396,13 @@ export async function applySessionTurnSettlement(
         ...request,
         questions: request.questions.map((question) => {
           const parsed = HumanInputQuestionContract.parse(question);
+          if (parsed.skillReview) {
+            const canonical = canonicalSkillReviewQuestion(question);
+            if (!canonical || request.questions.length !== 1 || request.allowSkip) {
+              throw new Error("Skill review requires the exact dedicated confirmation contract");
+            }
+            return canonical;
+          }
           return parsed.kind === "text" || parsed.allowOther
             ? parsed
             : { ...parsed, allowOther: true };
@@ -70464,6 +70472,40 @@ export async function applySessionTurnSettlement(
         );
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
+            if (request.questions.length === 1 && request.questions[0]!.skillReview) {
+              const [existing] = await tx
+                .select()
+                .from(schema.sessionHumanInputRequests)
+                .where(
+                  and(
+                    eq(schema.sessionHumanInputRequests.accountId, session.accountId),
+                    eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+                    eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+                    eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+                    eq(schema.sessionHumanInputRequests.toolCallId, request.toolCallId),
+                  ),
+                )
+                .for("update");
+              if (existing) {
+                const canonical =
+                  existing.questions.length === 1
+                    ? canonicalSkillReviewQuestion(existing.questions[0]!)
+                    : null;
+                if (
+                  existing.id !== request.id ||
+                  !canonical ||
+                  stableJson(canonical) !== stableJson(request.questions[0])
+                ) {
+                  throw new Error(
+                    `Human-input request ${request.id} changed contract before re-freeze`,
+                  );
+                }
+                // Preserve immutable displayed/audited bytes. The unchanged
+                // UPSERT predicate below still fences pending status, skip and
+                // exact deadline; only generation ownership can advance.
+                request.questions = existing.questions;
+              }
+            }
             const [persistedRequest] = await tx
               .insert(schema.sessionHumanInputRequests)
               .values({

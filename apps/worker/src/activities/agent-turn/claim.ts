@@ -347,7 +347,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     });
     return attached.action === "claimed" && attached.turn.id === turn.id;
   };
-  turnLifecycleMetricsFor(observability).start(attempt.turnId);
+  turnLifecycleMetricsFor(observability).start({ attemptId: input.attemptId });
   // §7.5 P3 — pass the accepted billing attribution (externally funded turns
   // bypass OpenGeni credit/token gates)
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
@@ -451,7 +451,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }
     recordCanonicalStartupMilestones(appended.canonicalStartupMilestones);
     if (inputs.length > 0) {
-      turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
+      turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
     }
     activityContext?.heartbeat({
       ...heartbeatDetails,
@@ -515,7 +515,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       return false;
     }
     recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
-    turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
+    turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
     if (inputSettlement.turnStatus === "requires_action") {
       // The settlement transaction committed the parent's child_requires_action

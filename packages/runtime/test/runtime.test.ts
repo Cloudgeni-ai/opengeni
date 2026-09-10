@@ -530,6 +530,70 @@ describe("structured human-input runtime boundary", () => {
     expect(serialized[0]!.input.questions[0]!.allowOther).toBe(false);
   });
 
+  test("canonicalizes the reported Skill wire envelope without creating consent", () => {
+    const canonical = skillReviewHumanInput({
+      sourceOperationId: "00000000-0000-4000-8000-000000000001",
+      skillId: "00000000-0000-4000-8000-000000000002",
+      revisionId: "00000000-0000-4000-8000-000000000003",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    });
+    const question = canonical.questions[0]!;
+    const wire = {
+      questions: [
+        {
+          ...question,
+          allowOther: true,
+          options: question.options.map((option) => ({ ...option, description: null })),
+          validation: null,
+        },
+      ],
+      allowSkip: false,
+      expiresInSeconds: null,
+    };
+    const serialize = (input: unknown) =>
+      serializeHumanInputRequests([
+        {
+          name: HUMAN_INPUT_TOOL_NAME,
+          rawItem: { callId: "reported-skill-review", arguments: JSON.stringify(input) },
+        },
+      ]);
+    expect(serialize(wire)).toEqual([
+      {
+        toolCallId: "reported-skill-review",
+        input: { ...canonical, allowSkip: false, expiresInSeconds: null },
+      },
+    ]);
+    expect(serialize({ ...wire, allowSkip: true })).toEqual(serialize(wire));
+    expect(
+      serialize({
+        ...wire,
+        questions: [
+          { ...wire.questions[0]!, validation: { minSelections: null, maxSelections: null } },
+        ],
+      }),
+    ).toEqual(serialize(wire));
+    for (const altered of [
+      { prompt: "Save harmless metadata only?" },
+      { label: "Preview?" },
+      { helpText: "This does not activate anything." },
+      { required: false },
+      { id: "different-question" },
+      { options: [{ id: "save", label: "Preview" }, question.options[1]!] },
+      {
+        options: [{ ...question.options[0]!, description: "No activation" }, question.options[1]!],
+      },
+      { validation: { minSelections: 2 } },
+    ]) {
+      expect(() =>
+        serialize({ ...wire, questions: [{ ...wire.questions[0]!, ...altered }] }),
+      ).toThrow("exact host-owned confirmation presentation");
+    }
+    expect(() =>
+      serialize({ ...wire, questions: [...wire.questions, { ...question, id: "extra" }] }),
+    ).toThrow("one dedicated human-input question");
+  });
+
   test("partitions typed interaction waits while preserving their exact SDK approval", () => {
     const interaction = {
       name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,

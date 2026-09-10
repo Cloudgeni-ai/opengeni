@@ -21,6 +21,7 @@ import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
+import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
@@ -413,22 +414,29 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
 function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutRef<"table">) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLTableElement>(null);
+  const layoutRef = useRef<ReturnType<typeof observeMarkdownTableLayout>>(undefined);
   useEffect(() => {
     const wrapper = wrapperRef.current;
     const table = tableRef.current;
     if (!wrapper?.closest("[data-og-wide-table-message]") || !table) return;
     let disposed = false;
-    let cleanup: (() => void) | undefined;
     // Ordinary tables remain usable even if this optional layout chunk fails.
     void import("./markdown-table-layout")
       .then(({ observeMarkdownTableLayout }) => {
-        if (!disposed) cleanup = observeMarkdownTableLayout(wrapper, table);
+        if (!disposed) layoutRef.current = observeMarkdownTableLayout(wrapper, table);
       })
       .catch(() => {});
     return () => {
       disposed = true;
-      cleanup?.();
+      layoutRef.current?.disconnect();
+      layoutRef.current = undefined;
     };
+  }, []);
+  // ReactMarkdown recreates table children even when only later prose changes.
+  // Remeasure genuine content changes without collapsing the expanded wrapper
+  // between cleanup and the asynchronous observer-module import on each update.
+  useEffect(() => {
+    layoutRef.current?.measure();
   }, [children]);
   return (
     <div ref={wrapperRef} className="group/copy relative mt-3 max-w-full first:mt-0">

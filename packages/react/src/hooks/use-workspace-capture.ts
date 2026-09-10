@@ -194,8 +194,9 @@ export function useWorkspaceCapture(
           return;
         }
         setDegradedReason(null);
-        // Resolve the changed-file count immediately from the response's stats — the
-        // default-tab signal must not wait on a >2MB manifest-URL hop.
+        // Expose metadata while a large signed manifest downloads. Consumers
+        // must distinguish this pending count from a resolved capture; zero
+        // working-tree files can still have committed-only branch changes.
         setFileCount(res.stats.fileCount);
         // Exactly one of manifest / manifestUrl is non-null (M2 contract). The inline
         // manifest is the <200ms common case; a >2MB manifest is a signed URL hop.
