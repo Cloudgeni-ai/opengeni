@@ -857,6 +857,10 @@ Human preferences require frozen causal identity. Command/timeout successors
 preserve immutable receipts, separate causal claims and live personal-grant
 admission; see [run lifecycle](run-lifecycle.md).
 
+`session_turns.initiating_human_subject_id` never authorizes alone:
+`artifacts:publish`, archive, restore, and exact mutation fences apply;
+pure service work fails closed. See [run lifecycle](run-lifecycle.md).
+
 Tool disclosure is progressive, but authority is not. A tool may be eager or
 lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
 still resolves through the current authorized catalog and the same execution
