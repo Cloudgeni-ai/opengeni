@@ -19,7 +19,6 @@ function useChatRequest(body: unknown): Request {
 }
 
 const resolveTenant: ChatResolve = async () => ({ tenant: "acme", user: "u_42" });
-const U_42 = { source: "app", id: "u_42" };
 
 function parts(body: string): Array<Record<string, unknown>> {
   return sseDataLines(body)
@@ -78,9 +77,7 @@ describe("handleVercelChatRequest", () => {
     expect(typeof parts(body)[0]!.messageId).toBe("string");
 
     expect(server.creates[0]!.initialMessage).toBe("hello\nworld");
-    expect(server.creates[0]!.requestedSessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_9", U_42),
-    );
+    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
     expect(server.creates[0]!.modelContext).toBe(
       "Earlier conversation imported from the product, oldest first:\nassistant: earlier",
     );
@@ -163,7 +160,7 @@ describe("handleVercelChatRequest", () => {
     });
     await readBody(await handleVercelChatRequest(server.og, request, resolveTenant));
     expect(server.creates[0]!.requestedSessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "header_c", U_42),
+      await chatSessionId(WORKSPACE_ID, "header_c"),
     );
   });
 

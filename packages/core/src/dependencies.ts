@@ -208,6 +208,8 @@ export type AppDependencies = {
   fikenFetch?: typeof fetch;
   /** Injectable Integration Definition OAuth/API transport for deterministic tests. */
   apiIntegrationOAuthFetch?: typeof fetch;
+  /** Injectable specification/introspection transport, still network-policy checked. */
+  apiIntegrationSourceFetch?: typeof fetch;
   atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;

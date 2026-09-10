@@ -161,7 +161,7 @@ describe("0428 creator policy (real PostgreSQL)", () => {
       firstPartyMcpPermissions: ["sessions:read" as const, "scheduled_tasks:manage" as const],
       sessionPolicy: {
         agentAccess: "session",
-        endUser: { source: "acme", id: "u_42" },
+        scopeSubjectId: "user:u_42",
         memoryScope: "user",
       },
     };

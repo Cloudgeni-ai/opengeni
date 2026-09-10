@@ -66,6 +66,11 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
       add column timer_due_at timestamptz,
       add column timer_pause_for_seconds integer,
       add column timer_pause_revision bigint`;
+    // Current bootstrap uses the post-0425 organization-scoped conflict target.
+    // Supply its arbiter alongside the historical global index: this fixture
+    // tests only 0398, and its legacy SQL still requires the original index.
+    await admin`create unique index workspace_current_bootstrap_fixture_idx
+      on workspaces (account_id, external_source, external_id)`;
     await provisionRoles(blank.databaseUrl, {
       appRole: customRole,
       appPassword: customPassword,

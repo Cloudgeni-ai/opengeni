@@ -2,9 +2,9 @@
  * Deterministic chat identities. A conversation id maps to exactly one
  * session id per workspace, so any process can address the same session
  * without storing a mapping, and a double-submitted create collapses through
- * the idempotency key. With an end-user label the conversation id is
- * namespaced to that user, so one user cannot address another user's
- * conversation by guessing its id.
+ * the idempotency key. The optional legacy label argument is retained only to
+ * reproduce historical addresses. New chat calls do not use it: authorization
+ * is independent of addressing, so collaborators can share a conversation.
  */
 
 /** The end-user label a conversation is namespaced to: the product `source` plus the opaque user id. */

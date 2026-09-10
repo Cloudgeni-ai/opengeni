@@ -184,6 +184,7 @@ import {
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
+import { getToolSearchExecution, getToolSearchProviderCallId } from "@openai/agents-core/utils";
 import {
   Capabilities,
   Manifest,
@@ -196,7 +197,6 @@ import {
   inContainerMountStrategy,
   s3Mount,
   shell,
-  skills,
   type SandboxClient,
   type SandboxSessionLike,
   type SandboxSessionState,
@@ -213,6 +213,8 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+
+import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
@@ -277,13 +279,18 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
+  readRuntimeSkill,
+  skillCatalogFromComposition,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
+  type RuntimeSkillIndexEntry,
 } from "./runtime-skills";
 export {
   composeRuntimeSkills,
   loadNativeToolSkillArtifacts,
+  readRuntimeSkill,
+  skillCatalogFromComposition,
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
@@ -293,6 +300,7 @@ export {
   type RuntimeSkillArtifactFile,
   type RuntimeSkillComposition,
   type RuntimeSkillDescriptor,
+  type RuntimeSkillIndexEntry,
   type SessionSkillActivation,
 } from "./runtime-skills";
 import {
@@ -316,6 +324,7 @@ import {
   composeCallModelInputFilters,
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
+  stripProviderItemId,
 } from "./model-input";
 import {
   recordModelPreparationManifestInventory,
@@ -1014,9 +1023,12 @@ export async function summarizeForCompaction(
   // items without flattening tool history into a fake user transcript.
   const request: ModelRequest = {
     systemInstructions: options.systemInstructions ?? "",
-    input: input as AgentInputItem[],
+    input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
     modelSettings: {
       maxTokens,
+      // Azure can select a historical tool despite empty schemas. Keep this
+      // verified policy off subscription/gateway transports with other contracts.
+      ...(provider.wireProfile === "azure-openai" ? { toolChoice: "none" as const } : {}),
       // Azure rejects store:false; the Codex subscription transport enforces
       // it independently. The OpenAI platform path remains explicitly storeless.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
@@ -1048,6 +1060,47 @@ export async function summarizeForCompaction(
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
   return summary;
+}
+
+/**
+ * Portable checkpoints carry inline history, not references to stored Responses
+ * items. An assistant/tool item's provider id can require its original reasoning
+ * item even when the full message is supplied. The portable preparation removes
+ * opaque reasoning, so retaining those dependent ids makes Azure reject the
+ * checkpoint. Remove only provider item identity from this request-local copy;
+ * callId/call_id, tool payloads, order, and canonical history stay unchanged.
+ */
+const DETACHABLE_COMPACTION_ITEM_TYPES = new Set([
+  "message",
+  "reasoning",
+  "function_call",
+  "function_call_result",
+  "shell_call",
+  "shell_call_output",
+  "computer_call",
+  "computer_call_result",
+  "apply_patch_call",
+  "apply_patch_call_output",
+]);
+
+function detachCompactionResponseItemIdentity(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  const clientToolSearch =
+    (item.type === "tool_search_call" || item.type === "tool_search_output") &&
+    getToolSearchExecution(item) !== "server" &&
+    Boolean(getToolSearchProviderCallId(item));
+  const providerData = item.providerData as Record<string, unknown> | undefined;
+  const webSearch =
+    item.type === "hosted_tool_call" &&
+    (providerData?.type === "web_search_call" || providerData?.type === "web_search");
+  // Unlike web search, hosted file search requires its id on Azure input.
+  // Approval/program references also remain intact. A universal strip is unsafe.
+  if (!DETACHABLE_COMPACTION_ITEM_TYPES.has(String(item.type)) && !clientToolSearch && !webSearch)
+    return item;
+  // The SDK reserves providerData.id for these types; only the top-level id is
+  // emitted. Share the normal inference primitive without changing its policy.
+  return stripProviderItemId(item as AgentInputItem) as Record<string, unknown>;
 }
 
 /**
@@ -1287,11 +1340,13 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let type: string | null = null;
   let requestId: string | null = null;
   let eventType: string | null = null;
+  let rejectionReason: "missing_required_reasoning_item" | null = null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as Record<string, unknown>;
+    rejectionReason ??= compactionRejectionReason(record);
     if (!errorName && current instanceof Error) {
       errorName = boundCompactionDiagnosticField(current.name);
     }
@@ -1342,6 +1397,7 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     const nestedError = record.error;
     if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
       const nested = nestedError as Record<string, unknown>;
+      rejectionReason ??= compactionRejectionReason(nested);
       if (code === null && typeof nested.code === "string") {
         code = boundCompactionDiagnosticField(nested.code);
       }
@@ -1372,7 +1428,22 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     type,
     requestId,
     ...(eventType ? { eventType } : {}),
+    ...(rejectionReason ? { rejectionReason } : {}),
   };
+}
+
+function compactionRejectionReason(
+  record: Record<string, unknown>,
+): "missing_required_reasoning_item" | null {
+  // Classify the known provider protocol rejection without persisting the
+  // message, referenced item ids, or arbitrary provider-owned fields.
+  return typeof record.message === "string" &&
+    record.message.length <= 1024 &&
+    /^Item '[A-Za-z0-9_-]+' of type '[a-z_]+' was provided without its required 'reasoning' item: '[A-Za-z0-9_-]+'\.$/.test(
+      record.message,
+    )
+    ? "missing_required_reasoning_item"
+    : null;
 }
 
 const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
@@ -1548,6 +1619,8 @@ export type CodemodeTokenWriterSession = SandboxSessionLike;
 
 const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
 const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
+const agentRuntimeSkillIndex = new WeakMap<object, readonly RuntimeSkillIndexEntry[]>();
+const emptyRuntimeSkillIndex: readonly RuntimeSkillIndexEntry[] = Object.freeze([]);
 const agentInstructionInspection = new WeakMap<object, PersistentAgentInstructionInspection>();
 const emptyInstructionInspection: PersistentAgentInstructionInspection = Object.freeze({
   layers: Object.freeze([]),
@@ -1564,6 +1637,11 @@ export function effectiveSkillSelectionsForAgent(
   agent: object,
 ): readonly EffectiveSkillSelection[] {
   return agentSkillSelections.get(agent) ?? emptySkillSelections;
+}
+
+/** Sandbox-independent Skill index admitted for this agent. */
+export function runtimeSkillIndexForAgent(agent: object): readonly RuntimeSkillIndexEntry[] {
+  return agentRuntimeSkillIndex.get(agent) ?? emptyRuntimeSkillIndex;
 }
 
 export function persistentAgentInstructionInspectionFor(
@@ -1648,6 +1726,8 @@ const modelToolInvocation = new AsyncLocalStorage<ModelToolInvocation>();
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
+  authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
   inputWaitYield?: InputWaitYield;
   model?: Model;
@@ -1873,10 +1953,8 @@ export type BuildAgentOptions = {
    * executable tool catalog.
    */
   skillActivations?: readonly RuntimeSkillActivation[];
-  /** Server-backed Skill descriptors, independent of sandbox capabilities. */
+  /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
-  /** Shared reader serves configured Skills; filesystem discovery remains for repo Skills only. */
-  serverSkillReading?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2294,6 +2372,12 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+const SkillReadToolInput = z.object({
+  skill: z.string().min(1).max(512),
+  listFiles: z.boolean().optional(),
+  paths: z.array(z.string().min(1).max(1024)).min(1).max(128).optional(),
+});
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -2309,6 +2393,29 @@ export function buildOpenGeniAgent(
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
     options.attemptToolCatalog,
   );
+  const hostSuppliedSkillCatalog = options.skillCatalog !== undefined;
+  if (hostSuppliedSkillCatalog && options.skillActivations?.length) {
+    throw new Error(
+      "Supply either host Skill catalog/reader or runtime Skill activations, not both.",
+    );
+  }
+  // Site authoring needs filesystem execution; managed and connected compute
+  // are equivalent. Reading supplied Skill files never needs either.
+  const filesystemAvailable = (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
+  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
+    sites: !hostSuppliedSkillCatalog && filesystemAvailable,
+    videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),
+  });
+  const skillCatalog = hostSuppliedSkillCatalog
+    ? options.skillCatalog
+    : skillComposition.index.length > 0
+      ? skillCatalogFromComposition(skillComposition)
+      : undefined;
+  const instructionOptions: BuildAgentOptions = {
+    ...options,
+    ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+  };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2441,7 +2548,26 @@ export function buildOpenGeniAgent(
     ...(videoGenerationTool ? [videoGenerationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
-  const instructionInspection = inspectPersistentAgentInstructions(settings, options);
+  const embeddedSkillReadTool =
+    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+      ? agentTool({
+          name: "skill_read",
+          description:
+            "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
+          parameters: SkillReadToolInput,
+          errorFunction: null,
+          execute: (input) =>
+            JSON.stringify(
+              readRuntimeSkill(skillComposition, {
+                skill: input.skill,
+                ...(input.paths !== undefined ? { paths: input.paths } : {}),
+                ...(input.listFiles !== undefined ? { listFiles: input.listFiles } : {}),
+              }),
+            ),
+        })
+      : null;
+  if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
+  const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -2504,6 +2630,8 @@ export function buildOpenGeniAgent(
     const agent = new Agent(baseConfig);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
+    agentSkillSelections.set(agent, skillComposition.selections);
+    agentRuntimeSkillIndex.set(agent, skillComposition.index);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
@@ -2532,26 +2660,6 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  const skillComposition = composeRuntimeSkills(
-    options.serverSkillReading ? [] : (options.skillActivations ?? []),
-    {
-      editableArtifacts: !options.serverSkillReading && editableArtifactToolsAvailable,
-      // Sites guidance is bundled capability metadata, not eager tool authority.
-      // Tool discovery/execution remains governed by the lazy attempt gateway.
-      sites:
-        !options.serverSkillReading &&
-        (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
-      // A connected machine owns its filesystem, and its session deliberately
-      // does not materialize host-local lazy entries. Advertising this bundled
-      // skill there makes load_skill report a path that does not exist. Keep the
-      // executable tools (whose descriptions contain the full short workflow),
-      // but expose the filesystem-backed helper only where it can be delivered.
-      videoGeneration:
-        !options.serverSkillReading &&
-        Boolean(options.videoGeneration) &&
-        options.activeSandboxBackend !== "selfhosted",
-    },
-  );
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
@@ -2572,6 +2680,9 @@ export function buildOpenGeniAgent(
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
+      ...(options.authorizeAttemptExecution
+        ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
+        : {}),
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
@@ -2595,6 +2706,7 @@ export function buildOpenGeniAgent(
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
+  agentRuntimeSkillIndex.set(agent, skillComposition.index);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -3306,6 +3418,7 @@ export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
   options: {
+    authorizeAttemptExecution?: () => Promise<void> | void;
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
@@ -3335,6 +3448,7 @@ function buildAgentCapabilitiesFromComposition(
   settings: Settings,
   skillComposition: RuntimeSkillComposition,
   options: {
+    authorizeAttemptExecution?: () => Promise<void> | void;
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
@@ -3380,7 +3494,7 @@ function buildAgentCapabilitiesFromComposition(
       ? { configureTools: configureFilesystemTools }
       : {}),
   });
-  if (options.structuredToolTransport === false) {
+  if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
   const caps: ReturnType<typeof Capabilities.default> = [
@@ -3389,11 +3503,6 @@ function buildAgentCapabilitiesFromComposition(
       ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
     }),
   ];
-  caps.push(
-    skills({
-      lazyFrom: skillComposition.lazySource,
-    }),
-  );
   if (options.workspaceSkillPaths?.length) {
     caps.push(
       workspaceSkills(
@@ -3409,6 +3518,25 @@ function buildAgentCapabilitiesFromComposition(
         capability as unknown as { tools(): Tool<unknown>[] },
         toolCancellation,
       );
+    }
+  }
+  if (options.authorizeAttemptExecution) {
+    for (const capability of caps) {
+      const target = capability as unknown as { tools(): Tool<unknown>[] };
+      const original = target.tools;
+      target.tools = function () {
+        return original.call(this).map((tool) => {
+          if (tool.type !== "function") return tool;
+          const invoke = tool.invoke;
+          return {
+            ...tool,
+            invoke: async (context, input, details) => {
+              await options.authorizeAttemptExecution!();
+              return invoke(context, input, details);
+            },
+          };
+        });
+      };
     }
   }
   return caps;
@@ -3542,6 +3670,10 @@ export type PrepareToolsOptions = {
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
+  /** Live accepted-attempt fence, evaluated at execution rather than catalog
+   * preparation. Includes model and Codemode calls and runs before consuming
+   * connector approval authority. Does not alter catalog identity. */
+  authorizeAttemptExecution?: () => Promise<void> | void;
   /** Attempt-bound connector policy installed into the canonical gateway lifecycle. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   /** Private connector identities for exact-name attempt-local tools. */
@@ -4387,10 +4519,29 @@ async function prepareAttemptToolEnvironment(
     options.connectorActionPolicy,
   );
   const subjectId = options.subjectId ?? "worker:mcp-model";
+  const guardedDefinitions = options.authorizeAttemptExecution
+    ? definitions.map((definition) => ({
+        ...definition,
+        lifecycle: {
+          prepare: async (
+            input: Parameters<NonNullable<AttemptToolDefinition["lifecycle"]>["prepare"]>[0],
+          ) => {
+            const prior = await definition.lifecycle?.prepare(input);
+            return {
+              begin: async () => {
+                await options.authorizeAttemptExecution!();
+                await prior?.begin?.();
+              },
+              ...(prior?.complete ? { complete: prior.complete } : {}),
+            };
+          },
+        },
+      }))
+    : definitions;
   const environment = createAttemptToolEnvironment({
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions,
+    definitions: guardedDefinitions,
     confirmModelApproval: ({ modelName, subjectId: callerSubjectId }) =>
       callerSubjectId === subjectId &&
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,

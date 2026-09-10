@@ -1,163 +1,40 @@
+import { OpenGeniApiError, type ToolGatewayCallResponse } from "@opengeni/sdk";
 import {
-  OpenGeniApiError,
-  type OpenGeniSiteToolCatalog,
-  type OpenGeniWorkspaceTools,
-  type ToolGatewayCallRequest,
-  type ToolGatewayCallResponse,
-  type ToolGatewayIdentity,
-} from "@opengeni/sdk";
+  createSiteToolBridge as createSharedSiteToolBridge,
+  type CreateSiteToolBridgeOptions,
+} from "@opengeni/sdk/site";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
-
-import { siteSessionPath } from "@opengeni/sdk/site";
 import { ApiError, request, requestResponse } from "@/api";
 
-type SiteToolCallRequest = ToolGatewayCallRequest & {
-  siteArtifactId: string;
-  siteVersionId: string;
-};
-
-type SiteToolCaller = (input: {
-  workspaceId: string;
-  request: SiteToolCallRequest;
-  signal: AbortSignal;
-}) => Promise<ToolGatewayCallResponse>;
-
-export function createSiteToolBridge(input: {
-  workspaceTools: OpenGeniWorkspaceTools;
-  workspaceId: string;
-  artifactId: string;
-  siteVersionId: string;
-  requestedTools: readonly ToolGatewayIdentity[];
-  callTool?: SiteToolCaller;
-}): PublishedHtmlArtifactToolBridge {
-  const allowed = new Set(input.requestedTools.map(toolIdentityKey));
-  const callTool = input.callTool ?? callWorkspaceTool;
-  let projectedCatalog: OpenGeniSiteToolCatalog | null = null;
-
-  const loadCatalog = async ({
-    signal,
-    refresh = false,
-  }: {
-    signal: AbortSignal;
-    refresh?: boolean;
-  }): Promise<OpenGeniSiteToolCatalog> => {
-    if (projectedCatalog && !refresh) return projectedCatalog;
-    const current = await input.workspaceTools.$catalog({
-      signal,
-      ...(refresh ? { refresh } : {}),
-    });
-    projectedCatalog = {
-      version: current.version,
-      generation: current.generation,
-      digest: current.digest,
-      createdAt: current.createdAt,
-      entries: current.entries.filter((entry) => allowed.has(toolIdentityKey(entry.identity))),
-    };
-    return projectedCatalog;
-  };
-
-  const requireEnabledIdentity = (
-    catalog: OpenGeniSiteToolCatalog,
-    identity: ToolGatewayIdentity,
-  ): void => {
-    if (
-      !catalog.entries.some(
-        (entry) => toolIdentityKey(entry.identity) === toolIdentityKey(identity),
-      )
-    ) {
-      throw new Error("This requested tool is not enabled in the workspace");
-    }
-  };
-
-  return {
-    fetch: async (message, signal) => {
-      const path = siteSessionPath(
-        message.path,
-        input.workspaceId,
-        message.method,
-        input.artifactId,
-      );
-      // The host owns auth and tenant selection. Only content negotiation and
-      // event replay headers come from the embedded SDK.
-      const headers = new Headers();
-      headers.set("x-opengeni-site-id", input.artifactId);
-      headers.set("x-opengeni-site-version", input.siteVersionId);
-      for (const [name, value] of message.headers) {
-        if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
-          headers.set(name, value);
-      }
-      return requestResponse(path, {
-        method: message.method,
-        signal,
-        headers: Object.fromEntries(headers),
-        ...(message.body === undefined ? {} : { body: message.body }),
-      });
-    },
-    catalog: async ({ signal }) => await loadCatalog({ signal }),
-    call: async (toolRequest, { signal }) => {
-      requireAllowedIdentity(allowed, toolRequest.identity);
-
-      const callAgainstCurrentCatalog = async (refresh = false) => {
-        const current = await loadCatalog({ signal, refresh });
-        requireEnabledIdentity(current, toolRequest.identity);
-        return await callTool({
-          workspaceId: input.workspaceId,
-          signal,
-          request: {
-            ...(toolRequest.operationId ? { operationId: toolRequest.operationId } : {}),
-            catalogDigest: current.digest,
-            identity: toolRequest.identity,
-            arguments: toolRequest.arguments,
-            siteArtifactId: input.artifactId,
-            siteVersionId: input.siteVersionId,
+/** Native authentication only; Site routing, origin, filtering and version pinning are shared. */
+export function createSiteToolBridge(
+  input: Omit<CreateSiteToolBridgeOptions, "callTool" | "isCatalogStale" | "fetchResponse"> & {
+    callTool?: CreateSiteToolBridgeOptions["callTool"];
+  },
+): PublishedHtmlArtifactToolBridge {
+  return createSharedSiteToolBridge({
+    ...input,
+    isCatalogStale: isCatalogStaleApiError,
+    fetchResponse: (path, init) => requestResponse(path, init),
+    callTool:
+      input.callTool ??
+      (async ({ workspaceId, request: body, signal }) =>
+        request<ToolGatewayCallResponse>(
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/tools/calls`,
+          {
+            method: "POST",
+            signal,
+            body: JSON.stringify(body),
           },
-        });
-      };
-
-      try {
-        return await callAgainstCurrentCatalog();
-      } catch (error) {
-        if (!isCatalogStaleApiError(error)) throw error;
-        projectedCatalog = null;
-        return await callAgainstCurrentCatalog(true);
-      }
-    },
-  };
+        )),
+  });
 }
 
 export function isCatalogStaleApiError(error: unknown): boolean {
-  if (error instanceof OpenGeniApiError && error.status === 409) {
-    if (error.details?.code === "catalog_stale") return true;
-    return error.body.includes("catalog_stale") || error.message.includes("catalog_stale");
-  }
   return (
-    error instanceof ApiError &&
+    (error instanceof OpenGeniApiError || error instanceof ApiError) &&
     error.status === 409 &&
-    (error.code === "catalog_stale" ||
-      error.details?.code === "catalog_stale" ||
-      error.body.includes("catalog_stale") ||
-      error.message.includes("catalog_stale"))
+    (error.details?.code === "catalog_stale" ||
+      (error instanceof ApiError && error.code === "catalog_stale"))
   );
-}
-
-function requireAllowedIdentity(allowed: ReadonlySet<string>, identity: ToolGatewayIdentity): void {
-  if (!allowed.has(toolIdentityKey(identity))) {
-    throw new Error("This tool is not available to the Site");
-  }
-}
-
-function toolIdentityKey(identity: ToolGatewayIdentity): string {
-  return `${identity.serverId}\u0000${identity.toolName}`;
-}
-
-async function callWorkspaceTool(input: {
-  workspaceId: string;
-  request: SiteToolCallRequest;
-  signal: AbortSignal;
-}): Promise<ToolGatewayCallResponse> {
-  return await request<ToolGatewayCallResponse>(`/v1/workspaces/${input.workspaceId}/tools/calls`, {
-    method: "POST",
-    signal: input.signal,
-    body: JSON.stringify(input.request),
-  });
 }

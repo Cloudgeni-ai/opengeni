@@ -294,8 +294,8 @@ async function listWorkspaceSessionPage(
         limit,
         materializeSnapshot: true,
         ...(cursor ? { cursor } : {}),
-        ...(input.query.endUserSource !== undefined && input.query.endUserId !== undefined
-          ? { endUser: { source: input.query.endUserSource, id: input.query.endUserId } }
+        ...(input.query.scopeSubjectId !== undefined
+          ? { scopeSubjectId: input.query.scopeSubjectId }
           : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,

@@ -556,3 +556,17 @@ describe("social provider integration UI", () => {
     }
   });
 });
+
+test("separate inline connection forms have independent ownership groups", async () => {
+  const r = await render(
+    <>
+      <OwnershipSelector value="workspace" onChange={() => {}} />
+      <OwnershipSelector value="personal" onChange={() => {}} />
+    </>,
+  );
+  const radios = [...r.container.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+  expect(radios[0]!.name).toBe(radios[1]!.name);
+  expect(radios[2]!.name).toBe(radios[3]!.name);
+  expect(radios[0]!.name).not.toBe(radios[2]!.name);
+  await r.unmount();
+});

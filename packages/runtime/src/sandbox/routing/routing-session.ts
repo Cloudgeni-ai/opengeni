@@ -2179,7 +2179,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // sees a different, empty host directory. `pathExists()` and `readFile()` on
       // that SDK session inspect the worker-side path, so only a command executed
       // inside the actual sandbox proves the materialized path is usable by the
-      // agent. Never let lazy `load_skill` report success on a split workspace.
+      // agent. Never report successful materialization on a split workspace.
       const path =
         args && typeof args === "object" && typeof (args as { path?: unknown }).path === "string"
           ? (args as { path: string }).path

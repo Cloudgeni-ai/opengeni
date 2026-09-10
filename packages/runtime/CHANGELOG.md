@@ -1,5 +1,54 @@
 # @opengeni/runtime
 
+## 2.5.1
+
+### Patch Changes
+
+- be17b8e: Remove the SDK Skill loader capability and use eager sandbox-free Skill reading
+  with a turn-prepared descriptor index. Keep on-demand checkout and repository
+  Skill discovery separate, and render Skill tool calls consistently in the timeline.
+
+## 2.5.0
+
+### Minor Changes
+
+- cffd21b: Add organization-scoped external users, explicit native identity linking, shared
+  white-label Connect flows and Site lifecycle/bridge surfaces. Add opt-in durable
+  host-MCP delegation and renewal while preserving simple short-lived credentials,
+  existing schedule authority and approval behavior. Share native/embedded device
+  polling and setup components, and synchronize developer integration Skills with
+  the installable Product Integration Pack.
+
+  Database migrations 0437–0457 require the documented maintenance/cutover procedure;
+  older API and worker writers must not be restarted after activation. Provider
+  OAuth applications and host resolvers remain deployment configuration, not
+  automatic external provisioning. No package is published by this changeset.
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/contracts@3.0.0
+  - @opengeni/sdk@5.0.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codemode@0.5.4
+  - @opengeni/tool-gateway@0.1.5
+
+## 2.4.5
+
+### Patch Changes
+
+- 5b17932: Make bundled runtime skills authoritative and remove their duplicate repository-agent skill sources.
+
+## 2.4.4
+
+### Patch Changes
+
+- 5249b0d: Detach provider response item identities from portable checkpoint requests while preserving inline history and tool call/result correlation. This prevents Azure from rejecting a message whose opaque reasoning identity was omitted during compaction. Classify the known rejection without persisting provider message content.
+
+  Explicitly disable tool selection for Azure-profile Responses checkpoints so historical tool records cannot yield a new tool call instead of summary text. Empty/provider failure safeguards remain unchanged.
+
 ## 2.4.3
 
 ### Patch Changes

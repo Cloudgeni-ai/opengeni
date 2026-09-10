@@ -50,7 +50,7 @@ export function additionalOrganizationCreationAttemptIsCurrent(input: {
 
 export const WORKSPACE_SWITCHER_GRID_CLASS = "grid min-w-0 grid-cols-[minmax(0,1fr)] px-2";
 
-export function SwitcherBlock() {
+export function SwitcherBlock({ inline = false }: { inline?: boolean }) {
   const context = useAppContext();
   const rail = useRail();
   const managedUserId = context.authSession?.user.id ?? null;
@@ -211,7 +211,7 @@ export function SwitcherBlock() {
   }
 
   return (
-    <div className={WORKSPACE_SWITCHER_GRID_CLASS}>
+    <div className={inline ? "ml-auto grid min-w-0 flex-1" : WORKSPACE_SWITCHER_GRID_CLASS}>
       {createOpen ? (
         <Suspense fallback={null}>
           <LazyCreateOrganizationDialog
@@ -231,6 +231,7 @@ export function SwitcherBlock() {
       <WorkspaceSwitcherMenu
         workspaceId={rail.workspaceId}
         collapsed={false}
+        compact={inline}
         align="start"
         onSelect={rail.openWorkspace}
         onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}

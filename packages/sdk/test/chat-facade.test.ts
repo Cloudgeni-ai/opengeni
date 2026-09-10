@@ -47,23 +47,23 @@ describe("chat identities", () => {
     expect(server.requestsTo("GET", `/sessions/${first.sessionId}`)).toHaveLength(2);
   });
 
-  test("the session id differs per user for one conversation and matches the RFC v5 derivation", async () => {
+  test("the session id stays stable across actors; legacy user-derived IDs remain explicitly computable", async () => {
     const server = fakeServer();
     const anonymous = await server.og.chat({ tenant: "acme", conversation: "c_9" });
     const alice = await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
     const bob = await server.og.chat({ tenant: "acme", user: "u_43", conversation: "c_9" });
 
-    expect(alice.sessionId).not.toBe(anonymous.sessionId);
-    expect(alice.sessionId).not.toBe(bob.sessionId);
+    expect(alice.sessionId).toBe(anonymous.sessionId);
+    expect(alice.sessionId).toBe(bob.sessionId);
     const aliceLabel = { source: "app", id: "u_42" };
     expect(chatIdentityName(WORKSPACE_ID, "c_9", aliceLabel)).toBe(
       JSON.stringify([WORKSPACE_ID, "app", "u_42", "c_9"]),
     );
     expect(chatIdentityName(WORKSPACE_ID, "c_9")).toBe(JSON.stringify([WORKSPACE_ID, "c_9"]));
     expect(alice.sessionId).toBe(
-      await uuidV5(chatIdentityName(WORKSPACE_ID, "c_9", aliceLabel), CHAT_SESSION_NAMESPACE),
+      await uuidV5(chatIdentityName(WORKSPACE_ID, "c_9"), CHAT_SESSION_NAMESPACE),
     );
-    expect(alice.sessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9", aliceLabel));
+    expect(alice.sessionId).not.toBe(await chatSessionId(WORKSPACE_ID, "c_9", aliceLabel));
     expect(anonymous.sessionId).toBe(
       await uuidV5(chatIdentityName(WORKSPACE_ID, "c_9"), CHAT_SESSION_NAMESPACE),
     );
@@ -91,26 +91,16 @@ describe("chat identities", () => {
     );
   });
 
-  test("reopening a session created under another user's label is refused", async () => {
-    const server = fakeServer();
+  test("reopening uses canonical server authorization rather than mutable session labels", async () => {
+    const server = fakeServer({ authorizeSession: (user) => user !== "u_99" });
     const chat = await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
     await chat.send("hello");
-    // Simulate a session at this id that carries a different label (a relabelled
-    // or hand-addressed row): the facade must not hand it to u_42.
-    const state = server.sessions.get(chat.sessionId)!;
-    (state.session as { endUser: unknown }).endUser = { source: "app", id: "u_99" };
-    let caught: unknown;
-    try {
-      await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toBeInstanceOf(OpenGeniChatError);
-    expect((caught as OpenGeniChatError).code).toBe("conversation_not_authorized");
-    // A host-named reopen without a user still vouches for the session it named.
-    (state.session as { endUser: unknown }).endUser = null;
+    await expect(
+      server.og.chat({ tenant: "acme", user: "u_99", conversation: "c_9" }),
+    ).rejects.toMatchObject({ status: 403 });
+    // An authorized service may address the same shared conversation.
     const unlabelled = await server.og.chat({ tenant: "acme", conversation: "c_9" });
-    expect(unlabelled.sessionId).not.toBe(chat.sessionId);
+    expect(unlabelled.sessionId).toBe(chat.sessionId);
   });
 });
 
@@ -133,8 +123,7 @@ describe("Chat.send", () => {
     expect(server.creates).toHaveLength(1);
     expect(server.creates[0]).toEqual({
       agentAccess: "session",
-      memoryScope: "session",
-      endUser: { source: "app", id: "u_42" },
+      memoryScope: "off",
       initialMessage: "hello",
       requestedSessionId: chat.sessionId,
       idempotencyKey: `chat:${chat.sessionId}`,
@@ -249,7 +238,7 @@ describe("Chat.send", () => {
       ["workspace", "off"],
       ["session", "workspace"],
     ]);
-    expect(server.creates[1]!.endUser).toBeUndefined();
+    expect(Object.hasOwn(server.creates[1]!, "endUser")).toBe(false);
 
     const failure = server.og.chat({ tenant: "acme", conversation: "d", memory: "user" });
     await expect(failure).rejects.toBeInstanceOf(OpenGeniChatError);
@@ -522,16 +511,20 @@ describe("Chat.steer, history, sessions.list, chatBySessionId", () => {
     );
   });
 
-  test("sessions.list filters by the end-user label", async () => {
+  test("sessions.list uses the acting-user client and native visibility", async () => {
     const server = fakeServer({ source: "helpdesk" });
     await (await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" })).send("hi");
     const sessions = await server.og.sessions.list({ tenant: "acme", user: "u_42", limit: 5 });
     expect(sessions).toHaveLength(1);
-    expect(sessions[0]!.endUser).toEqual({ source: "helpdesk", id: "u_42" });
+    expect(sessions[0]!.scopeSubjectId).toBe("external_user:u_42");
     const list = server.requestsTo("GET", "/sessions").at(-1)!;
     const query = new URL(list.url).searchParams;
-    expect(query.get("endUserSource")).toBe("helpdesk");
-    expect(query.get("endUserId")).toBe("u_42");
+    expect(query.has("endUserSource")).toBe(false);
+    expect(query.has("endUserId")).toBe(false);
+    expect(JSON.parse(decodeURIComponent(list.headers["x-opengeni-external-actor"]!))).toEqual({
+      mode: "external",
+      identity: { source: "helpdesk", externalId: "u_42" },
+    });
     expect(query.get("limit")).toBe("5");
   });
 
@@ -556,8 +549,8 @@ describe("Chat.steer, history, sessions.list, chatBySessionId", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  test("chatBySessionId denies a session owned by another user and allows the same user", async () => {
-    const server = fakeServer();
+  test("chatBySessionId supports authorized shared participants and propagates API denials", async () => {
+    const server = fakeServer({ authorizeSession: (user) => user !== "u_43" });
     const alice = await server.og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
     await alice.send("hello");
     const anonymous = await server.og.chat({ tenant: "acme", conversation: "c_9" });
@@ -575,17 +568,19 @@ describe("Chat.steer, history, sessions.list, chatBySessionId", () => {
       sessionId: alice.sessionId,
       user: "u_43",
     });
-    await expect(other).rejects.toBeInstanceOf(OpenGeniChatError);
-    await expect(other).rejects.toMatchObject({ code: "conversation_not_authorized" });
+    await expect(other).rejects.toMatchObject({ status: 403 });
 
-    // A session without an end user is not this user's either.
-    await expect(
-      server.og.chatBySessionId({
-        workspaceId: WORKSPACE_ID,
-        sessionId: anonymous.sessionId,
-        user: "u_42",
-      }),
-    ).rejects.toMatchObject({ code: "conversation_not_authorized" });
-    expect(server.requestsTo("POST", "/events")).toHaveLength(0);
+    const shared = await server.og.chatBySessionId({
+      workspaceId: WORKSPACE_ID,
+      sessionId: anonymous.sessionId,
+      user: "u_44",
+    });
+    expect(shared.sessionId).toBe(alice.sessionId);
+    expect((await shared.send("another participant")).text).toBe("Hello");
+    const sent = server.requestsTo("POST", "/events").at(-1)!;
+    expect(
+      JSON.parse(decodeURIComponent(sent.headers["x-opengeni-external-actor"]!)).identity
+        .externalId,
+    ).toBe("u_44");
   });
 });

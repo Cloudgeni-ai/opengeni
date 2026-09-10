@@ -30,10 +30,19 @@ import {
   updateXaiRotationSettings,
   upsertXaiSubscriptionCredential,
   wakeXaiCapacityWaiters,
+  encryptEnvironmentValue,
+  decryptEnvironmentValue,
+  getWorkspaceGrant,
   type XaiSubscriptionAccountMetadata,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
-import { getManagedSession, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  getManagedSession,
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   XAI_CLIENT_VERSION,
   XaiSubscriptionError,
@@ -50,11 +59,14 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
 import { projectClientModel } from "../model-catalog";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 
 type XaiAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1;
 type ManagedCookieHuman = { subjectId: string };
 
 type SuperGrokConnectState = {
+  externalContinuationEncrypted?: string;
   workspaceId: string;
   scope: "workspace" | "user";
   subjectId: string;
@@ -132,8 +144,28 @@ async function requirePrivateHuman(
   workspaceId: string,
 ): Promise<{ accountId: string; subjectId: string }> {
   if (c.req.header("authorization")) {
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const external = externalActorContinuationForAuthorization(authorization);
+    if (
+      external &&
+      authorization.contextIntegrity &&
+      external.actor.effectiveSubjectId === authorization.grant.subjectId
+    ) {
+      // The existing xAI user-pool domain requires an ordinary workspace
+      // membership, not just the synthetic Personal-workspace owner grant.
+      if (!(await getWorkspaceGrant(deps.db, authorization.grant.subjectId, workspaceId)))
+        throw new HTTPException(409, {
+          message: "Private SuperGrok accounts require membership in an ordinary workspace",
+        });
+      return { accountId: authorization.grant.accountId, subjectId: authorization.grant.subjectId };
+    }
     throw new HTTPException(403, {
-      message: "authorization bearer is not allowed for private SuperGrok accounts",
+      message: "Private SuperGrok accounts require a verified owning user",
     });
   }
   const human = await managedCookieHuman(c, deps);
@@ -148,6 +180,10 @@ async function requirePrivateHuman(
       message: "managed browser identity mismatch",
     });
   }
+  if (!(await getWorkspaceGrant(deps.db, grant.subjectId, workspaceId)))
+    throw new HTTPException(409, {
+      message: "Private SuperGrok accounts require membership in an ordinary workspace",
+    });
   return { accountId: grant.accountId, subjectId: grant.subjectId };
 }
 
@@ -160,7 +196,9 @@ export async function requireScopeMutation(
   if (scope === "organization")
     throw new HTTPException(409, { message: "Manage this subscription in organization settings" });
   if (scope === "user") {
-    requireSameOriginBrowserMutation(c, deps);
+    // Server-side external-user assertions do not use browser cookies. Ordinary
+    // bearers remain rejected by requirePrivateHuman; native CSRF is unchanged.
+    if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
     return await requirePrivateHuman(c, deps, workspaceId);
   }
   const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
@@ -509,6 +547,16 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     const parsed = connectStartBody.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid SuperGrok scope" });
     const authority = await requireScopeMutation(c, deps, workspaceId, parsed.data.scope);
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      parsed.data.scope === "workspace" ? "workspace:admin" : "connections:write",
+    );
+    const continuation = externalActorContinuationForAuthorization(authorization);
+    const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
+    if (continuation && !encryptionKey)
+      throw new HTTPException(503, { message: "Credential encryption is unavailable" });
     try {
       const start = await requestXaiDeviceCode({
         fetch: (deps.xaiFetch ?? fetch) as XaiFetch,
@@ -528,6 +576,14 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
           deviceCode: start.deviceCode,
           intervalSeconds: start.intervalSeconds,
           expiresAt,
+          ...(continuation
+            ? {
+                externalContinuationEncrypted: encryptEnvironmentValue(
+                  encryptionKey!,
+                  JSON.stringify(continuation),
+                ),
+              }
+            : {}),
         }),
       });
     } catch (error) {
@@ -563,6 +619,30 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "SuperGrok connect identity changed",
       });
     }
+    const originKey = environmentsEncryptionKeyBytes(deps.settings);
+    const origin =
+      state.externalContinuationEncrypted && originKey
+        ? ExternalActorContinuation.parse(
+            JSON.parse(decryptEnvironmentValue(originKey, state.externalContinuationEncrypted)),
+          )
+        : null;
+    if (state.externalContinuationEncrypted && !origin)
+      throw new HTTPException(503, { message: "Connection origin unavailable" });
+    const requireOrigin = async () => {
+      if (origin)
+        await requireConnectOwnerAuthority(
+          deps.db,
+          {
+            accountId: authority.accountId,
+            workspaceId,
+            subjectId: authority.subjectId,
+            externalContinuation: origin,
+          },
+          state.scope === "workspace" ? "workspace:admin" : "connections:write",
+          origin,
+        );
+    };
+    await requireOrigin();
     if (Math.floor(Date.now() / 1_000) >= state.expiresAt) {
       return c.json({ status: "expired" as const });
     }
@@ -579,6 +659,13 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       phase = "token_identity";
       const identity = xaiIdentityFromDeviceTokens(poll.tokens);
       phase = "credential_persist";
+      await requireOrigin();
+      const liveAuthority = await requireScopeMutation(c, deps, workspaceId, state.scope);
+      if (
+        liveAuthority.accountId !== authority.accountId ||
+        liveAuthority.subjectId !== authority.subjectId
+      )
+        throw new HTTPException(403, { message: "SuperGrok connection identity changed" });
       const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
       if (!encryptionKey) {
         throw new HTTPException(500, {

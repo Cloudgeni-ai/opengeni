@@ -1,5 +1,20 @@
+export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export type {
+  SiteToolBridge,
+  SiteToolCaller,
+  SiteToolCallRequest,
+  CreateSiteToolBridgeOptions,
+} from "./site-tool-bridge";
+export type {
+  ExternalIdentityLink,
+  BeginExternalIdentityLinkRequest,
+  BeginExternalIdentityLinkResponse,
+  ConfirmExternalIdentityLinkRequest,
+  ExternalIdentityLinkPreview,
+  ExternalIdentityLinkPage,
+} from "@opengeni/contracts/external-identities";
 export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
-export { OpenGeniClient } from "./artifact-client";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,

@@ -20,6 +20,9 @@ import {
 import {
   createApiKey,
   createConnection,
+  createOrganizationApiKey,
+  ensureExternalIdentity,
+  grantWorkspaceAccess,
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
@@ -35,6 +38,7 @@ import {
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   startTestMcpServer,
   testSettings,
   type SharedTestDatabase,
@@ -53,6 +57,7 @@ import {
   preferredOAuthSelfRegistration,
 } from "../src/integrations/oauth-client";
 import { builtInOAuthProfileByKey } from "../src/integrations/oauth-profiles";
+import { createRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 
 const DELEGATION_SECRET = "connections-routes-delegation-secret";
 const STATE_SECRET = "connections-routes-state-secret";
@@ -1713,6 +1718,974 @@ describe("connections routes", () => {
       },
     );
     expect(convert.status).toBe(422);
+  });
+
+  test.each(["external_user", "organization_service"] as const)(
+    "host gateway uses remote credentials and denies key revocation during resolution for %s",
+    async (kind) => {
+      if (!available) throw new Error("Real database required for host gateway verification");
+      const workspace = await freshWorkspace();
+      const token = randomUUID();
+      const permissions: Permission[] = ["workspace:read"];
+      const key = await createOrganizationApiKey(client.db, {
+        accountId: workspace.accountId,
+        name: "Host gateway fixture",
+        prefix: "test",
+        keyHash: createHash("sha256").update(token).digest("hex"),
+        permissions,
+      });
+      const identity = await ensureExternalIdentity(client.db, {
+        accountId: workspace.accountId,
+        externalId: "gateway-owner",
+      });
+      await grantWorkspaceAccess(client.db, {
+        ...workspace,
+        subjectId: identity.subjectId,
+        permissions,
+      });
+      const mcp = startTestMcpServer({ requiredAuthorization: "Bearer synthetic-gateway" });
+      let revoke = false;
+      let resolutions = 0;
+      const connectionCredentials = createRemoteMcpCredentialsPort(
+        {
+          ...settings,
+          hostMcpCredentialResolversJson: JSON.stringify([
+            {
+              accountId: workspace.accountId,
+              url: "https://host.fixture.invalid/credentials",
+              bearerToken: "synthetic-host-secret",
+            },
+          ]),
+        },
+        async (_url, init) => {
+          resolutions++;
+          const envelope = JSON.parse(String(init?.body));
+          expect(envelope.request.surface).toBe("workspace_gateway");
+          expect(envelope.request).not.toHaveProperty("sessionId");
+          expect(envelope.request.authority).toMatchObject({
+            kind,
+            subjectId: kind === "external_user" ? identity.subjectId : `api_key:${key.id}`,
+            permissions,
+          });
+          if (revoke)
+            await shared!
+              .admin`update api_keys set revoked_at = clock_timestamp() where id = ${key.id}`;
+          return Response.json({
+            version: 1,
+            requestId: envelope.requestId,
+            destinationUrl: mcp.url,
+            resolution: {
+              status: "ok",
+              ...workspace,
+              requestId: envelope.request.requestId,
+              connectionId: "host-account",
+              providerDomain: new URL(mcp.url).hostname,
+              headers: { Authorization: "Bearer synthetic-gateway" },
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          });
+        },
+      );
+      const gatewayApi = (requireApproval = false) =>
+        appWithDeps(
+          {
+            mcpServers: [
+              {
+                id: "host-fixture",
+                name: "Host fixture",
+                url: mcp.url,
+                cacheToolsList: false,
+                requireApproval,
+                connectionRef: {
+                  authoritySource: "host",
+                  connectionId: "host-account",
+                  providerDomain: new URL(mcp.url).hostname,
+                },
+              },
+            ],
+          },
+          { connectionCredentials },
+        );
+      const api = gatewayApi();
+      const headers = {
+        authorization: `Bearer ${token}`,
+        ...(kind === "external_user"
+          ? {
+              "x-opengeni-external-actor": encodeURIComponent(
+                JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+              ),
+            }
+          : {}),
+      };
+      const path = `/v1/workspaces/${workspace.workspaceId}/tools/catalog`;
+      try {
+        const response = await api.request(path, { headers });
+        expect(response.status).toBe(200);
+        const catalog = await response.json();
+        expect(JSON.stringify(catalog)).toContain("host-fixture");
+        expect(resolutions).toBeGreaterThan(0);
+        expect(mcp.requests.some((request) => request.jsonRpcMethod === "tools/list")).toBe(true);
+        const call = {
+          operationId: randomUUID(),
+          catalogDigest: catalog.digest,
+          identity: { serverId: "host-fixture", toolName: "search_documents" },
+          arguments: { query: "embedding fixture" },
+        };
+        const post = (route: string, body: unknown) =>
+          api.request(`/v1/workspaces/${workspace.workspaceId}/tools/${route}`, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        const approval = await post("approvals", call);
+        expect(approval.status).toBe(422);
+        expect(mcp.calls).toHaveLength(0);
+        expect((await post("calls", call)).status).toBe(200);
+        expect(mcp.calls).toEqual([{ tool: "search_documents", args: call.arguments }]);
+        const guardedCatalog = await gatewayApi(true).request(path, { headers });
+        expect(guardedCatalog.status).toBe(200);
+        expect((await guardedCatalog.json()).entries).toEqual([]);
+        expect(mcp.calls).toHaveLength(1);
+        const resolvedBeforeOutsider = resolutions;
+        const outsider = await api.request(path, {
+          headers: {
+            ...headers,
+            "x-opengeni-external-actor": encodeURIComponent(
+              JSON.stringify({
+                mode: "external",
+                identity: { externalId: "not-a-workspace-member" },
+              }),
+            ),
+          },
+        });
+        expect(outsider.status).toBe(403);
+        expect(resolutions).toBe(resolvedBeforeOutsider);
+        const before = mcp.requests.length;
+        revoke = true;
+        expect((await post("calls", { ...call, operationId: randomUUID() })).status).toBe(403);
+        expect(mcp.requests).toHaveLength(before);
+        expect(mcp.calls).toHaveLength(1);
+        const resolved = resolutions;
+        expect((await api.request(path, { headers })).status).toBe(401);
+        expect(resolutions).toBe(resolved);
+      } finally {
+        mcp.close();
+      }
+    },
+  );
+
+  test("external host binding registration survives key replacement and denies service or other-owner access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = randomUUID();
+    const key = await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Binding fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: [
+        "connections:read",
+        "connections:write",
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+        "scheduled_tasks:run",
+      ],
+    });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "binding-owner",
+    });
+    const other = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "binding-other",
+    });
+    for (const owner of [identity, other])
+      await grantWorkspaceAccess(client.db, {
+        ...workspace,
+        subjectId: owner.subjectId,
+        permissions: [
+          "connections:read",
+          "connections:write",
+          "sessions:create",
+          "sessions:read",
+          "sessions:control",
+          "scheduled_tasks:manage",
+          "scheduled_tasks:run",
+        ],
+      });
+    const headers = (externalId: string | null = identity.externalId, apiKey = token) => ({
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      ...(externalId
+        ? {
+            "x-opengeni-external-actor": encodeURIComponent(
+              JSON.stringify({ mode: "external", identity: { externalId } }),
+            ),
+          }
+        : {}),
+    });
+    const api = app();
+    const path = `/v1/workspaces/${workspace.workspaceId}/host-mcp-bindings`;
+    const input = {
+      operationId: randomUUID(),
+      definition: {
+        serverId: "fixture",
+        destinationUrl: "https://mcp.fixture.invalid/tools",
+        connectionRef: {
+          authoritySource: "host",
+          providerDomain: "mcp.fixture.invalid",
+          connectionId: "host-connection",
+        },
+      },
+    };
+    const create = () =>
+      api.request(path, { method: "POST", headers: headers(), body: JSON.stringify(input) });
+    const response = await create();
+    expect(response.status).toBe(201);
+    const binding = await response.json();
+    expect(binding).toMatchObject({
+      ownerSubjectId: identity.subjectId,
+      generation: 1,
+      status: "active",
+    });
+    expect(await (await create()).json()).toEqual(binding);
+    const delegationPath = `/v1/workspaces/${workspace.workspaceId}/host-mcp-delegations`;
+    const delegationInput = {
+      operationId: randomUUID(),
+      bindingId: binding.id,
+      expectedBindingGeneration: 1,
+      grant: {
+        scope: "user",
+        mode: "always",
+        context: "workspace_shared",
+        workspaceSharedAcknowledged: true,
+      },
+    };
+    const issue = (body = delegationInput, actor: string | null = identity.externalId) =>
+      api.request(delegationPath, {
+        method: "POST",
+        headers: headers(actor),
+        body: JSON.stringify(body),
+      });
+    const issued = await issue();
+    expect(issued.status).toBe(201);
+    const delegation = await issued.json();
+    expect(delegation).toMatchObject({
+      ownerSubjectId: identity.subjectId,
+      bindingId: binding.id,
+      generation: 1,
+    });
+    expect(await (await issue()).json()).toEqual(delegation);
+    const sessionApi = appWithDeps(
+      {
+        sandboxBackend: "none",
+        hostMcpAuthoritySourceAdmissionEnabled: true,
+        mcpServers: [
+          {
+            id: "fixture",
+            url: binding.definition.destinationUrl,
+            transport: "streamable_http",
+            connectionRef: {
+              ...binding.definition.connectionRef,
+              hostBinding: { bindingId: binding.id, generation: 1 },
+            },
+          },
+        ],
+      },
+      {
+        bus: new MemoryEventBus(),
+        workflowClient: {
+          wakeSessionWorkflow: async () => {},
+          requestSessionWorkflowWakeDispatch: async () => {},
+          syncScheduledTask: async () => {},
+        },
+      },
+    );
+    const sessionInput = {
+      initialMessage: "Host initial authority",
+      idempotencyKey: randomUUID(),
+      tools: [{ kind: "mcp", id: "fixture" }],
+      sandboxBackend: "none",
+      selectedHostMcpDelegations: [
+        { serverId: "fixture", delegationId: delegation.id, generation: 1 },
+      ],
+    };
+    const start = (
+      body: unknown = sessionInput,
+      actor: string | null = identity.externalId,
+      apiKey = token,
+    ) =>
+      sessionApi.request(`/v1/workspaces/${workspace.workspaceId}/sessions`, {
+        method: "POST",
+        headers: headers(actor, apiKey),
+        body: JSON.stringify(body),
+      });
+    expect((await start(sessionInput, null)).status).toBe(403);
+    expect(
+      (await start({ ...sessionInput, initialMessage: undefined, startMode: "realtime" })).status,
+    ).toBe(403);
+    const started = await start();
+    expect(started.status).toBe(202);
+    const captured = await shared!
+      .admin`select a.canonical_snapshot from host_mcp_turn_authorities a where a.workspace_id = ${workspace.workspaceId} and a.delegation_id = ${delegation.id}`;
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.canonical_snapshot.ownerSubjectId).toBe(identity.subjectId);
+    const acceptedSessionId = captured[0]!.canonical_snapshot.targetSessionId;
+    const scheduledInput = {
+      name: "Host schedule",
+      schedule: { type: "manual" },
+      runMode: "existing_session",
+      targetSessionId: acceptedSessionId,
+      agentConfig: { prompt: "Use the selected host", tools: [{ kind: "mcp", id: "fixture" }] },
+      selectedHostMcpDelegations: sessionInput.selectedHostMcpDelegations,
+    };
+    const scheduleResponse = await sessionApi.request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks`,
+      {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(scheduledInput),
+      },
+    );
+    expect(scheduleResponse.status).toBe(201);
+    const hostTask = await scheduleResponse.json();
+    const taskSnapshots = await shared!
+      .admin`select canonical_snapshot from host_mcp_task_authorities where task_id = ${hostTask.id}`;
+    expect(taskSnapshots).toHaveLength(1);
+    expect(taskSnapshots[0]!.canonical_snapshot.ownerSubjectId).toBe(identity.subjectId);
+    const renameTask = await sessionApi.request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${hostTask.id}`,
+      {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ name: "Renamed host schedule" }),
+      },
+    );
+    expect(renameTask.status).toBe(200);
+    const renamedTask = await renameTask.json();
+    expect(renamedTask.authorityRevision).toBeGreaterThan(hostTask.authorityRevision);
+    expect(
+      await shared!
+        .admin`select task_id from host_mcp_task_authorities where task_id = ${hostTask.id}
+      and task_authority_revision = ${renamedTask.authorityRevision}`,
+    ).toHaveLength(1);
+    const clearTask = await sessionApi.request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${hostTask.id}`,
+      {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify({ selectedHostMcpDelegations: [] }),
+      },
+    );
+    expect(clearTask.status).toBe(200);
+    const clearedTask = await clearTask.json();
+    expect(
+      await shared!
+        .admin`select task_id from host_mcp_task_authorities where task_id = ${hostTask.id}
+      and task_authority_revision = ${clearedTask.authorityRevision}`,
+    ).toHaveLength(0);
+    const followup = {
+      type: "user.message",
+      clientEventId: randomUUID(),
+      payload: {
+        text: "Use the explicitly selected host account again",
+        selectedHostMcpDelegations: sessionInput.selectedHostMcpDelegations,
+      },
+    };
+    const sendFollowup = (body: unknown = followup, apiKey = token) =>
+      sessionApi.request(
+        `/v1/workspaces/${workspace.workspaceId}/sessions/${acceptedSessionId}/events`,
+        {
+          method: "POST",
+          headers: headers(identity.externalId, apiKey),
+          body: JSON.stringify(body),
+        },
+      );
+    expect((await sendFollowup()).status).toBe(202);
+    expect((await sendFollowup()).status).toBe(202);
+    expect(
+      (
+        await sendFollowup({
+          ...followup,
+          payload: { ...followup.payload, selectedHostMcpDelegations: [] },
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await sendFollowup({
+          ...followup,
+          clientEventId: randomUUID(),
+          payload: {
+            ...followup.payload,
+            selectedHostMcpDelegations: [
+              { ...sessionInput.selectedHostMcpDelegations[0], generation: 2 },
+            ],
+          },
+        })
+      ).status,
+    ).toBe(403);
+    const steer = await sessionApi.request(
+      `/v1/workspaces/${workspace.workspaceId}/sessions/${acceptedSessionId}/steer`,
+      {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ ...followup.payload, clientEventId: randomUUID() }),
+      },
+    );
+    expect(steer.status).toBe(202);
+    expect(
+      await shared!
+        .admin`select turn_id from host_mcp_turn_authorities where workspace_id = ${workspace.workspaceId} and delegation_id = ${delegation.id}`,
+    ).toHaveLength(3);
+    expect(
+      (await start({ ...sessionInput, idempotencyKey: randomUUID() }, other.externalId)).status,
+    ).toBe(403);
+    expect((await start({ ...sessionInput, idempotencyKey: randomUUID(), tools: [] })).status).toBe(
+      422,
+    );
+    expect(
+      (
+        await start({
+          ...sessionInput,
+          idempotencyKey: randomUUID(),
+          selectedHostMcpDelegations: [
+            { ...sessionInput.selectedHostMcpDelegations[0], generation: 2 },
+          ],
+        })
+      ).status,
+    ).toBe(403);
+    expect((await start()).status).toBe(202);
+    expect((await start({ ...sessionInput, selectedHostMcpDelegations: [] })).status).toBe(409);
+    expect(
+      (
+        await start({
+          ...sessionInput,
+          selectedHostMcpDelegations: [
+            { ...sessionInput.selectedHostMcpDelegations[0], generation: 2 },
+          ],
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await issue({
+          ...delegationInput,
+          grant: { ...delegationInput.grant, context: "user_private" },
+        })
+      ).status,
+    ).toBe(409);
+    expect((await issue(delegationInput, null)).status).toBe(403);
+    expect(
+      (
+        await api.request(`${delegationPath}/${delegation.id}`, {
+          headers: headers(other.externalId),
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await api.request(`${delegationPath}/${delegation.id}/revoke`, {
+          method: "GET",
+          headers: headers(),
+        })
+      ).status,
+    ).toBe(404);
+    const badSession = await api.request(delegationPath, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        ...delegationInput,
+        operationId: randomUUID(),
+        grant: {
+          scope: "user",
+          mode: "session",
+          context: "user_private",
+          sessionId: randomUUID(),
+          expectedAuthorityEpoch: 1,
+        },
+      }),
+    });
+    expect(badSession.status).toBe(403);
+    expect(
+      (await api.request(`${path}/${binding.id}`, { headers: headers(other.externalId) })).status,
+    ).toBe(404);
+    expect((await api.request(`${path}/${binding.id}`, { headers: headers(null) })).status).toBe(
+      403,
+    );
+    const replacement = randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Replacement fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(replacement).digest("hex"),
+      permissions: [
+        "connections:read",
+        "connections:write",
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+        "scheduled_tasks:run",
+      ],
+    });
+    await shared!.admin`update api_keys set revoked_at = clock_timestamp() where id = ${key.id}`;
+    expect((await api.request(`${path}/${binding.id}`, { headers: headers() })).status).toBe(401);
+    const restored = await api.request(`${path}/${binding.id}`, {
+      headers: headers(identity.externalId, replacement),
+    });
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toEqual(binding);
+    expect(
+      (await api.request(`${delegationPath}/${delegation.id}`, { headers: headers() })).status,
+    ).toBe(401);
+    expect(
+      await (
+        await api.request(`${delegationPath}/${delegation.id}`, {
+          headers: headers(identity.externalId, replacement),
+        })
+      ).json(),
+    ).toEqual(delegation);
+    const revokeDelegation = () =>
+      api.request(`${delegationPath}/${delegation.id}/revoke`, {
+        method: "POST",
+        headers: headers(identity.externalId, replacement),
+        body: JSON.stringify({ expectedGeneration: 1 }),
+      });
+    const retiredDelegationResponse = await revokeDelegation();
+    expect(retiredDelegationResponse.status).toBe(200);
+    const retiredDelegation = await retiredDelegationResponse.json();
+    expect(retiredDelegation).toMatchObject({
+      id: delegation.id,
+      status: "revoked",
+      generation: 2,
+    });
+    expect((await start(sessionInput, identity.externalId, replacement)).status).toBe(202);
+    expect((await sendFollowup(followup, replacement)).status).toBe(202);
+    expect(
+      (await sendFollowup({ ...followup, clientEventId: randomUUID() }, replacement)).status,
+    ).toBe(403);
+    expect(
+      (
+        await start(
+          { ...sessionInput, idempotencyKey: randomUUID() },
+          identity.externalId,
+          replacement,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      await shared!
+        .admin`select turn_id from host_mcp_turn_authorities where workspace_id = ${workspace.workspaceId} and delegation_id = ${delegation.id}`,
+    ).toHaveLength(3);
+    expect(await (await revokeDelegation()).json()).toEqual(retiredDelegation);
+    const revoke = () =>
+      api.request(`${path}/${binding.id}/revoke`, {
+        method: "POST",
+        headers: headers(identity.externalId, replacement),
+        body: JSON.stringify({ expectedGeneration: 1 }),
+      });
+    const revoked = await revoke();
+    expect(revoked.status).toBe(200);
+    const retired = await revoked.json();
+    expect(retired).toMatchObject({ id: binding.id, generation: 2, status: "revoked" });
+    expect(await (await revoke()).json()).toEqual(retired);
+  });
+
+  test("external generic MCP OAuth preserves exact return and rechecks key authority before exchange and persistence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = randomUUID();
+    const key = await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "External MCP fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "opaque-host-user-for-mcp",
+    });
+    await grantWorkspaceAccess(client.db, {
+      ...workspace,
+      subjectId: identity.subjectId,
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    let revokeDuringExchange = false;
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      onTokenRequest: async () => {
+        if (revokeDuringExchange)
+          await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
+      },
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    const returnUrl = "https://HOST.example:443/Done?x=%2f#fragment";
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const api = app();
+    const begin = async () => {
+      const response = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerDomain: "external-mcp.example",
+            mcpUrl: mcp.url,
+            returnUrl,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(typeof state.encryptedExternalContinuation).toBe("string");
+      expect(state.returnUrl).toBe(returnUrl);
+      expect(JSON.stringify(state)).not.toContain(identity.externalId);
+      return body.state as string;
+    };
+    const callback = (state: string) =>
+      api.request(
+        `/v1/integrations/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
+      );
+    try {
+      const direct = await api.request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "external-manual.example",
+          kind: "api_key",
+          ownership: "personal",
+          credential: { headers: { "x-api-key": "synthetic-never-returned" } },
+        }),
+      });
+      expect(direct.status).toBe(201);
+      const directBody = await direct.json();
+      expect(directBody.connection.subjectId).toBe(identity.subjectId);
+      expect(JSON.stringify(directBody)).not.toContain("synthetic-never-returned");
+      const first = await begin();
+      expect((await callback(first)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(1);
+      expect(
+        (
+          await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId)
+        ).filter((row) => row.providerDomain === "external-mcp.example"),
+      ).toHaveLength(1);
+      expect((await callback(first)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(1);
+      const second = await begin();
+      revokeDuringExchange = true;
+      expect((await callback(second)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(2);
+      expect(
+        (
+          await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId)
+        ).filter((row) => row.providerDomain === "external-mcp.example"),
+      ).toHaveLength(1);
+      await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
+      const third = await begin();
+      await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
+      expect((await callback(third)).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(2);
+      await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      const customBegin = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-headers",
+          ownership: "personal",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(customBegin.status).toBe(200);
+      const custom = await customBegin.json();
+      const customSubmit = (values: Record<string, string>) =>
+        api.request(`${base}/${custom.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            expectedRevision: custom.revision,
+            idempotencyKey: "custom-headers-fixture",
+            action: { type: "credentials", values },
+          }),
+        });
+      for (const invalid of [
+        { Host: "wrong.example" },
+        { "X-Key": "a", "x-key": "b" },
+        { "X-Key": "bad\r\nvalue" },
+        {},
+      ]) {
+        expect(
+          (
+            await customSubmit({
+              mcpUrl: "https://mcp.fixture.invalid/custom",
+              headers: JSON.stringify(invalid),
+            })
+          ).status,
+        ).toBe(422);
+      }
+      const customValues = {
+        mcpUrl: "https://mcp.fixture.invalid/custom",
+        headers: JSON.stringify({ "X-Key": "synthetic-custom-secret", "X-Tenant": "fixture" }),
+      };
+      const customResult = await customSubmit(customValues);
+      expect(customResult.status).toBe(200);
+      const customBody = await customResult.json();
+      expect(customBody.state).toBe("complete");
+      expect(JSON.stringify(customBody)).not.toContain("synthetic-custom-secret");
+      expect(await (await customSubmit(customValues)).json()).toEqual(customBody);
+      const manualBegin = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-bearer",
+          ownership: "personal",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(manualBegin.status).toBe(200);
+      const manual = await manualBegin.json();
+      expect(manual.nextAction.fields).toContainEqual({
+        name: "token",
+        label: "Bearer credential",
+        required: true,
+        secret: true,
+      });
+      const manualInput = {
+        expectedRevision: manual.revision,
+        idempotencyKey: randomUUID(),
+        action: {
+          type: "credentials",
+          values: {
+            mcpUrl: "https://mcp.fixture.invalid/tools",
+            token: "synthetic-bearer-never-echoed",
+          },
+        },
+      };
+      const submitManual = () =>
+        api.request(`${base}/${manual.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(manualInput),
+        });
+      const manualResponse = await submitManual();
+      expect(manualResponse.status).toBe(200);
+      const manualResult = await manualResponse.json();
+      expect(manualResult.state).toBe("complete");
+      expect(manualResult.credentialsCommitted).toBe(true);
+      expect(manualResult.integrationInstalled).toBe(false);
+      expect(JSON.stringify(manualResult)).not.toContain("synthetic-bearer-never-echoed");
+      const replayedManual = await submitManual();
+      expect(replayedManual.status).toBe(200);
+      expect(await replayedManual.json()).toEqual(manualResult);
+      const manualAccounts = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/accounts`,
+        { headers },
+      );
+      expect(await manualAccounts.json()).toContainEqual(
+        expect.objectContaining({ id: manualResult.account.id, providerId: "mcp-bearer" }),
+      );
+      const reconnectManual = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-bearer",
+          ownership: "personal",
+          reconnectAccountId: manualResult.account.id,
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(reconnectManual.status).toBe(200);
+      const manualAgain = await reconnectManual.json();
+      for (const url of [
+        "http://mcp.fixture.invalid/tools",
+        "https://secret@mcp.fixture.invalid/tools",
+        "https://mcp.fixture.invalid/tools#fragment",
+        "https://openrouter.ai/tools",
+      ]) {
+        const invalid = await api.request(`${base}/${manualAgain.id}/advance`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            expectedRevision: manualAgain.revision,
+            idempotencyKey: randomUUID(),
+            action: { type: "credentials", values: { mcpUrl: url, token: "synthetic-new-token" } },
+          }),
+        });
+        expect(invalid.status).toBe(422);
+      }
+      const replaceManual = await api.request(`${base}/${manualAgain.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: manualAgain.revision,
+          idempotencyKey: randomUUID(),
+          action: {
+            type: "credentials",
+            values: { mcpUrl: "https://mcp.fixture.invalid/tools", token: "synthetic-new-token" },
+          },
+        }),
+      });
+      expect(replaceManual.status).toBe(200);
+      const replacedManual = await replaceManual.json();
+      expect(replacedManual.account.id).toBe(manualResult.account.id);
+      expect(replacedManual.account.version).toBeGreaterThan(manualResult.account.version);
+    } finally {
+      as.close();
+      await mcp.close();
+    }
+  });
+
+  test("external generic MCP Connect commits credentials and attempt together and replays without exchange", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const token = randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "MCP Connect fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "mcp-connect-fixture",
+    });
+    await grantWorkspaceAccess(client.db, {
+      ...workspace,
+      subjectId: identity.subjectId,
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const as = startFakeAuthorizationServer({ clientIdMetadataDocumentSupported: true });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    const api = app();
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const returnUrl = "https://HOST.example:443/Done?x=%2f#fragment";
+    try {
+      const begun = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-oauth",
+          ownership: "workspace",
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(begun.status).toBe(200);
+      const attempt = await begun.json();
+      expect(attempt.state).toBe("credential_input");
+      const advanced = await api.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: attempt.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { mcpUrl: mcp.url } },
+        }),
+      });
+      expect(advanced.status).toBe(200);
+      const authorization = await advanced.json();
+      expect(authorization.state).toBe("requires_user_action");
+      const state = new URL(authorization.nextAction.url).searchParams.get("state")!;
+      const callback = () =>
+        api.request(
+          `/v1/integrations/oauth/callback?code=fixture&state=${encodeURIComponent(state)}`,
+        );
+      expect((await callback()).headers.get("location")).toBe(returnUrl);
+      const completed = await api.request(`${base}/${attempt.id}`, { headers });
+      expect(completed.status).toBe(200);
+      const result = await completed.json();
+      expect(result.state).toBe("complete");
+      expect(result.credentialsCommitted).toBe(true);
+      expect(result.integrationInstalled).toBe(false);
+      expect(result.completionRequirement).toBe("connection");
+      const accounts = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/accounts`,
+        { headers },
+      );
+      expect(accounts.status).toBe(200);
+      expect(await accounts.json()).toContainEqual(
+        expect.objectContaining({
+          id: result.account.id,
+          providerId: "mcp-oauth",
+          version: result.account.version,
+        }),
+      );
+      expect(as.tokenRequests).toHaveLength(1);
+      expect((await callback()).headers.get("location")).toBe(returnUrl);
+      expect(as.tokenRequests).toHaveLength(1);
+      const reconnect = await api.request(base, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerId: "mcp-oauth",
+          ownership: "workspace",
+          reconnectAccountId: result.account.id,
+          returnUrl,
+          idempotencyKey: randomUUID(),
+        }),
+      });
+      expect(reconnect.status).toBe(200);
+      const reconnectAttempt = await reconnect.json();
+      expect(reconnectAttempt.account.id).toBe(result.account.id);
+      const reconnectAdvance = await api.request(`${base}/${reconnectAttempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expectedRevision: reconnectAttempt.revision,
+          idempotencyKey: randomUUID(),
+          action: { type: "credentials", values: { mcpUrl: mcp.url } },
+        }),
+      });
+      expect(reconnectAdvance.status).toBe(200);
+      const reconnectState = new URL(
+        (await reconnectAdvance.json()).nextAction.url,
+      ).searchParams.get("state")!;
+      expect(
+        (
+          await api.request(
+            `/v1/integrations/oauth/callback?code=fixture&state=${encodeURIComponent(reconnectState)}`,
+          )
+        ).headers.get("location"),
+      ).toBe(returnUrl);
+      const reconnected = await (
+        await api.request(`${base}/${reconnectAttempt.id}`, { headers })
+      ).json();
+      expect(reconnected.state).toBe("complete");
+      expect(reconnected.account.id).toBe(result.account.id);
+      expect(reconnected.account.version).toBeGreaterThan(result.account.version);
+      expect(as.tokenRequests).toHaveLength(2);
+    } finally {
+      as.close();
+      await mcp.close();
+    }
   });
 
   test("oauth start/callback defaults to a verified workspace oauth2 connection and keeps PKCE verifier out of URLs", async () => {

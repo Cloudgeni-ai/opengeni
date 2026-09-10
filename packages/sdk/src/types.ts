@@ -694,6 +694,7 @@ export type McpConnectionAuthoritySelection = {
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
   authoritySource?: "host" | undefined;
+  hostBinding?: { bindingId: string; generation: number } | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
@@ -879,6 +880,7 @@ export type FikenInstallRequest = {
 };
 
 export type FikenOAuthStartRequest = {
+  returnPath?: string | undefined;
   /** Existing Fiken connection to re-authorize in place (reconnect). */
   connectionId?: string | undefined;
 };
@@ -1177,6 +1179,8 @@ export type OAuthStartRequest = {
   resource?: string | undefined;
   requestedScopes?: string[] | undefined;
   returnPath?: string | undefined;
+  /** Exact trusted-host destination; requires verified external-user mode. */
+  returnUrl?: string | undefined;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
   oauthClient?:
@@ -1472,7 +1476,7 @@ export type Session = {
   /** Agent access scope; absent on servers before the agent-access release. */
   agentAccess?: SessionAgentAccess | undefined;
   /** Opaque end-user label; null when the session carries none. */
-  endUser?: SessionEndUser | null | undefined;
+  scopeSubjectId?: SessionScopeSubjectId | null | undefined;
   /** Memory scope; absent on servers before the agent-access release. */
   memoryScope?: SessionMemoryScope | undefined;
   createdAt: string;
@@ -2857,6 +2861,10 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  /** Opt-in host grants for a direct external-user initial turn. */
+  selectedHostMcpDelegations?:
+    | { serverId: string; delegationId: string; generation: number }[]
+    | undefined;
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
@@ -2929,14 +2937,15 @@ export type CreateSessionRequest = {
   // on the platform (the chat facade defaults to "session").
   agentAccess?: SessionAgentAccess | undefined;
   /** Opaque end-user label inside the workspace. Not a subject, not authority. */
-  endUser?: SessionEndUser | undefined;
-  /** Which Memory the agent reads and where it saves; "user" requires `endUser`. */
+  /** Select identity with server-side asUser(), not session creation data. */
+  scopeSubjectId?: never;
+  /** Which Memory the agent reads and where it saves; "user" requires `scopeSubjectId`. */
   memoryScope?: SessionMemoryScope | undefined;
 };
 
 export type SessionAgentAccess = "session" | "user" | "workspace";
-export type SessionEndUser = { source: string; id: string };
-export type SessionMemoryScope = "workspace" | "user" | "session" | "off";
+export type SessionScopeSubjectId = string;
+export type SessionMemoryScope = "workspace" | "user" | "off";
 
 // --- Access, workspaces, API keys -------------------------------------------
 
@@ -4610,7 +4619,7 @@ export type ListOrganizationSessionsOptions = {
   /** `nextCursor` from the previous page. */
   cursor?: string | undefined;
   /** Keep only sessions labelled with this exact end user. */
-  endUser?: { source: string; id: string } | undefined;
+  scopeSubjectId?: string | undefined;
   /** Keep only sessions in this exact lifecycle state. */
   status?: SessionStatus | undefined;
   signal?: AbortSignal | undefined;
@@ -5222,6 +5231,7 @@ export type CreateAgentScheduledTaskRequest = {
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -5252,6 +5262,7 @@ export type UpdateScheduledTaskRequest = {
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -7925,6 +7936,7 @@ export type UserMessageEventInput = {
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
     connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+    selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

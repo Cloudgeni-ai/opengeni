@@ -677,47 +677,31 @@ describe("organization-wide session list", () => {
     ).toBe(403);
   });
 
-  test("endUser filter round-trips through the organization list", async () => {
+  test("canonical user filter round-trips through the organization list", async () => {
     if (!shared || !client || !app || !fixture) return;
-    if (!fixture.endUserColumnsPresent) {
-      console.warn(
-        "[organization-sessions] skipped: sessions.end_user_id is not present yet (slice B migration 0427)",
-      );
-      return;
-    }
     // Workspace A is where the owner holds a membership, so the seam probe
     // below can list as the owner subject.
     const [labelled] = fixture.sharedSessionIds.get(fixture.workspaceA.id)!;
     await shared.admin`
       update sessions
-      set end_user_source = 'acme', end_user_id = 'u_42'
+      set scope_subject_id = 'user:u_42'
       where id = ${labelled}`;
-    // The route passes `endUser: { source, id }` straight through to
-    // listSessionsForSubject. Until slice B wires that option into the SQL
-    // predicate the label is ignored; probe the seam directly so this test
-    // reports the missing filter instead of asserting a widening it cannot fix.
+    // Both the database filter and HTTP adapter must use the canonical column.
     const probe = await listSessionsForSubject(client.db, fixture.workspaceA.id, {
       subjectId: fixture.subjectId,
       limit: 10,
       materializeSnapshot: true,
-      ...({ endUser: { source: "acme", id: "nobody" } } as Record<string, unknown>),
+      scopeSubjectId: "user:nobody",
     });
-    if (probe.sessions.length > 0) {
-      console.warn(
-        "[organization-sessions] skipped: listSessionsForSubject does not filter by endUser yet (slice B)",
-      );
-      return;
-    }
+    expect(probe.sessions).toEqual([]);
     const { status, body } = await listOrganizationSessions(fixture.fullHeaders, {
-      endUserSource: "acme",
-      endUserId: "u_42",
+      scopeSubjectId: "user:u_42",
     });
     expect(status).toBe(200);
     expect(body.sessions.map((session: Session) => session.id)).toEqual([labelled]);
     expect(body.nextCursor).toBeNull();
     const miss = await listOrganizationSessions(fixture.fullHeaders, {
-      endUserSource: "acme",
-      endUserId: "nobody",
+      scopeSubjectId: "user:nobody",
     });
     expect(miss.body.sessions).toEqual([]);
   });

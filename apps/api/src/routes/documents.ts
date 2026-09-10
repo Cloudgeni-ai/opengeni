@@ -1006,9 +1006,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       // (migration 0427); a missing row resolves to no Memory tools.
       const memory =
         sessionId !== undefined
-          ? ((await resolveSessionMemoryAgentScope(db, workspaceId, sessionId)) ?? {
+          ? ((await resolveSessionMemoryAgentScope(db, workspaceId, sessionId, grant.metadata)) ?? {
               mode: "off" as const,
-              endUserSubjectId: null,
+              userSubjectId: null,
               rootSessionId: null,
             })
           : null;

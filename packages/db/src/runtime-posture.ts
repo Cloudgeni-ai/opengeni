@@ -86,6 +86,9 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
 const ADDITIONAL_ORGANIZATION_CREATION_ROUTINE =
   "create_additional_managed_organization(text, text, text, text, uuid)";
 const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
+  "get_external_identity_link_reference(uuid, uuid, text)",
+  "get_external_identity_link_inventory_references(uuid, uuid[])",
+  "ensure_external_identity(uuid, text, text)",
   "list_self_organization_memberships(text)",
   "list_self_organization_invitations(text)",
   "list_self_organization_invitations(text, uuid, integer)",
@@ -700,6 +703,7 @@ export const FORCE_RLS_TABLES = [
   "composer_drafts",
   "computer_session_associations",
   "computer_sessions",
+  "connect_attempts",
   "connection_disconnect_operations",
   "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
@@ -732,6 +736,10 @@ export const FORCE_RLS_TABLES = [
   "editable_artifact_versions",
   "editable_artifacts",
   "enrollments",
+  "external_identities",
+  "external_identity_links",
+  "external_link_task_authorities",
+  "external_link_turn_authorities",
   "feedback_submissions",
   "file_uploads",
   "files",
@@ -749,6 +757,10 @@ export const FORCE_RLS_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "host_mcp_bindings",
+  "host_mcp_delegations",
+  "host_mcp_task_authorities",
+  "host_mcp_turn_authorities",
   "image_generation_operations",
   "import_batches",
   "integration_facet_binding_owners",
@@ -1068,6 +1080,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "codex_subscription_credentials",
   "composer_drafts",
   "computer_session_associations",
+  "connect_attempts",
   "connection_disconnect_operations",
   "connections",
   "connector_action_policies",
@@ -1085,6 +1098,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
+  "host_mcp_bindings",
+  "host_mcp_delegations",
   "image_generation_operations",
   "import_batches",
   "integration_facet_binding_owners",
@@ -1249,9 +1264,13 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "external_link_task_authorities",
+  "external_link_turn_authorities",
   "feedback_submissions",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
+  "host_mcp_task_authorities",
+  "host_mcp_turn_authorities",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",
@@ -1304,6 +1323,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "computer_sessions",
   "editable_artifact_session_links",
   "editable_artifacts",
+  "external_identity_links",
   "integration_facet_definitions",
   "integration_spec_revisions",
   "integration_tools",
@@ -1344,6 +1364,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "document_default_collection_backfill_runs",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
+  "external_identities",
   "governed_learning_activation_receipts",
   "governed_learning_activation_undo_receipts",
   "governed_learning_decision_receipts",
@@ -2232,6 +2253,32 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (
+      [
+        "ensure_external_identity(uuid, text, text)",
+        "get_external_identity_link_reference(uuid, uuid, text)",
+        "get_external_identity_link_inventory_references(uuid, uuid[])",
+      ].includes(routine.name)
+    ) {
+      const names =
+        routine.name !== "ensure_external_identity(uuid, text, text)"
+          ? ["external_identity_links", "external_identities", "organization_memberships"]
+          : [
+              "external_identities",
+              "organization_memberships",
+              "workspaces",
+              "workspace_inference_controls",
+            ];
+      const missing = names.filter((name) => !tableByName.has(name));
+      if (missing.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missing.join(", ")}`,
+        );
+      } else if (names.some((name) => tableByName.get(name)!.owner !== routine.owner)) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match`,
+        );
       }
     } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
       const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(

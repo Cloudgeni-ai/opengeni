@@ -1,4 +1,9 @@
 import { createHash, createHmac } from "node:crypto";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import {
+  startSlackBotInstall,
+  requireOpenGeniSlackOAuthSettings,
+} from "../integrations/slack-install";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -18,9 +23,6 @@ import {
   ApiIntegrationOAuthStartRequest,
   ConnectionResponse,
   CreateConnectionRequest,
-  FIKEN_CREDENTIAL_LABEL,
-  FIKEN_CREDENTIAL_ROLE,
-  FIKEN_PROVIDER_DOMAIN,
   FikenInstallRequest,
   FikenOAuthStartRequest,
   FikenOAuthStartResponse,
@@ -30,7 +32,6 @@ import {
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OpenGeniSlackBotInstallRequest,
-  OpenGeniSlackBotInstallStart,
   OAuthStartRequest,
   OAuthStartResponse,
   UpdateConnectionRequest,
@@ -57,24 +58,27 @@ import {
   isPersonalGitHubConnection,
 } from "@opengeni/contracts/personal-github";
 import {
-  fikenConnectionMetadata,
   hasPermission,
   hasReservedFikenMetadata,
   hasReservedOpenGeniSlackBotMetadata,
-  isFikenConnection,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
-  resolveFikenDefaultCompanySlug,
+  externalContinuationCommitAuthorizer,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
+  claimConnectOperation,
+  finishConnectOperation,
+  getConnectAttempt,
+  decryptEnvironmentValue,
   createConnection,
+  withWorkspaceSubjectRls,
+  type Database,
   encryptEnvironmentValue,
   getConnectionMetadata,
-  getWorkspaceGrant,
   listConnectionsMetadata,
   listSlackInstallationBindings,
   persistSlackBotInstallationWithSuccessAudit,
@@ -127,8 +131,10 @@ import {
 import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
+  requireLegacyOAuthActor,
 } from "../connection-ownership";
 import { canonicalProviderDomain } from "../integrations/provider-domain";
+import { externalActorContinuationForAuthorization } from "@opengeni/core";
 import {
   exchangeOpenGeniSlackAuthorizationCode,
   SlackBotCredentialVerificationError,
@@ -136,19 +142,20 @@ import {
 } from "../integrations/slack-bot";
 import {
   completeFikenOAuthCallback,
-  fikenCredentialBundle,
   startFikenOAuth,
-  verifyFikenApiToken,
+  prepareFikenTokenInstall,
 } from "../integrations/fiken";
+import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
 } from "@opengeni/contracts";
-import { createSignedState, readSignedState } from "@opengeni/github";
+import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
 
 type OpenGeniSlackInstallState = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -195,122 +202,111 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     const grant = access.grant;
+    const beforeCommit = externalContinuationCommitAuthorizer(access);
     const payload = CreateConnectionRequest.parse(await c.req.json());
-    assertNotReservedSlackBotMetadata(payload.metadata);
-    assertNotReservedFikenMetadata(payload.metadata);
-    assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
-    assertNotReservedPersonalGitHubMetadata(payload.metadata);
-    const key = requireEnvironmentEncryption(settings);
-    const subjectId = createConnectionSubjectId(payload, grant.subjectId);
-    if (subjectId !== null) {
-      assertPersonalConnectionOwnerPrincipal(access);
-    }
-    const providerDomain = canonicalProviderDomain(payload.providerDomain);
-    assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
-    assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
-    assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
-    assertNotDirectPersonalGitHubOAuth(providerDomain, payload.kind, payload.metadata);
-    const credentialEncrypted = encryptCredentialBundle(key, payload.credential);
-    const workspaceProviderKind = workspaceProviderApiKeyConnectionKind({
-      subjectId,
-      providerDomain,
-      kind: payload.kind,
-      metadata: payload.metadata,
-    });
-    const connection = workspaceProviderKind
-      ? await (async () => {
-          const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
-          if (!payload.operationId) {
-            throw new HTTPException(400, {
-              message: `connecting ${provider.label} requires an operationId`,
-            });
-          }
-          const expiresAt = payload.expiresAt ? new Date(payload.expiresAt) : null;
-          const metadata = workspaceProviderCredentialMetadata(
-            workspaceProviderKind,
-            payload.metadata,
-          );
-          const input = {
+    // All writes in this closure must use the caller-owned scoped transaction.
+    // eslint-disable-next-line no-shadow
+    const persist = async (db: Database) => {
+      assertNotReservedSlackBotMetadata(payload.metadata);
+      assertNotReservedFikenMetadata(payload.metadata);
+      assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
+      assertNotReservedPersonalGitHubMetadata(payload.metadata);
+      const key = requireEnvironmentEncryption(settings);
+      const subjectId = createConnectionSubjectId(payload, grant.subjectId);
+      if (subjectId !== null) {
+        assertPersonalConnectionOwnerPrincipal(access);
+      }
+      const providerDomain = canonicalProviderDomain(payload.providerDomain);
+      assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
+      assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
+      assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
+      assertNotDirectPersonalGitHubOAuth(providerDomain, payload.kind, payload.metadata);
+      const credentialEncrypted = encryptCredentialBundle(key, payload.credential);
+      const workspaceProviderKind = workspaceProviderApiKeyConnectionKind({
+        subjectId,
+        providerDomain,
+        kind: payload.kind,
+        metadata: payload.metadata,
+      });
+      const connection = workspaceProviderKind
+        ? await (async () => {
+            const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
+            if (!payload.operationId) {
+              throw new HTTPException(400, {
+                message: `connecting ${provider.label} requires an operationId`,
+              });
+            }
+            const expiresAt = payload.expiresAt ? new Date(payload.expiresAt) : null;
+            const metadata = workspaceProviderCredentialMetadata(
+              workspaceProviderKind,
+              payload.metadata,
+            );
+            const input = {
+              accountId: grant.accountId,
+              workspaceId,
+              operationId: payload.operationId,
+              requestDigest: workspaceProviderCredentialRequestDigest(key, {
+                action: "create",
+                providerDomain,
+                kind: payload.kind,
+                subjectId,
+                credential: payload.credential,
+                grantedScopes: payload.grantedScopes,
+                expiresAt: expiresAt?.toISOString() ?? null,
+                metadata,
+              }),
+              credentialEncrypted,
+              grantedScopes: payload.grantedScopes,
+              expiresAt,
+              metadata,
+              updatedBySubjectId: grant.subjectId,
+            };
+            const created =
+              workspaceProviderKind === "vercel_gateway"
+                ? await upsertWorkspaceVercelAiGatewayConnection(db, input)
+                : await upsertWorkspaceOpenRouterConnection(db, input);
+            if (!created || created.status === "revoked") {
+              throw new HTTPException(409, {
+                message: `${provider.label} is already connected; reload before replacing its key`,
+              });
+            }
+            return created;
+          })()
+        : await createConnection(db, {
             accountId: grant.accountId,
             workspaceId,
-            operationId: payload.operationId,
-            requestDigest: workspaceProviderCredentialRequestDigest(key, {
-              action: "create",
-              providerDomain,
-              kind: payload.kind,
-              subjectId,
-              credential: payload.credential,
-              grantedScopes: payload.grantedScopes,
-              expiresAt: expiresAt?.toISOString() ?? null,
-              metadata,
-            }),
+            subjectId,
+            providerDomain,
+            kind: payload.kind,
             credentialEncrypted,
             grantedScopes: payload.grantedScopes,
-            expiresAt,
-            metadata,
-            updatedBySubjectId: grant.subjectId,
-          };
-          const created =
-            workspaceProviderKind === "vercel_gateway"
-              ? await upsertWorkspaceVercelAiGatewayConnection(db, input)
-              : await upsertWorkspaceOpenRouterConnection(db, input);
-          if (!created || created.status === "revoked") {
-            throw new HTTPException(409, {
-              message: `${provider.label} is already connected; reload before replacing its key`,
-            });
-          }
-          return created;
-        })()
-      : await createConnection(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId,
-          providerDomain,
-          kind: payload.kind,
-          credentialEncrypted,
-          grantedScopes: payload.grantedScopes,
-          expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
-          metadata: payload.metadata,
-          createdBySubjectId: grant.subjectId,
-        });
-    return c.json(ConnectionResponse.parse({ connection }), 201);
+            expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
+            metadata: payload.metadata,
+            createdBySubjectId: grant.subjectId,
+          });
+      return c.json(ConnectionResponse.parse({ connection }), 201);
+    };
+    return beforeCommit
+      ? withWorkspaceSubjectRls(db, workspaceId, grant.subjectId, async (tx) => {
+          await beforeCommit(tx);
+          return persist(tx);
+        })
+      : persist(db);
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/slack-bot/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireLegacyOAuthActor(access);
+    const grant = access.grant;
     const payload = OpenGeniSlackBotInstallRequest.parse(await c.req.json());
-    const slack = requireOpenGeniSlackOAuthSettings(settings);
-    const existing = payload.connectionId
-      ? await getConnectionMetadata(db, workspaceId, payload.connectionId, grant.subjectId)
-      : null;
-    if (payload.connectionId && !existing) {
-      throw new HTTPException(404, { message: "connection not found" });
-    }
-    if (existing && !isOpenGeniSlackBotConnection(existing)) {
-      throw new HTTPException(422, {
-        message: "connectionId is not an OpenGeni Slack bot connection",
-      });
-    }
-    const baseUrl = integrationBaseUrl(settings.publicBaseUrl, c.req.url);
-    const redirectUri = `${baseUrl}/v1/integrations/slack/callback`;
-    const returnPath = `/workspaces/${workspaceId}/capabilities`;
-    const state = createSignedState(requireIntegrationsStateSecret(settings), {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      returnPath,
-      ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
-    });
-    const authorizationUrl = new URL("https://slack.com/oauth/v2/authorize");
-    authorizationUrl.searchParams.set("client_id", slack.clientId);
-    authorizationUrl.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(","));
-    authorizationUrl.searchParams.set("redirect_uri", redirectUri);
-    authorizationUrl.searchParams.set("state", state);
     return c.json(
-      OpenGeniSlackBotInstallStart.parse({
-        authorizationUrl: authorizationUrl.toString(),
-        expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+      await startSlackBotInstall(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        requestUrl: c.req.url,
+        ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
       }),
     );
   });
@@ -318,9 +314,30 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/slack/callback", async (c) => {
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, c.req.url);
     let state: OpenGeniSlackInstallState | null = null;
+    let exactReturnUrl: string | undefined;
+    let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
     let stage: SlackBotInstallCallbackFailureStage = "permission_check";
     try {
       state = readOpenGeniSlackInstallState(c.req.query("state"), settings);
+      if (state.connectAttemptId) {
+        const stored = await getConnectAttempt(db, state, state.connectAttemptId);
+        if (stored.attempt.providerId !== "slack-bot" || stored.attempt.ownership !== "workspace")
+          throw new HTTPException(403, { message: "Slack attempt mismatch" });
+        exactReturnUrl = stored.returnUrl;
+        operation = {
+          attemptId: state.connectAttemptId,
+          operationId: `oauth:${state.nonce}`,
+          inputDigest: createHash("sha256").update(c.req.query("state")!).digest("hex"),
+        };
+        const claim = await claimConnectOperation(db, state, {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        });
+        if (claim.status === "replayed")
+          return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
+      }
       await requireSlackInstallCallbackGrant(db, state);
       stage = "nonce_consume";
       const consumed = await consumeIntegrationOAuthStateNonce(db, {
@@ -337,6 +354,25 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           "state_replayed",
           "Slack installation state has already been used",
         );
+      }
+      if (operation && (c.req.query("error") || !c.req.query("code"))) {
+        await finishConnectOperation(db, state, {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          commit: async (_tx, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: c.req.query("error") === "access_denied" ? "cancelled" : "failed",
+            nextAction: { type: "none" },
+            error: {
+              code: c.req.query("error") ? "provider_denied" : "missing_code",
+              message: "Authorization was not completed. Start a new connection attempt.",
+              retryable: false,
+            },
+          }),
+        });
+        return new Response(null, { status: 302, headers: { Location: exactReturnUrl! } });
       }
       if (c.req.query("error")) {
         stage = "provider_denial";
@@ -379,17 +415,51 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       stage = "permission_recheck";
       await requireSlackInstallCallbackGrant(db, state);
       stage = "persistence";
-      const connection = await persistOpenGeniSlackBotConnection({
-        deps,
-        state,
-        token: authorization.accessToken,
-        verified,
+      const acceptedState = state;
+      const persist = (tx: Database) =>
+        persistOpenGeniSlackBotConnection({
+          deps: { ...deps, db: tx },
+          state: acceptedState,
+          token: authorization.accessToken,
+          verified,
+        });
+      if (operation) {
+        await finishConnectOperation(db, acceptedState, {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "slack-bot",
+                label: "Slack workspace bot",
+                ownership: "workspace",
+                status: "connected",
+              },
+            };
+          },
+        });
+        return new Response(null, { status: 302, headers: { Location: exactReturnUrl! } });
+      }
+      const connection = await db.transaction(async (tx) => {
+        await requireSlackInstallCallbackGrant(tx, acceptedState);
+        return persist(tx);
       });
       return c.redirect(
         slackInstallReturnUrl(baseUrl, state.returnPath, "connected", connection.id),
         302,
       );
     } catch (error) {
+      if (exactReturnUrl)
+        return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
       if (state) {
         const failure = slackInstallCallbackFailure(stage, error);
         try {
@@ -422,80 +492,27 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/connections/fiken/install", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const payload = FikenInstallRequest.parse(await c.req.json());
-    const key = requireEnvironmentEncryption(settings);
-    const existing = payload.connectionId
-      ? await getConnectionMetadata(db, workspaceId, payload.connectionId, null)
-      : null;
-    if (payload.connectionId && !existing) {
-      throw new HTTPException(404, { message: "connection not found" });
-    }
-    if (existing && !isFikenConnection(existing)) {
-      throw new HTTPException(422, { message: "connectionId is not a Fiken connection" });
-    }
-    const verified = await verifyFikenApiToken(payload.apiToken, deps.fikenFetch ?? fetch);
-    const previousDefault = existing
-      ? (fikenConnectionMetadata(existing.metadata)?.defaultCompanySlug ?? null)
-      : null;
-    const defaultCompanySlug = resolveFikenDefaultCompanySlug({
-      requested: payload.defaultCompanySlug ?? null,
-      previous: previousDefault,
-      companies: verified.companies,
-    });
-    if (payload.defaultCompanySlug && defaultCompanySlug !== payload.defaultCompanySlug) {
-      throw new HTTPException(422, {
-        message: `defaultCompanySlug is not among the companies this token can access: ${verified.companies
-          .map((company) => company.slug)
-          .join(", ")}`,
-      });
-    }
-    const metadata = {
-      credentialRole: FIKEN_CREDENTIAL_ROLE,
-      credentialLabel: FIKEN_CREDENTIAL_LABEL,
-      companies: verified.companies,
-      defaultCompanySlug,
-      verifiedAt: new Date().toISOString(),
-    };
-    const credentialEncrypted = encryptCredentialBundle(
-      key,
-      fikenCredentialBundle(payload.apiToken),
-    );
-    if (existing) {
-      // Rewrites the whole credential identity: a token pasted over an OAuth
-      // row must also flip kind and clear the OAuth expiry, or the broker
-      // keeps treating the api_key bundle as a refreshable oauth2 credential.
-      const updated = await updateConnection(db, {
-        workspaceId,
-        connectionId: existing.id,
-        visibleToSubjectId: null,
-        expectedVersion: existing.version,
-        kind: "api_key",
-        status: "active",
-        credentialEncrypted,
-        grantedScopes: [],
-        expiresAt: null,
-        metadata,
-        updatedBySubjectId: grant.subjectId,
-      });
-      if (!updated) {
-        throw new HTTPException(409, { message: "the Fiken connection changed; retry" });
-      }
-      return c.json(ConnectionResponse.parse({ connection: updated }));
-    }
-    const connection = await createConnection(db, {
-      accountId: grant.accountId,
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
       workspaceId,
-      subjectId: null,
-      providerDomain: FIKEN_PROVIDER_DOMAIN,
-      kind: "api_key",
-      credentialEncrypted,
-      grantedScopes: [],
-      expiresAt: null,
-      metadata,
-      createdBySubjectId: grant.subjectId,
+      "connections:write",
+    );
+    const grant = authorization.grant;
+    const payload = FikenInstallRequest.parse(await c.req.json());
+    const persist = await prepareFikenTokenInstall(deps, grant, payload);
+    const continuation = externalActorContinuationForAuthorization(authorization);
+    const connection = await db.transaction(async (tx) => {
+      await requireConnectOwnerAuthority(tx, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
+        ...(continuation ? { externalContinuation: continuation } : {}),
+      });
+      return persist(tx);
     });
-    return c.json(ConnectionResponse.parse({ connection }), 201);
+    return c.json(ConnectionResponse.parse({ connection }), payload.connectionId ? 200 : 201);
   });
 
   // Fiken OAuth (registered app) start. Both Fiken lanes produce the same
@@ -503,7 +520,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/connections/fiken/oauth/start", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireLegacyOAuthActor(access);
+    const grant = access.grant;
     const payload = FikenOAuthStartRequest.parse(await c.req.json());
     requireEnvironmentEncryption(settings);
     return c.json(
@@ -527,6 +546,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -537,6 +558,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // human may start it.
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     assertPersonalConnectionOwnerPrincipal(access, "Google Drive");
+    requireLegacyOAuthActor(access);
     const grant = access.grant;
     const parsed = GoogleDriveOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -562,6 +584,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // managed human may start it.
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     assertPersonalConnectionOwnerPrincipal(access, "Atlassian");
+    requireLegacyOAuthActor(access);
     const grant = access.grant;
     const parsed = AtlassianOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -588,6 +611,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -663,6 +688,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       requestUrl: c.req.url,
     };
     const result = await completeGoogleDriveOAuthCallback(deps, input);
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -1024,6 +1051,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
     }
+    const expectedVersion = c.req.query("expectedVersion");
+    if (expectedVersion !== undefined) {
+      if (!/^[1-9]\d*$/.test(expectedVersion) || !Number.isSafeInteger(Number(expectedVersion))) {
+        throw new HTTPException(400, { message: "invalid expected connection version" });
+      }
+      if (Number(expectedVersion) !== existing.version) {
+        throw new HTTPException(409, { message: "connection changed; refresh before disconnect" });
+      }
+    }
     const isPersonalGitHub =
       existing.subjectId === grant.subjectId && isPersonalGitHubConnection(existing);
     if (isPersonalGitHub) {
@@ -1161,6 +1197,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const result = await startMcpOAuth(
       { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
+        ...(externalActorContinuationForAuthorization(access)
+          ? { externalContinuation: externalActorContinuationForAuthorization(access)! }
+          : {}),
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
@@ -1186,6 +1225,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       OAuthStartResponse.parse(
         await startApiIntegrationProviderOAuth(deps, {
+          ...(externalActorContinuationForAuthorization(access)
+            ? { externalContinuation: externalActorContinuationForAuthorization(access)! }
+            : {}),
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,
@@ -1211,6 +1253,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
           input,
         );
+    if ("exactReturn" in result && result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     const redirectTo = settings.webBaseUrl
       ? new URL(result.redirectTo, settings.webBaseUrl).toString()
       : result.redirectTo;
@@ -1225,6 +1269,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -1341,22 +1387,6 @@ async function persistOpenGeniSlackBotConnection(input: {
   }
 }
 
-function requireOpenGeniSlackOAuthSettings(settings: ApiRouteDeps["settings"]): {
-  clientId: string;
-  clientSecret: string;
-} {
-  const clientId = settings.slackClientId?.trim();
-  const clientSecret = settings.slackClientSecret?.trim();
-  const signingSecret = settings.slackSigningSecret?.trim();
-  if (!clientId || !clientSecret || !signingSecret) {
-    throw new HTTPException(503, {
-      message:
-        "OpenGeni Slack bot installation requires OPENGENI_SLACK_CLIENT_ID, OPENGENI_SLACK_CLIENT_SECRET, and OPENGENI_SLACK_SIGNING_SECRET",
-    });
-  }
-  return { clientId, clientSecret };
-}
-
 function readOpenGeniSlackInstallState(
   rawState: string | undefined,
   settings: ApiRouteDeps["settings"],
@@ -1371,6 +1401,11 @@ function readOpenGeniSlackInstallState(
   if (!payload) {
     throw new HTTPException(400, { message: "invalid or expired Slack installation state" });
   }
+  if (
+    (payload.kind !== undefined && payload.kind !== "slack_bot_install") ||
+    (payload.connectAttemptId && payload.kind !== "slack_bot_install")
+  )
+    throw new HTTPException(400, { message: "invalid Slack installation state kind" });
   const requiredString = (value: unknown, label: string): string => {
     if (typeof value !== "string" || value.length === 0) {
       throw new HTTPException(400, { message: `invalid Slack installation ${label}` });
@@ -1405,6 +1440,21 @@ function readOpenGeniSlackInstallState(
     workspaceId,
     subjectId,
     returnPath,
+    ...(typeof payload.connectAttemptId === "string"
+      ? { connectAttemptId: payload.connectAttemptId }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "nonce"),
     iat:
@@ -1456,6 +1506,9 @@ function slackInstallCallbackFailure(
   if (error instanceof SlackBotLifecycleSuccessAuditError) {
     return { stage: "persistence", reason: "success_audit_failed" };
   }
+  if (stage === "permission_check" && error instanceof HTTPException && error.status === 403) {
+    return { stage, reason: "permission_lost" };
+  }
   if (stage === "code_exchange") {
     return { stage, reason: "exchange_failed" };
   }
@@ -1479,18 +1532,7 @@ async function requireSlackInstallCallbackGrant(
   db: ApiRouteDeps["db"],
   state: OpenGeniSlackInstallState,
 ): Promise<void> {
-  const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
-  if (
-    !grant ||
-    grant.accountId !== state.accountId ||
-    !hasPermission(grant.permissions, "connections:write")
-  ) {
-    throw new SlackInstallCallbackError(
-      403,
-      "permission_lost",
-      "Slack installation subject no longer has permission for this workspace",
-    );
-  }
+  await requireConnectOwnerAuthority(db, state, "connections:write");
 }
 
 function assertNotDirectPersonalSlackOAuth(providerDomain: string, kind: string): void {

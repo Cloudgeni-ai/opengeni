@@ -150,7 +150,11 @@ export const workspaces = pgTable(
     accountSlug: uniqueIndex("workspaces_account_slug_idx")
       .on(table.accountId, table.slug)
       .where(sql`${table.slug} is not null`),
-    external: uniqueIndex("workspaces_external_idx").on(table.externalSource, table.externalId),
+    external: uniqueIndex("workspaces_external_idx").on(
+      table.accountId,
+      table.externalSource,
+      table.externalId,
+    ),
     sandboxViewerForceDrain: index("workspaces_sandbox_viewer_force_drain_idx")
       .on(table.id)
       .where(sql`${table.sandboxViewerForceDrainReason} is not null`),
@@ -519,6 +523,46 @@ export const workspaceMemberships = pgTable(
 // Organization membership is distinct from workspace access. `account_id` is
 // the physical organization identifier; `personal_workspace_id` is lifecycle
 // metadata only and never the ownership anchor for user resources.
+export const externalIdentities = pgTable(
+  "external_identities",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    externalId: text("external_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    organizationMembershipId: uuid("organization_membership_id").notNull(),
+    personalWorkspaceId: uuid("personal_workspace_id").notNull(),
+    status: text("status").notNull().default("active"),
+    authorizationRevision: bigint("authorization_revision", { mode: "number" })
+      .notNull()
+      .default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    mapping: uniqueIndex("external_identities_account_id_source_external_id_key").on(
+      table.accountId,
+      table.source,
+      table.externalId,
+    ),
+    subject: uniqueIndex("external_identities_account_id_subject_id_key").on(
+      table.accountId,
+      table.subjectId,
+    ),
+    membership: foreignKey({
+      columns: [table.organizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }),
+    personalWorkspace: foreignKey({
+      columns: [table.personalWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }),
+  }),
+);
+
 export const organizationMemberships = pgTable(
   "organization_memberships",
   {
@@ -895,7 +939,8 @@ export const organizationMembershipLifecycleEvents = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     operationId: uuid("operation_id").notNull(),
-    actorMembershipId: uuid("actor_membership_id").notNull(),
+    actorMembershipId: uuid("actor_membership_id"),
+    actorServiceSubject: text("actor_service_subject"),
     targetMembershipId: uuid("target_membership_id"),
     kind: text("kind").notNull(),
     priorAuthorizationRevision: bigint("prior_authorization_revision", {
@@ -925,6 +970,10 @@ export const organizationMembershipLifecycleEvents = pgTable(
     kindValid: check(
       "organization_membership_lifecycle_events_kind_check",
       sql`${table.kind} in ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')`,
+    ),
+    actorKindValid: check(
+      "organization_membership_lifecycle_events_actor_kind_check",
+      sql`(${table.actorMembershipId} is not null and ${table.actorServiceSubject} is null) or (${table.actorMembershipId} is null and ${table.actorServiceSubject} is not null and ${table.actorServiceSubject} ~ '^api_key:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')`,
     ),
   }),
 );
@@ -3543,6 +3592,49 @@ export const integrationOauthClients = pgTable(
 
 // Consumed OAuth state nonces. Rows are inserted only on callback; the primary
 // key makes a verified state single-use across API instances.
+export const hostMcpTurnAuthorities = pgTable(
+  "host_mcp_turn_authorities",
+  {
+    turnId: uuid("turn_id")
+      .notNull()
+      .references(() => sessionTurns.id, { onDelete: "cascade" }),
+    serverId: text("server_id").notNull(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    bindingId: uuid("binding_id")
+      .notNull()
+      .references(() => hostMcpBindings.id),
+    delegationId: uuid("delegation_id")
+      .notNull()
+      .references(() => hostMcpDelegations.id),
+    canonicalSnapshot: jsonb("canonical_snapshot")
+      .$type<import("@opengeni/contracts/host-mcp-bindings").HostMcpAcceptedAuthority>()
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.turnId, table.serverId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    serverBounds: check(
+      "host_mcp_turn_authorities_server_id_check",
+      sql`octet_length(${table.serverId}) between 1 and 1024`,
+    ),
+    snapshotBounds: check(
+      "host_mcp_turn_authorities_canonical_snapshot_check",
+      sql`jsonb_typeof(${table.canonicalSnapshot}) = 'object' and octet_length(${table.canonicalSnapshot}::text) <= 262144`,
+    ),
+  }),
+);
+
 export const integrationOauthStateNonces = pgTable(
   "integration_oauth_state_nonces",
   {
@@ -3561,6 +3653,135 @@ export const integrationOauthStateNonces = pgTable(
   (table) => ({
     workspace: index("integration_oauth_state_nonces_workspace_idx").on(table.workspaceId),
     expires: index("integration_oauth_state_nonces_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const hostMcpBindings = pgTable(
+  "host_mcp_bindings",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    authorizationRevision: bigint("authorization_revision", { mode: "number" }).notNull(),
+    operationId: uuid("operation_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    definition: jsonb("definition").notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspace: foreignKey({
+      name: "host_mcp_bindings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    owner: foreignKey({
+      name: "host_mcp_bindings_member_owner_fk",
+      columns: [table.accountId, table.ownerSubjectId],
+      foreignColumns: [organizationMemberships.accountId, organizationMemberships.subjectId],
+    }),
+    operation: uniqueIndex("host_mcp_bindings_workspace_id_owner_subject_id_operation_id_key").on(
+      table.workspaceId,
+      table.ownerSubjectId,
+      table.operationId,
+    ),
+    inventory: index("host_mcp_bindings_owner_idx").on(
+      table.workspaceId,
+      table.ownerSubjectId,
+      table.createdAt,
+      table.id,
+    ),
+  }),
+);
+
+export const hostMcpDelegations = pgTable(
+  "host_mcp_delegations",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    ownerAuthorizationRevision: bigint("owner_authorization_revision", {
+      mode: "number",
+    }).notNull(),
+    bindingId: uuid("binding_id")
+      .notNull()
+      .references(() => hostMcpBindings.id),
+    bindingGeneration: bigint("binding_generation", { mode: "number" }).notNull(),
+    operationId: uuid("operation_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    grantDefinition: jsonb("grant_definition").notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspace: foreignKey({
+      name: "host_mcp_delegations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    owner: foreignKey({
+      name: "host_mcp_delegations_member_owner_fk",
+      columns: [table.accountId, table.ownerSubjectId],
+      foreignColumns: [organizationMemberships.accountId, organizationMemberships.subjectId],
+    }),
+    operation: uniqueIndex(
+      "host_mcp_delegations_workspace_id_owner_subject_id_operation_id_key",
+    ).on(table.workspaceId, table.ownerSubjectId, table.operationId),
+    inventory: index("host_mcp_delegations_owner_idx").on(
+      table.workspaceId,
+      table.ownerSubjectId,
+      table.bindingId,
+      table.id,
+    ),
+  }),
+);
+
+export const connectAttempts = pgTable(
+  "connect_attempts",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    idempotencyKeyHash: text("idempotency_key_hash").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    returnUrl: text("return_url").notNull(),
+    externalContinuation: jsonb("external_continuation"),
+    projection: jsonb("projection").notNull(),
+    operationId: text("operation_id"),
+    operationDigest: text("operation_digest"),
+    receipts: jsonb("receipts").notNull().default({}),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "connect_attempts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    idempotency: uniqueIndex("connect_attempts_actor_idempotency_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.idempotencyKeyHash,
+    ),
+    pending: index("connect_attempts_actor_pending_idx")
+      .on(table.workspaceId, table.subjectId, table.createdAt.desc(), table.id.desc())
+      .where(sql`${table.projection}->>'state' not in ('complete','cancelled','expired')`),
+    expiry: index("connect_attempts_expiry_idx").on(table.expiresAt, table.id),
   }),
 );
 
@@ -4175,6 +4396,9 @@ export const sessions = pgTable(
     // sessions carrying the same end-user label; 'session' limits it to the
     // own root tree. Enforced only in the core session-authorization seam.
     agentAccess: text("agent_access").notNull().default("workspace"),
+    // Canonical authenticated user for the frozen cross-session agent scope.
+    // Independent of per-turn initiating users and historical external labels.
+    scopeSubjectId: text("scope_subject_id"),
     // Opaque end-user label (both set or both null). This is a product label
     // used for scoping and filtering, never a subject and never authority.
     endUserSource: text("end_user_source"),
@@ -10814,7 +11038,7 @@ export const scheduledTasks = pgTable(
     >(),
     creatorSessionPolicy: jsonb("creator_session_policy").$type<{
       agentAccess: string | null;
-      endUser: { source: string; id: string } | null;
+      scopeSubjectId: string | null;
       memoryScope: string | null;
     }>(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -12934,6 +13158,7 @@ export const socialConnections = pgTable(
   "social_connections",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    version: integer("version").notNull().default(1),
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),

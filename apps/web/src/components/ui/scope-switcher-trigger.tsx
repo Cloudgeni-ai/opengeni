@@ -12,8 +12,9 @@ export const ScopeSwitcherTrigger = forwardRef<
     label: string;
     icon: ReactNode;
     badge?: ReactNode;
+    compact?: boolean;
   }
->(function ScopeSwitcherTrigger({ label, icon, badge, className, ...props }, ref) {
+>(function ScopeSwitcherTrigger({ label, icon, badge, compact = false, className, ...props }, ref) {
   return (
     <button
       {...props}
@@ -21,14 +22,17 @@ export const ScopeSwitcherTrigger = forwardRef<
       type="button"
       className={cn(
         "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand",
+        compact && "h-8 gap-1.5 py-0 pointer-coarse:h-11",
         className,
       )}
     >
-      <Avatar size="sm" className="rounded-md">
-        <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
-          {icon}
-        </AvatarFallback>
-      </Avatar>
+      {compact ? null : (
+        <Avatar size="sm" className="rounded-md">
+          <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
+            {icon}
+          </AvatarFallback>
+        </Avatar>
+      )}
       <span className="min-w-0 flex-1 truncate text-sm font-medium" title={label}>
         {label}
       </span>

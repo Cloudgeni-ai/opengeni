@@ -1,7 +1,7 @@
 # Agent session authority
 
 A live agent attempt may read, message, and control other sessions in the same
-workspace when both sessions' `agentAccess` scopes allow it. Parent/child
+workspace when the caller's outbound `agentAccess` scope allows it. Parent/child
 lineage is never an access deny. First-party session tools (`sessions_list`,
 `session_get`, `session_events`, `session_wait`, `session_steer`,
 pause/resume/cancel) are the capability surface; the access scope below is the
@@ -29,36 +29,32 @@ already-frozen catalog does not change in place.
 
 ## Agent access scope
 
-Every session carries `agentAccess` (`session`, `user`, or `workspace`; raw
-create default `workspace`), an optional opaque `endUser: { source, id }`
-label, and `memoryScope` (`workspace`, `user`, `session`, or `off`). They are
-frozen on the session row at create and inherited by every child, which may
-only narrow them (`workspace` > `user` > `session`; memory `workspace` > `user`
-> `session` > `off`; a child may not name a different `endUser`). A widening
-request is a 403, and `memoryScope: "user"` without a label is a 422. The MCP
-`session_create` tool accepts only `memoryScope`; access and the label are
-always inherited.
+Every session carries frozen `agentAccess` (`session`, `user`, or
+`workspace`; default `workspace`) and a server-derived canonical
+`scopeSubjectId`. Native or `asUser` authority establishes that identity;
+request bodies cannot supply it or the retired `endUser` label. Children inherit
+identity and omitted scope, and may narrow access (`workspace` > `user` >
+`session`) but never widen it.
 
-The rule, applied only to `agent_attempt` actors and only when the target is
-outside the caller's own root tree:
+For authenticated `agent_attempt` callers:
 
-- the caller's own tree (root, parent, siblings, descendants) is always allowed;
-- if either side is `session`, deny;
-- if either side is `user`, allow only when both carry the same
-  `endUser` pair;
-- otherwise (both `workspace`) allow, subject to the private/Slack/host checks
-  below.
+- Own-tree access remains subject to ordinary permissions, private-session,
+  Slack-private, and optional host checks.
+- Outside that tree, a `session` caller cannot reach another task.
+- A `user` caller requires the same non-null canonical scope subject.
+- A `workspace` caller may reach any otherwise authorized workspace task.
+- The target's `agentAccess` never restricts inbound access.
 
-The same predicate filters `sessions_list`, `GET /sessions`, agent topology, and
-Slack discovery through `SessionAuthorizationListScope.agentAccessViewer`, so a
-`workspace`-scoped caller never learns a `session`- or `user`-scoped peer
-exists. Humans and the organization API key are unaffected: these sessions stay
-`workspace_shared`.
+The same predicate filters REST/MCP lists, topology, and Slack discovery through
+`SessionAuthorizationListScope.agentAccessViewer`. Human visibility is separate:
+private-session ownership and ordinary authorization still apply.
 
-`endUser` is a label, never a principal: it scopes memory
-(`end_user:v1:<sha256 of JSON [source,id]>`) and filters lists, and it grants nothing. Its shape
-matches the external-identity pair used by white-label embedding so the two can
-later be joined by value.
+Memory selection is `workspace`, `user`, or `off`. User Memory uses the verified
+active-turn user. Children may only narrow the selection. New `session` Memory
+requests are rejected; stored historical selectors hydrate as `off`, without
+deleting records or making private data workspace-visible. Existing task notes
+serve tree-local coordination. The MCP `session_create` tool accepts Memory
+selection; access and canonical identity are inherited from trusted authority.
 
 ## Relationship policy
 
@@ -72,9 +68,9 @@ widen a cross-session projection from exact-target to whole-root.
 | --- | --- | --- | --- |
 | Self | Yes | Yes | Session-local operations; an agent cannot Steer itself; tool approvals are never agent-decidable |
 | Immediate child, parent, sibling, or skipped generation in the caller's own root tree | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
-| Unrelated root, both sides `agentAccess: "workspace"` | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
-| Unrelated root, both sides `agentAccess: "user"` with the same `endUser` | Yes | Yes | Yes, subject to ordinary permissions |
-| Unrelated root where either side is `agentAccess: "session"`, or `"user"` with a different or missing `endUser` | No | No | No |
+| Unrelated root, caller `agentAccess: "workspace"` | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
+| Unrelated root, caller `agentAccess: "user"` with the same canonical scope subject | Yes | Yes | Yes, subject to ordinary permissions |
+| Unrelated root where caller is `agentAccess: "session"`, or `"user"` with a different or missing scope subject | No | No | No |
 | Slack-private session outside the caller's root | No | No | No |
 | `user_private` session whose owner is not the initiating human | No | No | No |
 

@@ -263,6 +263,7 @@ const ROUTINE_AS_DOLLAR = /\bAS\s+(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)/i;
  * backfill. `EXECUTE format($ddl$ UPDATE ... $ddl$)` still looks like a write.
  */
 export function stripRoutineBodies(statement: string): string {
+  statement = stripCatalogRoutinePatchLiterals(statement);
   let out = "";
   let index = 0;
   while (index < statement.length) {
@@ -290,6 +291,41 @@ export function stripRoutineBodies(statement: string): string {
     index = close + tag.length;
   }
   return out;
+}
+
+/** A quoted replacement used only to patch pg_get_functiondef is routine
+ * source, not an executed migration query. Keep arbitrary EXECUTE strings and
+ * every actual query outside the replacement visible to the guard. */
+function stripCatalogRoutinePatchLiterals(statement: string): string {
+  const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
+  return statement.replace(assignments, (whole, variable: string, _tag: string) => {
+    const outside = statement.replace(whole, `${variable} := NULL;`);
+    const use = new RegExp(
+      `\\bEXECUTE\\s+replace\\(\\s*([a-z_]\\w*)\\s*,\\s*[a-z_]\\w*\\s*,\\s*${variable}\\s*\\)\\s*;`,
+      "i",
+    ).exec(outside);
+    if (!use) return whole;
+    const definition = use[1]!;
+    const writes = [...outside.matchAll(new RegExp(`\\b${definition}\\s*:=\\s*([^;]+);`, "gi"))];
+    if (!writes.some((match) => /^pg_get_functiondef\s*\(/i.test(match[1]!.trim()))) return whole;
+    if (
+      writes.some(
+        (match) =>
+          !new RegExp(`^(?:pg_get_functiondef\\s*\\(|replace\\(\\s*${definition}\\s*,)`, "i").test(
+            match[1]!.trim(),
+          ),
+      )
+    )
+      return whole;
+    // Declaration and the one assignment/use are the only permitted references
+    // to the replacement variable. Additional execution or data flow is opaque.
+    const remainder = outside
+      .replace(use[0], "")
+      .replace(new RegExp(`\\b${variable}\\s*:=\\s*NULL\\s*;`, "i"), "")
+      .replace(new RegExp(`\\b${variable}\\s+text\\s*;`, "i"), "");
+    if (new RegExp(`\\b${variable}\\b`, "i").test(remainder)) return whole;
+    return `${variable} := NULL; /* catalog routine replacement omitted */`;
+  });
 }
 
 const DDL_ONLY =

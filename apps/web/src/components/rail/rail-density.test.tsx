@@ -50,6 +50,7 @@ window.matchMedia = (query) => {
   Object.defineProperty(media, "matches", { get: () => window.innerHeight < 720 });
   return media;
 };
+const railHeader = await Bun.file(new URL("./rail-header.tsx", import.meta.url)).text();
 const railShell = await Bun.file(new URL("./rail-shell.tsx", import.meta.url)).text();
 
 describe("rail overflow boundaries", () => {
@@ -61,7 +62,7 @@ describe("rail overflow boundaries", () => {
       /data-rail-scroll-viewport\s+className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"/,
     );
     expect(railShell).toMatch(
-      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border bg-surface pt-2"/,
+      /data-rail-footer\s+className="relative z-10 shrink-0 border-t border-border bg-surface"/,
     );
   });
 });
@@ -166,9 +167,9 @@ describe("session-first rail density", () => {
         4,
       );
       expect(railShell).toMatch(
-        /id="mobile-nav-panel-workspace"[\s\S]*?<SwitcherBlock \/>[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
+        /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
       );
-      expect(railShell).toMatch(/\{rail\.isMobile \? null : <SwitcherBlock \/>\}/);
+      expect(railHeader).toMatch(/\{!rail\.collapsed \? <SwitcherBlock inline \/> : null\}/);
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();
