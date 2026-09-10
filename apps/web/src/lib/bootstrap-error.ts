@@ -91,6 +91,25 @@ function errorMetadata(error: unknown): ErrorMetadata {
   };
 }
 
+/** Only transient bootstrap reads qualify; presentation copy is not retry authority. */
+export function isTransientBootstrapError(error: unknown, context: BootstrapErrorContext): boolean {
+  const metadata = errorMetadata(error);
+  if (isMaintenanceCode(metadata.code) || bodyIndicatesMaintenance(metadata.body)) return false;
+  if (metadata.status !== null) {
+    return (
+      [0, 502, 503, 504].includes(metadata.status) ||
+      (context === "workspace_access" && metadata.status === 500)
+    );
+  }
+  // Do not retry arbitrary TypeErrors from invalid config or application code.
+  return (
+    error instanceof TypeError &&
+    /^(Failed to fetch|fetch failed|Load failed|NetworkError when attempting to fetch resource\.)$/u.test(
+      error.message,
+    )
+  );
+}
+
 /**
  * Bootstrap failures replace the whole application surface, so they should
  * explain the recovery path without exposing API JSON, proxy HTML, or internal
