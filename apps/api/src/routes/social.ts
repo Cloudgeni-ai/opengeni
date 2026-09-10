@@ -19,6 +19,7 @@ import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/c
 import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
+  requireLegacyOAuthActor,
 } from "../connection-ownership";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
@@ -111,6 +112,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     // The contract already defaults this request to workspace ownership; an
     // explicit personal choice still needs a human who can own it.
+    requireLegacyOAuthActor(access);
     const personalOwnershipAllowed = isPersonalConnectionOwnerPrincipal(access);
     if (payload.ownership === "personal") {
       assertPersonalConnectionOwnerPrincipal(access);
@@ -140,7 +142,9 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         requestUrl: c.req.url,
       },
     );
-    return c.redirect(result.redirectTo, 302);
+    return result.exactReturn
+      ? new Response(null, { status: 302, headers: { location: result.redirectTo } })
+      : c.redirect(result.redirectTo, 302);
   });
 
   app.get("/v1/workspaces/:workspaceId/social/posts", async (c) => {

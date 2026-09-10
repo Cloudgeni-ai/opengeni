@@ -8,11 +8,13 @@ const testFiles =
         "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
         "./test/e2e/artifact-static-renderer.browser.e2e.ts",
+        "./test/e2e/ai-gateway-connection.browser.e2e.ts",
         "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
         "./test/e2e/crypto-random-uuid.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
+        "./test/e2e/lossless-message.browser.e2e.ts",
         "./test/e2e/organization-workspace-administration.browser.e2e.ts",
         "./test/e2e/organization-recovery.browser.e2e.ts",
         "./test/e2e/personal-workspace-accessibility.browser.e2e.ts",
@@ -22,9 +24,13 @@ const testFiles =
         "./test/e2e/react-compiled-css.browser.e2e.ts",
         "./test/e2e/react-demo-mobile.browser.e2e.ts",
         "./test/e2e/realtime-demo.browser.e2e.ts",
+        "./test/e2e/restored-attachment-preview.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
+        "./test/e2e/skill-review.browser.e2e.ts",
+        "./test/e2e/workspace-pause-timers.browser.e2e.ts",
         "./test/e2e/session-rail-row-metadata.browser.e2e.ts",
+        "./test/e2e/setup-account-token.browser.e2e.ts",
         "./test/e2e/timeline-scroll.browser.e2e.ts",
         "./test/e2e/timeline-tip-follow.browser.e2e.ts",
         "./test/e2e/user-message-disclosure.browser.e2e.ts",
@@ -35,11 +41,17 @@ const testFiles =
 for (const testFile of testFiles) {
   const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
     ? (["chromium", "firefox", "webkit"] as const)
-    : ([undefined] as const);
+    : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+      ? (["chromium", "webkit"] as const)
+      : ([undefined] as const);
   for (const engineId of engineIds) {
     // Keep native browser engines in separate Bun processes so one engine's teardown cannot
     // influence another engine's performance or liveness result.
-    const environment = engineId ? { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId } : {};
+    const environment = engineId
+      ? testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+        ? { OPENGENI_AI_GATEWAY_BROWSER_ENGINE: engineId }
+        : { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId }
+      : {};
     const status = runTestFile(testFile, environment);
     if (status !== 0) process.exit(status);
   }

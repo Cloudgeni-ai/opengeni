@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
   FIKEN_CREDENTIAL_LABEL,
@@ -11,6 +11,8 @@ import {
 } from "@opengeni/contracts";
 import {
   createConnection,
+  createOrganizationApiKey,
+  ensureExternalIdentity,
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
@@ -307,6 +309,95 @@ describe("verifyFikenApiToken", () => {
 });
 
 describe("fiken install route", () => {
+  test("durable Connect verifies once, replays the credential receipt and preserves workspace ownership", async () => {
+    if (!available) throw new Error("Fiken Connect requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    const fiken = fakeFiken();
+    const server = app(fiken.fetch);
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begin = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "fiken-token",
+        ownership: "workspace",
+        returnUrl: "https://product.example/settings#fiken",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const attempt = (await begin.json()) as { id: string; revision: number };
+    expect((await server.request(`${base}/${attempt.id}`, { headers })).status).toBe(200);
+    expect((await server.request(base, { headers })).status).toBe(200);
+    const input = {
+      expectedRevision: attempt.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "credentials",
+        values: { apiToken: FIXTURE_TOKEN, defaultCompanySlug: "demo-as" },
+      },
+    };
+    const submit = () =>
+      server.request(`${base}/${attempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(input),
+      });
+    const readOnly = await server.request(`${base}/${attempt.id}/advance`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+      },
+      body: JSON.stringify(input),
+    });
+    expect(readOnly.status).toBe(403);
+    expect(fiken.calls).toHaveLength(0);
+    const complete = await submit();
+    expect(complete.status).toBe(200);
+    const result = (await complete.json()) as { account: { id: string }; state: string };
+    expect(result.state).toBe("complete");
+    expect(JSON.stringify(result)).not.toContain(FIXTURE_TOKEN);
+    const providerCalls = fiken.calls.length;
+    expect(await (await submit()).json()).toEqual(result);
+    expect(fiken.calls.length).toBe(providerCalls);
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, result.account.id, null),
+    ).toMatchObject({
+      subjectId: null,
+      kind: "api_key",
+      metadata: { defaultCompanySlug: "demo-as", credentialRole: FIKEN_CREDENTIAL_ROLE },
+    });
+    const pending = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "fiken-token",
+        ownership: "workspace",
+        returnUrl: "https://product.example/settings#fiken",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(pending.status).toBe(200);
+    const cancellable = (await pending.json()) as { id: string; revision: number };
+    const cancelled = await server.request(`${base}/${cancellable.id}/cancel`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: cancellable.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json()).state).toBe("cancelled");
+  });
   test("verifies the token and stores a workspace-owned api_key connection", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1199,6 +1290,92 @@ async function completeOAuth(
 }
 
 describe("fiken OAuth", () => {
+  test("external Connect completes Fiken OAuth with an exact host return and replayable receipt", async () => {
+    if (!available) throw new Error("real database required");
+    const workspace = await freshWorkspace();
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "fiken-product-user",
+    });
+    const token = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Fiken embedded",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const provider = fakeFiken({ companies: [fixtureCompanies()[0]!] });
+    const server = oauthApp(provider.fetch);
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const returnUrl = "https://HOST.example:443/settings?x=%2f#Fiken";
+    const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+    const begin = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "fiken-oauth",
+        ownership: "workspace",
+        returnUrl,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const attempt = (await begin.json()) as {
+      id: string;
+      nextAction: { type: string; url: string };
+    };
+    expect(attempt.nextAction.type).toBe("authorize");
+    const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const callback = () =>
+      server.request(
+        `/v1/integrations/fiken/callback?${new URLSearchParams({ state, code: "fixture-auth-code" })}`,
+      );
+    const response = await callback();
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(returnUrl);
+    const count = provider.calls.length;
+    expect((await callback()).headers.get("location")).toBe(returnUrl);
+    expect(provider.calls.length).toBe(count);
+    const result = await server.request(`${base}/${attempt.id}`, { headers });
+    expect(await result.json()).toMatchObject({
+      state: "complete",
+      credentialsCommitted: true,
+      completionRequirement: "connection",
+      account: { providerId: "fiken-oauth", ownership: "workspace" },
+    });
+    const deniedBegin = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "fiken-oauth",
+        ownership: "workspace",
+        returnUrl,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(deniedBegin.status).toBe(200);
+    const denied = await deniedBegin.json();
+    const deniedState = new URL(denied.nextAction.url).searchParams.get("state")!;
+    const deny = () =>
+      server.request(
+        `/v1/integrations/fiken/callback?${new URLSearchParams({ state: deniedState, error: "access_denied" })}`,
+      );
+    expect((await deny()).headers.get("location")).toBe(returnUrl);
+    expect((await deny()).headers.get("location")).toBe(returnUrl);
+    expect(provider.calls.length).toBe(count);
+    expect(await (await server.request(`${base}/${denied.id}`, { headers })).json()).toMatchObject({
+      state: "cancelled",
+      credentialsCommitted: false,
+      error: { code: "provider_denied", retryable: false },
+    });
+  });
   test("start requires configured client credentials", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

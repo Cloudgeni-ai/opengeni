@@ -12,6 +12,8 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
+  createScheduledTask,
+  deleteScheduledTask,
   createVariableSet,
   deleteVariableSet,
   getActiveSessionHistoryItems,
@@ -524,7 +526,9 @@ async function expectControlledVariableSetCreateRemovalRace(
       body: JSON.stringify({
         requestedSessionId,
         initialMessage: `Variable Set create ${removal} race`,
-        ...(removal === "revoke" ? { idempotencyKey: createIdempotencyKey } : {}),
+        // Keyed creates probe immutable replay under workspace control before
+        // mutable dependencies. This fixture specifically exercises the later
+        // post-validation FK race, so keep the fresh create unkeyed.
         variableSetIds:
           removal === "revoke"
             ? [variableSet.id, retainedVariableSet.id]
@@ -1377,7 +1381,12 @@ describe("embedding host session authorization routes", () => {
     });
     const lineage = await app.request(`${base}/lineage`, { headers });
     expect(lineage.status).toBe(200);
-    expect(await lineage.json()).toEqual({ ancestors: [], children: [], truncated: false });
+    expect(await lineage.json()).toEqual({
+      ancestors: [],
+      children: [],
+      truncated: false,
+      sessionHasSchedules: false,
+    });
 
     await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
       mutateSessionControlInTransaction(scoped, {
@@ -1601,12 +1610,13 @@ describe("embedding host session authorization routes", () => {
       } as unknown as ApiRouteDeps,
       value.grant,
     );
-    const detail = await callMcpTool<{ id: string; parentSessionId: string | null }>(
+    const detail = await callMcpTool<{ id: string; parentSessionId?: string }>(
       server,
       "session_get",
       { sessionId: value.child.id },
     );
-    expect(detail).toMatchObject({ id: value.child.id, parentSessionId: null });
+    expect(detail).toMatchObject({ id: value.child.id });
+    expect(detail).not.toHaveProperty("parentSessionId");
     expect(calls).toContainEqual({
       sessionId: value.child.id,
       operation: "session.read",
@@ -1617,13 +1627,46 @@ describe("embedding host session authorization routes", () => {
     ).rejects.toThrow("Session not found or access denied");
 
     const listed = await callMcpTool<{
-      sessions: Array<{ id: string; parentSessionId: string | null }>;
+      sessions: Array<{ id: string; parentSessionId?: string }>;
       total: number;
     }>(server, "sessions_list", { query: "Shared host search target" });
     expect(listed.total).toBe(1);
-    expect(listed.sessions).toEqual([
-      expect.objectContaining({ id: value.child.id, parentSessionId: null }),
-    ]);
+    expect(listed.sessions).toEqual([expect.objectContaining({ id: value.child.id })]);
+    expect(listed.sessions[0]).not.toHaveProperty("parentSessionId");
+    await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
+      mutateSessionControlInTransaction(scoped, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId: value.root.id,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "private parent reason",
+      }),
+    );
+    for (const mode of ["compact", "full"] as const) {
+      const paused = await callMcpTool<Record<string, unknown>>(server, "session_get", {
+        sessionId: value.child.id,
+        detail: mode,
+      });
+      expect(JSON.stringify(paused)).toContain("An ancestor session");
+      expect(JSON.stringify(paused)).not.toContain("private parent reason");
+      expect(JSON.stringify(paused)).not.toContain(value.root.id);
+      if (mode === "full") {
+        expect(paused.effectiveToolPolicy).toMatchObject({ inheritedFromSessionId: null });
+      }
+      await expect(
+        callMcpTool(server, "session_get", { sessionId: value.hidden.id, detail: mode }),
+      ).rejects.toThrow("Session not found or access denied");
+      const rows = await callMcpTool<{ total: number; sessions: unknown[] }>(
+        server,
+        "sessions_list",
+        { detail: mode },
+      );
+      expect(rows.total).toBe(1);
+      expect(JSON.stringify(rows.sessions)).not.toContain(value.root.id);
+      expect(JSON.stringify(rows.sessions)).not.toContain(value.hidden.id);
+    }
   });
 
   test("authorizes first-party MCP parent-to-child Pause, Resume, and Agent Steer exactly once", async () => {
@@ -2177,6 +2220,57 @@ describe("embedding host session authorization routes", () => {
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
     const headers = { authorization: `Bearer ${token}` };
+    const mcpDeps = {
+      settings: testSettings(),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {},
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => ({}) as never,
+      sessionAuthorization: {
+        authorizeSession: async ({ target }: { target: { sessionId: string } }) =>
+          target.sessionId === value.hidden.id
+            ? { allowed: false as const, reason: "not_found" }
+            : { allowed: true as const },
+      },
+    } as unknown as ApiRouteDeps;
+    const agentGrant = {
+      ...value.grant,
+      principalKind: "agent_attempt" as const,
+      metadata: {
+        sessionId: value.child.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        // A session-scoped grant registers only its signed selection; an
+        // omitted claim now fails closed instead of exposing the default catalog.
+        firstPartyMcpTools: ["session_get" as const],
+      },
+    };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, agentGrant);
+    for (const detail of ["compact", "full"] as const) {
+      const own = await callMcpTool<{ id: string }>(mcp, "session_get", { detail });
+      expect(own.id).toBe(value.child.id);
+      expect(own.id).not.toBe(value.root.id);
+      expect(await callMcpTool(mcp, "session_get", { sessionId: value.child.id, detail })).toEqual(
+        own,
+      );
+      expect(
+        await callMcpTool(mcp, "session_get", { sessionId: value.root.id, detail }),
+      ).toMatchObject({ id: value.root.id });
+      await expect(
+        callMcpTool(mcp, "session_get", { sessionId: value.hidden.id, detail }),
+      ).rejects.toThrow("Session not found or access denied");
+      const operator = buildOpenGeniMcpServer(mcpDeps, { ...agentGrant, principalKind: "service" });
+      await expect(callMcpTool(operator, "session_get", { detail })).rejects.toThrow(
+        "requires an explicit sessionId",
+      );
+      expect(
+        await callMcpTool(operator, "session_get", { sessionId: value.child.id, detail }),
+      ).toMatchObject({ id: value.child.id });
+    }
     const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}`;
     expect((await app.request(path, { headers })).status).toBe(200);
     expect(actors).toContainEqual({
@@ -2209,6 +2303,11 @@ describe("embedding host session authorization routes", () => {
     const callCount = actors.length;
     expect((await app.request(path, { headers })).status).toBe(404);
     expect(actors).toHaveLength(callCount);
+    for (const args of [{}, { sessionId: value.child.id }, { sessionId: value.root.id }]) {
+      await expect(callMcpTool(mcp, "session_get", args)).rejects.toMatchObject({
+        reason: "caller_stale",
+      });
+    }
     await expect(
       requireSessionAuthorizationListScope(
         { db: client.db },
@@ -2252,5 +2351,65 @@ describe("embedding host session authorization routes", () => {
       { headers: { authorization: value.authorization } },
     );
     expect(response.status).toBe(200);
+  });
+});
+
+test("session schedule projections follow current targets and schedule permissions", async () => {
+  if (!available) return;
+  const value = await fixture();
+  const app = fullAppWith({
+    resolveListScope: async () => ({ kind: "all" }),
+    authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+  });
+  const task = await createScheduledTask(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: "Paused review",
+    status: "paused",
+    schedule: { type: "manual" },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "existing_session",
+    overlapPolicy: "skip",
+    targetSessionId: value.child.id,
+    agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {} },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    metadata: {},
+  });
+  const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: value.grant.subjectId,
+    permissions: ["sessions:read", "sessions:control", "scheduled_tasks:run"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}`;
+  const base = `/v1/workspaces/${value.grant.workspaceId}`;
+  const read = async (path: string, token = authorization) => {
+    const response = await app.request(`${base}${path}`, { headers: { authorization: token } });
+    expect(response.status).toBe(200);
+    return await response.json();
+  };
+  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({ hasSchedules: true });
+  expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
+    sessionHasSchedules: true,
+  });
+  expect(await read(`/sessions/${value.child.id}`, value.authorization)).toMatchObject({
+    hasSchedules: false,
+  });
+  expect(await read(`/scheduled-tasks?sessionId=${value.child.id}`)).toMatchObject([
+    { id: task.id },
+  ]);
+  expect(await read(`/scheduled-tasks?sessionId=${value.hidden.id}`)).toEqual([]);
+  const page = await read("/sessions?view=page");
+  expect(
+    page.sessions.find((session: { id: string }) => session.id === value.child.id),
+  ).toMatchObject({ hasSchedules: true });
+  const denied = await app.request(`${base}/scheduled-tasks?sessionId=${value.child.id}`, {
+    headers: { authorization: value.authorization },
+  });
+  expect(denied.status).toBe(403);
+  await deleteScheduledTask(client.db, value.grant.workspaceId, task.id);
+  expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
+    sessionHasSchedules: false,
   });
 });

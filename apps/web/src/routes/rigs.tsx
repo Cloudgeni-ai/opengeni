@@ -1,8 +1,9 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Rigs: organization-, workspace-, or user-scoped sandbox machine definitions. A rig is the
 // team's machine — a setup/check layer over the platform sandbox image plus
 // default variable sets, versioned and self-healing. This page lists them and
 // creates new ones; the per-rig detail owns versions, changes, and promotion.
-import { useRigs, useVariableSets } from "@opengeni/react";
+import { useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
   CheckIcon,
@@ -10,7 +11,6 @@ import {
   ChevronRightIcon,
   Loader2Icon,
   PlusIcon,
-  RefreshCwIcon,
   ServerCogIcon,
   StarIcon,
 } from "lucide-react";
@@ -62,7 +62,7 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
         membership.status === "active" && membership.organizationId === workspace.accountId,
     ),
   );
-  const rigs = useRigs({ enabled: canView });
+  const rigs = useWorkspaceRigs({ enabled: canView });
   const defaultRigId =
     context.workspaces.find((candidate) => candidate.id === workspaceId)?.defaultRigId ?? null;
   const [createOpen, setCreateOpen] = useState(false);
@@ -94,30 +94,17 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
         title="Rigs"
         description="The team's machine, versioned and self-healing: setup and health checks layered on the deployment-managed platform sandbox."
         actions={
-          <>
+          canManage ? (
             <Button
               type="button"
-              variant="ghost"
               size="sm"
-              onClick={() => void rigs.refresh()}
-              disabled={rigs.loading}
+              onClick={() => setCreateOpen((open) => !open)}
               className="h-9"
             >
-              <RefreshCwIcon className={rigs.loading ? "size-3.5 animate-spin" : "size-3.5"} />
-              Refresh
+              <PlusIcon className="size-3.5" />
+              New rig
             </Button>
-            {canManage ? (
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => setCreateOpen((open) => !open)}
-                className="h-9"
-              >
-                <PlusIcon className="size-3.5" />
-                New rig
-              </Button>
-            ) : null}
-          </>
+          ) : null
         }
       />
 
@@ -362,6 +349,7 @@ function CreateRigForm({
           <Label htmlFor="rig-name">Name</Label>
           <Input
             id="rig-name"
+            suppressAutofill
             value={name}
             onChange={(event) => setName(event.target.value)}
             placeholder="dev-machine"

@@ -3,6 +3,25 @@
 // output. Terminal status is authoritative only in the metadata header; the
 // output body is untrusted and may contain exact copies of SDK banner lines.
 
+// Only adapter code that throws on a missing handle before polling may opt in.
+// Its successful responses contain command output, never missing-handle proof.
+const typedHandleLossSessions = new WeakSet<object>();
+export function markTypedExecHandleLoss(session: object): void {
+  typedHandleLossSessions.add(session);
+}
+export function hasTypedExecHandleLoss(
+  session: object | null | undefined,
+  providerSessionId?: number,
+): boolean {
+  if (!session) return false;
+  if (typedHandleLossSessions.has(session)) return true;
+  const routed = session as { retainedProcessHasTypedHandleLoss?: (id: number) => boolean };
+  return (
+    providerSessionId !== undefined &&
+    routed.retainedProcessHasTypedHandleLoss?.(providerSessionId) === true
+  );
+}
+
 const EXEC_BANNER_HEADER_MAX_CHARS = 16 * 1024;
 const OUTPUT_DELIMITER = /\r?\nOutput:\r?\n/u;
 const SDK_METADATA_LINE =
@@ -69,13 +88,22 @@ export function parseExecBannerExitCode(raw: string): number | null {
 // Detect the Modal "the exec-session you're writing to no longer exists" fact.
 // This is process-lifetime authority, so classify only the complete known
 // banner (or its bare provider form) carrying the exact tracked numeric id.
-export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
+export function isExecSessionLostBanner(
+  out: string,
+  execSessionId: number,
+  source?: object,
+): boolean {
+  if (source && typedHandleLossSessions.has(source)) return false;
   if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
-  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
+  const delimiter = OUTPUT_DELIMITER.exec(out);
+  if (delimiter && delimiter.index > EXEC_BANNER_HEADER_MAX_CHARS) return false;
+  if (delimiter && parseExecResponseBanner(out).kind !== "exited") return false;
+  const candidate = delimiter ? out.slice(delimiter.index + delimiter[0].length) : out;
+  const match = candidate.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
   // JavaScript's `$` also matches immediately before one final line terminator.
   // Requiring the regex match to consume the entire string keeps even that
   // otherwise-special case fail-closed.
-  if (!match || match[0] !== out) return false;
+  if (!match || match[0] !== candidate) return false;
   // String equality is intentional: parseInt would normalize malformed facts
   // such as `01` and can round an out-of-range integer into another identity.
   return match[1] === String(execSessionId);

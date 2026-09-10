@@ -13,7 +13,7 @@ import type { ToolCallItem } from "./types";
    Resolution order (most → least specific):
      1. exact match on `raw.type`        (e.g. "apply_patch_call", "computer_call")
      2. exact match on the tool `name`   (e.g. "exec_command", "web_search_call")
-     3. leaf match after MCP `__` prefix (e.g. opengeni__environment_set_variable)
+     3. allowed leaf match after MCP `__` prefix (e.g. opengeni__environment_set_variable)
      4. the registry's generic fallback
 
    A consumer extends the defaults without forking by passing overrides to
@@ -48,7 +48,13 @@ export type ToolRenderer = ComponentType<ToolRendererProps>;
 /** A registry entry: which key it matches and the component that renders it. */
 export type ToolRegistryEntry =
   | { match: "rawType"; type: string; render: ToolRenderer }
-  | { match: "name"; name: string; render: ToolRenderer };
+  | {
+      match: "name";
+      name: string;
+      render: ToolRenderer;
+      /** Disable untrusted `<server>__${name}` leaf matching for identity-sensitive renderers. */
+      matchPrefixedLeaf?: boolean | undefined;
+    };
 
 export type ToolRegistry = {
   /** Resolve the renderer for a call (never null — falls back to generic). */
@@ -92,6 +98,7 @@ export function createToolRegistry(
 
   const byRawType = new Map<string, ToolRenderer>();
   const byName = new Map<string, ToolRenderer>();
+  const byPrefixedLeaf = new Map<string, ToolRenderer>();
   for (const entry of entries) {
     if (entry.match === "rawType") {
       if (!byRawType.has(entry.type)) {
@@ -99,6 +106,11 @@ export function createToolRegistry(
       }
     } else if (!byName.has(entry.name)) {
       byName.set(entry.name, entry.render);
+    }
+    if (entry.match === "name" && entry.matchPrefixedLeaf !== false) {
+      if (!byPrefixedLeaf.has(entry.name)) {
+        byPrefixedLeaf.set(entry.name, entry.render);
+      }
     }
   }
 
@@ -116,7 +128,7 @@ export function createToolRegistry(
     }
     const leaf = mcpToolLeaf(item.name);
     if (leaf !== item.name) {
-      const byLeaf = byName.get(leaf);
+      const byLeaf = byPrefixedLeaf.get(leaf);
       if (byLeaf) {
         return byLeaf;
       }

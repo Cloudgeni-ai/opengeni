@@ -184,6 +184,16 @@ request-start audit, provider lifecycle, event append, NATS publication, and the
 bounded sandbox establish-policy reason. Queue-reason, per-file Connected Machine
 work, and credential-selection internals remain.
 
+A later four-repository case measured 13.771 seconds in the broad model-preparation
+phase even though repository setup had completed 10.576 seconds before provider
+dispatch. The first model prompt renders repository Skills from ten configured
+workspace search roots during that interval. This work now has its own
+`model_prepare_repository_skill_discovery` phase, including the search-root count,
+with the preceding and following exclusive gaps reported separately. This change
+is attribution only: repository Skill discovery still runs at the same point with
+the same ordering and validation behavior. Performance remediation remains a
+separate decision after representative production measurements exist.
+
 Labels: provider, sandbox backend, phase, outcome, count bucket, cache hit/miss.
 Attempt/session identifiers belong only in logs and traces.
 

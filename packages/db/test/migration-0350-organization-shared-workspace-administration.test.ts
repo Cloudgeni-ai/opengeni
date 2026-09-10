@@ -11,6 +11,7 @@ import {
   assertWorkspaceMemberManagementCandidate,
   createDb,
   createOrganizationWorkspace,
+  deleteWorkspaceIfQuiescent,
   ensureManagedAccessForUser,
   getOrganizationAdministrationOverview,
   listWorkspaceMemberManagementCandidates,
@@ -117,6 +118,8 @@ describe("migration 0350 organization shared-workspace administration", () => {
         eventsDml: boolean;
         receiptsDml: boolean;
         command: boolean;
+        administrationDelete: boolean;
+        bypassCreatorAccess: boolean;
         workspaceCandidate: boolean;
         safeList: boolean;
       }>
@@ -135,6 +138,14 @@ describe("migration 0350 organization shared-workspace administration", () => {
         ) as command,
         has_function_privilege(
           'opengeni_app',
+          'authorize_organization_shared_workspace_administration(uuid,uuid,text)', 'EXECUTE'
+        ) as "administrationDelete",
+        has_function_privilege(
+          'opengeni_app',
+          'organization_workspace_command_without_creator_access(jsonb)', 'EXECUTE'
+        ) as "bypassCreatorAccess",
+        has_function_privilege(
+          'opengeni_app',
           'assert_workspace_member_management_candidate(uuid,uuid,text,text)', 'EXECUTE'
         ) as "workspaceCandidate",
         has_function_privilege(
@@ -144,6 +155,8 @@ describe("migration 0350 organization shared-workspace administration", () => {
       eventsDml: false,
       receiptsDml: false,
       command: true,
+      administrationDelete: true,
+      bypassCreatorAccess: false,
       workspaceCandidate: true,
       safeList: true,
     });
@@ -199,7 +212,13 @@ describe("migration 0350 organization shared-workspace administration", () => {
       operationId: createOperationId,
     });
     expect((await requireWorkspace(client.db, workspace.id)).kind).toBe("shared");
-    expect(workspace.members).toEqual([]);
+    expect(workspace.members).toEqual([
+      expect.objectContaining({
+        organizationMembershipId: ownerMembership!.id,
+        subjectId: ownerSubject,
+        role: "admin",
+      }),
+    ]);
     expect(
       (
         await createOrganizationWorkspace(client.db, {
@@ -243,17 +262,6 @@ describe("migration 0350 organization shared-workspace administration", () => {
       expect(definition.permissions).not.toContain("account:admin");
     }
 
-    await putOrganizationWorkspaceMember(client.db, {
-      organizationId,
-      actorSubjectId: ownerSubject,
-      workspaceId: workspace.id,
-      targetOrganizationMembershipId: ownerMembership!.id,
-      access: {
-        role: "admin",
-        expectedUpdatedAt: null,
-        operationId: crypto.randomUUID(),
-      },
-    });
     expect(
       await listWorkspaceMemberManagementCandidates(client.db, {
         accountId: organizationId,
@@ -517,6 +525,21 @@ describe("migration 0350 organization shared-workspace administration", () => {
         }),
       "42501",
     );
+    const disposable = await createOrganizationWorkspace(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      name: "Disposable shared workspace",
+      operationId: crypto.randomUUID(),
+    });
+    await expectSqlState(
+      () =>
+        deleteWorkspaceIfQuiescent(client!.db, {
+          accountId: organizationId,
+          workspaceId: disposable.id,
+          organizationAdministratorSubjectId: targetSubject,
+        }),
+      "42501",
+    );
     const foreignUserId = crypto.randomUUID();
     const foreignSubject = `user:${foreignUserId}`;
     await ensureManagedAccessForUser(client.db, {
@@ -625,13 +648,33 @@ describe("migration 0350 organization shared-workspace administration", () => {
       ).find(({ id }) => id === targetMembershipId)?.sharedWorkspaceAccess,
     ).toEqual([]);
 
+    expect(disposable.members.some((candidate) => candidate.subjectId === targetSubject)).toBe(
+      false,
+    );
+    expect(
+      await deleteWorkspaceIfQuiescent(client.db, {
+        accountId: organizationId,
+        workspaceId: disposable.id,
+        organizationAdministratorSubjectId: targetSubject,
+      }),
+    ).toMatchObject({ status: "deleted" });
+    await expectSqlState(
+      () =>
+        deleteWorkspaceIfQuiescent(client!.db, {
+          accountId: organizationId,
+          workspaceId: targetPersonalWorkspaceId,
+          organizationAdministratorSubjectId: targetSubject,
+        }),
+      "42501",
+    );
+
     const [audit] = await owned.admin<Array<{ events: number; receipts: number }>>`
       select
         (select count(*)::int from organization_workspace_lifecycle_events
          where account_id = ${organizationId}) as events,
         (select count(*)::int from organization_workspace_operation_receipts
          where account_id = ${organizationId}) as receipts`;
-    expect(audit).toEqual({ events: 8, receipts: 8 });
+    expect(audit).toEqual({ events: 10, receipts: 10 });
     await expectSqlState(
       () => client!.db.execute(sql`delete from organization_workspace_lifecycle_events`),
       "42501",

@@ -1,5 +1,7 @@
 import {
   AcceptOrganizationInvitationRequest,
+  CreateAdditionalOrganizationRequest,
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
@@ -34,12 +36,14 @@ import {
   getManagedSession,
   organizationMembershipHttpStatus,
   requireCanonicalLocalAccountAdministrator,
+  updateExternalIdentityMembershipForRequest,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   claimOrganizationUserSetupDelivery,
+  createAdditionalManagedOrganization,
   createManagedOrganization,
   createOrganizationWorkspace,
   createOrganizationInvitation,
@@ -68,12 +72,11 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { deleteWorkspaceForRequest } from "../workspace-deletion";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
-  deriveOrganizationUserSetupToken,
-  organizationUserSetupPayloadDigest,
-  renderOrganizationUserSetupEmail,
+  resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
 
 const OrganizationId = z.string().uuid();
@@ -117,7 +120,9 @@ async function requireOrganizationAdministrator(
     );
     return { subjectId };
   }
-  throw new HTTPException(401, { message: "organization administrator session required" });
+  throw new HTTPException(401, {
+    message: "organization administrator session required",
+  });
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
@@ -136,8 +141,14 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
   return parsed.data;
 }
 
-function rethrowMembershipError(error: unknown): never {
-  const status = organizationMembershipHttpStatus(nestedPostgresSqlState(error));
+function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "54000" && resourceLimitMessage) {
+    throw new HTTPException(409, {
+      message: resourceLimitMessage,
+    });
+  }
+  const status = organizationMembershipHttpStatus(sqlState);
   if (status !== null) {
     throw new HTTPException(status, {
       message:
@@ -154,6 +165,28 @@ function rethrowMembershipError(error: unknown): never {
 }
 
 export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.patch("/v1/organizations/:organizationId/external-members/:membershipId", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const membershipId = parseId(MembershipId, context.req.param("membershipId"), "membership id");
+    try {
+      return context.json(
+        await updateExternalIdentityMembershipForRequest(
+          context,
+          deps,
+          organizationId,
+          membershipId,
+          await context.req.json().catch(() => null),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      rethrowMembershipError(error);
+    }
+  });
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateOrganizationRequest);
@@ -170,6 +203,25 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
     } catch (error) {
       rethrowMembershipError(error);
+    }
+  });
+
+  app.post("/v1/organizations/additional", async (context) => {
+    const { session, subjectId } = await requireManagedHuman(context, deps);
+    const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
+    try {
+      return context.json(
+        CreateAdditionalOrganizationResponse.parse(
+          await createAdditionalManagedOrganization(deps.db, {
+            subjectId,
+            subjectLabel: session.user.email || session.user.name,
+            ...payload,
+          }),
+        ),
+        201,
+      );
+    } catch (error) {
+      rethrowMembershipError(error, "additional organization limit reached");
     }
   });
 
@@ -326,6 +378,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     } catch (error) {
       rethrowMembershipError(error);
     }
+  });
+
+  app.delete("/v1/organizations/:organizationId/workspaces/:workspaceId", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
+    const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
+    await deleteWorkspaceForRequest(deps, {
+      accountId: organizationId,
+      workspaceId,
+      organizationAdministratorSubjectId: subjectId,
+    });
+    return context.body(null, 204);
   });
 
   app.patch(
@@ -768,18 +836,18 @@ async function deliverOrganizationUserSetup(
 ) {
   const claim = await claimOrganizationUserSetupDelivery(deps.db, input);
   if (!claim.claimed) return claim.delivery;
-  const setup = await deriveOrganizationUserSetupToken(deps.settings, {
+  const prepared = await resolveOrganizationUserSetupDeliveryEmail(deps.settings, {
     invitationId: claim.invitationId,
     deliveryId: claim.delivery.id,
-  });
-  const message = renderOrganizationUserSetupEmail({
     senderEmail: deps.managedEmailTransport.sender,
     recipientEmail: claim.recipientEmail,
     recipientName: claim.recipientName,
     organizationName: claim.organizationName,
     organizationRole: claim.organizationRole,
     sharedWorkspaceAccess: claim.sharedWorkspaceAccess,
-    setupUrl: setup.url,
+    providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    frozenTransport: claim.setupTokenTransport,
+    frozenPayloadDigest: claim.payloadDigest,
   });
   await prepareOrganizationUserSetupDelivery(deps.db, {
     organizationId: input.organizationId,
@@ -787,11 +855,9 @@ async function deliverOrganizationUserSetup(
     deliveryId: claim.delivery.id,
     attemptId: claim.attemptId,
     claimHolderId: claim.claimHolderId,
-    tokenDigest: setup.digest,
-    payloadDigest: await organizationUserSetupPayloadDigest({
-      ...message,
-      providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
-    }),
+    tokenDigest: prepared.tokenDigest,
+    payloadDigest: prepared.payloadDigest,
+    setupTokenTransport: prepared.transport,
     providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
     providerIdempotencyRetentionSeconds: deps.managedEmailTransport.idempotency.retentionSeconds,
   });
@@ -801,7 +867,7 @@ async function deliverOrganizationUserSetup(
   try {
     outcome = await deps.managedEmailTransport.send({
       kind: "organization_user_setup",
-      ...message,
+      ...prepared.message,
       idempotencyKey: claim.providerKey,
     });
   } catch {

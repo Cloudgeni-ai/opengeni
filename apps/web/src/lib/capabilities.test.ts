@@ -781,6 +781,31 @@ describe("connectionHealth", () => {
       connection: null,
     });
   });
+
+  test("host bindings stay enabled without native connection health lookup", () => {
+    const hostRef = {
+      authoritySource: "host" as const,
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      providerDomain: "cloudgeni.example",
+      kind: "delegated",
+      subjectScope: "subject" as const,
+    };
+    expect(
+      connectionHealth(
+        item({ enabled: true, connectionRef: hostRef }),
+        [
+          connection({
+            id: hostRef.connectionId,
+            subjectId: "current-user",
+            providerDomain: hostRef.providerDomain,
+            kind: "delegated",
+            status: "revoked",
+          }),
+        ],
+        true,
+      ),
+    ).toEqual({ state: "none" });
+  });
 });
 
 describe("capabilityReconnectPlan", () => {
@@ -863,6 +888,19 @@ describe("capabilityReconnectPlan", () => {
     expect(
       capabilityReconnectPlan(item({ enabled: true, connectionRef: null }), deleted),
     ).toBeNull();
+  });
+
+  test("never offers native repair for a host-owned installation", () => {
+    const hostItem = item({
+      enabled: true,
+      connectionRef: {
+        authoritySource: "host",
+        connectionId: "host:connection:42",
+        providerDomain: "cloudgeni.example",
+        kind: "oauth2",
+      },
+    });
+    expect(capabilityReconnectPlan(hostItem, deleted)).toBeNull();
   });
 });
 

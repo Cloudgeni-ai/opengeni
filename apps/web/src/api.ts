@@ -10,6 +10,7 @@ import {
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 
 import type { AuthSession, ClientConfig } from "./types";
+import { beginAnalyticsRequest } from "./lib/analytics-observer";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -105,9 +106,48 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly body: string,
+    options: {
+      code?: string;
+      retryable?: boolean;
+      outcomeUnknown?: boolean;
+      details?: Record<string, unknown>;
+      message?: string;
+    } = {},
   ) {
-    super(`API ${status}: ${body}`);
+    super(options.message ?? `API ${status}: ${body}`);
     this.name = "ApiError";
+    this.code = options.code;
+    this.retryable = options.retryable === true;
+    this.outcomeUnknown = options.outcomeUnknown === true;
+    this.details = options.details;
+  }
+
+  readonly code: string | undefined;
+  readonly retryable: boolean;
+  readonly outcomeUnknown: boolean;
+  readonly details: Record<string, unknown> | undefined;
+}
+
+export function apiErrorFromResponseBody(status: number, body: string): ApiError {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (typeof parsed.error !== "object" || parsed.error === null || Array.isArray(parsed.error)) {
+      return new ApiError(status, body);
+    }
+    const error = parsed.error as Record<string, unknown>;
+    return new ApiError(status, body, {
+      ...(typeof error.code === "string" ? { code: error.code } : {}),
+      ...(typeof error.message === "string" ? { message: error.message } : {}),
+      ...(error.retryable === true ? { retryable: true } : {}),
+      ...(error.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+      ...(typeof error.details === "object" &&
+      error.details !== null &&
+      !Array.isArray(error.details)
+        ? { details: error.details as Record<string, unknown> }
+        : {}),
+    });
+  } catch {
+    return new ApiError(status, body);
   }
 }
 
@@ -214,6 +254,21 @@ export async function managedActorFetch(
   input: string | URL | Request,
   init: RequestInit = {},
 ): Promise<Response> {
+  let finishAnalytics: (status: number | null) => void = () => {};
+  try {
+    const requestUrl = new URL(
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      window.location.origin,
+    );
+    if (
+      init.credentials !== "omit" &&
+      requestUrl.origin === new URL(apiBaseUrl || "/", window.location.origin).origin
+    ) {
+      finishAnalytics = beginAnalyticsRequest(requestUrl.pathname, requestMethod(input, init));
+    }
+  } catch {
+    /* Telemetry must never affect transport. */
+  }
   const acceptedEpoch = managedActorEpoch;
   const acceptedRevision = managedActorRevision;
   const controller = new AbortController();
@@ -291,7 +346,10 @@ export async function managedActorFetch(
       void response.body?.cancel();
       throw new DOMException("Ignored a response from the previous browser account", "AbortError");
     }
-    if (!response.body) return response;
+    if (!response.body) {
+      finishAnalytics(response.status);
+      return response;
+    }
     // Finite JSON is consumed before it crosses the actor boundary. Returning
     // a manual bridge over a native compressed response can leave Chromium's
     // transport lifecycle unresolved even after the source reader reaches
@@ -349,6 +407,7 @@ export async function managedActorFetch(
           actorBodyController.abort(reason);
         };
     responseOwnsCleanup = true;
+    finishAnalytics(response.status);
     return managedActorTrackedResponse(
       actorResponse,
       actorBodyController.signal,
@@ -357,6 +416,9 @@ export async function managedActorFetch(
       finiteSseBatch !== null ? cleanCloseDelayMs : 0,
       detachedResponse ? 0 : nativeLifetimeMs,
     );
+  } catch (error) {
+    finishAnalytics(null);
+    throw error;
   } finally {
     if (boundedRequestTimer !== null) clearTimeout(boundedRequestTimer);
     if (!responseOwnsCleanup) cleanup();
@@ -710,7 +772,7 @@ function authHeaders(): Record<string, string> {
   return authHeadersForAccessKey(getStoredAccessKey());
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
   const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",
@@ -721,10 +783,16 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
+  handleApiContractResponse(response);
+  return response;
+}
+
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await requestResponse(path, init);
   if (!response.ok) {
     handleApiContractResponse(response);
     const text = await response.text();
-    throw new ApiError(response.status, text);
+    throw apiErrorFromResponseBody(response.status, text);
   }
   return (await response.json()) as T;
 }
@@ -942,9 +1010,18 @@ async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T
   });
   if (!response.ok) {
     handleApiContractResponse(response);
-    throw new ApiError(response.status, await response.text());
+    throw apiErrorFromResponseBody(response.status, await response.text());
   }
   return (await response.json()) as T;
+}
+
+// Request uses the same public auth boundary as sign-in and returns no account
+// existence information. Better Auth sends a link only for an eligible account.
+export async function requestPasswordReset(email: string): Promise<unknown> {
+  return await authRequest<unknown>("/request-password-reset", {
+    method: "POST",
+    body: JSON.stringify({ email, redirectTo: "/reset-password" }),
+  });
 }
 
 // Completes a password reset. `token` comes from the emailed link

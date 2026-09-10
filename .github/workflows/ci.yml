@@ -47,6 +47,9 @@ concurrency:
 permissions:
   contents: read
 
+# Substantive jobs must use !cancelled(), not always(): GitHub reevaluates
+# job conditions on cancellation. Keep bounded final reports and cleanup able
+# to run, while superseded heads release their test/build capacity promptly.
 jobs:
   automation-admission:
     name: Admit automation Version PR
@@ -138,7 +141,7 @@ jobs:
   plan:
     name: Explain change impact
     needs: automation-admission
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -272,7 +275,7 @@ jobs:
   source-contracts:
     name: Source and type contracts
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -357,7 +360,7 @@ jobs:
           fi
 
           bunx changeset status --output "$plan"
-          changeset_count="$(jq -er '.changesets | length' "$plan")"
+          changeset_count="$(jq -er '[.changesets[] | select(.releases | length > 0)] | length' "$plan")"
           release_count="$(jq -er '.releases | length' "$plan")"
           if [ "$changeset_count" -gt 0 ] && [ "$release_count" -eq 0 ]; then
             echo "::error::pending changesets target only ignored/private packages and cannot produce a Version PR"
@@ -407,11 +410,12 @@ jobs:
   unit-shards:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      # Finish independent shards so one failure cannot hide other regressions.
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
@@ -468,7 +472,7 @@ jobs:
   integration-shards:
     name: Real-service shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -520,7 +524,7 @@ jobs:
   e2e-shards:
     name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -575,14 +579,15 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
       # Firefox is included because the impact plan can select the artifact
-      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts), which
-      # launch Firefox; a Chromium-only install fails those shards on any
-      # web-broad candidate.
+      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts). WebKit is
+      # included because multi-engine product E2E files such as the Gateway
+      # settings acceptance launch it directly. A Chromium-only install makes
+      # either class fail before exercising application behavior.
       - name: Install pinned browser runtimes
         uses: ./.github/actions/playwright-browsers
         timeout-minutes: 17
         with:
-          browsers: chromium firefox
+          browsers: chromium firefox webkit
 
       - name: Run exactly the impacted E2E tests
         timeout-minutes: 13
@@ -609,7 +614,7 @@ jobs:
   test-suite:
     name: Real-service and recovery tests
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -666,7 +671,7 @@ jobs:
   browser-acceptance:
     name: Browser and visual acceptance (${{ matrix.lane }})
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -802,7 +807,11 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
-        timeout-minutes: 4
+        # Includes a production web build, real PostgreSQL setup, and 23 serial
+        # browser cases. Baseline fa2b99a6 took 229s; run 34257100987 passed 22
+        # cases in 247s before the old 4m cap stopped the last case. Keep the
+        # individual test deadlines strict while allowing suite-level headroom.
+        timeout-minutes: 6
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
@@ -810,6 +819,7 @@ jobs:
 
       - name: Responsive knowledge surfaces browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
+        id: knowledge_surfaces_browser
         timeout-minutes: 6
         env:
           # This gate traverses the public configured-principal API and must fail
@@ -885,7 +895,7 @@ jobs:
             /tmp/codex-quota-evidence/codex-quota-mobile-dark.png
 
       - name: Upload responsive knowledge-surface evidence
-        if: ${{ always() && matrix.lane == 'knowledge' }}
+        if: ${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: responsive-knowledge-surface-evidence
@@ -958,7 +968,7 @@ jobs:
   package-contracts:
     name: Package and bundle contracts
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
@@ -1014,6 +1024,11 @@ jobs:
           --output ci-profile/packages.json
           --timeout-seconds 1200
           -- bun scripts/ci/run-build-plan.ts --plan impact-plan.json
+
+      - name: Built embedding package exports
+        # Build-independent unit shards verify source exports; this job proves
+        # their actual emitted files using the canonical package build above.
+        run: OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES=1 bun test scripts/embedding-package-contract.test.ts
 
       - name: React Native Metro to Hermes session bundle
         run: bun run test:react-native-hermes-bundle
@@ -1132,7 +1147,9 @@ jobs:
   deployment:
     name: Deployment artifacts
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    # Every image-producing source needs the deployment receipt, including a
+    # docs-only main push. Staging validates it before importing these images.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1350,7 +1367,7 @@ jobs:
   artifact-runtime:
     name: Build exact artifact runtime inputs
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     uses: ./.github/workflows/artifact-runtime.yml
     with:
       source_sha: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -1358,7 +1375,7 @@ jobs:
   api-image:
     name: Build API workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -1440,7 +1457,7 @@ jobs:
   worker-image:
     name: Build worker workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -1489,7 +1506,7 @@ jobs:
   web-image:
     name: Build web workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -1503,9 +1520,6 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -1539,7 +1553,7 @@ jobs:
   artifact-materializer-image:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -1594,7 +1608,7 @@ jobs:
   artifact-outbox-dispatcher-image:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -1643,7 +1657,7 @@ jobs:
   relay-image:
     name: Build relay workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1688,7 +1702,7 @@ jobs:
   sandbox-image:
     name: Build headless sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

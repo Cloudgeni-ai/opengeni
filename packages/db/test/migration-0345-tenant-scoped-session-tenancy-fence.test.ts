@@ -16,6 +16,7 @@ import {
   type DbClient,
 } from "../src";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
+import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationUrl = new URL(
   "../drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
@@ -58,6 +59,7 @@ const directHotMutatorInventory = [
   "detach_scoped_machine_dependent_sessions(uuid,uuid,uuid)",
   "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
   "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)",
+  "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,uuid)",
   "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",
@@ -257,8 +259,16 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         values
           ('0345_tenant_scoped_session_tenancy_fence.sql'),
           ('0374_session_event_cursors.sql'),
-          ('0379_session_event_raw_lane_activation.sql')
+          ('0379_session_event_raw_lane_activation.sql'),
+          ('0388_sandbox_provider_deadline_interactions.sql'),
+          ('0391_sandbox_provider_deadline_interaction_followup.sql'),
+          ('0397_sandbox_deadline_rotation_preemption.sql'),
+          ('0407_connected_command_tracking_retirement.sql')
       `);
+      // This intentionally incomplete historical fence graph cannot satisfy the
+      // later embedding migrations' exact predecessor-definition checks.
+      // Full-schema coverage above still applies the complete migration chain.
+      await setup`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(driftOwned.ownerUrl);
       const migration = await readFile(migrationUrl, "utf8");
       const sessionEventCursorMigration = await readFile(sessionEventCursorMigrationUrl, "utf8");

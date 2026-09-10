@@ -73,6 +73,39 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
+  test("distinguishes catalog routine patches from executed dynamic SQL and real guards", () => {
+    const patch = `DO $patch$ DECLARE definition text; replacement text; anchor text;
+BEGIN
+definition := pg_get_functiondef('example()'::regprocedure);
+replacement := $body$ IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'runtime only'; END IF; $body$;
+IF definition IS NULL THEN RAISE EXCEPTION 'missing catalog routine'; END IF;
+EXECUTE replace(definition, anchor, replacement);
+END $patch$;`;
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE,
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toHaveLength(0);
+    expect(
+      analyze(
+        patch.replace(
+          "END $patch$",
+          "IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'real guard'; END IF; END $patch$",
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(
+        patch.replace("EXECUTE replace(definition, anchor, replacement);", "EXECUTE replacement;"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(patch.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace")),
+    ).toHaveLength(1);
+  });
   test("flags a bare backfill over a FORCE-RLS table", () => {
     const directory = fixture({
       "0001_base.sql": FORCED_TABLE,
@@ -212,6 +245,53 @@ WHERE capability.enabled = '1';
 `,
     });
     expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
+  });
+
+  test("accepts only the exact governed runner capability for its batched migration", () => {
+    const policy = `
+CREATE TABLE new_session_drafts (id uuid PRIMARY KEY);
+ALTER TABLE new_session_drafts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE new_session_drafts FORCE ROW LEVEL SECURITY;
+CREATE POLICY draft_owner_repair ON new_session_drafts
+FOR ALL
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'new_session_drafts'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.new_session_draft_project_provenance_backfill_v1', true
+  ) = '1'
+)
+WITH CHECK (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'new_session_drafts'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.new_session_draft_project_provenance_backfill_v1', true
+  ) = '1'
+);
+`;
+    const backfill = `-- deployment-mode: rolling
+-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
+WITH candidates AS (SELECT id FROM new_session_drafts LIMIT 500)
+UPDATE new_session_drafts SET id = new_session_drafts.id FROM candidates
+WHERE new_session_drafts.id = candidates.id RETURNING new_session_drafts.id;
+`;
+    const accepted = fixture({
+      "0409_new_session_draft_project_provenance.sql": policy,
+      "0411_new_session_draft_project_provenance_backfill.sql": backfill,
+    });
+    expect(analyzeMigrationRlsBackfills(accepted)).toHaveLength(0);
+
+    const wrongFile = fixture({
+      "0409_new_session_draft_project_provenance.sql": policy,
+      "0413_unrelated_backfill.sql": backfill,
+    });
+    expect(analyzeMigrationRlsBackfills(wrongFile)).toHaveLength(1);
   });
 
   test("does not trust a custom capability without an exact owner-pinned policy", () => {

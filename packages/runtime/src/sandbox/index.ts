@@ -1,3 +1,7 @@
+export type {
+  ProviderCommandPersistence,
+  ProviderCommandSession,
+} from "./provider-command-session";
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
@@ -70,6 +74,9 @@ import type { ExposedPortEndpoint } from "./stream-port";
 // a single agent-loop-free entrypoint. They physically live in @opengeni/config
 // (moving them into runtime would create a config→runtime cycle — ledger CR8).
 export { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+export { sendCommandInput, type CommandInputSession } from "./command-input";
+export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-stream";
+
 export {
   repairSerializedRunStateExposedPorts,
   runStateCompatibilityProvider,
@@ -392,6 +399,7 @@ export {
   ChannelAValidationError,
   ChannelAUnavailableError,
   ChannelAConflictError,
+  ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   stripExecBanner,
@@ -489,9 +497,12 @@ export {
   type SelfhostedOpStreamDeps,
 } from "./selfhosted/session";
 export {
+  connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
   isWindowsConnectedMachinePath,
   normalizeConnectedMachineWorkspaceRoot,
+  relativeConnectedMachinePath,
   resolveConnectedMachinePath,
   resolveConnectedMachineWorkspaceRoot,
   type ConnectedMachineOs,
@@ -557,6 +568,7 @@ export {
   RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
+  RoutingActiveRouteChangedError,
   RoutingUnsupportedError,
   type ActivePointer,
   type DefaultBackendLossResult,

@@ -118,7 +118,7 @@ export type ObjectStorage = {
     contentType: string;
     chunks: AsyncIterable<Uint8Array>;
     byteSize: number;
-    sha256: string;
+    sha256?: string;
     signal?: AbortSignal;
   }) => Promise<boolean>;
   /**
@@ -244,7 +244,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
             Key: args.key,
             ContentType: args.contentType,
             Body: args.body,
-            Metadata: { sha256: args.sha256 },
+            Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
             IfNoneMatch: "*",
           }),
         );
@@ -263,7 +263,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
             ContentType: args.contentType,
             ContentLength: args.byteSize,
             Body: Readable.from(args.chunks),
-            Metadata: { sha256: args.sha256 },
+            Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
             IfNoneMatch: "*",
           }),
           args.signal ? { abortSignal: args.signal } : undefined,
@@ -507,7 +507,7 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
       try {
         await bucket.file(args.key).save(Buffer.from(args.body), {
           contentType: args.contentType,
-          metadata: { metadata: { sha256: args.sha256 } },
+          ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
           preconditionOpts: { ifGenerationMatch: 0 },
         });
         return true;
@@ -521,7 +521,7 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         resumable: false,
         contentType: args.contentType,
         highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
-        metadata: { metadata: { sha256: args.sha256 } },
+        ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
         preconditionOpts: { ifGenerationMatch: 0 },
       });
       try {
@@ -700,7 +700,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       try {
         await blobClient.upload(body, body.byteLength, {
           blobHTTPHeaders: { blobContentType: args.contentType },
-          metadata: { sha256: args.sha256 },
+          ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
           conditions: { ifNoneMatch: "*" },
         });
         return true;
@@ -718,7 +718,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
           INTERNAL_STREAM_CONCURRENCY,
           {
             blobHTTPHeaders: { blobContentType: args.contentType },
-            metadata: { sha256: args.sha256 },
+            ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
             conditions: { ifNoneMatch: "*" },
             ...(args.signal ? { abortSignal: args.signal } : {}),
           },

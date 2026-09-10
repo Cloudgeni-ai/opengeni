@@ -1,6 +1,15 @@
-import { Link } from "@tanstack/react-router";
 import {
-  ArrowLeftIcon,
+  type WorkspaceSettingsSection,
+  type WorkspaceManagementLocation,
+} from "@/lib/workspace-management-location";
+export {
+  workspaceManagementLocation,
+  workspaceSettingsSectionFromSearch,
+  type WorkspaceSettingsSection,
+  type WorkspaceManagementLocation,
+} from "@/lib/workspace-management-location";
+import { Link, useNavigate } from "@tanstack/react-router";
+import {
   BarChart3Icon,
   BotIcon,
   BoxIcon,
@@ -19,18 +28,17 @@ import {
 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 
-import { BrandMark } from "@/components/brand-mark";
+import {
+  SettingsSidebar,
+  SETTINGS_SHELL_CLASS,
+  SETTINGS_NAV_CLASS,
+  settingsNavItemClass,
+} from "./settings-sidebar";
+import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
+import { SETTINGS_SWITCHER_CLASS } from "@/components/ui/scope-switcher-trigger";
 import { ContentPage } from "@/components/ui/content-layout";
+import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
-
-export type WorkspaceSettingsSection =
-  | "general"
-  | "members"
-  | "tools"
-  | "plugins"
-  | "models"
-  | "api-keys"
-  | "danger";
 
 type SettingsItem = {
   id: WorkspaceSettingsSection;
@@ -127,184 +135,166 @@ const WORKSPACE_PAGE_GROUPS = [
   },
 ] as const;
 
-type WorkspacePageTarget = (typeof WORKSPACE_PAGE_GROUPS)[number]["items"][number]["to"];
-
-export type WorkspaceManagementLocation =
-  | { kind: "settings"; section: WorkspaceSettingsSection }
-  | { kind: "page"; target: WorkspacePageTarget };
-
-const DEFAULT_SETTINGS_SECTION: WorkspaceSettingsSection = "general";
-
-export function workspaceSettingsSectionFromSearch(value: unknown): WorkspaceSettingsSection {
-  return value === "members" ||
-    value === "tools" ||
-    value === "plugins" ||
-    value === "models" ||
-    value === "api-keys" ||
-    value === "danger"
-    ? value
-    : DEFAULT_SETTINGS_SECTION;
-}
-
-/**
- * Resolve the workspace routes that share the persistent management shell.
- * Keep matching segment-aware: `/rigs/:rigId` belongs to Rigs, while a future
- * `/rigs-archive` route must not be captured accidentally.
- */
-export function workspaceManagementLocation(
-  pathname: string,
-  workspaceId: string,
-  settingsSection?: unknown,
-): WorkspaceManagementLocation | null {
-  const base = `/workspaces/${encodeURIComponent(workspaceId)}`;
-  if (pathname === `${base}/settings`) {
-    return {
-      kind: "settings",
-      section: workspaceSettingsSectionFromSearch(settingsSection),
-    };
-  }
-
-  for (const group of WORKSPACE_PAGE_GROUPS) {
-    for (const item of group.items) {
-      const targetPath = item.to.replace("$workspaceId", encodeURIComponent(workspaceId));
-      if (
-        pathname === targetPath ||
-        (item.to.endsWith("/rigs") && pathname.startsWith(`${targetPath}/`))
-      ) {
-        return { kind: "page", target: item.to };
-      }
-    }
-  }
-  return null;
-}
-
 export function WorkspaceManagementShell({
   workspaceId,
   workspaceName,
   organizationName,
   location,
+  organizationManagementOnly = false,
+  organizationSettingsWorkspaceId,
   children,
 }: {
   workspaceId: string;
-  workspaceName: string;
+  workspaceName?: string;
   organizationName: string;
   location: WorkspaceManagementLocation;
+  organizationManagementOnly?: boolean;
+  organizationSettingsWorkspaceId?: string;
   children: ReactNode;
 }) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  const settingsItems = organizationManagementOnly
+    ? SETTINGS_ITEMS.filter(
+        (item) => item.id === "general" || item.id === "members" || item.id === "danger",
+      )
+    : SETTINGS_ITEMS;
+  const organizationLinkWorkspaceId =
+    organizationSettingsWorkspaceId ?? (organizationManagementOnly ? undefined : workspaceId);
+  const switcherWorkspaceId = organizationManagementOnly
+    ? (organizationSettingsWorkspaceId ?? context.workspaces[0]?.id)
+    : workspaceId;
+
+  function openManagementWorkspace(nextWorkspaceId: string) {
+    context.resetSessionView();
+    if (location.kind === "settings") {
+      void navigate({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: nextWorkspaceId },
+        search: { section: location.section },
+      });
+      return;
+    }
+    void navigate({
+      to: location.target,
+      params: { workspaceId: nextWorkspaceId },
+    });
+  }
   return (
-    <div className="grid h-dvh min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
-      <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-dvh lg:max-h-none lg:border-r lg:border-b-0">
-        <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
-          <Link
-            to="/workspaces/$workspaceId/sessions"
-            params={{ workspaceId }}
-            className="flex h-9 items-center gap-2 rounded-md px-2 text-sm font-semibold text-fg transition-colors hover:bg-surface-2"
-          >
-            <span className="flex size-6 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-              <BrandMark className="size-4" />
-            </span>
-            OpenGeni
-          </Link>
-
-          <Link
-            to="/workspaces/$workspaceId/sessions"
-            params={{ workspaceId }}
-            className="mt-3 inline-flex h-8 items-center gap-2 rounded-md px-2 text-xs text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:mt-5"
-          >
-            <ArrowLeftIcon className="size-3.5" />
-            Back to sessions
-          </Link>
-
-          <div className="mt-4 min-w-0 px-2 lg:mt-6">
-            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Workspace settings
-            </p>
-            <div className="mt-2 flex min-w-0 items-center gap-2.5">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
-                {workspaceName.trim().charAt(0).toUpperCase() || "W"}
-              </span>
-              <div className="min-w-0">
-                <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
-                  {workspaceName}
-                </p>
-                <p className="mt-0.5 text-2xs text-fg-subtle">Settings and controls</p>
+    <div className={SETTINGS_SHELL_CLASS}>
+      <SettingsSidebar
+        workspaceId={organizationManagementOnly ? undefined : workspaceId}
+        label="Workspace settings"
+        currentPage={
+          location.kind === "settings"
+            ? SECTION_COPY[location.section].title
+            : (WORKSPACE_PAGE_GROUPS.map(
+                (group) => group.items.find((item) => item.to === location.target)?.label,
+              ).find(Boolean) ?? "Workspace settings")
+        }
+        identity={
+          organizationManagementOnly ? (
+            <>
+              <div className="mt-2 flex min-w-0 items-center gap-2.5">
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
+                  {workspaceName?.trim().charAt(0).toUpperCase() || "W"}
+                </span>
+                <div className="min-w-0">
+                  <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
+                    {workspaceName ?? "Workspace"}
+                  </p>
+                  <p className="mt-0.5 text-2xs text-fg-subtle">Organization management</p>
+                </div>
               </div>
+              {switcherWorkspaceId ? (
+                <div className="mt-3 min-w-0">
+                  <p className="mb-1 px-1 text-2xs text-fg-subtle">Open another workspace</p>
+                  <WorkspaceSwitcherMenu
+                    workspaceId={switcherWorkspaceId}
+                    collapsed={false}
+                    align="start"
+                    onSelect={openManagementWorkspace}
+                    className="w-full"
+                  />
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="mt-2 min-w-0">
+              <WorkspaceSwitcherMenu
+                workspaceId={workspaceId}
+                collapsed={false}
+                align="start"
+                onSelect={openManagementWorkspace}
+                className={SETTINGS_SWITCHER_CLASS}
+              />
+              <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and controls</p>
             </div>
-          </div>
-
-          <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-            Settings
-          </p>
-          <nav
-            aria-label="Workspace settings"
-            className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
-          >
-            {SETTINGS_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const selected = location.kind === "settings" && item.id === location.section;
-              return (
-                <Link
-                  key={item.id}
-                  to="/workspaces/$workspaceId/settings"
-                  params={{ workspaceId }}
-                  search={{ section: item.id }}
-                  aria-current={selected ? "page" : undefined}
-                  className={cn(
-                    "flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors lg:w-full",
-                    selected
-                      ? "bg-surface-3 font-medium text-fg"
-                      : "text-fg-muted hover:bg-surface-2 hover:text-fg",
-                    item.id === "danger" && selected ? "text-danger" : "",
-                  )}
-                >
-                  <Icon className="size-4 shrink-0" />
-                  <span className="truncate">{item.label}</span>
-                </Link>
-              );
-            })}
-          </nav>
-
-          {WORKSPACE_PAGE_GROUPS.map((group) => (
-            <div key={group.label}>
-              <p className="mt-4 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                {group.label}
-              </p>
-              <nav
-                aria-label={group.label}
-                className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
+          )
+        }
+      >
+        <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+          Settings
+        </p>
+        <nav aria-label="Workspace settings" className={SETTINGS_NAV_CLASS}>
+          {settingsItems.map((item) => {
+            const Icon = item.icon;
+            const selected = location.kind === "settings" && item.id === location.section;
+            return (
+              <Link
+                key={item.id}
+                to="/workspaces/$workspaceId/settings"
+                params={{ workspaceId }}
+                search={{ section: item.id }}
+                aria-current={selected ? "page" : undefined}
+                className={cn(
+                  settingsNavItemClass(selected),
+                  item.id === "danger" && selected ? "text-danger" : "",
+                )}
               >
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  const selected = location.kind === "page" && item.to === location.target;
-                  return (
-                    <Link
-                      key={item.to}
-                      to={item.to}
-                      params={{ workspaceId }}
-                      aria-current={selected ? "page" : undefined}
-                      className={cn(
-                        "flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors lg:w-full",
-                        selected
-                          ? "bg-surface-3 font-medium text-fg"
-                          : "text-fg-muted hover:bg-surface-2 hover:text-fg",
-                      )}
-                    >
-                      <Icon className="size-4 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                    </Link>
-                  );
-                })}
-              </nav>
-            </div>
-          ))}
+                <Icon className="size-4 shrink-0" />
+                <span className="truncate">{item.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
 
-          <div className="mt-4 border-t border-border pt-3">
-            <p className="px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Organization
-            </p>
+        {!organizationManagementOnly
+          ? WORKSPACE_PAGE_GROUPS.map((group) => (
+              <div key={group.label}>
+                <p className="mt-4 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                  {group.label}
+                </p>
+                <nav aria-label={group.label} className={SETTINGS_NAV_CLASS}>
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    const selected = location.kind === "page" && item.to === location.target;
+                    return (
+                      <Link
+                        key={item.to}
+                        to={item.to}
+                        params={{ workspaceId }}
+                        aria-current={selected ? "page" : undefined}
+                        className={cn(settingsNavItemClass(selected))}
+                      >
+                        <Icon className="size-4 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                      </Link>
+                    );
+                  })}
+                </nav>
+              </div>
+            ))
+          : null}
+
+        <div className="mt-4 border-t border-border pt-3">
+          <p className="px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+            Organization
+          </p>
+          {organizationLinkWorkspaceId ? (
             <Link
               to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
+              params={{ workspaceId: organizationLinkWorkspaceId }}
               aria-label={`Organization settings for ${organizationName}`}
               className="mt-1 flex min-h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
             >
@@ -312,9 +302,14 @@ export function WorkspaceManagementShell({
               <span className="min-w-0 flex-1 truncate">{organizationName}</span>
               <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
             </Link>
-          </div>
+          ) : (
+            <div className="mt-1 flex min-h-9 min-w-0 items-center gap-2 px-2.5 text-sm text-fg-muted">
+              <Building2Icon className="size-4 shrink-0" />
+              <span className="truncate">{organizationName}</span>
+            </div>
+          )}
         </div>
-      </aside>
+      </SettingsSidebar>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
     </div>

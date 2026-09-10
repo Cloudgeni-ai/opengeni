@@ -1,3 +1,4 @@
+import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, BrainCircuitIcon } from "lucide-react";
 
@@ -19,7 +20,7 @@ export function MemoryRoute({
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const memoryEnabled = workspace?.settings?.memoryEnabled === true;
+  const memoryEnabled = workspace ? resolveWorkspaceMemoryEnabled(workspace.settings) : false;
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
 
   return (

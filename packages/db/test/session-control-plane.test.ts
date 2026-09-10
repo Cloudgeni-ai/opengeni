@@ -28,6 +28,9 @@ import {
   commitSessionAttemptQuiescence,
   clearDurablePendingSessionToolCalls,
   completeConnectorActionExecution,
+  confirmDrainCold,
+  claimWorkspaceArchiveCapture,
+  releaseWorkspaceArchiveCapture,
   createDb,
   createSession,
   createSessionGoal,
@@ -53,6 +56,7 @@ import {
   listUsageEvents,
   listWorkspaceControlEvents,
   isSessionCompactionRequested,
+  markWarmLeaseInstanceLost,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeDelivered,
   insertRecording,
@@ -184,6 +188,7 @@ async function controlSession(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   action: "pause" | "resume" | "cancel",
+  operationKey = crypto.randomUUID(),
 ) {
   return await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
@@ -192,7 +197,7 @@ async function controlSession(
         workspaceId: grant.workspaceId,
         sessionId,
         actor: { type: "human", subjectId: grant.subjectId },
-        operationKey: crypto.randomUUID(),
+        operationKey,
         action,
       }),
     ),
@@ -565,6 +570,174 @@ describe("clean session control plane", () => {
         ?.providerArtifactInvalidatedAt,
     ).toBeInstanceOf(Date);
   });
+
+  test.each(["draining", "warm", "teardown"] as const)(
+    "rotation recovery parks until the %s lease transition wakes it",
+    async (liveness) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "wait for the rotating sandbox");
+      const attemptId = crypto.randomUUID();
+      const workflowId = `session-${session.id}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = `dispatch-${crypto.randomUUID()}`;
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        workflowId,
+        {
+          attemptId,
+          workflowRunId,
+          dispatchId,
+        },
+      );
+      expect(turn).not.toBeNull();
+
+      const leaseEpoch = 7;
+      await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${grant.workspaceId!}, ${session.sandboxGroupId},
+        ${liveness === "warm" ? "warm" : "draining"}, 0, 'sb-rotation-wait', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-rotation-wait')
+          )
+        ),
+        ${liveness === "teardown" ? null : new Date()}, ${liveness === "teardown" ? null : "provider_deadline"}, now() - interval '1 second'
+      )`;
+
+      const captureId = crypto.randomUUID();
+      if (liveness === "teardown") {
+        expect(
+          await claimWorkspaceArchiveCapture(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            captureId,
+            expectedEpoch: leaseEpoch,
+            expectedInstanceId: "sb-rotation-wait",
+            liveness: "draining",
+            captureTimeoutMs: 60_000,
+            minIntervalMs: 0,
+          }),
+        ).toMatchObject({ status: "claimed" });
+      }
+
+      expect(
+        await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          turnId: turn!.id,
+          triggerEventId: turn!.triggerEventId,
+          attemptId,
+          reason: "sandbox_deadline_rotation",
+          detail: {
+            sandboxGroupId: session.sandboxGroupId,
+            leaseEpoch,
+          },
+          sandboxLifecycleWait: {
+            version: 1,
+            sandboxGroupId: session.sandboxGroupId,
+            leaseEpoch,
+            reason: "rotation_in_progress",
+          },
+        }),
+      ).toMatchObject({ action: "recovering" });
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+      });
+
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "sandbox-lifecycle-wait",
+        ref: {
+          version: 1,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+          reason: "rotation_in_progress",
+        },
+      });
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+      ).toBeNull();
+
+      const wakeBeforeCold = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        const [row] = await db
+          .select()
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+          .limit(1);
+        return row!;
+      });
+      if (liveness === "warm") {
+        expect(
+          await markWarmLeaseInstanceLost(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            expectedEpoch: leaseEpoch,
+            expectedInstanceId: "sb-rotation-wait",
+          }),
+        ).toMatchObject({ status: "marked" });
+      } else if (liveness === "teardown") {
+        expect(
+          await releaseWorkspaceArchiveCapture(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            captureId,
+            expectedEpoch: leaseEpoch,
+            expectedInstanceId: "sb-rotation-wait",
+          }),
+        ).toBe(true);
+      } else {
+        expect(
+          await confirmDrainCold(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            expectedEpoch: leaseEpoch,
+          }),
+        ).toEqual({ wentCold: true });
+      }
+
+      const wakeAfterCold = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        const [row] = await db
+          .select()
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+          .limit(1);
+        return row!;
+      });
+      expect(wakeAfterCold.reason).toBe("sandbox_lifecycle_advanced");
+      expect(wakeAfterCold.wakeRevision).toBeGreaterThan(wakeBeforeCold.wakeRevision);
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "runnable",
+      });
+
+      const resumed = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        workflowId,
+      );
+      expect(resumed).toMatchObject({
+        id: turn!.id,
+        status: "running",
+        executionGeneration: turn!.executionGeneration + 1,
+      });
+      expect(resumed?.metadata).not.toHaveProperty("sandboxLifecycleWait");
+    },
+  );
 
   test("an accepted Steer outranks retryable recovery for the exact live attempt", async () => {
     const { grant, session } = await fixture();
@@ -1796,6 +1969,9 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId },
     );
+    const historyStart =
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).at(-1)!
+        .position + 1;
     const huge = "x".repeat(500_000);
     const structuredOutput: Record<string, unknown> = {
       type: "界😀".repeat(100_000),
@@ -1843,7 +2019,7 @@ describe("clean session control plane", () => {
         modelToolOutputTruncationTokens: 100,
         items: [
           {
-            position: 0,
+            position: historyStart + 0,
             item: {
               type: "function_call",
               callId: "canonical-call",
@@ -1852,14 +2028,14 @@ describe("clean session control plane", () => {
             },
           },
           {
-            position: 1,
+            position: historyStart + 1,
             item: {
               type: "function_call_result",
               callId: "canonical-call",
               output: { type: "text", text: huge },
             },
           },
-          { position: 2, item: structuredItem },
+          { position: historyStart + 2, item: structuredItem },
         ],
       }),
     ).toBe(true);
@@ -1873,7 +2049,7 @@ describe("clean session control plane", () => {
         expectedAttemptId: attemptId,
         items: [
           {
-            position: 3,
+            position: historyStart + 3,
             item: {
               type: "function_call",
               callId: "canonical-mixed-call",
@@ -1882,11 +2058,13 @@ describe("clean session control plane", () => {
               status: "completed",
             },
           },
-          { position: 4, item: canonicalMixedItem },
+          { position: historyStart + 4, item: canonicalMixedItem },
         ],
       }),
     ).toBe(true);
-    const canonical = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const canonical = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).filter((row) => row.position >= historyStart);
     const canonicalText = (canonical[1]!.item.output as { text: string }).text;
     expect(canonicalText).toContain("tokens truncated");
     expect(canonicalText.length).toBeLessThan(1_000);
@@ -4803,6 +4981,45 @@ describe("clean session control plane", () => {
       kind: "cancellation-wait",
       attemptId,
     });
+    const beforeNudge = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return {
+        wake: wake!,
+        control: await evaluateSessionControl(db, grant.workspaceId!, session.id),
+      };
+    });
+    const nudgeKey = crypto.randomUUID();
+    const nudge = await controlSession(grant, session.id, "pause", nudgeKey);
+    expect(nudge.outcome).toBe("unchanged");
+    expect(nudge.interruptionCount).toBe(0);
+    expect(nudge.wakeCount).toBe(1);
+    expect(nudge.control.controlVersion).toBe(beforeNudge.control.controlVersion);
+    expect(nudge.control.state).toBe("paused");
+    const afterNudge = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return wake!;
+    });
+    expect(afterNudge.wakeRevision).toBeGreaterThan(beforeNudge.wake.wakeRevision);
+    const replay = await controlSession(grant, session.id, "pause", nudgeKey);
+    expect(replay.outcome).toBe("replayed");
+    const replayWake = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return wake!;
+    });
+    expect(replayWake.wakeRevision).toBe(afterNudge.wakeRevision);
+
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
     expect(
       await reconcileSessionAttemptQuiescence(client.db, {
         accountId: grant.accountId,
@@ -6068,8 +6285,8 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: firstAttemptId },
     );
-    expect(
-      await appendSessionHistoryItems(client.db, {
+    await expect(
+      appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
@@ -6083,7 +6300,7 @@ describe("clean session control plane", () => {
           },
         ],
       }),
-    ).toBe(true);
+    ).rejects.toThrow("Conversation history persistence conflict at position 0");
     await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: first!.id,
@@ -6736,13 +6953,32 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    const capabilityWrite = {
+      ...call("connector-capability-write", "unmanaged"),
+      approvalMode: "connector_write" as const,
+    };
     expect(
-      await prepareConnectorActionApproval(client.db, firstIdentity, {
-        ...call("connector-write-default", "unmanaged_write"),
-        approvalMode: "connector_write",
-      }),
-    ).toMatchObject({ managed: true, decision: "ask" });
-
+      await prepareConnectorActionApproval(client.db, firstIdentity, capabilityWrite),
+    ).toMatchObject({ managed: true, decision: "allow" });
+    const capabilityWriteAdmission = await beginConnectorActionExecution(
+      client.db,
+      firstIdentity,
+      capabilityWrite,
+    );
+    expect(capabilityWriteAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!capabilityWriteAdmission.allowed || !capabilityWriteAdmission.managed) {
+      throw new Error("capability-authorized write was denied");
+    }
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: capabilityWriteAdmission.requestId,
+      attemptId: firstAttemptId,
+      outcome: "completed",
+    });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, capabilityWrite),
+    ).toMatchObject({ allowed: false, reason: "already_executed" });
     const allowCall = call("connector-allow", "read");
     expect(await prepareConnectorActionApproval(client.db, firstIdentity, allowCall)).toMatchObject(
       {

@@ -13,5 +13,8 @@
   "action": {
     "default_title": "OpenGeni Browser",
     "default_popup": "popup.html"
+  },
+  "icons": {
+    "128": "icons/icon-128.png"
   }
 }

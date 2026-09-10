@@ -12,6 +12,8 @@ import { connectionTokenResolverForTurn } from "../src/activities/mcp-credential
 type AuthorizeInput = Parameters<typeof resolveAcceptedConnectionUse>[1];
 type Authorization = Awaited<ReturnType<typeof resolveAcceptedConnectionUse>>;
 
+const WORKSPACE_CONNECTION_ID = "33333333-3333-4333-8333-333333333333";
+
 const turn = {
   id: "turn-1",
   executionGeneration: 4,
@@ -74,7 +76,7 @@ function resolverFor(input: {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
         headers: { Authorization: "Bearer resolved" },
-        connectionId: request.connectionRef.connectionId ?? "connection-ws",
+        connectionId: request.connectionRef.connectionId ?? WORKSPACE_CONNECTION_ID,
         providerDomain: request.connectionRef.providerDomain,
         ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
       }),
@@ -90,7 +92,7 @@ const request = {
   connectionRef: {
     provider: "linear",
     providerDomain: "linear.app",
-    connectionId: "connection-ws",
+    connectionId: WORKSPACE_CONNECTION_ID,
     kind: "oauth2" as const,
     subjectScope: "workspace" as const,
   },
@@ -105,7 +107,7 @@ function authorizedAs(scope: "workspace" | "legacy_user"): Authorization {
       organizationId: "account-1",
       workspaceId: "workspace-1",
       sessionId: "session-1",
-      connectionId: "connection-ws",
+      connectionId: WORKSPACE_CONNECTION_ID,
       connectionGeneration: 2,
       scope,
       ownerSubjectId: scope === "legacy_user" ? "user:someone" : null,
@@ -185,7 +187,7 @@ describe("tenancy compatibility lane telemetry", () => {
           workspaceId: hostRequest.workspaceId,
           sessionId: hostRequest.sessionId,
           headers: { Authorization: "Bearer resolved" },
-          connectionId: "connection-ws",
+          connectionId: WORKSPACE_CONNECTION_ID,
           providerDomain: hostRequest.connectionRef.providerDomain,
           ...(hostRequest.connectionRef.provider
             ? { provider: hostRequest.connectionRef.provider }

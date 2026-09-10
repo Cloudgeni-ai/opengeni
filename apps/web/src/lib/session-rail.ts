@@ -24,9 +24,42 @@ export function sessionStatusLabel(status: Session["status"]): string {
   }
 }
 
+export function sessionInputWait(
+  session: Pick<Session, "status" | "effectiveControl" | "inputWait">,
+) {
+  return session.status === "idle" && session.effectiveControl?.state === "active"
+    ? (session.inputWait ?? null)
+    : null;
+}
+
+export function sessionWaitLabel(deadlineAt: string, now = Date.now(), compact = false): string {
+  const deadline = new Date(deadlineAt);
+  if (deadline.getTime() <= now) return compact ? "Recheck due" : "Waiting · recheck due";
+  const sameDay = deadline.toDateString() === new Date(now).toDateString();
+  const time = deadline.toLocaleString(undefined, {
+    ...(sameDay ? {} : { month: "short", day: "numeric" }),
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return compact ? `Waiting · ${time}` : `Waiting · recheck at ${time}`;
+}
+
 /** Honest user-facing state: lifecycle first, then the effective pause policy. */
 export function sessionStateLabel(session: Session): string {
   const commandActivity = session.backgroundCommandActivity;
+  if (commandActivity?.unavailableCount) {
+    const unavailable = Math.min(commandActivity.count, commandActivity.unavailableCount);
+    const known = commandActivity.count - unavailable;
+    const unknownLabel =
+      unavailable === 1
+        ? "Command status unavailable"
+        : `${unavailable} command statuses unavailable`;
+    return known > 0
+      ? `${known} other active background command${known === 1 ? "" : "s"} · ${unknownLabel}`
+      : commandActivity.state === "stopping"
+        ? `Stop requested · ${unknownLabel}`
+        : unknownLabel;
+  }
   if (commandActivity?.state === "stopping") {
     return commandActivity.count === 1
       ? "Stopping background command…"
@@ -37,7 +70,10 @@ export function sessionStateLabel(session: Session): string {
       ? "Background command running"
       : `${commandActivity.count} background commands running`;
   }
-  const lifecycle = sessionStatusLabel(session.status);
+  const waiting = sessionInputWait(session);
+  const lifecycle = waiting
+    ? sessionWaitLabel(waiting.deadlineAt, Date.now(), true)
+    : sessionStatusLabel(session.status);
   const attentionOrTerminal =
     session.status === "requires_action" ||
     session.status === "failed" ||

@@ -6,7 +6,7 @@ import type {
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -28,7 +28,9 @@ export type WakeSessionWorkflowSignal = (input: {
   workflowId: string;
   wakeRevision: number;
   interruptionRequested?: boolean;
-}) => Promise<void>;
+  /** Called after transport acceptance, before the fallible durable ACK. */
+  onSignalAccepted?: () => void;
+}) => Promise<SessionWorkflowWakeDeliveryResult | void>;
 
 export type SignalCodexCapacityWorkflow = (input: {
   accountId: string;
@@ -75,6 +77,11 @@ export type InspectSessionAttemptActivity = (input: {
  * agent runtime and document parser so each process can load only its role. */
 export type SharedActivityServices = {
   settings: Settings;
+  /**
+   * Original environment/host settings retained across live database-catalog
+   * refreshes. Older embedded test hosts may omit it and fall back to settings.
+   */
+  catalogSourceSettings?: Settings;
   db: Database;
   bus: EventBus;
   objectStorage: ObjectStorage | null;
@@ -338,6 +345,18 @@ export type PeekSessionWorkInput = {
   sessionId: string;
 };
 
+export type SettleSessionInputWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waitTurnId: string;
+  disposition: "held" | "timeout" | "superseded";
+};
+
+export type SettleSessionInputWaitResult = {
+  action: "held" | "timeout" | "superseded" | "stale";
+};
+
 export type ExpireSessionHumanInputInput = {
   accountId: string;
   workspaceId: string;
@@ -373,14 +392,10 @@ export type MaybeContinueGoalInput = {
 };
 
 export type MaybeContinueGoalResult = {
-  // `held`: an agent-declared `goal_wait` hold is current. No continuation was
-  // materialized and the goal obligation stays armed; the workflow closes like
-  // `none` and the wake outbox (deadline) or any producer's signalWithStart
-  // restarts it.
-  // `deferred`: idle backoff between consecutive no-input continuations. Same
-  // shape as `held`: nothing materialized, obligation armed, a delayed outbox
-  // wake at the pacing deadline (pulled to now by any new input) restarts it.
-  action: "none" | "queue" | "continue" | "paused" | "held" | "deferred";
+  // `deferred`: idle backoff between consecutive no-input continuations.
+  // Nothing was materialized; the obligation remains armed and a delayed
+  // outbox wake at the pacing deadline restarts it.
+  action: "none" | "queue" | "continue" | "paused" | "deferred";
 };
 
 export type DispatchScheduledTaskRunInput = {
@@ -461,6 +476,7 @@ export type DispatchAutomationRunResult =
   | { action: "started"; sessionId: string }
   | { action: "already_dispatched"; sessionId: string }
   | { action: "skipped"; reason: string }
+  | { action: "failed"; reason: string }
   | { action: "not_found" };
 
 export type RunKnowledgeSourceSyncBatchResult =

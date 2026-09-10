@@ -18,6 +18,7 @@ const connectionRef = {
 function server(input: {
   fetchImpl: typeof fetch;
   resolveCredential?: GmailRestMcpServerOptions["resolveCredential"];
+  onAuthNeeded?: GmailRestMcpServerOptions["onAuthNeeded"];
 }) {
   return new GmailRestMcpServer({
     workspaceId: "ws_1",
@@ -31,6 +32,7 @@ function server(input: {
         headers: { authorization: "Bearer gmail-token" },
         connectionId: "conn_1",
       })),
+    ...(input.onAuthNeeded ? { onAuthNeeded: input.onAuthNeeded } : {}),
     fetchImpl: input.fetchImpl,
   });
 }
@@ -129,6 +131,42 @@ describe("Gmail REST MCP adapter", () => {
     await gmail.connect();
     expect(providerAuthorizations).toBe(0);
     expect(requests).toBe(0);
+  });
+
+  test("preserves host provenance from a legacy credential result", async () => {
+    const authNeeded: unknown[] = [];
+    let requests = 0;
+    const gmail = server({
+      resolveCredential: async () => ({
+        status: "auth_needed",
+        reason: "expired",
+        providerDomain: "gmailmcp.googleapis.com",
+        authoritySource: "host",
+        connectionId: "legacy-gmail-binding",
+        authorizationUrl: "https://host.example.test/connections/gmail",
+      }),
+      onAuthNeeded: (payload) => authNeeded.push(payload),
+      fetchImpl: async () => {
+        requests += 1;
+        return Response.json({ labels: [] });
+      },
+    });
+
+    const result = (await gmail.callToolResult("list_labels", {})) as { isError?: boolean };
+    expect(result.isError).toBe(true);
+    expect(requests).toBe(0);
+    expect(authNeeded).toEqual([
+      expect.objectContaining({
+        serverId: "gmail",
+        toolName: "list_labels",
+        reason: "expired",
+        providerDomain: "gmailmcp.googleapis.com",
+        connectionId: "legacy-gmail-binding",
+        authoritySource: "host",
+        authorizationUrl: "https://host.example.test/connections/gmail",
+        subjectId: "subject-a",
+      }),
+    ]);
   });
 
   test("refreshes and retries a read once after 401", async () => {

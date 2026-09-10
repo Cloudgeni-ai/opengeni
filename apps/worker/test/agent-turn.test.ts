@@ -2,7 +2,12 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
-import type { Settings } from "@opengeni/config";
+import {
+  withWorkspaceGatewayCredential,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  type Settings,
+} from "@opengeni/config";
 import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
@@ -17,6 +22,7 @@ import {
   XaiSubscriptionReloginRequired,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
+  type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -57,12 +63,15 @@ import {
   classifySandboxLogicalProvisionFailure,
   classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
+  xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
+  classifyCodexCredentialFailure,
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
+  createSessionTitleModelUsageEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
   releaseTurnSandboxAfterWriterDrain,
@@ -93,11 +102,14 @@ import {
   PostCompactionContinuationEmptyError,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
+  processSessionTitleModelUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
+  sessionTitleCodexRequestContext,
+  sessionTitleXaiRequestContext,
   providerRetryAfterMs,
   providerRecoveryResult,
   providerRecoveryExhaustedFailure,
@@ -131,6 +143,11 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
+import {
+  CodexCredentialLeaseLostError,
+  CodexTurnLease,
+} from "../src/activities/agent-turn/credential-leases";
+import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
   SandboxExecReadinessTimeoutError,
   SandboxProvisionStageError,
@@ -242,6 +259,7 @@ describe("periodic workspace snapshot admission", () => {
     firstProviderRequestStarted: true,
     snapshotInFlight: false,
     turnEndCaptureInProgress: false,
+    deadlineRotationRequested: false,
   };
 
   test("keeps checkpoint maintenance off the first-request critical path", () => {
@@ -256,6 +274,9 @@ describe("periodic workspace snapshot admission", () => {
     expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, turnEndCaptureInProgress: true })).toBe(
       false,
     );
+    expect(
+      shouldStartPeriodicWorkspaceSnapshot({ ...ready, deadlineRotationRequested: true }),
+    ).toBe(false);
   });
 });
 
@@ -778,6 +799,24 @@ describe("turn exact-content boundaries", () => {
     const streamCompletionAuthority = source.indexOf(
       "await assertSuccessfulAgentStreamCompletion({",
     );
+    expect(source).toContain(
+      "const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();",
+    );
+    const closedStreamAdmission = source.indexOf("closeStreamWaitAdmission?.();");
+    const streamFailureCatch = source.lastIndexOf("} catch (error) {", closedStreamAdmission);
+    expect(streamFailureCatch).toBeGreaterThan(-1);
+    expect(source.slice(streamFailureCatch, closedStreamAdmission)).not.toContain("await ");
+    const streamFailurePublication = source.indexOf(
+      "await eventing.publish!([",
+      closedStreamAdmission,
+    );
+    expect(closedStreamAdmission).toBeGreaterThan(-1);
+    expect(streamFailurePublication).toBeGreaterThan(closedStreamAdmission);
+    expect(streamCompletionAuthority).toBeGreaterThan(streamFailurePublication);
+    const sealedWaitAdmission = source.indexOf(
+      "await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);",
+      streamCompletionAuthority,
+    );
     const postCompactionRecovery = source.indexOf(
       "throw new PostCompactionContinuationEmptyError();",
       streamCompletionAuthority,
@@ -791,7 +830,7 @@ describe("turn exact-content boundaries", () => {
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(
-      "String(requireAgentStreamFinalOutput(eventing.stream.finalOutput))",
+      "requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded)",
       interruptionPath,
     );
     const mandatoryBarrier = source.indexOf(
@@ -800,12 +839,29 @@ describe("turn exact-content boundaries", () => {
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
     expect(streamCompletionAuthority).toBeGreaterThan(-1);
-    expect(postCompactionRecovery).toBeGreaterThan(streamCompletionAuthority);
+    expect(sealedWaitAdmission).toBeGreaterThan(streamCompletionAuthority);
+    expect(postCompactionRecovery).toBeGreaterThan(sealedWaitAdmission);
+    expect(source).toContain("eventing.preparedTools?.inputWaitYield?.yielded === true");
+    expect(source).toContain(
+      "options.requireTerminalModelResponse &&\n      !eventing.preparedTools?.inputWaitYield?.yielded &&",
+    );
+    expect(source).not.toContain("eventing.preparedTools?.inputWaitYield?.requested === true");
     expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
     expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
     expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
+
+    const runSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const closedFailureAdmission = runSource.indexOf(
+      "eventing.preparedTools?.inputWaitYield?.closeAdmission();",
+    );
+    expect(closedFailureAdmission).toBeGreaterThan(-1);
+    expect(runSource.indexOf("return await settleTurnFailure({")).toBeGreaterThan(
+      closedFailureAdmission,
+    );
 
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
@@ -845,6 +901,7 @@ describe("accepted turn execution identity", () => {
     });
     expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: false,
       xaiSubscription: false,
     });
@@ -859,6 +916,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: true,
       xaiSubscription: false,
     });
@@ -873,6 +931,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: false,
       xaiSubscription: true,
     });
@@ -884,6 +943,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: false,
+      countsTowardTokenCap: true,
       codexSubscription: false,
       xaiSubscription: false,
     });
@@ -922,6 +982,32 @@ describe("accepted turn execution identity", () => {
         latencyModeSource: "continuation",
       });
     }
+  });
+
+  test("uses frozen initiating-human xAI authority for service-originated catalog reads", () => {
+    const authoritySnapshot = {
+      version: 1 as const,
+      scope: "user" as const,
+      authorityGeneration: 7,
+    };
+    expect(
+      xaiCatalogReadinessAuthority(
+        {
+          initiatingHumanSubjectId: "human-subject",
+          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
+        },
+        undefined,
+      ),
+    ).toEqual({ subjectId: "human-subject", authoritySnapshot });
+    expect(
+      xaiCatalogReadinessAuthority(
+        {
+          initiatingHumanSubjectId: null,
+          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
+        },
+        "direct-subject",
+      ),
+    ).toEqual({ subjectId: "direct-subject", authoritySnapshot });
   });
 });
 
@@ -1381,6 +1467,37 @@ describe("model usage source key (re-dispatch charge stability)", () => {
       }),
     ).toBe("aggregate");
   });
+
+  test("keeps title usage distinct from compaction when a provider omits responseId", async () => {
+    const expectedSourceKey = "act-A:session-title-1";
+    const state = createSessionTitleModelUsageEventState(new Set([expectedSourceKey]));
+    const result = await processSessionTitleModelUsageEvent({
+      usage: { usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } },
+      state,
+      dispatchId: "act-A",
+      settings: testSettings(),
+      db: {} as any,
+      observability: createObservability(testSettings(), { component: "worker" }),
+      publish: null,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      turnAttemptId: "attempt-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5",
+      externallyBilled: true,
+      servingCredentialId: null,
+      priorSessionCredentialId: null,
+      emittedSourceKeys: new Set(),
+      renewLease: async () => undefined,
+      leaseLost: () => false,
+      leaseLostMessage: "lease lost",
+    });
+
+    expect(result).toEqual({ status: "duplicate", sourceKey: expectedSourceKey });
+  });
 });
 
 describe("sandbox lease holder identity", () => {
@@ -1715,6 +1832,120 @@ describe("production model-response usage callback authority", () => {
       );
     } finally {
       recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("persists unpinned workspace Gateway endpoint authority before a soft fact-write failure", async () => {
+    const upstreamModelId = "anthropic/claude-sonnet-4.6";
+    const model = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${upstreamModelId}`;
+    const settings = withWorkspaceGatewayCredential(
+      testSettings({ billingMode: "stripe", usageLimitsMode: "managed" }),
+      "vck_workspace_test",
+      [{ upstreamModelId }],
+    );
+    const event = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: "resp-workspace-gateway",
+        output: [],
+        providerMetadata: {
+          gateway: {
+            routing: { finalProvider: "anthropic" },
+            inferenceCost: "0.00000325",
+          },
+        },
+        usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
+      },
+    } as any);
+    const usageRows: Array<Record<string, unknown>> = [];
+    const eventPayloads: Array<Record<string, unknown>> = [];
+    const facts: Array<Record<string, unknown>> = [];
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        usageRows.push(input as unknown as Record<string, unknown>);
+      },
+    );
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
+      async (_db, input) => {
+        facts.push(input as unknown as Record<string, unknown>);
+        throw new Error("fact writer unavailable");
+      },
+    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+      },
+    );
+    try {
+      const result = await processModelResponseTerminalEvent({
+        event,
+        state: createModelResponseEventState(),
+        dispatchId: "activity-workspace-gateway",
+        settings,
+        db: {} as any,
+        observability: createObservability(settings, { component: "worker" }),
+        publish: (async (batch: any[]) => ({
+          accepted: true,
+          events: batch.map((entry) => {
+            eventPayloads.push(entry.payload as Record<string, unknown>);
+            return {
+              ...entry,
+              id: crypto.randomUUID(),
+              turnAssociation: "current" as const,
+            };
+          }),
+        })) as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-workspace-gateway",
+        turnId: "turn-workspace-gateway",
+        turnAttemptId: "attempt-workspace-gateway",
+        provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+        providerApi: "responses",
+        model,
+        metricProvider: WORKSPACE_GATEWAY_PROVIDER_ID,
+        externallyBilled: true,
+        chargesOpenGeniCredits: false,
+        countsTowardTokenCap: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set<string>(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async () => undefined,
+      });
+
+      expect(result).toMatchObject({
+        status: "processed",
+        authoritative: true,
+        sourceKey: "resp-workspace-gateway",
+      });
+      expect(usageRows).toEqual([
+        expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+      ]);
+      expect(eventPayloads).toEqual([
+        expect.objectContaining({
+          provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+          upstreamProvider: "anthropic",
+          billingPath: "external",
+        }),
+      ]);
+      expect(facts).toEqual([
+        expect.objectContaining({
+          provider: "anthropic",
+          model,
+          billingPath: "external",
+          pricedCostMicros: 0,
+          estimatedProviderCostMicros: 4,
+          pricingSource: "gateway_reported",
+        }),
+      ]);
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      usageSpy.mockRestore();
+      factSpy.mockRestore();
+      debitSpy.mockRestore();
     }
   });
 
@@ -2737,6 +2968,11 @@ describe("lazy sandbox provisioner single-flight", () => {
       runStreamOnceAt,
     );
     const runtimeRunStreamAt = source.indexOf("return await runtime.runStream(", runStreamOnceAt);
+    const codexLeaseAssertionAt = source.indexOf("leases.codex.assertUsable()", runStreamOnceAt);
+    const providerInvocationAt = source.indexOf(
+      "eventing.stream = await withProviderRequestContext(runStreamOnce)",
+      runStreamOnceAt,
+    );
     const genericWireHookAt = source.indexOf(
       "onModelTransportStarted: recordFallbackProviderDispatchAtWire",
       runtimeRunStreamAt,
@@ -2744,6 +2980,8 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     expect(runStreamOnceAt).toBeGreaterThan(-1);
     expect(modelPreparationStartedAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeLessThan(providerInvocationAt);
     expect(runtimeRunStreamAt).toBeGreaterThan(modelPreparationStartedAt);
     expect(genericWireHookAt).toBeGreaterThan(runtimeRunStreamAt);
   });
@@ -3160,6 +3398,28 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     await expect(provisioner.get()).resolves.toBe("ready");
     expect(establishes).toBe(2);
+  });
+
+  test("rotation yields to durable recovery without internal retries or a fresh memo", async () => {
+    let establishes = 0;
+    const failure = new SandboxLeaseTransitionError(
+      "group-1",
+      7,
+      "rotation_in_progress",
+      "modal",
+      "sb-1",
+      "warm",
+    );
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw failure;
+      },
+      { backoffMs: 1 },
+    );
+    await expect(provisioner.get()).rejects.toBe(failure);
+    await expect(provisioner.get()).rejects.toBe(failure);
+    expect(establishes).toBe(1);
   });
 
   test("command-readiness timeout creates at most one sandbox for the turn", async () => {
@@ -3605,6 +3865,64 @@ describe("worker shutdown preemption", () => {
         cancellationRequested: false,
       }),
     ).toBe(true);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "recovering",
+        cancellationRequested: false,
+        deadlineRotationRequested: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("provider-deadline rotation preempts immediately without waiting for a snapshot", async () => {
+    const controller = new AbortController();
+    const sandboxState = { deadlineRotationRequested: false };
+
+    expect(
+      preemptSandboxTurnForDeadlineRotation({
+        controller,
+        sandboxState,
+        sandboxGroupId: "group-deadline",
+        leaseEpoch: 17,
+      }),
+    ).toBe(true);
+    expect(sandboxState.deadlineRotationRequested).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toMatchObject({
+      name: "SandboxDeadlineRotationError",
+      sandboxGroupId: "group-deadline",
+      leaseEpoch: 17,
+    });
+
+    const runtimeSource = await Bun.file(
+      new URL("../src/activities/agent-turn/sandbox-runtime.ts", import.meta.url),
+    ).text();
+    const rotationStart = runtimeSource.indexOf("const beginRotationPreemption");
+    const rotationEnd = runtimeSource.indexOf("const startLeaseHeartbeat", rotationStart);
+    const rotationSource = runtimeSource.slice(rotationStart, rotationEnd);
+    expect(rotationSource).toContain("preemptSandboxTurnForDeadlineRotation");
+    expect(rotationSource.indexOf("stopLeaseHeartbeat();")).toBeLessThan(
+      rotationSource.indexOf("preemptSandboxTurnForDeadlineRotation"),
+    );
+    expect(rotationSource).not.toContain("snapshotInFlight");
+    expect(rotationSource).not.toContain("persistSandboxDeadlineRotationCheckpoint");
+  });
+
+  test("joins a periodic provider capture before every proof-bearing holder release", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const finalReleaseStart = source.lastIndexOf("} finally {");
+    const finalReleaseSource = source.slice(finalReleaseStart);
+    const stopHeartbeatAt = finalReleaseSource.indexOf("stopLeaseHeartbeat();");
+    const rotationJoinAt = finalReleaseSource.indexOf("rotationPreemptionInFlight.catch");
+    const snapshotJoinAt = finalReleaseSource.indexOf("await drainInFlightWarmSnapshot();");
+    const proofReleaseAt = finalReleaseSource.indexOf("releaseTurnSandboxAfterWriterDrain");
+
+    expect(stopHeartbeatAt).toBeGreaterThan(-1);
+    expect(rotationJoinAt).toBeGreaterThan(stopHeartbeatAt);
+    expect(snapshotJoinAt).toBeGreaterThan(rotationJoinAt);
+    expect(proofReleaseAt).toBeGreaterThan(snapshotJoinAt);
   });
 
   test("turns an unconfirmed physical tool fence into a hard failure", () => {
@@ -3923,6 +4241,18 @@ describe("worker shutdown preemption", () => {
     await Bun.sleep(0);
   });
 
+  test("a completed activity never waits forever for hung finalizer housekeeping", async () => {
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    await expect(waitForTurnFinalizerStep(hung, undefined, 10)).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
+  });
+
   test("a cancelled activity detaches both hung batch flush and provider completion", async () => {
     const controller = new AbortController();
     let rejectFlush: ((error: Error) => void) | undefined;
@@ -4046,6 +4376,28 @@ describe("settled run-credential finalization", () => {
 });
 
 describe("Codex credential lease deadline fence", () => {
+  test("an expired confirmed deadline marks the lease lost before dispatch", () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() - 1;
+
+    expect(() => lease.assertUsable()).toThrow(CodexCredentialLeaseLostError);
+    expect(lease.lost).toBe(true);
+    expect(lease.lossReason).toBe("deadline");
+  });
+
   test("fails closed at the last database-confirmed expiry, including a missing deadline", () => {
     const now = Date.parse("2026-07-10T08:00:00.000Z");
     expect(codexCredentialLeaseDeadlineExpired(null, now)).toBe(true);
@@ -4053,6 +4405,98 @@ describe("Codex credential lease deadline fence", () => {
     expect(codexCredentialLeaseDeadlineExpired(now, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now - 1, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now + 1, now)).toBe(false);
+  });
+
+  test("does not accept a successful heartbeat that returns after the prior deadline", async () => {
+    let now = performance.now();
+    const clock = spyOn(performance, "now").mockImplementation(() => now);
+    let resolveHeartbeat!: (value: Date | null) => void;
+    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+      () =>
+        new Promise<Date | null>((resolve) => {
+          resolveHeartbeat = resolve;
+        }),
+    );
+    try {
+      const lease = new CodexTurnLease({
+        db: {},
+        observability: {
+          incrementCounter: () => undefined,
+          warn: () => undefined,
+        },
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        codexWorkspaceKey: "workspace-key",
+        getTurnId: () => "turn-1",
+      } as never);
+      lease.held = true;
+      lease.holderId = "holder-1";
+      lease.generation = 1;
+      const priorDeadline = now + 1_000;
+      lease.confirmedUntilMs = priorDeadline;
+
+      const renewal = lease.renew("timer");
+      expect(heartbeat).toHaveBeenCalledTimes(1);
+      now = priorDeadline + 1;
+      resolveHeartbeat(new Date());
+      await renewal;
+
+      expect(lease.lost).toBe(true);
+      expect(lease.lossReason).toBe("deadline");
+      expect(lease.confirmedUntilMs).toBe(priorDeadline);
+    } finally {
+      heartbeat.mockRestore();
+      clock.mockRestore();
+    }
+  });
+
+  test("transport dispatch fence preserves typed lease loss and skips the provider", async () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() + 10_000;
+    lease.markLost("not_found");
+
+    let providerCalls = 0;
+    await expect(
+      codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+          beforeProviderDispatch: lease.assertUsable,
+        },
+        () =>
+          codexSubscriptionFetch(async () => {
+            providerCalls += 1;
+            return new Response(null, { status: 200 });
+          })("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+          }),
+      ),
+    ).rejects.toBeInstanceOf(CodexCredentialLeaseLostError);
+    expect(providerCalls).toBe(0);
   });
 });
 
@@ -4771,7 +5215,20 @@ describe("transient provider error classifier", () => {
       database: { constraint: "session_turn_attempts_pkey" },
     });
     expect(preClaimAdmissionFailure(constraint)).toMatchObject({
-      details: [{ disposition: "permanent", code: "db_failure" }],
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const authorizationGuard = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "42501",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-authorization-guard",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(authorizationGuard)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
     });
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",
@@ -4893,6 +5350,42 @@ describe("transient provider error classifier", () => {
     expect(JSON.stringify(payload)).not.toContain(syntheticValue);
     expect(JSON.stringify(payload)).not.toContain(source.query);
     expect((error as SessionEventPersistenceError).cause).toBe(source);
+  });
+
+  test("safety refusals outrank transient status and do not rotate credentials", () => {
+    const message =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    for (const status of [403, 429, 500, 502, 503]) {
+      const error = Object.assign(new Error(message), {
+        status,
+        headers: new Headers({ "x-opengeni-codex-transport-error": "1" }),
+      });
+      expect(isTransientProviderError(error)).toBe(false);
+      expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(
+        classifyXaiCredentialFailure(
+          Object.assign(new Error(message), {
+            status,
+            headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
+          }),
+        ),
+      ).toBeNull();
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "provider_safety_refusal",
+        retryable: false,
+        detail: message,
+      });
+    }
+    const wrapped = Object.assign(new Error("Service unavailable"), {
+      status: 503,
+      cause: { error: { code: "content_policy_violation" } },
+    });
+    expect(isTransientProviderError(wrapped)).toBe(false);
+    expect(agentRunFailurePayload(wrapped)).toMatchObject({
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: "content_policy_violation",
+    });
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
@@ -5262,6 +5755,71 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+    const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
+    const refreshCodexToken = mock(async () => ({
+      accessToken: "codex-token-2",
+      accountId: "acct",
+    }));
+    const beforeProviderDispatch = mock(() => undefined);
+    const codexContext: CodexRequestContext = {
+      clientVersion: "test",
+      sessionId: "session-id",
+      getToken: getCodexToken,
+      refresh: refreshCodexToken,
+      resolveModel: (model) => model,
+      onUsageHeaders: () => undefined,
+      beforeProviderDispatch,
+      onRequestPreparationDiagnostic: () => undefined,
+      onModelRequestDiagnostic: () => undefined,
+      onModelRequestEvent: () => undefined,
+      onRequestOpaqueArtifacts: () => undefined,
+      nextRequestId: () => "main-request",
+      betaFeatures: ["main-only"],
+      turnMetadata: { request_kind: "agent_turn" },
+    };
+    const titleCodexContext = sessionTitleCodexRequestContext(codexContext, () => "title-request");
+
+    expect(titleCodexContext.getToken).toBe(getCodexToken);
+    expect(titleCodexContext.refresh).toBe(refreshCodexToken);
+    expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
+    expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
+    expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
+    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
+    expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
+    expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
+    expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
+    expect(titleCodexContext.onRequestOpaqueArtifacts).toBeUndefined();
+    expect(titleCodexContext.betaFeatures).toBeUndefined();
+
+    const getXaiToken = mock(async () => ({ accessToken: "xai-token", userId: "user" }));
+    const refreshXaiToken = mock(async () => ({ accessToken: "xai-token-2", userId: "user" }));
+    const xaiContext: XaiSubscriptionRequestContext = {
+      clientVersion: "test",
+      sessionId: "session-id",
+      turnId: "turn-id",
+      getToken: getXaiToken,
+      refresh: refreshXaiToken,
+      resolveModel: (model) => model,
+      hostedSearch: { webSearch: true, xSearch: true },
+      onFinalContextUsage: () => undefined,
+      onModelRequestDiagnostic: () => undefined,
+      onModelRequestEvent: () => undefined,
+      nextRequestId: () => "main-xai-request",
+      streamIdleTimeoutMs: 30_000,
+    };
+    const titleXaiContext = sessionTitleXaiRequestContext(xaiContext, () => "title-xai-request");
+
+    expect(titleXaiContext.getToken).toBe(getXaiToken);
+    expect(titleXaiContext.refresh).toBe(refreshXaiToken);
+    expect(titleXaiContext.nextRequestId?.()).toBe("title-xai-request");
+    expect(titleXaiContext.streamIdleTimeoutMs).toBe(30_000);
+    expect(titleXaiContext.hostedSearch).toBeUndefined();
+    expect(titleXaiContext.onFinalContextUsage).toBeUndefined();
+    expect(titleXaiContext.onModelRequestDiagnostic).toBeUndefined();
+    expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
+  });
+
   test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
     const marked = (status: number, headers: HeadersInit = {}) =>
       Object.assign(new Error(`xAI request failed (${status})`), {
@@ -5438,8 +5996,26 @@ describe("transient provider error classifier", () => {
 });
 
 describe("structuredToolTransportForTurn", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi = "responses") =>
-    ({ provider: { kind, api } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi = "responses",
+    options: {
+      id?: string;
+      wireProfile?: "openai" | "azure-openai";
+      builtin?: boolean;
+      baseUrl?: string;
+    } = {},
+  ) =>
+    ({
+      provider: {
+        id: options.id ?? "registry",
+        kind,
+        api,
+        wireProfile: options.wireProfile ?? "openai",
+        builtin: options.builtin ?? false,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      },
+    }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
   test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
@@ -5453,10 +6029,32 @@ describe("structuredToolTransportForTurn", () => {
     expect(structuredToolTransportForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 
-  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
-    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(true);
-    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+  test("preserves hosted tool types only for native OpenAI/Azure Responses providers", () => {
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { id: "openai", builtin: true }),
+      ),
+    ).toBe(true);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { wireProfile: "azure-openai" }),
+      ),
+    ).toBe(true);
     expect(structuredToolTransportForTurn(null)).toBe(true);
+  });
+
+  test("keeps hosted apply_patch off OpenAI-compatible Responses endpoints", () => {
+    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(false);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "openai",
+          builtin: true,
+          baseUrl: "https://proxy.example.test/v1",
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

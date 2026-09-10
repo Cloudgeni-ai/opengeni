@@ -7,6 +7,7 @@ import {
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
+  settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
   getSessionEvent,
@@ -42,6 +43,8 @@ import type {
   RecoverDispatchResult,
   RecoverEscapedMcpTimeoutInput,
   RecoverEscapedMcpTimeoutResult,
+  SettleSessionInputWaitInput,
+  SettleSessionInputWaitResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
@@ -53,6 +56,7 @@ export type SessionStateActivityOverrides = Partial<{
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
+  settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
@@ -93,6 +97,7 @@ export function createSessionStateActivities(
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionAttemptActivityRefFn =
     overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
@@ -155,6 +160,7 @@ export function createSessionStateActivities(
           workflowId,
           trigger: input.trigger,
           error: input.error ?? "Agent turn admission failed before attempt claim.",
+          ...(input.preClaimFailure ? { admissionFailure: input.preClaimFailure } : {}),
         });
         if (failed.action === "terminal") return { action: "terminal" };
         if (failed.action === "stale") return { action: "stale" };
@@ -219,7 +225,9 @@ export function createSessionStateActivities(
       : input.preClaimFailure?.disposition === "retryable" &&
           input.preClaimFailure.code !== "claim_invariant"
         ? input.preClaimFailure.code
-        : null;
+        : input.preClaimFailureDisposition === "retryable"
+          ? "legacy_retryable_preclaim_database_failure"
+          : null;
     if (recoveredClaimCode) {
       const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
         sessionId: input.sessionId,
@@ -486,6 +494,17 @@ export function createSessionStateActivities(
     return peek;
   }
 
+  async function settleSessionInputWait(
+    input: SettleSessionInputWaitInput,
+  ): Promise<SettleSessionInputWaitResult> {
+    const { db, bus } = await services();
+    const result = await settleSessionInputWaitFn(db, input);
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return { action: result.action };
+  }
+
   async function expireSessionHumanInput(
     input: ExpireSessionHumanInputInput,
   ): Promise<ExpireSessionHumanInputResult> {
@@ -522,14 +541,12 @@ export function createSessionStateActivities(
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
     }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
-    if (settled.action === "stale") {
+    if (settled.action === "stale" || !settled.notifyParent) {
       return;
     }
-    // The workflow reaches markSessionIdle exactly when it has decided to stop
-    // for now (no queued turn, no goal continuation): the terminal-for-now
-    // point for a spawned worker, whatever the cause (goal completed, agent or
-    // system paused goal, goalless work finished, idle control settlement). Wake
-    // the parent here, deduped per idle episode so the manager is nudged once.
+    // The idle transaction distinguishes parked wait/goal obligations from
+    // completed work. Only a terminal idle boundary may notify the parent;
+    // workflow closure while waiting retains its durable wake without a result.
     await notifyParentOfChildIdleFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
@@ -546,6 +563,7 @@ export function createSessionStateActivities(
     recoverDispatch,
     recoverEscapedMcpTimeout,
     peekSessionWork,
+    settleSessionInputWait,
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
     markSessionIdle,

@@ -27,8 +27,12 @@ import {
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
+import { createRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
-import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
+import {
+  resolveCatalogSettings,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+} from "@opengeni/core";
 import {
   Connection,
   Client as TemporalClient,
@@ -51,6 +55,7 @@ import {
 } from "./editable-artifact-websocket";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -119,6 +124,7 @@ export async function createTemporalWorkflowClient(
       workflowId,
       wakeRevision,
       interruptionRequested,
+      onSignalAccepted,
     }) => {
       await temporal.workflow.signalWithStart("sessionWorkflow", {
         taskQueue: settings.temporalTaskQueue,
@@ -127,7 +133,8 @@ export async function createTemporalWorkflowClient(
         args: [{ accountId, workspaceId, sessionId }],
         signal: interruptionRequested ? "sessionControl" : "queueChanged",
       });
-      await markSessionWorkflowWakeDelivered(db, {
+      onSignalAccepted?.();
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId,
         workspaceId,
         sessionId,
@@ -357,6 +364,15 @@ export async function startApi(
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
       { ...retryOptions, onRetry },
     );
+    const resolvedCatalog = await retryStartupDependency(
+      "model catalog",
+      () => resolveCatalogSettings(dbClient.db, settings),
+      { ...retryOptions, onRetry },
+    );
+    observability.info("OpenGeni model catalog resolved", {
+      catalogSource: resolvedCatalog.source,
+      catalogVersion: resolvedCatalog.version,
+    });
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -404,6 +420,7 @@ export async function startApi(
   }
   const { app, routeDeps } = createAppComposition({
     settings,
+    connectionCredentials: createRemoteMcpCredentialsPort(settings),
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,
@@ -443,7 +460,10 @@ export async function startApi(
       if (artifactWebSockets.handles(request)) {
         return artifactWebSockets.upgrade(request, bunServer);
       }
-      return app.fetch(request);
+      return app.fetch(
+        request,
+        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+      );
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,

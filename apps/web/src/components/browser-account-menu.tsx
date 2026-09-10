@@ -1,3 +1,4 @@
+import { AppearanceMenu } from "@/components/appearance-menu";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import {
@@ -34,6 +35,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useRail } from "@/components/rail/rail-context";
+import {
+  accountMenuAriaLabel,
+  OrganizationInvitationCountBadge,
+  OrganizationInvitationRailNotice,
+  OrganizationInvitationsDialog,
+  OrganizationInvitationsMenuItem,
+  useOrganizationInvitations,
+} from "@/components/organization-invitations";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { useAppContext } from "@/context";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
@@ -74,6 +83,13 @@ export function BrowserAccountMenu() {
     context.authSession?.user.email ??
     context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const organizationInvitations = useOrganizationInvitations({
+    client: context.client,
+    enabled: true,
+    activeEmail: selected?.verifiedClaim.value ?? context.authSession?.user.email ?? null,
+    onUseInvitedAccount: continueInvitation,
+    onAccepted: context.revalidatePrincipalAccess,
+  });
   const replacementSlots = useMemo(
     () =>
       projection?.slots.filter((slot) => slot.id !== logoutTarget?.id && slot.state === "active") ??
@@ -119,6 +135,17 @@ export function BrowserAccountMenu() {
       .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
   }
 
+  function continueInvitation(targetEmail: string) {
+    const targetSlot = projection?.slots.find(
+      (slot) => slot.verifiedClaim.value.trim().toLowerCase() === targetEmail.trim().toLowerCase(),
+    );
+    if (!targetSlot) {
+      authenticate("add");
+      return;
+    }
+    chooseSlot(targetSlot);
+  }
+
   function requestLogout(slot: ManagedAuthLoginSlot) {
     const alternatives =
       projection?.slots.filter(
@@ -161,12 +188,18 @@ export function BrowserAccountMenu() {
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
+      {!rail.collapsed ? (
+        <OrganizationInvitationRailNotice controller={organizationInvitations} />
+      ) : null}
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button
             ref={triggerRef}
             type="button"
-            aria-label={`Account menu. ${displayName} is active.`}
+            aria-label={accountMenuAriaLabel({
+              displayName,
+              pendingCount: organizationInvitations.pendingCount,
+            })}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;
               // Own the Enter transition so native button activation cannot
@@ -174,14 +207,19 @@ export function BrowserAccountMenu() {
               event.preventDefault();
               setMenuOpen(true);
             }}
-            className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none forced-colors:border forced-colors:border-transparent forced-colors:focus:border-[Highlight]"
+            className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none forced-colors:border forced-colors:border-transparent forced-colors:focus:border-[Highlight]"
           >
-            <Avatar size="sm">
-              {image ? <AvatarImage src={image} alt="" /> : null}
-              <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-                {userInitial(displayName)}
-              </AvatarFallback>
-            </Avatar>
+            <span className="relative shrink-0">
+              <Avatar size="sm">
+                {image ? <AvatarImage src={image} alt="" /> : null}
+                <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
+                  {userInitial(displayName)}
+                </AvatarFallback>
+              </Avatar>
+              <OrganizationInvitationCountBadge
+                pendingCount={organizationInvitations.pendingCount}
+              />
+            </span>
             {!rail.collapsed ? (
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-medium text-fg">{displayName}</span>
@@ -199,6 +237,7 @@ export function BrowserAccountMenu() {
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
+          tabIndex={0}
           align="start"
           side={rail.collapsed ? "right" : "top"}
           className="w-[min(22rem,calc(100vw-1rem))] forced-colors:border-[CanvasText] forced-colors:text-[CanvasText]! motion-reduce:[&_*]:animate-none"
@@ -274,6 +313,12 @@ export function BrowserAccountMenu() {
             <UserRoundPlusIcon className="size-4" />
             Add another account
           </DropdownMenuItem>
+          <OrganizationInvitationsMenuItem
+            controller={organizationInvitations}
+            className="min-h-11 forced-colors:text-[CanvasText]!"
+            disabled={busy}
+          />
+          <AppearanceMenu />
           {showAnalyticsPreferences ? (
             <DropdownMenuItem className="min-h-11" onSelect={() => openAnalyticsPreferences()}>
               <ChartColumnIcon className="size-4" />
@@ -312,6 +357,8 @@ export function BrowserAccountMenu() {
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <OrganizationInvitationsDialog controller={organizationInvitations} />
 
       <Dialog open={logoutTarget !== null} onOpenChange={(open) => !open && setLogoutTarget(null)}>
         <DialogContent className="motion-reduce:duration-0">

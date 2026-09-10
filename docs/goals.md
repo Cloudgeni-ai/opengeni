@@ -92,17 +92,18 @@ A goal is `active`, `paused`, or `completed`.
   completed goal.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
-- `goal_wait { reason, untilSeconds, idempotencyKey? }` declares a
-  continuation hold: the active goal's next automatic continuation waits for
-  child results, an agent message, a human prompt, or the deadline instead of
-  materializing as soon as the declaring turn ends. It is for progress that
-  depends on child sessions or an external event, never a substitute for
-  `goal_pause` when a human decision is required, and the agent must end its
-  turn right after calling it. `untilSeconds` is mandatory (30 s to 7 days),
-  the reason is bounded to 2 KiB, and the hold, its `goal.held` timeline fact,
-  and the target-scoped operation receipt commit together under the canonical
-  goal event-write prefix. See "The continuation loop" for what honors and
-  clears a hold.
+- `goal_resume {}` reactivates any paused goal regardless of pause actor or
+  reason, preserves its objective, resets continuation counters, and arms its
+  durable wake. Already-active calls succeed unchanged. Existing sessions with
+  `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+
+Long waits are session-level rather than goal mutations. `wait_for_input {
+reason, timeoutSeconds, idempotencyKey? }` is self-only, requires no goal, and
+stores the declaring turn plus a 30-second-to-7-day relative safety deadline on
+the session. An active goal remains active while the session waits; use
+`goal_pause` instead when the goal itself must stop for a human decision. See
+[`mcp-surfaces.md`](mcp-surfaces.md) and
+[`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
 and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
@@ -112,10 +113,11 @@ accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
 explicit original-byte truncation fact, so ordinary turns, recovery, and
 compaction stay bounded without rewriting canonical history.
 
-Every transition lands on the session timeline as `goal.set`, `goal.updated`,
-`goal.progress`, `goal.rewrite.proposed`,
-`goal.completed`, `goal.paused`, `goal.resumed`, `goal.cleared`, `goal.held`,
-or `goal.continuation` events.
+Every current goal transition lands on the session timeline as `goal.set`,
+`goal.updated`, `goal.progress`, `goal.rewrite.proposed`, `goal.completed`,
+`goal.paused`, `goal.resumed`, `goal.cleared`, or `goal.continuation`. Historical
+`goal.held` rows remain readable for pre-0402 audit compatibility; new
+session-level waits use `session.wait.started` and `session.wait.finished`.
 
 ## The continuation loop
 
@@ -154,41 +156,20 @@ The locked decision applies these rules:
    schedule) also wins with `queue`: it is delivered by the next claim rather
    than shadowed by a synthesized continuation, and because peek and
    materialization serialize on the session lock, input that lands between
-   them cannot be missed. Against a CURRENT `goal_wait` hold (rule 3) only an
-   `immediate`-class pending row wins; `deferred` child lifecycle notices
-   (`child_requires_action_resolved`, `child_paused`,
-   `child_waiting_capacity`, `child_progress`) leave the hold in place and are
-   delivered when it ends or an immediate input arrives
-   (`peekSessionWork` mirrors this and reports `idle`). See
-   [`durable-agent-inputs.md`](durable-agent-inputs.md) for the wake classes.
-3. An agent-declared `goal_wait` hold is honored only while its declaring turn
-   is still the latest finished turn and `now < continuation_hold_until`. The
-   materializer then returns `held`: it does not advance
-   `continuation_observed_revision` (a crash cannot lose the obligation) and,
-   in the same transaction, re-arms a delayed workflow wake
-   (`goal_hold_deadline`, `notBefore = hold_until`) through the session
-   workflow-wake outbox. Re-arming on every idle evaluation is required: an
-   earlier immediate wake (for example a child result) delivered in between
-   advances the outbox's delivered revision and would otherwise drop the
-   deadline row; an undelivered earlier wake coalesces with
-   `least(next_attempt_at, notBefore)`. A hold that belongs to an older turn or
-   whose deadline has passed is cleared in that same transaction and
-   evaluation continues as before. "Newest finished turn" is ordered by
-   finish time everywhere (materializer, evaluator, backoff, and the API
-   projection): a human prompt queued after internal turns takes a low
-   normalized queue position, yet it is the newer truth that retires a hold.
-   Every goal head mutation clears the hold
-   inside its own transaction: human/API `PATCH` (pause, resume, redirect),
-   `DELETE`, agent `goal_set`, `goal_complete`, `goal_pause`, and an applied
-   `goal_update` revision (a `review_changes` proposal-only outcome records
-   evidence but does not touch the head, so it leaves the hold in place). So a
-   human redirect never sits behind an agent-declared wait. The scheduled-run
-   re-arm (`upsertScheduledSessionGoalForRun`) replaces the goal through the
-   same `upsertSessionGoal` path and therefore clears it as well. The API
-   projects a current hold as `blocked` / `held_for_input` with
-   `nextAttemptAt` at the deadline, and the deadline comparison uses the
-   transaction's database clock, the same clock the wake-outbox dispatcher
-   fires on.
+   them cannot be missed. See [`durable-agent-inputs.md`](durable-agent-inputs.md)
+   for the wake classes.
+3. Before the goal materializer runs, `peekSessionWork` evaluates a current
+   session-level `wait_for_input`. It is current only while the declaring turn
+   remains the newest finished turn and the database deadline is ahead. While
+   held, the workflow re-arms `session_input_wait_deadline` in the durable wake
+   outbox and closes without consuming a goal revision. Immediate machine input
+   or a queued human/API turn wins and runs normally; deferred child notices
+   remain parked. A newer finished turn clears the wait with
+   `session.wait.finished{outcome:"input"}`. An unchanged expired deadline
+   atomically clears it and queues `session_wait_timeout` input. The active-goal
+   projection may report this independent session wait as `blocked` /
+   `held_for_input`, with `nextAttemptAt` and `holdReason`, but goal mutations do
+   not own or clear it.
 4. Consecutive no-input continuations are paced, not capped. `auto_continuations`
    counts only consecutive synthesized continuations whose claimed batch
    contained no other machine input and that no human/API/Steer turn
@@ -204,14 +185,11 @@ The locked decision applies these rules:
    `deferred` without touching the wake/observed ledger, counters, updates, or
    usage, and re-arms a delayed workflow wake (`goal_idle_backoff`,
    `notBefore` at the deadline) through the session workflow-wake outbox on
-   every idle evaluation, exactly like the hold; the deadline lives only in
+   every idle evaluation; the deadline lives only in
    `session_workflow_wake_outbox.next_attempt_at`, never in a Temporal timer or
    a new column. Any new input (pending machine input, a human prompt, Steer)
    commits its own immediate wake, which pulls that row to now, and wins the
-   next evaluation as ordinary input. A `goal_wait` hold whose deadline has
-   just passed is due now: the evaluation that retires it skips the backoff
-   once (the streak keeps counting afterwards), so pacing never extends the
-   agent's own stated deadline. The API projects the wait as
+   next evaluation as ordinary input. The API projects the pacing delay as
    `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
 5. Budget/admission policy can pause the goal visibly with reason `limits`.
    OpenGeni does not infer progress or blockage from tool/event shape; the
@@ -312,8 +290,8 @@ recovery of the same turn, not creation or charging of another continuation.
   status alone: `running` is reserved for a live goal-owned turn and alone
   means "Pursuing". A live human/API or system turn blocks autonomous
   continuation; recovering or queued work is scheduled. Pause, approval,
-  provider backpressure, cancellation, pending wake/update, an agent-declared
-  `goal_wait` hold (`blocked` / `held_for_input`, `nextAttemptAt` at the
+  provider backpressure, cancellation, pending wake/update, a session-level
+  `wait_for_input` declaration (`blocked` / `held_for_input`, `nextAttemptAt` at the
   deadline), idle backoff between consecutive no-input continuations
   (`scheduled` / `backoff_pending`, `nextAttemptAt` at the pacing deadline),
   and a missing obligation are distinct truthful states.
@@ -361,10 +339,11 @@ requires an explicit `changeKind`, non-empty `rationale`, and
 separate `goal_progress` tool but do not gate continuation. The worker signs the
 session id into the delegated access token it uses for first-party MCP calls
 (HMAC, worker-asserted — not agent-controlled), and the API registers
-`goal_set`/`goal_update`/`goal_progress`/`goal_wait`/`goal_complete`/`goal_pause` only for grants carrying
-that claim plus the `goals:manage` permission. `goal_wait` is in the default
-first-party tool selection but is not one of the names a goal-bearing session
-is required to select, so existing explicit selections keep working. A top-level session with no
+`goal_set`/`goal_update`/`goal_progress`/`goal_complete`/`goal_pause` only for grants carrying
+that claim plus the `goals:manage` permission. `wait_for_input` is a separate
+self-only session-control tool (`sessions:control`) and is in the default
+first-party selection, but it is not required merely because a session has a
+goal. A top-level session with no
 first-party permission override uses the worker default. A child inherits its
 creator's exact effective permissions, and an explicit set may only narrow
 them; goal-bearing creation is rejected when that resulting set omits
@@ -388,3 +367,24 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 | `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |
 | `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `false` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Enable only after the whole fleet runs an image that understands the new kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
+
+
+### Interpreting wake delivery
+
+A successful Temporal signal only confirms transport acceptance. The durable
+wake acknowledgment guard may still return `pending_admission` with a queued
+prompt, machine input, input wait, Agent Steer, or quiescence blocker. The wake
+dispatcher's result and structured reconciliation log separate `signaled`,
+`delivered` (acknowledged revisions), `pendingAdmission` by blocker, and
+`unconfirmed` legacy signal-only responses. None is proof of a model turn:
+verify the durable attempt claim and `turn.started` before reporting execution.
+Pending revisions keep the existing outbox backoff and admission rules; these
+counters neither resume paused work nor authorize a new attempt. Logs emit each
+blocker count as a numeric `pendingAdmissionBlockers.<blocker>` attribute; the
+activity result retains the blocker object.
+
+Transport acceptance is reported before attempting the database acknowledgment.
+If that acknowledgment fails, a batch can report both `signaled` and `failed`
+for the same revision; `delivered` remains zero and the original error propagates
+to immediate callers. Older embedding clients may omit the optional transport
+observer; successful void responses remain `unconfirmed`, not acknowledged.

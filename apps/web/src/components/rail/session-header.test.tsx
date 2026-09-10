@@ -110,3 +110,45 @@ describe("SessionHeader mobile touch targets", () => {
     }
   });
 });
+
+test("reuses the compact Schedule button without requiring creation metadata", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  let opened = 0;
+  const render = (linked: boolean) => (
+    <SessionHeader
+      session={{ ...session, hasSchedules: linked }}
+      ancestors={[]}
+      connectionState="live"
+      status="idle"
+      keyAuthRequired={false}
+      onForgetAccessKey={() => undefined}
+      inspectorOpen={false}
+      onToggleInspector={() => undefined}
+      onRename={async () => null}
+      onPin={async () => null}
+      onOpenSchedule={
+        linked
+          ? () => {
+              opened++;
+            }
+          : null
+      }
+    />
+  );
+  try {
+    await act(async () => root.render(render(true)));
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="Open schedules for this session"]',
+    );
+    expect(button?.textContent?.trim()).toBe("Schedule");
+    await act(async () => button?.click());
+    expect(opened).toBe(1);
+    await act(async () => root.render(render(false)));
+    expect(container.querySelector('button[title="Open schedules for this session"]')).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

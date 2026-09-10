@@ -1,12 +1,6 @@
-// The "For you" priority feed: ranks root workstreams by what the viewer
-// should look at, most expensive inaction first. Pure projection over the
-// session list — every signal here is already durable list truth (status,
-// effectiveControl, treeStats, timestamps); nothing is re-derived from events.
-//
-// The ledger figure is "agent-time lost": how long a workstream has been
-// stopped multiplied by how many turns are visibly waiting on a human. It is
-// an honest lower bound, not billing — the point is that the biggest number
-// is the thing to look at first, with zero color required to read the order.
+// The For you feed ranks root workstreams using durable session-list truth.
+// Human wait duration uses the oldest reported request timestamp, never a
+// parent update timestamp multiplied by descendants. This is not billing.
 import type { Session } from "../types";
 import { rootNeedsYou } from "./needs-you";
 import { sessionStateLabel } from "./session-rail";
@@ -20,7 +14,7 @@ export type PriorityEntry = {
   rank: number | null;
   /** One-line reason in the product's state voice. */
   reason: string;
-  /** Minutes since the workstream last moved (entered its current state). */
+  /** Minutes since the session was last updated. */
   waitingMinutes: number;
   /**
    * Tier-specific agent count for the ledger basis line: blocked = turns
@@ -28,8 +22,8 @@ export type PriorityEntry = {
    * the whole tree's agents ("N agents' work"); waiting = 0.
    */
   waitingAgents: number;
-  /** Sort key: agent-minutes lost. Zero for tiers that don't burn time. */
-  costMinutes: number;
+  /** Oldest verified human wait; absent timestamp is explicitly unknown. */
+  oldestHumanWaitMinutes?: number | null;
 };
 
 export type PriorityFeed = {
@@ -103,7 +97,6 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
         reason,
         waitingMinutes,
         waitingAgents: 1,
-        costMinutes: waitingMinutes,
       });
     } else if (rootNeedsYou(session)) {
       // A root whose own turn needs a human, OR a root whose spawned agents
@@ -114,10 +107,13 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
       const waitingAgents = attentionDescendants + (session.status === "requires_action" ? 1 : 0);
       // "… for 10 h": how long the longest-waiting blocked agent has been
       // parked on a human, from the server's requires_action timestamps.
-      const blockedSince =
-        session.status === "requires_action"
-          ? session.requiresActionSince
-          : session.treeStats?.attentionSince;
+      const waitingTimes = [
+        ...(session.status === "requires_action" ? [session.requiresActionSince] : []),
+        ...(attentionDescendants > 0 ? [session.treeStats?.attentionSince] : []),
+      ].filter(
+        (value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value)),
+      );
+      const blockedSince = waitingTimes.sort((a, b) => Date.parse(a) - Date.parse(b))[0];
       const blockedFor = blockedSince
         ? ` for ${formatAgentMinutes(minutesSince(blockedSince, now))}`
         : "";
@@ -133,7 +129,7 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
               } you${blockedFor}`,
         waitingMinutes,
         waitingAgents,
-        costMinutes: waitingMinutes * waitingAgents,
+        oldestHumanWaitMinutes: blockedSince ? minutesSince(blockedSince, now) : null,
       });
     } else if (
       session.status === "waiting_capacity" ||
@@ -147,7 +143,6 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
         reason,
         waitingMinutes,
         waitingAgents: 0,
-        costMinutes: 0,
       });
     } else if (session.status === "running" || treeHasLiveWork(session)) {
       healthyWorkstreams += 1;
@@ -160,17 +155,14 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
         reason,
         waitingMinutes,
         waitingAgents: treeAgents(session),
-        costMinutes: 0,
       });
     }
     // Cancelled trees are deliberate terminal state: not in the feed at all.
   }
 
-  // Most expensive inaction first; ties break toward the older wait.
-  const byCost = (a: PriorityEntry, b: PriorityEntry) =>
-    b.costMinutes - a.costMinutes || b.waitingMinutes - a.waitingMinutes;
-  blocked.sort(byCost);
-  broken.sort(byCost);
+  // Oldest known human wait first. Unknown duration is never fabricated.
+  blocked.sort((a, b) => (b.oldestHumanWaitMinutes ?? -1) - (a.oldestHumanWaitMinutes ?? -1));
+  broken.sort((a, b) => b.waitingMinutes - a.waitingMinutes);
   // Finished reads newest-first: the freshest result is the one to review.
   finished.sort((a, b) => a.waitingMinutes - b.waitingMinutes);
   finished.splice(FINISHED_LIMIT);

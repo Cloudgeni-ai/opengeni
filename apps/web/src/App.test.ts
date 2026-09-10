@@ -34,6 +34,7 @@ import {
   authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
   commitSessionBranchPage,
+  readLoadedSessionBranchWindow,
   failSessionBranchRequest,
   sessionBranchNeedsHydration,
   sessionBranchSummaryKey,
@@ -590,6 +591,78 @@ describe("rail session grouping", () => {
     expect(afterCompletion).toEqual({ acknowledge: true, refresh: true, markStale: false });
   });
 
+  test("accepted root reads refresh observation-only child changes without parent edits", () => {
+    const parent = railSession({ id: "observation-parent" });
+    const previousKey = sessionBranchSummaryKey(parent, 1);
+    const nextKey = sessionBranchSummaryKey(parent, 2);
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey,
+        nextKey,
+        loading: false,
+        expanded: true,
+        stale: false,
+      }),
+    ).toEqual({ acknowledge: true, refresh: true, markStale: false });
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey,
+        nextKey,
+        loading: false,
+        expanded: false,
+        stale: false,
+      }),
+    ).toEqual({ acknowledge: true, refresh: false, markStale: true });
+    expect(
+      sessionBranchSummaryDecision({
+        previousKey: nextKey,
+        nextKey,
+        loading: false,
+        expanded: true,
+        stale: false,
+      }).refresh,
+    ).toBe(false);
+  });
+
+  test("loaded child windows refresh observations beyond page one and drop removed tail rows", async () => {
+    const children = Array.from({ length: 60 }, (_, index) =>
+      railSession({ id: `child-${index}`, parentSessionId: "parent" }),
+    );
+    const unknown = {
+      ...children[55]!,
+      backgroundCommandActivity: { state: "running" as const, count: 1, unavailableCount: 1 },
+    };
+    const calls: (string | undefined)[] = [];
+    const window = await readLoadedSessionBranchWindow(async (cursor) => {
+      calls.push(cursor);
+      return {
+        sessions: cursor
+          ? children.slice(50, 59).map((child) => (child.id === unknown.id ? unknown : child))
+          : children.slice(0, 50),
+        pinned: [],
+        nextCursor: cursor ? null : "page-two",
+      };
+    }, children.length);
+    expect(calls).toEqual([undefined, "page-two"]);
+    let pages = commitSessionBranchPage(new Map(), "parent", {
+      sessions: children,
+      nextCursor: "old",
+    });
+    pages = commitSessionBranchPage(pages, "parent", window, { replaceWindow: true });
+    expect(
+      pages.get("parent")?.sessions.find((child) => child.id === unknown.id)
+        ?.backgroundCommandActivity?.unavailableCount,
+    ).toBe(1);
+    expect(pages.get("parent")?.sessions).toHaveLength(59);
+    expect(pages.get("parent")?.nextCursor).toBeNull();
+    await expect(
+      readLoadedSessionBranchWindow(
+        async () => ({ sessions: [], pinned: [], nextCursor: "repeated" }),
+        60,
+      ),
+    ).rejects.toThrow("cursor repeated");
+  });
+
   test("a failed page-one invalidation retries page one instead of the old continuation", () => {
     const managerId = "manager-retry";
     const worker = railSession({ id: "worker", parentSessionId: managerId });
@@ -994,7 +1067,9 @@ describe("organization helpers", () => {
   test("lists every org the subject can reach, default first", () => {
     const context = ctx({
       defaultAccountId: "acc-b",
-      accountGrants: [{ accountId: "acc-a", subjectId: "s", permissions: ["billing:read"] }],
+      accountGrants: [
+        { accountId: "acc-a", subjectId: "s", role: "admin", permissions: ["billing:read"] },
+      ],
     });
     const orgs = organizationsForSubject(context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
     expect(orgs.map((org) => org.accountId)).toEqual(["acc-b", "acc-a"]);
@@ -1582,12 +1657,85 @@ describe("summarizeSessionFailure", () => {
     );
   });
 
+  test("reports an unclaimed failure instead of reusing a previous provider rejection", () => {
+    const failure = {
+      ...event(3, "session.status.changed", {
+        status: "failed",
+        code: "pre_claim_failure",
+        failedSystemUpdateIds: ["update-1"],
+      }),
+      turnId: null,
+    };
+    const summary = summarizeSessionFailure(
+      [
+        {
+          ...event(1, "turn.failed", { code: "provider_safety_refusal", error: "Old rejection" }),
+          turnId: "previous-turn",
+        },
+        event(2, "session.status.changed", { status: "queued" }),
+        failure,
+      ],
+      "failed",
+    );
+    expect(summary.reason).toBe(
+      "The session failed before a turn could start. No error details were recorded.",
+    );
+    expect(summary.safetyRefusal).toBe(false);
+    expect(summary.failedAt).toBe(failure.occurredAt);
+    expect(summary.failedTurnCount).toBe(1);
+  });
+
+  test("keeps the detailed same-turn failure paired with its pre-claim status", () => {
+    const summary = summarizeSessionFailure(
+      [
+        {
+          ...event(1, "turn.failed", {
+            code: "pre_claim_failure",
+            error: "Database connection lost",
+          }),
+          turnId: "failed-turn",
+        },
+        {
+          ...event(2, "session.status.changed", { status: "failed", code: "pre_claim_failure" }),
+          turnId: "failed-turn",
+        },
+      ],
+      "failed",
+    );
+    expect(summary.reason).toBe("Database connection lost");
+    expect(summary.failedTurnCount).toBe(1);
+  });
+
   test("reports nothing for a clean session", () => {
     expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
       reason: null,
+      safetyRefusal: false,
       failedAt: null,
+      failureEventId: null,
       recoveryCount: 0,
       failedTurnCount: 0,
+    });
+  });
+  test("exposes a legacy safety rejection and clears it on a later unrelated failure", () => {
+    const refusal = event(1, "turn.failed", {
+      error: "Retries exhausted.",
+      lastRetryableError:
+        "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(summarizeSessionFailure([refusal], "failed")).toMatchObject({
+      failureEventId: refusal.id,
+      safetyRefusal: true,
+      reason:
+        "The model provider blocked this request. This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(
+      summarizeSessionFailure(
+        [refusal, event(2, "turn.failed", { error: "Connection reset." })],
+        "failed",
+      ),
+    ).toMatchObject({
+      safetyRefusal: false,
+      reason: "Connection reset.",
     });
   });
 });
@@ -2233,6 +2381,39 @@ describe("GitHub repository resources", () => {
     ).toBe(false);
   });
 
+  test("keeps verified manual commits immutable and rejects cleared authenticated refs", () => {
+    const commitSha = "a".repeat(40);
+    expect(
+      buildResources(
+        [
+          {
+            id: 1,
+            url: "https://github.com/acme/public.git",
+            ref: "refs/tags/v1",
+            expectedCommitSha: commitSha,
+            attached: true,
+          },
+        ],
+        [],
+        new Set(),
+        {},
+      ),
+    ).toEqual([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/public.git",
+        ref: "refs/tags/v1",
+        expectedCommitSha: commitSha,
+        mountPath: "repos/github.com/acme/public.git",
+      },
+    ]);
+
+    const repository = githubRepository();
+    expect(() =>
+      buildResources([], [repository], new Set([repository.id]), { [repository.id]: " " }),
+    ).toThrow("Repository ref is required.");
+  });
+
   test("keeps installation metadata for private GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: true }), "main")).toEqual({
       kind: "repository",
@@ -2330,6 +2511,7 @@ describe("GitHub repository resources", () => {
         kind: "repository",
         uri: "https://git.example.com/acme/manual.git",
         ref: "main",
+        expectedCommitSha: "b".repeat(40),
       },
     ];
 
@@ -2339,7 +2521,15 @@ describe("GitHub repository resources", () => {
     expect(hydrated).toEqual([privateResource, manualResource]);
     expect(rehydrateRepositoryResources(resources, [], { catalogReady: false })).toEqual(resources);
     expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
-      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
+      manualRepos: [
+        {
+          id: 1,
+          url: manualResource.uri,
+          ref: "main",
+          expectedCommitSha: "b".repeat(40),
+          attached: true,
+        },
+      ],
       selectedRepoIds: new Set([privateRepo.id]),
       selectedRepoRefs: { [privateRepo.id]: "develop" },
       selectedPersonalRepoIds: new Set(),

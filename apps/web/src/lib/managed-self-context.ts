@@ -33,6 +33,25 @@ export function sameManagedSelfContextIdentity(
 }
 
 /**
+ * Additional organization creation is available only after the exact current
+ * managed identity is verified and its server-issued membership projection
+ * proves that initial onboarding has completed.
+ */
+export function canCreateAdditionalOrganization(input: {
+  managedUserId: string | null;
+  emailVerified: boolean;
+  selfContext: ManagedSelfContext | null;
+}): boolean {
+  const { managedUserId, selfContext } = input;
+  if (!managedUserId || !input.emailVerified || !selfContext) return false;
+  return (
+    selfContext.identity.managedUserId === managedUserId &&
+    selfContext.identity.subjectId === `user:${managedUserId}` &&
+    selfContext.memberships.some((membership) => membership.status === "active")
+  );
+}
+
+/**
  * Resolve managed-human membership facts only for the credential/principal
  * identity that started the request. A late response from a replaced cookie
  * session is discarded instead of becoming the next principal's UI truth.

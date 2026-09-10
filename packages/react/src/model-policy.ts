@@ -1,11 +1,11 @@
+import {
+  compareModelPickerOrder,
+  modelPickerBillingClassFor,
+  type ModelPickerBillingClass,
+} from "@opengeni/sdk/model-picker-order";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
-export type PickerBillingClass =
-  | "opengeni_credits"
-  | "external"
-  | "codex_subscription"
-  | "supergrok_subscription"
-  | "byok";
+export type PickerBillingClass = ModelPickerBillingClass;
 
 export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogModel> = {
   id: string;
@@ -23,20 +23,13 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
 
 export type LatencyModeId = "standard" | "priority" | "fast";
 
-const BILLING_CLASS_ORDER: PickerBillingClass[] = [
-  "opengeni_credits",
-  "external",
-  "codex_subscription",
-  "supergrok_subscription",
-  "byok",
-];
-
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   opengeni_credits: "OpenGeni",
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
-  byok: "Your Gateway",
+  byok: "Workspace providers",
+  organization_byok: "Organization providers",
 };
 
 const AVAILABILITY_REASON_LABELS: Record<string, string> = {
@@ -50,33 +43,13 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
-  if (model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment") {
-    return "external";
+  if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
+    return "organization_byok";
   }
-  if (model.source === "supergrok") {
-    return "supergrok_subscription";
-  }
-  if (model.source === "codex") {
-    return "codex_subscription";
-  }
-  if (model.source === "workspace_gateway") {
+  if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
     return "byok";
   }
-  if (model.credentialSource?.kind === "connected_subscription") {
-    return model.credentialSource.provider === "xai"
-      ? "supergrok_subscription"
-      : "codex_subscription";
-  }
-  if (model.credentialSource?.kind === "workspace_connection") {
-    return "byok";
-  }
-  if (model.billing?.upstreamPayer === "connected_subscription") {
-    return "codex_subscription";
-  }
-  if (model.billing?.upstreamPayer === "workspace") {
-    return "byok";
-  }
-  return "opengeni_credits";
+  return modelPickerBillingClassFor(model);
 }
 
 export function billingClassLabel(billingClass: PickerBillingClass): string {
@@ -143,7 +116,33 @@ export function labelReasoningEffort(effort: ReasoningEffort): string {
   return effort.slice(0, 1).toUpperCase() + effort.slice(1);
 }
 
+/** Payment prompts must use cost policy, never the presentation group. */
+export function modelUsesCredits(model: ClientModel | undefined): boolean {
+  if (model?.cost !== undefined) return model.cost === "credits";
+  return model?.billing?.metering === "opengeni_credits";
+}
+
 export function payerSummaryForModel(model: ClientModel): string {
+  if (model.cost === "free") {
+    return "Free in this deployment";
+  }
+  if (model.cost === "credits") {
+    return "OpenGeni credits";
+  }
+  if (model.cost === "subscription") {
+    return model.source === "supergrok"
+      ? "SuperGrok subscription · external billing"
+      : "Codex subscription · external billing";
+  }
+  if (model.cost === "workspace") {
+    return workspaceProviderPayerSummary(model);
+  }
+  if (model.cost === "organization") {
+    return organizationProviderPayerSummary(model);
+  }
+
+  // Older client-config payloads do not carry `cost`; preserve their existing
+  // settlement-derived label until every deployment has rolled forward.
   const billing = model.billing;
   if (!billing) {
     return "Route unknown";
@@ -157,16 +156,21 @@ export function payerSummaryForModel(model: ClientModel): string {
       : "Codex subscription · external billing";
   }
   if (billing.upstreamPayer === "workspace") {
-    return "Billed to your AI Gateway";
+    return workspaceProviderPayerSummary(model);
   }
-  return "External provider · no OpenGeni credits";
+  if (billing.upstreamPayer === "organization") {
+    return organizationProviderPayerSummary(model);
+  }
+  return billing.upstreamPayer === "deployment"
+    ? "OpenGeni · no model credits"
+    : "External provider · no OpenGeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
     return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
-      ? "Deployment route · no authentication"
+      ? "Deployment-provided connection"
       : null;
   }
   if (source.kind === "connected_subscription") {
@@ -175,7 +179,13 @@ export function advancedSourceSummary(model: ClientModel): string | null {
       : "Connected Codex subscription";
   }
   if (source.kind === "workspace_connection") {
-    return "Workspace AI Gateway";
+    if (model.provider === "workspace-openrouter") {
+      return "Workspace OpenRouter connection";
+    }
+    if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
+      return "Workspace Vercel AI Gateway";
+    }
+    return "Workspace provider connection";
   }
   if (source.kind === "deployment") {
     return source.mechanism === "azure_ad_bearer"
@@ -183,6 +193,26 @@ export function advancedSourceSummary(model: ClientModel): string | null {
       : "Deployment API key";
   }
   return null;
+}
+
+function workspaceProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "workspace-openrouter") {
+    return "Billed to the workspace OpenRouter account";
+  }
+  if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
+    return "Billed to the workspace Vercel account";
+  }
+  return "Billed to the workspace provider account";
+}
+
+function organizationProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "organization-openrouter") {
+    return "Billed to the organization OpenRouter account";
+  }
+  if (model.provider === "organization-gateway") {
+    return "Billed to the organization Vercel account";
+  }
+  return "Billed to the organization provider account";
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
@@ -232,18 +262,7 @@ export function projectClientModelRows(models: ClientModel[]): PickerModelRow<Cl
 export function sortPickerRows<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
 ): PickerModelRow<TCatalog>[] {
-  return [...rows].sort((left, right) => {
-    const classDelta =
-      BILLING_CLASS_ORDER.indexOf(left.billingClass) -
-      BILLING_CLASS_ORDER.indexOf(right.billingClass);
-    if (classDelta !== 0) {
-      return classDelta;
-    }
-    if (left.selectable !== right.selectable) {
-      return left.selectable ? -1 : 1;
-    }
-    return left.label.localeCompare(right.label);
-  });
+  return [...rows].sort(compareModelPickerOrder);
 }
 
 export function findPickerRow<TCatalog extends ClientModel>(

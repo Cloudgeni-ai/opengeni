@@ -2,6 +2,11 @@ import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/conf
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
 import type { Context, MiddlewareHandler } from "hono";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
+import {
+  isMcpOAuthPublicProtocolPath,
+  isMcpOAuthResourcePath,
+  mcpOAuthBearerToken,
+} from "../mcp-oauth";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
 const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
@@ -33,6 +38,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   const path = new URL(c.req.url).pathname;
+  if (settings.mcpOauthEnabled && isMcpOAuthPublicProtocolPath(path)) {
+    return true;
+  }
+  if (settings.mcpOauthEnabled && isMcpOAuthResourcePath(path) && mcpOAuthBearerToken(c.req.raw)) {
+    return true;
+  }
   if (path === "/v1/config/client") {
     return true;
   }

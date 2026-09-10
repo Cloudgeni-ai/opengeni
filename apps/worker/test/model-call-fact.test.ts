@@ -5,6 +5,7 @@ import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 
 import {
+  emitModelCallUsage,
   recordAuthoritativeModelCallFact,
   recordModelUsageAndDebitCredits,
 } from "../src/activities/agent-turn";
@@ -17,12 +18,14 @@ function billedSettings() {
   return testSettings({
     billingMode: "stripe",
     usageLimitsMode: "managed",
+    vercelAiGatewayApiKey: "test-gateway-key",
     modelPricingJson: JSON.stringify({
       "gpt-5.6-sol": {
-        inputMicrosPerMillionTokens: 5_000_000,
-        cachedInputMicrosPerMillionTokens: 500_000,
-        outputMicrosPerMillionTokens: 30_000_000,
-        marginBps: 2_500,
+        inputMicrosPerMillionTokens: 4_000_000,
+        cachedInputMicrosPerMillionTokens: 400_000,
+        cacheWriteMicrosPerMillionTokens: 5_000_000,
+        outputMicrosPerMillionTokens: 20_000_000,
+        marginBps: 500,
       },
     }),
   });
@@ -67,6 +70,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "opengeni_credits",
         pricedCostMicros: 1000,
         estimatedProviderCostMicros: 800,
+        equivalentCreditCostMicros: 1000,
         pricingSource: "configured_list_price",
         normalizedUsage: {
           telemetry: {
@@ -128,6 +132,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "opengeni_credits",
         pricedCostMicros: 5,
         estimatedProviderCostMicros: 4,
+        equivalentCreditCostMicros: 5,
         pricingSource: "gateway_reported",
         upstreamProvider: "baseten",
         normalizedUsage: {
@@ -175,9 +180,143 @@ describe("recordAuthoritativeModelCallFact", () => {
     });
     expect(billing.billingPath).toBe("external");
     expect(billing.pricedCostMicros).toBe(0);
-    expect(billing.estimatedProviderCostMicros).toBe(20_000);
+    expect(billing.estimatedProviderCostMicros).toBe(14_000);
+    expect(billing.equivalentCreditCostMicros).toBe(14_700);
     expect(billing.pricingSource).toBe("configured_list_price");
     expect(debitSpy).not.toHaveBeenCalled();
+  });
+
+  test("external Codex ignores non-Gateway billing metadata and uses product list pricing", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => recordSpy.mockRestore());
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("credits must NOT be debited for an externally billed turn");
+      },
+    );
+    restores.push(() => debitSpy.mockRestore());
+
+    const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-codex-gateway",
+      turnId: "turn-codex-gateway",
+      turnAttemptId: "attempt-codex-gateway",
+      model: "codex/gpt-5.6-sol",
+      externallyBilled: true,
+      gatewayBilling: { finalProvider: "openai", inferenceCostUsd: "0.014" },
+      usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+      sourceKey: "response-codex-gateway",
+    });
+
+    expect(billing).toMatchObject({
+      billingPath: "external",
+      pricedCostMicros: 0,
+      estimatedProviderCostMicros: 14_000,
+      equivalentCreditCostMicros: 14_700,
+      pricingSource: "configured_list_price",
+    });
+    expect(billing).not.toHaveProperty("upstreamProvider");
+    expect(debitSpy).not.toHaveBeenCalled();
+  });
+
+  test("persists free external billing authority before a soft fact-write failure", async () => {
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => usageSpy.mockRestore());
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(async () => {
+      throw new Error("fact writer unavailable");
+    });
+    restores.push(() => factSpy.mockRestore());
+    const payloads: Array<Record<string, unknown>> = [];
+    const warns: Array<{ message: string; attributes: Record<string, unknown> }> = [];
+    const observability = {
+      info: () => undefined,
+      warn: (message: string, attributes: Record<string, unknown>) => {
+        warns.push({ message, attributes });
+      },
+    } as never;
+    const usage = { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 };
+    const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-free",
+      turnId: "turn-free",
+      turnAttemptId: "attempt-free",
+      model: "scripted-model",
+      externallyBilled: true,
+      chargesOpenGeniCredits: false,
+      countsTowardTokenCap: true,
+      usage,
+      sourceKey: "response-free",
+    });
+    expect(billing).not.toBeNull();
+    if (!billing) return;
+
+    const authoritative = await emitModelCallUsage({
+      observability,
+      publish: async (batch) => {
+        payloads.push(batch[0]?.payload as Record<string, unknown>);
+        return {
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })) as never,
+        };
+      },
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-free",
+      turnId: "turn-free",
+      provider: "openai",
+      providerApi: "responses",
+      model: "scripted-model",
+      sourceKey: "response-free",
+      usage: { usage },
+      normalizedUsage: billing.normalizedUsage,
+      billingPath: billing.billingPath,
+    });
+    expect(authoritative).toBe(true);
+
+    await recordAuthoritativeModelCallFact({
+      db,
+      observability,
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-free",
+      turnId: "turn-free",
+      turnAttemptId: "attempt-free",
+      sourceKey: "response-free",
+      provider: "openai",
+      providerApi: "responses",
+      model: "scripted-model",
+      billing,
+    });
+
+    expect(payloads).toEqual([
+      expect.objectContaining({
+        sourceKey: "response-free",
+        billingPath: "external",
+        inputTokens: 1000,
+        outputTokens: 500,
+      }),
+    ]);
+    expect(usageSpy.mock.calls.map(([, input]) => input)).toEqual([
+      expect.objectContaining({ eventType: "model.tokens", quantity: 1500 }),
+      expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+    ]);
+    expect(factSpy).toHaveBeenCalledTimes(1);
+    expect(warns).toEqual([
+      {
+        message: "model call fact persist failed",
+        attributes: {
+          errorClass: "WorkerOperationError",
+          errorCode: "worker_operation_failed",
+          origin: "worker",
+        },
+      },
+    ]);
   });
 
   test("external estimates preserve per-request pricing tiers", async () => {
@@ -206,6 +345,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: 60_000,
+      equivalentCreditCostMicros: 63_000,
       pricingSource: "configured_list_price",
     });
   });
@@ -243,6 +383,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "external",
         pricedCostMicros: 0,
         estimatedProviderCostMicros: null,
+        equivalentCreditCostMicros: null,
         pricingSource: null,
       });
     }
@@ -277,7 +418,6 @@ describe("recordAuthoritativeModelCallFact", () => {
       turnAttemptId: "attempt-gateway-incomplete",
       model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
       externallyBilled: false,
-      gatewayManaged: true,
       gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
       usage: { inputTokens: "invalid", outputTokens: 8, totalTokens: 8 },
       sourceKey: "response-gateway-incomplete",
@@ -285,8 +425,9 @@ describe("recordAuthoritativeModelCallFact", () => {
 
     expect(billing).toMatchObject({
       billingPath: "opengeni_credits",
-      pricedCostMicros: 5,
+      pricedCostMicros: 4,
       estimatedProviderCostMicros: 4,
+      equivalentCreditCostMicros: 4,
       pricingSource: "gateway_reported",
       upstreamProvider: "baseten",
     });
@@ -311,6 +452,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: null,
+      equivalentCreditCostMicros: null,
       pricingSource: null,
     });
   });

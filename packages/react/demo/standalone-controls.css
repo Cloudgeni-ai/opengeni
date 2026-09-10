@@ -1,0 +1,6 @@
+/* Intentionally hostile, unlayered host rules loaded AFTER the SDK. */
+body { margin: 24px; background: #151b26; color: #e8eef8; font: 15px/1.5 system-ui; }
+main { max-width: 760px; margin: auto; }
+section { margin-top: 24px; }
+button { border: 0; border-radius: 10px; padding: 10px 14px; font-weight: 650; background: #9db4ff; color: #111827; }
+button:disabled { opacity: 0.6; }

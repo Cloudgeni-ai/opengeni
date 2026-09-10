@@ -1,0 +1,78 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "OpenGeni",
+  "description": "Documentation for OpenGeni, the open, self-hostable runtime for long-running AI agents.",
+  "colors": {
+    "primary": "#026fd7",
+    "light": "#5fa7ff",
+    "dark": "#004bb7"
+  },
+  "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg",
+    "href": "https://opengeni.ai"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": ["index", "quickstart", "run-locally"]
+      },
+      {
+        "group": "Concepts",
+        "pages": [
+          "concepts/sessions",
+          "concepts/goals",
+          "concepts/approvals-and-human-input",
+          "concepts/compute-targets",
+          "concepts/memory-and-knowledge"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": ["guides/self-host", "guides/connect-a-machine", "guides/integrate-your-product"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["reference/sdk", "reference/authentication", "reference/further-reading"]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/Cloudgeni-ai/opengeni",
+          "icon": "github"
+        },
+        {
+          "anchor": "Open app",
+          "href": "https://app.opengeni.ai",
+          "icon": "arrow-up-right-from-square"
+        }
+      ]
+    }
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/Cloudgeni-ai/opengeni"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Open app",
+      "href": "https://app.opengeni.ai"
+    }
+  },
+  "contextual": {
+    "options": ["copy", "view", "chatgpt", "claude", "perplexity", "mcp", "cursor", "vscode"]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Cloudgeni-ai/opengeni"
+    }
+  }
+}

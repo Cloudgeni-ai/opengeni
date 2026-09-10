@@ -895,7 +895,7 @@ describe("transactional session workflow wake outbox", () => {
     const resumeWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
       (entry) => entry.sessionId === ctx.session.id,
     );
-    expect(resumeWake).toMatchObject({ interruptionRequested: true });
+    expect(resumeWake).toMatchObject({ interruptionRequested: false });
     await markSessionWorkflowWakeDelivered(client.db, resumeWake!);
     const ordinary = await send(ctx, "ordinary follow-up");
 

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { WorkspaceLearningHistoryResponse } from "@opengeni/sdk";
+import type { ManagedSelfContext } from "@/lib/managed-self-context";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -104,6 +105,8 @@ const rollbackRevision = mock(async () => ({ head: history.head!, event: {} }));
 const undoActivation = mock(async () => ({}));
 
 const context = {
+  workspaces: [{ id: workspaceId, accountId, kind: "shared" as "shared" | "personal" }],
+  managedSelfContext: null as ManagedSelfContext | null,
   client: {
     getWorkspaceLearningHistory: getHistory,
     createWorkspaceLearningPolicyRevision: createRevision,
@@ -112,6 +115,8 @@ const context = {
     undoGovernedLearningActivation: undoActivation,
   },
   accessContext: {
+    mode: "managed",
+    subjectId: "user:admin",
     accountGrants: [],
     workspaceGrants: [{ workspaceId, permissions: ["workspace:read", "workspace:admin"] }],
   },
@@ -132,7 +137,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-describe("Learning & autonomy", () => {
+describe("Workspace instruction and Skill autonomy", () => {
   test("renders only the learning-mode selector and saves with preserved overrides", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -143,8 +148,10 @@ describe("Learning & autonomy", () => {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
       expect(container.textContent).toContain("Off");
-      expect(container.textContent).toContain("Review first");
+      expect(container.textContent).toContain("Require approval");
       expect(container.textContent).toContain("Autonomous");
+      expect(container.textContent).toContain("Workspace instruction & Skill autonomy");
+      expect(container.textContent).toContain("Workspace instructions and Skills automatically");
       expect(container.querySelectorAll('input[name="learning-mode"]')).toHaveLength(3);
       expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
         true,
@@ -187,7 +194,7 @@ describe("Learning & autonomy", () => {
       );
       expect(rollbackRevision).not.toHaveBeenCalled();
       expect(undoActivation).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("Learning mode saved.");
+      expect(container.textContent).toContain("Instruction and Skill mode saved.");
     } finally {
       await act(async () => root.unmount());
     }
@@ -213,18 +220,20 @@ describe("Learning & autonomy", () => {
       );
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
-      expect(container.querySelector<HTMLInputElement>('input[value="off"]')?.checked).toBe(true);
+      expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
+        true,
+      );
 
-      const reviewFirst = container.querySelector<HTMLInputElement>('input[value="suggest"]');
+      const off = container.querySelector<HTMLInputElement>('input[value="off"]');
       await act(async () => {
-        reviewFirst!.click();
+        off!.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(createRevision).toHaveBeenCalledTimes(1);
       expect(createRevision).toHaveBeenCalledWith(
         workspaceId,
         expect.objectContaining({
-          workspaceMode: "suggest",
+          workspaceMode: "off",
           sourceOverrides: [],
           supersedesRevisionId: null,
         }),
@@ -238,9 +247,49 @@ describe("Learning & autonomy", () => {
           expectedActivationVersion: 0,
         }),
       );
-      expect(container.textContent).toContain("Learning mode saved.");
+      expect(container.textContent).toContain("Instruction and Skill mode saved.");
     } finally {
       await act(async () => root.unmount());
+    }
+  });
+
+  test("lets the Personal owner save without a workspace admin grant", async () => {
+    const previousGrants = context.accessContext.workspaceGrants;
+    context.accessContext.workspaceGrants = [{ workspaceId, permissions: ["workspace:read"] }];
+    context.workspaces[0]!.kind = "personal";
+    context.managedSelfContext = {
+      identity: { credentialGeneration: 1, managedUserId: "admin", subjectId: "user:admin" },
+      memberships: [
+        {
+          id: crypto.randomUUID(),
+          organizationId: accountId,
+          status: "active",
+          personalWorkspaceId: workspaceId,
+        },
+      ],
+    };
+    createRevision.mockClear();
+    activateRevision.mockClear();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(container.querySelector<HTMLFieldSetElement>("fieldset")?.disabled).toBe(false);
+      await act(async () => {
+        container.querySelector<HTMLInputElement>('input[value="off"]')!.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(createRevision).toHaveBeenCalledTimes(1);
+      expect(activateRevision).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Instruction and Skill mode saved.");
+    } finally {
+      await act(async () => root.unmount());
+      context.accessContext.workspaceGrants = previousGrants;
+      context.workspaces[0]!.kind = "shared";
+      context.managedSelfContext = null;
     }
   });
 
@@ -256,7 +305,7 @@ describe("Learning & autonomy", () => {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
       expect(container.textContent).toContain(
-        "Workspace admin access is required to change learning policy.",
+        "A workspace administrator or Personal workspace owner can change instruction and Skill autonomy.",
       );
       expect(container.querySelector<HTMLFieldSetElement>("fieldset")?.disabled).toBe(true);
     } finally {

@@ -1,14 +1,60 @@
 import type {
+  GitHubAppRepositoryBranchPage,
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
 } from "@opengeni/contracts";
 import {
+  GitHubRepositoryBranchesResponse as GitHubRepositoryBranchesResponseSchema,
+  type GitHubRepositoryBranchesResponse,
+  type ListGitHubRepositoryBranchesQuery,
+} from "@opengeni/contracts/github-repository-contracts";
+import {
+  areGitHubRepositoriesAllowedForWorkspace,
   hasAuditableGitHubInstallationAuthority,
   listGitHubInstallationAccessForWorkspace,
 } from "@opengeni/db";
-import { listGitHubAppInstallationSummaries, listGitHubAppRepositories } from "@opengeni/github";
+import {
+  GitHubAppApiError,
+  listGitHubAppInstallationSummaries,
+  listGitHubAppRepositories,
+  listGitHubAppRepositoryBranches,
+} from "@opengeni/github";
 import type { ApiRouteDeps } from "@opengeni/core";
+
+export type GitHubRepositoryBranchAuthorityErrorCode = "changed" | "not_authorized";
+
+export class GitHubRepositoryBranchAuthorityError extends Error {
+  constructor(readonly code: GitHubRepositoryBranchAuthorityErrorCode) {
+    super(code);
+    this.name = "GitHubRepositoryBranchAuthorityError";
+  }
+}
+
+export type WorkspaceGitHubRepositoryBranchServices = {
+  listInstallationAccess: typeof listGitHubInstallationAccessForWorkspace;
+  areRepositoriesAllowed: typeof areGitHubRepositoriesAllowedForWorkspace;
+  listProviderBranches: (
+    deps: ApiRouteDeps,
+    input: {
+      installationId: number;
+      repositoryId: number;
+      page: number;
+      limit: number;
+    },
+  ) => Promise<GitHubAppRepositoryBranchPage | null>;
+};
+
+const workspaceGitHubRepositoryBranchServices: WorkspaceGitHubRepositoryBranchServices = {
+  listInstallationAccess: listGitHubInstallationAccessForWorkspace,
+  areRepositoriesAllowed: areGitHubRepositoriesAllowedForWorkspace,
+  listProviderBranches: async (deps, input) =>
+    deps.githubAppApi?.listRepositoryBranches
+      ? await deps.githubAppApi.listRepositoryBranches(input)
+      : deps.githubAppApi
+        ? null
+        : await listGitHubAppRepositoryBranches(deps.settings, input),
+};
 
 export async function listWorkspaceGitHubInstallationBindings(
   deps: ApiRouteDeps,
@@ -152,4 +198,74 @@ export async function listWorkspaceGitHubRepositories(
     }
     return installation.repositoryIds.includes(repository.id);
   });
+}
+
+export async function listWorkspaceGitHubRepositoryBranches(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    repositoryId: number;
+    query: ListGitHubRepositoryBranchesQuery;
+  },
+  services: WorkspaceGitHubRepositoryBranchServices = workspaceGitHubRepositoryBranchServices,
+): Promise<GitHubRepositoryBranchesResponse> {
+  const installations = await services.listInstallationAccess(deps.db, input.workspaceId);
+  const installation = installations.find(
+    (candidate) => candidate.installationId === input.installationId,
+  );
+  if (
+    !installation ||
+    installation.accountId !== input.accountId ||
+    !hasAuditableGitHubInstallationAuthority(installation) ||
+    !installation.repositoryIds.includes(input.repositoryId)
+  ) {
+    throw new GitHubRepositoryBranchAuthorityError("not_authorized");
+  }
+  if (
+    !(await services.areRepositoriesAllowed(deps.db, input.workspaceId, input.installationId, [
+      input.repositoryId,
+    ]))
+  ) {
+    throw new GitHubRepositoryBranchAuthorityError("changed");
+  }
+  const page = await services.listProviderBranches(deps, {
+    installationId: input.installationId,
+    repositoryId: input.repositoryId,
+    page: input.query.cursor,
+    limit: input.query.limit,
+  });
+  if (!page) {
+    throw new GitHubAppApiError(
+      "The configured GitHub provider cannot list exact repository branches",
+    );
+  }
+  if (
+    page.installationId !== input.installationId ||
+    page.repositoryId !== input.repositoryId ||
+    page.branches.length > input.query.limit ||
+    (page.nextPage !== null && page.nextPage !== input.query.cursor + 1) ||
+    (page.branches.length < input.query.limit && page.nextPage !== null)
+  ) {
+    throw new GitHubAppApiError("GitHub returned an invalid repository branches page");
+  }
+  const response = GitHubRepositoryBranchesResponseSchema.safeParse({
+    branches: page.branches.map((name) => ({
+      name,
+      isDefault: name === page.defaultBranch,
+    })),
+    nextCursor: page.nextPage,
+  });
+  if (!response.success) {
+    throw new GitHubAppApiError("GitHub returned an invalid repository branches page");
+  }
+  if (
+    !(await services.areRepositoriesAllowed(deps.db, input.workspaceId, input.installationId, [
+      input.repositoryId,
+    ]))
+  ) {
+    throw new GitHubRepositoryBranchAuthorityError("changed");
+  }
+  return response.data;
 }

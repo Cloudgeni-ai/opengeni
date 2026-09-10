@@ -120,6 +120,36 @@ function tokenRegistration(property: string) {
 }
 
 describe("compiled CSS contract", () => {
+  test("keeps hidden SDK controls hidden despite display utilities", () => {
+    let hidden = false;
+    parsed.walkRules((rule) => {
+      if (!rule.selector.includes('[hidden]:not([hidden="until-found"])')) return;
+      rule.walkDecls("display", (decl) => {
+        hidden = decl.value === "none" && decl.important;
+      });
+    });
+    expect(hidden).toBe(true);
+  });
+  test("resets embedded controls before utilities without resetting host controls", () => {
+    const reset = compiled.indexOf(".og-root :where(button, input, textarea, select)");
+    expect(reset).toBeGreaterThan(-1);
+    expect(reset).toBeLessThan(compiled.indexOf(".bg-transparent"));
+    expect(reset).toBeLessThan(compiled.indexOf(".rounded-og-lg"));
+    let declarations: Record<string, string> = {};
+    parsed.walkRules((rule) => {
+      if (rule.selector !== ".og-root :where(button, input, textarea, select)") return;
+      rule.walkDecls((decl) => {
+        declarations[decl.prop] = decl.value;
+      });
+    });
+    expect(declarations).toMatchObject({
+      padding: "0",
+      border: "0 solid",
+      "background-color": "transparent",
+      font: "inherit",
+    });
+  });
+
   test("ships effective derived tokens through the Tailwind source bridge", () => {
     expect(sourceBridge).toContain('@import "./tokens.css";\n@import "./effective-tokens.css";');
     expect(effectiveTokens).toContain("--_og-color-accent-soft: var(--og-color-accent-soft);");
@@ -177,6 +207,7 @@ describe("compiled CSS contract", () => {
 
   test("keeps outline-hidden focus utilities safe in forced-colors mode", () => {
     expect(selectorsForUtility("outline-none")).toEqual([]);
+    expect(selectorsForUtility("focus-visible:outline-none")).toEqual([]);
     expect(hasForcedColorsOutlineFallback("outline-hidden")).toBe(true);
     expect(hasForcedColorsOutlineFallback("focus:outline-hidden")).toBe(true);
     expect(hasForcedColorsOutlineFallback("focus-visible:outline-hidden")).toBe(true);

@@ -97,6 +97,7 @@ describe("core new-session draft hydration", () => {
         model: settings.openaiModel,
         reasoningEffort: settings.openaiReasoningEffort,
         latencyMode: "standard",
+        selectedProjectChannelId: null,
         options: { visibility: "workspace" },
       },
     );
@@ -137,6 +138,83 @@ describe("core new-session draft hydration", () => {
     expect(session.initialTurnId).toBeString();
     expect(session.title).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
     expect(session.titleSource).toBe("agent");
+  }, 180_000);
+
+  test("rejects a stale create before committing a visible session shell", async () => {
+    if (!available) return;
+    const { grant } = await fixture();
+    const first = await saveActorNewSessionDraft(
+      { db, settings, objectStorage: null },
+      grant,
+      grant.workspaceId!,
+      {
+        expectedRevision: 0,
+        text: "stale browser prompt",
+        resources: [],
+        tools: [],
+        toolsProvided: true,
+        model: settings.openaiModel,
+        reasoningEffort: settings.openaiReasoningEffort,
+        latencyMode: "standard",
+        options: { visibility: "workspace" },
+      },
+    );
+    await saveActorNewSessionDraft(
+      { db, settings, objectStorage: null },
+      grant,
+      grant.workspaceId!,
+      {
+        expectedRevision: first.revision,
+        text: "newer sibling-tab prompt",
+        resources: [],
+        tools: [],
+        toolsProvided: true,
+        model: settings.openaiModel,
+        reasoningEffort: settings.openaiReasoningEffort,
+        latencyMode: "standard",
+        options: { visibility: "workspace" },
+      },
+    );
+    const noop = async () => undefined;
+    const deps = {
+      settings,
+      db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        signalUserMessage: noop,
+        wakeSessionWorkflow: noop,
+        requestSessionWorkflowWakeDispatch: noop,
+        signalApprovalDecision: noop,
+        signalSessionControl: noop,
+        syncScheduledTask: noop,
+        deleteScheduledTaskSchedule: noop,
+        triggerScheduledTask: noop,
+      } as unknown as SessionWorkflowClient,
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: noop },
+      getDocumentServices: () => ({}) as never,
+    } as unknown as ApiRouteDeps;
+
+    await expect(
+      createSessionForRequest(deps, grant, grant.workspaceId!, {
+        initialMessage: first.text,
+        visibility: "workspace",
+        resources: [],
+        tools: [],
+        model: first.model,
+        reasoningEffort: first.reasoningEffort,
+        latencyMode: first.latencyMode,
+        expectedNewSessionDraftRevision: first.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const [stored] = await shared!.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${grant.workspaceId!}`;
+    expect(stored).toEqual({ count: 0 });
   }, 180_000);
 
   test("treats a markerless old-client save, including [], as explicit tools", async () => {
@@ -228,6 +306,7 @@ describe("core new-session draft hydration", () => {
         model: "scripted-model",
         reasoningEffort: "high",
         latencyMode: "fast",
+        selectedProjectChannelId: null,
         options: {
           sandboxBackend: "selfhosted",
           targetSandboxId: crypto.randomUUID(),
@@ -243,6 +322,7 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.resources).toEqual([resources[0], resources[2]]);
     expect(hydrated.tools).toEqual([mcp("opengeni")]);
     expect(hydrated.toolsProvided).toBe(true);
+    expect(hydrated.selectedProjectChannelId).toBeNull();
     expect(hydrated.options).toEqual({});
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");

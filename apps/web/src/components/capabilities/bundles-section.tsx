@@ -4,7 +4,7 @@
  * A Bundle is a named collection of tools and instructions, not a live
  * connection to anything, so it does not belong in the Connectors
  * Enabled/Browse grid. All three kinds share the same `IntegrationRow` the
- * Integrations list uses and the same bundle-scoped search, so the list can be
+ * Integrations list uses and the page-wide search, so the list can be
  * scanned as one thing. Only the detail differs, and only where it genuinely
  * must: imported Skills and Plugins open the four-block `IntegrationSheet`, a
  * catalog Skill keeps the catalog detail sheet that owns its reviewed library
@@ -15,7 +15,7 @@
  * quick-connect fast path: the trailing state indicator stays decorative.
  */
 import type { usePacks } from "@opengeni/react";
-import { PackagePlusIcon, PlusIcon, PuzzleIcon, SearchIcon, SparklesIcon } from "lucide-react";
+import { PackagePlusIcon, PlusIcon, PuzzleIcon, SparklesIcon } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -42,7 +42,6 @@ import { useSourcePackages } from "@/components/capabilities/use-source-packages
 import { LoadErrorState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import type {
   CapabilityCatalogItem,
@@ -54,10 +53,11 @@ import type {
 
 export type PackSelectionInput = { rigId?: string; variableSetId?: string };
 
-/** The search input describes itself with the count, so both need one id. */
+/** Stable identity for the bundle search result count. */
 const BUNDLE_COUNT_ID = "bundles-visible-count";
 
 export function BundlesSection({
+  query,
   client,
   workspaceId,
   connections,
@@ -76,8 +76,10 @@ export function BundlesSection({
   onPreviewPackUninstall,
   onUninstallPack,
   onUnregisterPack,
+  onStartPackSession,
   onChanged,
 }: {
+  query: string;
   client: OpenGeniBrowserClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
@@ -110,6 +112,7 @@ export function BundlesSection({
     idempotencyKey: string,
   ) => Promise<boolean>;
   onUnregisterPack: (pack: CapabilityPack) => Promise<boolean>;
+  onStartPackSession: (skillCapabilityId: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
   const source = useSourcePackages({
@@ -119,7 +122,6 @@ export function BundlesSection({
     canManage,
     onChanged,
   });
-  const [query, setQuery] = useState("");
   const [openSheetId, setOpenSheetId] = useState<string | null>(null);
   const [openPackId, setOpenPackId] = useState<string | null>(null);
   const [manifestOpen, setManifestOpen] = useState(false);
@@ -280,17 +282,6 @@ export function BundlesSection({
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <div className="relative min-w-0 flex-1">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search installed skills, plugins, and packs"
-            className="h-10 rounded-xl pl-9 transition-none"
-            aria-label="Search bundles"
-            aria-describedby={BUNDLE_COUNT_ID}
-          />
-        </div>
         {/*
           A live region tied to the search box: narrowing the list is otherwise
           a silent change for a reader who cannot see the grid shrink.
@@ -298,6 +289,7 @@ export function BundlesSection({
         <span
           id={BUNDLE_COUNT_ID}
           role="status"
+          aria-label="Bundle search results"
           className="shrink-0 text-xs text-fg-muted"
           data-bundle-count
         >
@@ -379,6 +371,7 @@ export function BundlesSection({
             onUninstallPack(openPack, preview, idempotencyKey)
           }
           onUnregister={() => onUnregisterPack(openPack)}
+          onStartSession={onStartPackSession}
         />
       ) : null}
 

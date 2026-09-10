@@ -1,5 +1,52 @@
 # @opengeni/sdk
 
+## External-user admission (implementation branch)
+
+On a product backend, `client.asUser(externalId, { source? })` returns a separate
+client that sends the external actor assertion with the organization key. IDs
+are opaque and case-sensitive; the default source is `default`. Keep the key and
+this client server-side. Each request requires the intersection of the key's
+permissions and the user's explicit workspace membership. API-key rotation does
+not change the external identity.
+
+Use the service client—not an `asUser` client—to call
+`addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`
+for explicit onboarding. It requires `members:manage`, cannot grant more than
+the key permits, excludes Personal workspaces, and refuses to overwrite an
+existing membership with different permissions. Ordinary `asUser` calls never
+restore removed workspace membership or reactivate disabled identities.
+
+Service `removeWorkspaceMember` supports external members through the existing
+fenced workspace teardown. Account-wide `updateExternalIdentityMembership(
+organizationId, organizationMembershipId, { kind, expectedAuthorizationRevision,
+operationId, reason? })` requires explicit `account:admin` and supports suspend,
+reactivate, and offboard. The membership ID is returned by onboarding; its initial
+authorization revision is 1. Retain the returned revision for subsequent changes.
+Reactivation restores admission, not revoked memberships or work. Offboarding
+follows existing retention policy and cannot be reactivated through this API.
+Native-user targets and `asUser` calls are rejected by this service endpoint.
+
+An `asUser` client can discover/access its own provisioned Personal workspace
+under the key's permission ceiling. Core private session operations retain
+organization readiness/settings and explicit sharing acknowledgments; service
+clients gain no Personal-workspace fallback.
+
+Optional native-account delegation uses `beginIdentityLink`, authenticated native
+`previewIdentityLink`/`confirmIdentityLink`, and explicit server-side
+`asLinkedUser(externalId, { source?, linkId, expectedLinkRevision })`. Confirmation
+requires the actual native login plus the one-time host challenge; an organization
+key cannot confirm for the native user. `listIdentityLinks(workspaceId, cursor?)`
+returns only the effective participant's links in that organization (50 per page).
+`revokeIdentityLink` requires the observed revision. Linking never changes ordinary
+`asUser`, merges histories or transfers credentials. Link-dependent accepted work
+retains revocation checks across schedules and children. Short-lived inline MCP
+credentials remain supported, and durable renewal stays opt-in.
+
+Connect accepts an optional `installationTarget: { instanceKey, displayName,
+expectedInstanceVersion? }`. Keep the exact observed version for an existing named
+account. Setup freezes the target through callback and operation review; omitting
+it creates an independent named account instead of overwriting a default instance.
+
 Framework-agnostic TypeScript SDK for the OpenGeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
@@ -17,6 +64,83 @@ Browser clients may call the public API from any origin with an explicitly safe
 bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
+
+## Chat quick start (`@opengeni/sdk/chat`)
+
+The fastest way to put OpenGeni behind an existing chat: one option object per
+conversation, one server handler for your endpoint. Tenants map to organization
+workspaces, conversations map to deterministic sessions, and the organization
+API key never leaves your server.
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  // baseUrl defaults to https://app.opengeni.ai; source (default "app") labels your product.
+});
+
+const chat = await og.chat({
+  tenant: "acme", // one workspace per customer, created on first use
+  user: "u_42", // authenticated product user; onboard workspace membership first
+  conversation: "c_9", // stable conversation id, independent of the acting user
+  agentAccess: "session", // "session" (default) | "user" | "workspace"
+  memory: "user", // "user" | "workspace" | false; session-only agent reach defaults to false
+  create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
+});
+
+const reply = await chat.send("hello"); // creates the session on the first send
+console.log(reply.text); // or String(reply)
+
+for await (const chunk of chat.stream("and then?")) {
+  if (chunk.type === "text") process.stdout.write(chunk.text);
+  if (chunk.type === "pending") await chat.respond({ requestId: chunk.pending.requestId, decision: "approve" });
+}
+
+// Your endpoint. `resolve` is your auth hook: identity comes from the request
+// you authenticated, never from the body. The handler reads the client's
+// conversation id itself (x-opengeni-conversation header, or the wire format's
+// own field) and authorizes as `user`; return `conversation` from resolve only
+// when the host names it, which is required when there is no `user`.
+export const handler = createChatHandler(og, {
+  resolve: async (request) => {
+    const session = await getSessionFromCookie(request);
+    if (!session) return new Response("Unauthorized", { status: 401 });
+    return { tenant: session.accountId, user: session.userId };
+  },
+  // format: "vercel" | "openai-chat" | "openai-responses" (default "native");
+  // a request may override it with the x-opengeni-chat-format header.
+});
+export const GET = handler; // conversation history, for restoring the chat on reload
+export const POST = handler; // send a message, or answer a pending request at .../respond
+```
+
+Conversation IDs do not change with the acting user. Authorized collaborators
+can use the same session; private visibility prevents access by other users.
+Use `chatBySessionId` for existing and legacy user-namespaced conversations.
+User mode requires explicit workspace membership and never restores removed
+membership automatically. Without a `user`, the host must name the conversation
+from `resolve`. The Vercel and OpenAI adapters send only the latest user
+message; the earlier messages in that request are imported once, as context on
+the first message of a conversation, after which OpenGeni owns the history.
+
+Pick the isolation per session with `agentAccess` (which other sessions the
+agent may reach) and `memory` (what it remembers), all inside one workspace that
+shares the customer's documents, instructions, and integrations:
+
+| Scenario                                          | `agentAccess` | `memory`      |
+| ------------------------------------------------- | ------------- | ------------- |
+| Agent confined to its chat tree (support desk)    | `"session"`   | `false`       |
+| One user's chats see each other, not other users' | `"user"`      | `"user"`      |
+| Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
+| Shared agent access, no memory                    | any           | `false`       |
+
+The chat handler is backend-only: connect a custom or compatible frontend to
+its protocol. For the full React agent experience, use `SessionConversation`
+with `OpenGeniClient` and authenticated session routes, not this simplified
+chat protocol. The normal SDK preserves files, tools, approvals with policies,
+forks, and realtime voice.
 
 ## Quick start
 
@@ -76,7 +200,14 @@ complete organization-workspace inventory.
 Organization key administration uses `listOrganizationApiKeys`,
 `createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
 create response is shown once and must be stored in the backend's secret
-manager.
+manager. `createOrganizationApiKey(organizationId, { name, access: "read" })`
+mints a read-only master key: it inventories shared workspaces and reads their
+sessions, events, and files, but cannot create sessions, send messages, or mint
+keys, and every key reports its tier as `apiKey.access`. Either tier can call
+`listOrganizationSessions(organizationId, { limit, cursor, scopeSubjectId, status })`
+for one page of sessions across every shared workspace (each row carries its
+`workspaceId`; private sessions and Personal workspaces never appear), or
+`iterateOrganizationSessions` to follow `nextCursor` to the end.
 
 The external backend also owns its Skill catalog. Load the selected definitions
 and pass them inline in `CreateSessionRequest.skills` for each product-created
@@ -84,10 +215,22 @@ session. There is no organization-wide Skill registry or Skill inheritance in
 this integration contract. See the canonical guide for the complete route map,
 security boundary, and delivery checklist.
 
+Installed Pack Skills normally remain workspace-managed. A Pack may instead
+mark guidance as `session_selected`; installation then exposes it to no agent
+until `createSession` names the reviewed immutable component in
+`installedSkillIds`. OpenGeni copies that exact artifact into the new session,
+so omitting the field from customer-facing creates is a real contamination
+boundary rather than a prompt convention.
+The ordered selection is part of keyed-create identity: reusing an
+`idempotencyKey` with a different selection returns a conflict instead of the
+session configured by the earlier request.
+
 For session lists, `deriveSessionDisplayTitle(session)` returns the durable
 agent/user title when available. While the automatic title is still pending, it
-shows a short, sensitive-safe preview of the opening prompt and automatically
-yields to the later `session.title_set` value.
+shows the first short, sensitive-safe line of the opening prompt, skipping an
+unsafe pasted URL or identifier when later safe text exists. If no safe line is
+available, a short session reference keeps rows distinguishable. The display
+automatically yields to the later `session.title_set` value.
 
 Browser consoles that do not need operator-only surfaces can import
 `OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration
@@ -410,10 +553,13 @@ assign product types such as app, page, dashboard, or gallery. List pages are
 bounded and expose both `truncated` and an opaque `nextCursor` so callers never
 mistake a partial page for the complete workspace catalog.
 
-The initial web renderer supports semantic HTML, inline CSS, CSS-only
-interactions, and inline SVG. It removes JavaScript, event handlers, forms,
-embeds, external URLs, and other active or navigation-capable markup before
-rendering. Executable artifacts require a later, stronger isolation boundary.
+Each Site version retains one self-contained executable HTML runtime, its
+bounded editable source bundle, and the exact canonical tool identities it
+requested. The web host renders that runtime in an opaque-origin sandboxed
+iframe. Credentials, cookies, API URLs, workspace ids, and parent DOM authority
+never enter the iframe; `@opengeni/sdk/site` uses a single parent-owned
+`MessagePort` that exposes only the retained tool allowlist intersected with the
+current viewer's live workspace catalog.
 
 ```ts
 let cursor: string | undefined;
@@ -432,6 +578,64 @@ same key only to retry the same logical mutation. Agent-authored versions also
 return the exact source session, turn, attempt, and execution generation that
 published them. Version and event history are bounded; inspect
 `versionsTruncated` and `eventsTruncated` on the detail response.
+
+## Workspace tools
+
+The browser-safe SDK exposes the same gateway catalog and executor used by
+model MCP calls and Codemode. Generated declarations augment the lazy namespace
+for exact installed-tool types; canonical `{ serverId, toolName }` identity and
+the server-side catalog remain authoritative.
+
+```ts
+const tools = client.tools.forWorkspace(workspaceId);
+const documents = await tools.docs.search({ query: "launch plan" });
+```
+
+An approval-required call needs a server-issued capability. A trusted host
+shows its approval UI first, then asks for one token bound to the current human,
+workspace, operation id, catalog digest, exact tool identity, and arguments.
+The token expires after five minutes, is stored only as a hash, and is consumed
+once by the matching call.
+
+Connection-backed tools configured for both provider policy and one-shot human
+approval are omitted from this HTTP catalog until their provider adapter can
+preflight credential and resource authorization before consuming the token.
+
+```ts
+const operationId = crypto.randomUUID();
+const identity = { serverId: "linear", toolName: "issues_update" };
+const input = { issueId, state: "Done" };
+const approval = await tools.$approve(identity, input, { operationId });
+
+await tools.$call(identity, input, {
+  operationId,
+  approvalToken: approval.approvalToken,
+});
+```
+
+When a call or approval request receives the typed
+`409 details.code = "catalog_stale"` response, the SDK refreshes the catalog,
+re-resolves the exact identity or generated namespace path, preserves the
+operation id (generating it before the first attempt when omitted), and retries
+once. A call that already carries an approval token cannot reuse that
+single-use capability after the catalog digest changes; instead it throws
+`OpenGeniToolReapprovalRequiredError` with the refreshed identity and digest so
+the trusted host can show approval again for the same operation id.
+
+Reapproval is valid only before the original capability is consumed. Once a
+call crosses that boundary, the server retains a hash-only tombstone for the
+operation id and rejects another approval with
+`409 details.code = "tool_gateway_operation_already_started"` and
+`outcomeUnknown: true`. The host must reconcile the provider outcome; it must
+not turn an ambiguous call into a second approved execution by minting a fresh
+operation id automatically.
+
+Do not request approval capabilities speculatively or expose them to Site iframe
+code. The host projects only the active immutable version's requested identities,
+supplies the Site context on direct calls, and the server revalidates the active
+version and viewer's live authority. The requested set is a maximum allowlist,
+not an authority grant; ordinary gateway approval still applies. Archived Sites
+receive no tool bridge.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
@@ -748,6 +952,7 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `ensureWorkspace`, `getWorkspace`, `updateWorkspace` |
+| Managed organizations | `createOrganization` for first-time compatibility; `createAdditionalOrganization` for an already-onboarded human; `listOrganizationMemberships`, `listOrganizationInvitations`, `acceptOrganizationInvitation` |
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |

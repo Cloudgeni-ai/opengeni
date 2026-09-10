@@ -1,9 +1,34 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { buildOpenGeniAgent } from "../src/index";
+import { buildOpenGeniAgent, CODEMODE_PROGRAMMATIC_DIRECTIVE } from "../src/index";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 
 describe("provider-neutral operational instructions", () => {
+  test("separates command observation from conversation and diagnostic reads concisely", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "Use `session_events` for conversation history",
+    );
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("If the user asks to create", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(guidance).toContain("Cursors only paginate");
+    expect(guidance).toContain("Audit reads do not acknowledge command completion");
+    expect(guidance).toContain("`command_read`");
+    expect(guidance).toContain("`command_wait`");
+    expect(guidance).toContain("`command_input` only to send input");
+    expect(guidance).toContain("a running read does not");
+    expect(guidance).toContain("Earlier tool results and delivered messages never change");
+    expect(guidance.length).toBeLessThan(1600);
+  });
+
+  test("prefers the attempt-provided native Codemode client over an older installed CLI", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "prefer the connection-bound native client even if an older `ogtool` is installed",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_NATIVE_CLIENT");
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");
@@ -20,6 +45,30 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "a Connected Machine instead uses its host-native workspace root",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("`/home/u/proj` or `C:/repo`");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Both are valid inside a `sandbox:` link when they are the active workspace.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/home/u/proj/app.py:12)");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.ts](<sandbox:C:/repo/app.ts:12>)");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "In managed sandboxes, never link directly to `/tmp`",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "or any file outside the current workspace",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "copy it into the current workspace before responding",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "absolute file links may point outside the working directory",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("a host path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("host-absolute paths");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
   });
 
@@ -57,5 +106,32 @@ describe("provider-neutral operational instructions", () => {
       "A `goal.completed` event records goal state but is not a terminal child result",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("pausing an ancestor also stops you");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Keep the accepted update/turn ID");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "an older in-flight turn finishing does not prove your input was consumed",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not repeatedly send unconsumed input");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Preserve explicit human pauses and approvals",
+    );
+  });
+
+  test("holds an unchanged external wait during the status turn without stalling useful work", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not end with only a status reply and leave an immediate continuation",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only when further progress genuinely depends on unchanged work already in flight",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "after calling `wait_for_input`, end without another final or status restatement unless you found material new information",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "except for the unchanged-wait `wait_for_input` continuation described above",
+    );
   });
 });

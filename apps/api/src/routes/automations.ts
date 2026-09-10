@@ -10,6 +10,9 @@ import {
   UpdateAutomationSourceRequest,
   UpdateAutomationTriggerRequest,
   stableJson,
+  resolveBundledSkillSelection,
+  type AccessGrant,
+  type BundledSkillId,
 } from "@opengeni/contracts";
 import {
   AutomationDeliveryConflictError,
@@ -21,6 +24,7 @@ import {
   encryptVariableSetValue,
   getAutomationSourceSecret,
   getAutomationTriggerRevisions,
+  getSession,
   listActiveAutomationTriggersForSource,
   listAutomationRuns,
   listAutomationSources,
@@ -29,18 +33,46 @@ import {
   resolveAutomationWebhookEndpoint,
   updateAutomationSource,
   updateAutomationTrigger,
+  withWorkspaceGatewayCustomModelReadLock,
+  withWorkspaceOpenRouterCustomModelReadLock,
   type AutomationSourceSecret,
 } from "@opengeni/db";
 import {
   automationRequestDigest,
+  assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
+  canonicalConfiguredModel,
+  creationInitiatorForGrant,
+  workspaceCustomModelReference,
+  lockActiveCustomModelForAdmission,
   requireAccessGrant,
   requireAutomationAdapter,
   requirePermission,
+  resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+
+async function callerBundleSelection(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  requested: BundledSkillId[] | undefined,
+) {
+  const actor = creationInitiatorForGrant(grant).actor;
+  const parent = actor ? await getSession(deps.db, grant.workspaceId, actor.sessionId) : null;
+  if (actor && (!parent || parent.accountId !== grant.accountId))
+    throw new HTTPException(403, {
+      message: "Automation Skill selection requires the creating agent's session",
+    });
+  try {
+    return resolveBundledSkillSelection(requested, parent?.bundledSkillIds);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
+    });
+  }
+}
 
 export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/automations/sources", async (c) => {
@@ -139,6 +171,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const request = CreateAutomationTriggerRequest.parse(await c.req.json());
+    request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
+      deps,
+      grant,
+      request.sessionTemplate.bundledSkillIds,
+    );
     if (request.packInstallationId || request.packTemplateId) {
       throw new HTTPException(409, {
         message: "Pack-owned automation triggers must be created through their Pack setup API",
@@ -157,13 +194,36 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
       requirePermission(grant, permission);
     }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
+    const model = canonicalConfiguredModel(catalogSettings, request.sessionTemplate.model) ?? null;
+    if (model) {
+      await assertWorkspaceModelPolicyAllows(deps.db, catalogSettings, workspaceId, model);
+    }
+    const normalizedRequest = {
+      ...request,
+      sessionTemplate: { ...request.sessionTemplate, model },
+    };
+    const beforeCreateCommit = model
+      ? workspaceCustomModelCommitGuard({
+          settings: catalogSettings,
+          accountId: grant.accountId,
+          workspaceId,
+          modelId: model,
+        })
+      : undefined;
     return c.json(
       await createAutomationTrigger(deps.db, {
         accountId: grant.accountId,
         workspaceId,
         createdBySubjectId: grant.subjectId,
-        request,
+        request: normalizedRequest,
         adapterId: adapter.id,
+        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       }),
       201,
     );
@@ -190,16 +250,63 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       requireAutomationAdapter(existing.adapterId).validateTriggerParameters(request.parameters);
     }
     if (request.sessionTemplate) {
+      request.sessionTemplate.bundledSkillIds = await callerBundleSelection(
+        deps,
+        grant,
+        request.sessionTemplate.bundledSkillIds,
+      );
       for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
         requirePermission(grant, permission);
       }
     }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
+    const normalizedRequest = request.sessionTemplate
+      ? {
+          ...request,
+          sessionTemplate: {
+            ...request.sessionTemplate,
+            model: canonicalConfiguredModel(catalogSettings, request.sessionTemplate.model) ?? null,
+          },
+        }
+      : request;
+    if (normalizedRequest.sessionTemplate?.model) {
+      await assertWorkspaceModelPolicyAllows(
+        deps.db,
+        catalogSettings,
+        workspaceId,
+        normalizedRequest.sessionTemplate.model,
+      );
+    }
+    const effectiveModel = normalizedRequest.sessionTemplate
+      ? normalizedRequest.sessionTemplate.model
+      : existing.sessionTemplate.model;
+    const materialExecutionChange =
+      request.eventTypes !== undefined ||
+      request.configuration !== undefined ||
+      request.parameters !== undefined ||
+      request.sessionTemplate !== undefined ||
+      (request.status === "active" && existing.status !== "active");
+    const beforeUpdateCommit =
+      materialExecutionChange && effectiveModel
+        ? workspaceCustomModelCommitGuard({
+            settings: catalogSettings,
+            accountId: grant.accountId,
+            workspaceId,
+            modelId: effectiveModel,
+          })
+        : undefined;
     try {
       const trigger = await updateAutomationTrigger(deps.db, {
         workspaceId,
         triggerId: c.req.param("triggerId"),
         subjectId: grant.subjectId,
-        request,
+        request: normalizedRequest,
+        ...(beforeUpdateCommit ? { beforeUpdateCommit } : {}),
       });
       if (!trigger)
         throw new HTTPException(404, {
@@ -377,29 +484,86 @@ export async function acceptAutomationEvent(
     workspaceId: source.workspaceId,
     sourceId: source.id,
   });
-  const matchingAtAcceptance = triggers.filter((trigger) =>
+  const matchingByEvent = triggers.filter((trigger) =>
     adapter.matches({ event: input.normalizedEvent, trigger }),
   );
-  if (matchingAtAcceptance.length > AUTOMATION_MAX_MATCHED_TRIGGERS) {
+  if (matchingByEvent.length > AUTOMATION_MAX_MATCHED_TRIGGERS) {
     throw new HTTPException(422, {
       message: `automation event matches more than ${AUTOMATION_MAX_MATCHED_TRIGGERS} triggers`,
     });
   }
-  const stored = await recordAutomationEvent(deps.db, {
-    accountId: source.accountId,
-    workspaceId: source.workspaceId,
-    sourceId: source.id,
-    sourceVersion: source.version,
-    sourceConfiguration: source.configuration,
-    matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
-      triggerId: trigger.id,
-      revision: trigger.revision,
-    })),
-    deliveryKey: input.deliveryKey,
-    requestDigest: input.requestDigest,
-    normalizedEvent: input.normalizedEvent,
-    ignoredReason: matchingAtAcceptance.length === 0 ? "no_matching_triggers" : null,
-  });
+  const stored =
+    matchingByEvent.length === 0
+      ? await recordAutomationEvent(deps.db, {
+          accountId: source.accountId,
+          workspaceId: source.workspaceId,
+          sourceId: source.id,
+          sourceVersion: source.version,
+          sourceConfiguration: source.configuration,
+          matchedTriggerRevisions: [],
+          deliveryKey: input.deliveryKey,
+          requestDigest: input.requestDigest,
+          normalizedEvent: input.normalizedEvent,
+          ignoredReason: "no_matching_triggers",
+        })
+      : await withWorkspaceGatewayCustomModelReadLock(
+          deps.db,
+          { accountId: source.accountId, workspaceId: source.workspaceId },
+          async (gatewayLockedDb) =>
+            await withWorkspaceOpenRouterCustomModelReadLock(
+              gatewayLockedDb,
+              { accountId: source.accountId, workspaceId: source.workspaceId },
+              async (lockedDb) => {
+                const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+                const catalogSettings = (
+                  await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+                    accountId: source.accountId,
+                    workspaceId: source.workspaceId,
+                  })
+                ).settings;
+                const matchingAtAcceptance = [];
+                for (const trigger of matchingByEvent) {
+                  try {
+                    const render = adapter.render({
+                      event: input.normalizedEvent,
+                      trigger,
+                      source,
+                    });
+                    const requestedModel =
+                      render.sessionTemplate.model ?? catalogSettings.openaiModel;
+                    const model = canonicalConfiguredModel(catalogSettings, requestedModel);
+                    if (!model) continue;
+                    await assertWorkspaceModelPolicyAllows(
+                      lockedDb,
+                      catalogSettings,
+                      source.workspaceId,
+                      model,
+                    );
+                    matchingAtAcceptance.push(trigger);
+                  } catch (error) {
+                    if (isUnprocessableEntity(error)) continue;
+                    throw error;
+                  }
+                }
+                return await recordAutomationEvent(lockedDb, {
+                  accountId: source.accountId,
+                  workspaceId: source.workspaceId,
+                  sourceId: source.id,
+                  sourceVersion: source.version,
+                  sourceConfiguration: source.configuration,
+                  matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
+                    triggerId: trigger.id,
+                    revision: trigger.revision,
+                  })),
+                  deliveryKey: input.deliveryKey,
+                  requestDigest: input.requestDigest,
+                  normalizedEvent: input.normalizedEvent,
+                  ignoredReason:
+                    matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
+                });
+              },
+            ),
+        );
   const matching = await getAutomationTriggerRevisions(deps.db, {
     workspaceId: source.workspaceId,
     refs: stored.event.matchedTriggerRevisions,
@@ -455,6 +619,36 @@ export async function acceptAutomationEvent(
     eventId: stored.event.id,
     runIds,
   });
+}
+
+function isUnprocessableEntity(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "status" in error &&
+    (error as Error & { status?: unknown }).status === 422
+  );
+}
+
+function workspaceCustomModelCommitGuard(input: {
+  settings: ApiRouteDeps["settings"];
+  accountId: string;
+  workspaceId: string;
+  modelId: string;
+}): ((tx: ApiRouteDeps["db"]) => Promise<void>) | undefined {
+  const reference = workspaceCustomModelReference(input.settings, input.modelId);
+  if (!reference) return undefined;
+  return async (tx): Promise<void> => {
+    const active = await lockActiveCustomModelForAdmission(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      reference,
+    });
+    if (!active) {
+      throw new HTTPException(422, {
+        message: `model is not available: ${input.modelId}`,
+      });
+    }
+  };
 }
 
 async function requireSource(

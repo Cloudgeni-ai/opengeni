@@ -4,7 +4,6 @@ import {
   AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE,
   AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
   AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
-  AGENT_AUTHORED_SKILL_STYLE,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
@@ -141,7 +140,7 @@ export function registerCompanyBrainGovernedWriteTools(
       description:
         "Atomically promote one still-active note from this exact root task tree into a workspace instruction-policy proposal. The note bytes remain exact evidence and draft content. " +
         `Use this only for a universal always-on rule, never for an incident, fact, decision, outcome, or conditional procedure. Once active, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh minimal imperative note instead of promoting a long working note. ` +
-        "Off creates nothing; Review first keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt. This never widens scope.",
+        "Off creates nothing; Require approval keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt. This never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         target: WorkspaceInstructionPolicyTarget,
@@ -164,9 +163,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_preference",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into a workspace Skill proposal backed by the structured preference authority. Use this for reusable conditional how-to guidance, never for an incident, fact, decision, outcome, or universal always-on rule. The note bytes remain exact evidence and full proposal content. " +
-        `The title and description you supply are what gets composed into every session prompt, so write them as one short imperative statement; the note content is retrieved on demand and a note over ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters is rejected here rather than truncated. ` +
-        "Under Suggest the proposal waits for human review; under Automatic an eligible decision is activated through the preference lifecycle and remains undoable. This never widens scope.",
+        "Legacy Skill promotion entry point. Returns a redirect without changing the note or writing a Skill. Read the note, then use skill_save for reusable guidance governed directly by Learning mode. Read opengeni-skills with skill_read for instructions.",
       inputSchema: {
         ...taskNotePromotion,
         stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
@@ -185,14 +182,13 @@ export function registerCompanyBrainGovernedWriteTools(
         expiresAt: z.string().datetime({ offset: true }).nullable().optional().default(null),
       },
     },
-    async (request) => {
+    async () => {
       await input.authorize();
-      return writeResult(() =>
-        router.write({
-          attempt: input.attempt,
-          request: { kind: "promote_task_note_preference", ...request },
-        }),
-      );
+      return input.json({
+        status: "not_saved",
+        code: "use_skill_save",
+        message: "Read the task note, then use skill_save. The note has not been changed.",
+      });
     },
   );
 
@@ -202,7 +198,7 @@ export function registerCompanyBrainGovernedWriteTools(
       description:
         "Materialize an evidence-backed workspace instruction-policy proposal. " +
         `Use this only for a minimal universal rule, never for an incident, fact, decision, outcome, or conditional procedure. Once active, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE} ` +
-        "Off creates nothing; Review first keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt.",
+        "Off creates nothing; Require approval keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt.",
       inputSchema: {
         ...evidence,
         target: WorkspaceInstructionPolicyTarget,
@@ -234,9 +230,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "preference_propose",
     {
       description:
-        "Materialize an evidence-backed workspace Skill proposal in the structured preference authority. Use this only for reusable conditional how-to guidance, never for an incident, fact, decision, outcome, or universal always-on rule. " +
-        `Its short title and description are what get composed into every session prompt; the content is retrieved on demand, so its length is retrieval cost rather than standing prompt cost. Keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_SKILL_STYLE} ` +
-        "Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
+        "Legacy Skill proposal entry point. Returns a redirect without writing. Use skill_read to read opengeni-skills, then discover skill_save for shared Skill file changes governed directly by Learning mode.",
       inputSchema: {
         ...evidence,
         stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
@@ -264,14 +258,14 @@ export function registerCompanyBrainGovernedWriteTools(
         reason,
       },
     },
-    async (request) => {
+    async () => {
       await input.authorize();
-      return writeResult(() =>
-        router.write({
-          attempt: input.attempt,
-          request: { kind: "propose_preference", ...request },
-        }),
-      );
+      return input.json({
+        status: "not_saved",
+        code: "use_skill_save",
+        message:
+          "Use skill_save for Skill changes. This legacy entry point made no durable change.",
+      });
     },
   );
 }

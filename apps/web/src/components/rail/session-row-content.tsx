@@ -1,16 +1,33 @@
-import { CalendarClockIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
-import { useId } from "react";
+import {
+  BotIcon,
+  CalendarClockIcon,
+  Clock3Icon,
+  GitForkIcon,
+  Loader2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
+import { Children, isValidElement, useId } from "react";
 
 import { CreatorMonogram } from "@/components/creator-monogram";
-import { type CreatorRef, creatorAnnouncement, creatorInitials } from "@/lib/creator-initials";
+import {
+  type CreatorRef,
+  creatorAnnouncement,
+  creatorInitials,
+  creatorLabel,
+} from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
+import { sessionDescendantCountText } from "@/lib/session-tree-count";
 import { cn } from "@/lib/utils";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
 
-function ActiveWorkMark() {
+export function ActiveWorkMark({ className }: { className?: string }) {
   const maskId = `active-work-${useId().replaceAll(":", "")}`;
   return (
-    <svg aria-hidden="true" viewBox="0 0 108 108" className="size-2.5 shrink-0 text-brand">
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 108 108"
+      className={cn("size-2.5 shrink-0 text-brand", className)}
+    >
       <defs>
         <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="108">
           <circle cx="54" cy="54" r="48" fill="white" />
@@ -94,10 +111,13 @@ export function RailTrailingMetadata({
   scheduled = false,
   relativeTime,
   creator,
+  quickActionSlots = 0,
 }: {
   summary: RailAggregateStatus;
   scheduled?: boolean;
   relativeTime?: string | undefined;
+  /** Rightmost items replaced in place by the row's desktop quick actions. */
+  quickActionSlots?: number;
   /**
    * Session creator for a top-level row, else null; callers decide which rows
    * are roots. A chip is its own reason to render this block: a mobile root row
@@ -115,36 +135,142 @@ export function RailTrailingMetadata({
     summary.kind === "needs_attention" && summary.attentionSince
       ? formatWaitingSince(summary.attentionSince)
       : "";
-  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram) return null;
+  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram && !quickActionSlots)
+    return null;
+  const items = Children.toArray([
+    scheduled ? (
+      <CalendarClockIcon
+        key="schedule"
+        aria-label="Scheduled task"
+        className="size-3.5 shrink-0 text-fg-subtle"
+      />
+    ) : null,
+    hasMonogram && creator ? (
+      <CreatorMonogram key="creator" createdBy={creator} showTitle={false} />
+    ) : null,
+    waitingFor ? (
+      <span
+        key="waiting"
+        data-session-row-waiting
+        title={summary.label}
+        className="shrink-0 whitespace-nowrap text-2xs tabular-nums text-status-waiting"
+      >
+        {waitingFor}
+      </span>
+    ) : null,
+    hasStatusMarker ? (
+      <span key="status" className="flex size-3 items-center justify-center" title={summary.label}>
+        <RailAggregateDot summary={summary} />
+      </span>
+    ) : null,
+    hasRelativeTime ? (
+      <span
+        key="time"
+        className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg"
+      >
+        {relativeTime}
+      </span>
+    ) : null,
+  ]).filter(isValidElement);
+  if (!quickActionSlots) {
+    return (
+      <span
+        data-session-row-metadata
+        className="inline-flex shrink-0 items-center justify-end gap-1"
+      >
+        {items}
+      </span>
+    );
+  }
+  // Empty rows still reserve their action footprint. Visibility (never display
+  // or padding) swaps the last items, keeping every other box stationary.
+  while (items.length < quickActionSlots) items.unshift(<span key={`empty-${items.length}`} />);
   return (
-    <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end gap-1">
-      {scheduled ? (
-        <CalendarClockIcon
-          aria-label="Scheduled task"
-          className="size-3.5 shrink-0 text-fg-subtle"
-        />
-      ) : null}
-      {creator ? <CreatorMonogram createdBy={creator} /> : null}
-      {waitingFor ? (
+    <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end">
+      {items.map((item, index) => (
         <span
-          data-session-row-waiting
-          title={summary.label}
-          className="shrink-0 whitespace-nowrap text-2xs tabular-nums text-status-waiting"
+          key={item.key}
+          data-session-row-slot
+          className={cn(
+            "inline-flex min-w-6 shrink-0 items-center justify-center last:min-w-10",
+            index >= items.length - quickActionSlots &&
+              "pointer-fine:group-hover:invisible pointer-fine:group-focus-within:invisible",
+          )}
         >
-          {waitingFor}
+          {item}
         </span>
-      ) : null}
-      {hasStatusMarker ? (
-        <span className="flex size-3 items-center justify-center" title={summary.label}>
-          <RailAggregateDot summary={summary} />
-        </span>
-      ) : null}
-      {hasRelativeTime ? (
-        <span className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
-          {relativeTime}
-        </span>
-      ) : null}
+      ))}
     </span>
+  );
+}
+
+/**
+ * Dense, non-redundant context for a session row hover. The row itself already
+ * carries lifecycle and access signals, so this surface spends its space on
+ * facts the narrow rail cannot show: the complete title, creator identity,
+ * session age, and server-authoritative sub-agent total.
+ */
+export function SessionRowHoverDetails({
+  title,
+  createdAt,
+  createdBy,
+  descendantCount,
+  descendantCountTruncated,
+}: {
+  title: string;
+  createdAt: string;
+  createdBy: CreatorRef;
+  descendantCount: number;
+  descendantCountTruncated: boolean;
+}) {
+  const age = formatWaitingSince(createdAt);
+  const creatorName =
+    createdBy.kind === "service" || creatorInitials(createdBy) !== null
+      ? creatorLabel(createdBy)
+      : null;
+  const descendantTotal = sessionDescendantCountText(descendantCount, descendantCountTruncated);
+  const descendantNoun =
+    descendantCount === 1 && !descendantCountTruncated ? "sub-agent" : "sub-agents";
+
+  return (
+    <div data-session-row-hover-details className="grid min-w-0 grid-cols-1 gap-2.5">
+      <div className="flex min-w-0 items-start gap-3">
+        <p className="min-w-0 flex-1 text-sm font-medium leading-snug text-fg [overflow-wrap:anywhere]">
+          {title}
+        </p>
+        {age ? (
+          <span
+            aria-label={`Created ${age} ago`}
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-2xs tabular-nums text-fg-subtle"
+          >
+            <Clock3Icon aria-hidden="true" className="size-3" />
+            {age} ago
+          </span>
+        ) : null}
+      </div>
+      <div className="grid min-w-0 grid-cols-1 gap-1.5 text-xs text-fg-muted">
+        {creatorName ? (
+          <div className="flex min-w-0 items-center gap-2">
+            {createdBy.kind === "subject" ? (
+              <CreatorMonogram createdBy={createdBy} showTitle={false} />
+            ) : (
+              <span className="flex size-4 shrink-0 items-center justify-center">
+                <BotIcon aria-hidden="true" className="size-3.5" />
+              </span>
+            )}
+            <span className="min-w-0 truncate">Created by {creatorName}</span>
+          </div>
+        ) : null}
+        <div className="flex items-center gap-2">
+          <span className="flex size-4 shrink-0 items-center justify-center">
+            <GitForkIcon aria-hidden="true" className="size-3.5" />
+          </span>
+          <span>
+            {descendantTotal} {descendantNoun}
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -158,6 +284,7 @@ export function SessionRowContent({
   scheduled = false,
   relativeTime,
   creator,
+  quickActionSlots = 0,
 }: {
   title: string;
   stateLabel: string;
@@ -167,6 +294,7 @@ export function SessionRowContent({
   summary: RailAggregateStatus;
   scheduled?: boolean;
   relativeTime?: string;
+  quickActionSlots?: number;
   /** Session creator for a top-level row, else null. See RailTrailingMetadata. */
   creator?: CreatorRef | null | undefined;
 }) {
@@ -180,12 +308,16 @@ export function SessionRowContent({
           {title}
         </span>
         {mobile ? (
-          <span className="mt-0.5 truncate text-2xs font-normal text-fg-muted">
+          <span
+            data-session-row-state
+            className="mt-0.5 truncate text-2xs font-normal text-fg-muted"
+          >
             {[stateLabel, depthLabel, descendantLabel, relativeTime].filter(Boolean).join(" · ")}
           </span>
         ) : null}
       </span>
       <RailTrailingMetadata
+        quickActionSlots={quickActionSlots}
         summary={summary}
         scheduled={scheduled}
         relativeTime={relativeTime}

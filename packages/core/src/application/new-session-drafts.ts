@@ -11,6 +11,7 @@ import {
   getSandbox,
   getVariableSet,
   NewSessionDraftAccessError,
+  newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
   newSessionSelectionHistory,
   publicNewSessionDraftOptions,
@@ -28,7 +29,11 @@ import {
   validateGitHubRepositorySelection,
   validateToolRefs,
 } from "../domain/resources";
-import { hasPermission } from "../access";
+import {
+  hasPermission,
+  externalAttributionForAuthorization,
+  type AccessGrantAuthorization,
+} from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
@@ -41,6 +46,7 @@ function mapNewSessionDraft(
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
 ): NewSessionDraftValue | null {
   if (!row) return null;
+  const selectedProjectChannelId = newSessionDraftSelectedProjectChannelId(row);
   return NewSessionDraft.parse({
     revision: row.revision,
     text: row.text,
@@ -50,6 +56,7 @@ function mapNewSessionDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort,
     latencyMode: row.latencyMode,
+    ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
     options: publicNewSessionDraftOptions(row),
     selectionHistory: newSessionSelectionHistory(row),
     updatedAt: row.updatedAt.toISOString(),
@@ -224,6 +231,7 @@ export async function saveActorNewSessionDraft(
    * the historical bare-membership fence.
    */
   canonicalManagedHumanSession = false,
+  externalAuthorization?: AccessGrantAuthorization,
 ): Promise<NewSessionDraftValue> {
   const input = SaveNewSessionDraftRequest.parse(rawInput);
   // The pre-marker client contract required `tools` and had no
@@ -264,6 +272,9 @@ export async function saveActorNewSessionDraft(
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode,
+          ...(input.selectedProjectChannelId !== undefined
+            ? { selectedProjectChannelId: input.selectedProjectChannelId }
+            : {}),
           options: input.options,
           // Only managed people are removed through removeWorkspaceMember().
           // API keys and delegated service actors (for example the first-party
@@ -274,7 +285,9 @@ export async function saveActorNewSessionDraft(
           // all, so the human-removal fence above must fall back to the
           // organization-membership pointer for them — and only for the
           // canonical managed-cookie session that owns it.
-          personalWorkspaceOwnerException: canonicalManagedHumanSession,
+          personalWorkspaceOwnerException:
+            canonicalManagedHumanSession ||
+            externalAttributionForAuthorization(externalAuthorization, grant) !== null,
         }),
       ),
     );

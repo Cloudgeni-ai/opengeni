@@ -1,27 +1,40 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  AttemptToolApprovalRequiredError,
   codemodeDispatchSubject,
   createAttemptToolEnvironment,
   decodeCodemodeDispatchAck,
   encodeCodemodeDispatchRequest,
+  type AttemptToolDefinition,
 } from "@opengeni/codemode";
 import {
   bootstrapWorkspace,
+  claimCodemodeOperation,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   getCodemodeOperation,
   initializeSessionStartAtomically,
   listSessionEvents,
+  markCodemodeOperationExecutionStarted,
+  mutateSessionControlInTransaction,
+  withWorkspaceSessionActivityRls,
+  type SessionActivityDatabase,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
 } from "@opengeni/db";
+import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import {
   MemoryEventBus,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
+  testSettings,
 } from "@opengeni/testing";
-import { CodemodeAttemptDispatcher } from "../src/activities/codemode-dispatcher";
+import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
+import {
+  CodemodeAttemptDispatcher,
+  codemodeToolCallCreatedClientEventId,
+} from "../src/activities/codemode-dispatcher";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -42,7 +55,11 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function fixture(execute: (signal: AbortSignal | undefined) => Promise<string>) {
+async function fixture(
+  execute: (signal: AbortSignal | undefined) => Promise<string>,
+  inputSchema: AttemptToolDefinition["inputSchema"] = { type: "object" },
+  lifecycle?: AttemptToolDefinition["lifecycle"],
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -98,9 +115,10 @@ async function fixture(execute: (signal: AbortSignal | undefined) => Promise<str
       {
         identity: { serverId: "docs", toolName: "search" },
         modelName: "docs__search",
-        inputSchema: { type: "object" },
+        inputSchema,
         source: "docs",
         approval: "none",
+        ...(lifecycle ? { lifecycle } : {}),
         execute: async (_arguments, context) => ({
           content: [{ type: "text", text: await execute(context.signal) }],
         }),
@@ -108,7 +126,7 @@ async function fixture(execute: (signal: AbortSignal | undefined) => Promise<str
     ],
   });
   await persistAttemptToolCatalog(client.db, environment.catalog);
-  return { scope, environment };
+  return { scope, environment, turn: claimed.turn };
 }
 
 async function waitForTerminal(
@@ -149,6 +167,111 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("host credentials use the live canonical attempt during Codemode dispatch", async () => {
+    if (!available) throw new Error("This host execution test requires PostgreSQL");
+    let resolveHost!: ReturnType<typeof connectionTokenResolverForTurn>;
+    let hostCalls = 0;
+    let effects = 0;
+    let authorizePhysical: (() => Promise<boolean>) | undefined;
+    const { scope, environment, turn } = await fixture(async () => {
+      const resolution = await resolveHost({
+        workspaceId: scope.workspaceId,
+        serverId: "host-tools",
+        destinationUrl: "https://tools.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-id",
+          providerDomain: "tools.example.test",
+        },
+      });
+      expect(resolution.status).toBe("ok");
+      if (resolution.status !== "ok") throw new Error("Host credentials unavailable");
+      authorizePhysical = resolution.authorizeProviderRequest;
+      expect(await resolution.authorizeProviderRequest?.()).toBe(true);
+      effects++;
+      return "host-authorized";
+    });
+    resolveHost = connectionTokenResolverForTurn({
+      ...scope,
+      db: client.db,
+      settings: testSettings(),
+      rootSessionId: scope.sessionId,
+      turn,
+      connectionCredentials: {
+        mcpAuthoritySource: "host",
+        mcpCredentials: async (request) => {
+          hostCalls++;
+          expect(request).toMatchObject({
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            turnId: scope.turnId,
+            attemptId: scope.attemptId,
+            executionGeneration: scope.executionGeneration,
+          });
+          return {
+            status: "ok",
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            providerDomain: request.connectionRef.providerDomain,
+            connectionId: request.connectionRef.connectionId,
+            headers: { Authorization: "Bearer synthetic" },
+          };
+        },
+      },
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      await bus.request(
+        codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+        encodeCodemodeDispatchRequest({
+          version: 1,
+          operationId,
+          catalogDigest: environment.catalog.digest,
+        }),
+        { timeoutMs: 1_000 },
+      );
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "completed",
+        result: { content: [{ type: "text", text: "host-authorized" }] },
+      });
+      expect(hostCalls).toBe(1);
+      expect(effects).toBe(1);
+      await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as SessionActivityDatabase, {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            actor: { type: "service", subjectId: "host-liveness-fixture" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+            reason: "verify resolved host credentials cannot outlive an interruption",
+          }),
+        ),
+      );
+      expect(await authorizePhysical?.()).toBe(false);
+      expect(hostCalls).toBe(1);
+      expect(effects).toBe(1);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
   test("executes one durable call through the exact attempt environment", async () => {
     if (!available) return;
     let executions = 0;
@@ -213,10 +336,186 @@ describe("CodemodeAttemptDispatcher", () => {
         "agent.toolCall.created",
         "agent.toolCall.output",
       ]);
+      expect(toolEvents[0]?.clientEventId).toBe(codemodeToolCallCreatedClientEventId(operationId));
       expect(
         toolEvents.map((event) => (event.payload as { subjectId?: string } | undefined)?.subjectId),
       ).toEqual(["sandbox:test", "sandbox:test"]);
     } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("reuses the durable created event when an expired pre-execution claim is reclaimed", async () => {
+    if (!available) return;
+    let executions = 0;
+    const { scope, environment } = await fixture(async () => {
+      executions += 1;
+      return "reclaimed";
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: "reclaim" },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const expiredClaimId = crypto.randomUUID();
+    expect(
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        catalogDigest: environment.catalog.digest,
+        operationId,
+        claimId: expiredClaimId,
+        now: new Date(Date.now() - 5_000),
+        claimLeaseMs: 1_000,
+      }),
+    ).toMatchObject({ status: "claimed", claimId: expiredClaimId });
+    const bus = new MemoryEventBus();
+    expect(
+      (
+        await appendAndPublishTurnEventsFenced(
+          client.db,
+          bus,
+          scope.workspaceId,
+          scope.sessionId,
+          scope.turnId,
+          scope.executionGeneration,
+          scope.attemptId,
+          [
+            {
+              type: "agent.toolCall.created",
+              turnId: scope.turnId,
+              turnGeneration: scope.executionGeneration,
+              turnAttemptId: scope.attemptId,
+              producerId: "sandbox:test",
+              payload: {
+                id: operationId,
+                name: environment.catalog.entries[0]!.modelName,
+                arguments: { query: "reclaim" },
+                origin: "codemode",
+                subjectId: "sandbox:test",
+                raw: {
+                  type: "codemode_call",
+                  serverId: "docs",
+                  toolName: "search",
+                  catalogDigest: environment.catalog.digest,
+                },
+              },
+            },
+          ],
+        )
+      ).accepted,
+    ).toBe(true);
+
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("accepted");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "completed",
+        result: { content: [{ type: "text", text: "reclaimed" }] },
+      });
+      expect(executions).toBe(1);
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      expect(toolEvents.map((event) => event.type)).toEqual([
+        "agent.toolCall.created",
+        "agent.toolCall.output",
+      ]);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("renews the durable claim while provider preparation is still running", async () => {
+    if (!available) return;
+    let signalPreparationStarted!: () => void;
+    const preparationStarted = new Promise<void>((resolve) => {
+      signalPreparationStarted = resolve;
+    });
+    let releasePreparation!: () => void;
+    const preparationBlocked = new Promise<void>((resolve) => {
+      releasePreparation = resolve;
+    });
+    let executions = 0;
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "prepared";
+      },
+      { type: "object" },
+      {
+        prepare: async () => {
+          signalPreparationStarted();
+          await preparationBlocked;
+        },
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(
+      client.db,
+      bus,
+      environment,
+      scope,
+      undefined,
+      1,
+      { claimLeaseMs: 1_000, claimHeartbeatMs: 100 },
+    );
+    dispatcher.start();
+    const request = async () =>
+      decodeCodemodeDispatchAck(
+        (
+          await bus.request(
+            codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+            encodeCodemodeDispatchRequest({
+              version: 1,
+              operationId,
+              catalogDigest: environment.catalog.digest,
+            }),
+            { timeoutMs: 1_000 },
+          )
+        ).data,
+      ).status;
+    try {
+      expect(await request()).toBe("accepted");
+      await preparationStarted;
+      await Bun.sleep(1_200);
+      expect(await request()).toBe("already_running");
+      releasePreparation();
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "completed",
+      });
+      expect(executions).toBe(1);
+    } finally {
+      releasePreparation();
       await dispatcher.close();
     }
   });
@@ -279,6 +578,231 @@ describe("CodemodeAttemptDispatcher", () => {
         },
       },
     });
+  });
+
+  test("closes the timeline when an expired post-execution claim loses its worker", async () => {
+    if (!available) return;
+    const { scope, environment } = await fixture(async () => "must not execute twice");
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: "already dispatched" },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const claimId = crypto.randomUUID();
+    const startedAt = new Date(Date.now() - 5_000);
+    expect(
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        catalogDigest: environment.catalog.digest,
+        operationId,
+        claimId,
+        now: startedAt,
+        claimLeaseMs: 1_000,
+      }),
+    ).toMatchObject({ status: "claimed", claimId });
+    const bus = new MemoryEventBus();
+    const created = await appendAndPublishTurnEventsFenced(
+      client.db,
+      bus,
+      scope.workspaceId,
+      scope.sessionId,
+      scope.turnId,
+      scope.executionGeneration,
+      scope.attemptId,
+      [
+        {
+          type: "agent.toolCall.created",
+          turnId: scope.turnId,
+          turnGeneration: scope.executionGeneration,
+          turnAttemptId: scope.attemptId,
+          producerId: "sandbox:test",
+          payload: {
+            id: operationId,
+            name: environment.catalog.entries[0]!.modelName,
+            arguments: { query: "already dispatched" },
+            origin: "codemode",
+            subjectId: "sandbox:test",
+          },
+        },
+      ],
+    );
+    expect(created.accepted).toBe(true);
+    expect(
+      await markCodemodeOperationExecutionStarted(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        attemptId: scope.attemptId,
+        operationId,
+        claimId,
+        now: startedAt,
+        claimLeaseMs: 1_000,
+      }),
+    ).toBe(true);
+
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("terminal");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "outcome_unknown",
+        errorCode: "worker_lost_during_execution",
+      });
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      expect(toolEvents.map((event) => event.type)).toEqual([
+        "agent.toolCall.created",
+        "agent.toolCall.output",
+      ]);
+      expect(toolEvents[1]?.payload).toMatchObject({
+        id: operationId,
+        error: true,
+        output: {
+          isError: true,
+          _meta: {
+            codemodeState: "outcome_unknown",
+            errorCode: "worker_lost_during_execution",
+          },
+        },
+      });
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("fails invalid arguments before crossing the execution boundary", async () => {
+    if (!available) return;
+    let executions = 0;
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "unreachable";
+      },
+      {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: 42 },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("accepted");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "failed",
+        errorCode: "invalid_tool_arguments",
+        executionStartedAt: null,
+      });
+      expect(executions).toBe(0);
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      expect(toolEvents.map((event) => event.type)).toEqual([
+        "agent.toolCall.created",
+        "agent.toolCall.output",
+      ]);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("fails connector approval during prepare before marking execution started", async () => {
+    if (!available) return;
+    let executions = 0;
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "unreachable";
+      },
+      { type: "object" },
+      {
+        prepare: async () => {
+          throw new AttemptToolApprovalRequiredError();
+        },
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("accepted");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "failed",
+        errorCode: "approval_required",
+        executionStartedAt: null,
+      });
+      expect(executions).toBe(0);
+    } finally {
+      await dispatcher.close();
+    }
   });
 
   test("bounds concurrent execution without claiming work it cannot start", async () => {

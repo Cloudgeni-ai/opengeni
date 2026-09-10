@@ -212,6 +212,26 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
+  test("alerts from durable model-aware compaction lifecycle instead of a static token guess", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniCompactionNotFiring");
+
+    expect(expression).toContain("opengeni_context_compaction_oldest_pending_age_seconds");
+    expect(expression).toContain("opengeni_context_compaction_monitor_fresh");
+    expect(expression).toContain("on(namespace, release, environment, component, instance)");
+    expect(expression).toContain("> 900");
+    expect(expression).not.toContain("opengeni_model_input_tokens_bucket");
+    expect(expression).not.toContain("opengeni_context_compaction_last_event_timestamp_seconds");
+    expect(expression).not.toContain("150000");
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).toContain('component="worker-control"');
+    }
+  });
+
   test("correlates backlog and freshness before fleet aggregation", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
@@ -352,6 +372,35 @@ describe("turn-capacity Prometheus alerts", () => {
       "The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.",
     );
     expect(template).not.toMatch(/opensandbox_batchsandbox_(?:status|deletion|finalizer|spec)/);
+  });
+});
+
+describe("Codex pool Prometheus alerts", () => {
+  test("deduplicates low-pool counters by deployment and workspace", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+
+    for (const alertName of [
+      "OpenGeniCodexCredentialPoolEmpty",
+      "OpenGeniCodexCredentialPoolSingle",
+    ]) {
+      const expression = alertExpression(template, alertName);
+      expect(expression).toContain(
+        "sum by (namespace, release, environment, component, workspace_key)",
+      );
+      expect(expression).not.toContain("pod");
+      expect(expression).not.toContain("instance");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+
+    expect(template).toContain('Workspace pool {{ "{{ $labels.workspace_key }}" }} observed zero');
+    expect(template).toContain(
+      'Workspace pool {{ "{{ $labels.workspace_key }}" }} observed exactly one',
+    );
   });
 });
 

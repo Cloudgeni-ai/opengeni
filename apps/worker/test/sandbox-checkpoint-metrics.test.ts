@@ -32,6 +32,7 @@ describe("sandbox checkpoint and deadline metrics", () => {
       turnBlocked: 9,
       directBlocked: 10,
       processBlocked: 11,
+      interactionBlocked: 12,
     });
 
     const metrics = await observability.prometheusMetrics();
@@ -56,6 +57,7 @@ describe("sandbox checkpoint and deadline metrics", () => {
       turn_blocked: 9,
       direct_blocked: 10,
       process_blocked: 11,
+      interaction_blocked: 12,
     })) {
       expect(metrics).toMatch(
         new RegExp(`opengeni_sandbox_rotation_backlog\\{[^}]*kind="${kind}"[^}]*\\} ${value}\\b`),

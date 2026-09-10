@@ -1,3 +1,4 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -44,10 +45,13 @@ import {
   canonicalSessionCommandHash,
   evaluateSessionControl,
   lockSessionEventWriteRows,
+  lockSessionPromptCommandOperation,
   lockWorkspaceInferenceControl,
   lockWorkspaceInferenceControlForAdmission,
+  getCompletedSessionPromptCommandReceipt,
   registerInternalUpdateWakeInTransaction,
   reserveSessionCommandReceipt,
+  reserveSessionPromptCommandReceipt,
   registerSessionWorkflowWakeInTransaction,
   type SessionCommandActor,
   type SessionCommandReceiptRow,
@@ -208,6 +212,122 @@ function mapSubmittedPromptTurn(row: typeof schema.sessionTurns.$inferSelect): S
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+async function loadSubmittedHumanPromptReplay(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    delivery: "send" | "steer";
+    expectedDraftRevision?: number | null;
+    receipt: SessionCommandReceiptRow;
+  },
+): Promise<SubmitHumanPromptResult> {
+  const turnId = String(input.receipt.result.turnId ?? "");
+  const acceptedEventId = String(input.receipt.result.acceptedEventId ?? "");
+  const eventIds = Array.isArray(input.receipt.result.eventIds)
+    ? input.receipt.result.eventIds.filter((id): id is string => typeof id === "string")
+    : [];
+  const wakeRevision = Number(input.receipt.result.wakeRevision ?? 0);
+  if (!turnId || !acceptedEventId || wakeRevision < 1) {
+    throw new SessionControlInvariantError("Replayed prompt receipt is incomplete");
+  }
+  const replayEvents = await db
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        inArray(schema.sessionEvents.id, eventIds),
+      ),
+    )
+    .orderBy(asc(schema.sessionEvents.sequence));
+  const [replayTurn] = await db
+    .select()
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, turnId),
+      ),
+    )
+    .limit(1);
+  const events = replayEvents.map(mapSubmittedPromptEvent);
+  const accepted = events.find((event) => event.id === acceptedEventId);
+  if (!accepted || !replayTurn || events.length !== eventIds.length) {
+    throw new SessionControlInvariantError("Replayed prompt rows are incomplete");
+  }
+  const replayDraft =
+    input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
+      ? null
+      : await getComposerDraftInTransaction(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          subjectId: input.subjectId,
+        });
+  return {
+    receipt: input.receipt,
+    routing:
+      input.receipt.result.routing === "accepted_for_execution" ||
+      input.receipt.result.routing === "queued_for_execution" ||
+      input.receipt.result.routing === "accepted_for_steering"
+        ? input.receipt.result.routing
+        : input.delivery === "steer"
+          ? "accepted_for_steering"
+          : // Pre-routing receipts cannot reconstruct admission-time activity
+            // or Pause truth. Queue is the only conservative placement; a
+            // later turn.started event moves it into chat without duplication.
+            "queued_for_execution",
+    queueVersion: Number(input.receipt.appliedQueueVersion),
+    accepted,
+    events,
+    turn: mapSubmittedPromptTurn(replayTurn),
+    draft: replayDraft,
+    acceptedEventId,
+    eventIds,
+    turnId,
+    wakeRevision,
+    interruptionCount: Number(input.receipt.result.interruptionCount ?? 0),
+    workspaceControlEventId:
+      typeof input.receipt.result.workspaceControlEventId === "string"
+        ? input.receipt.result.workspaceControlEventId
+        : null,
+    replay: true,
+  };
+}
+
+export async function replaySubmittedHumanPromptFromBoundaryReceipt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    actor: SessionCommandActor;
+    operationKey: string;
+    delivery: "send" | "steer";
+    boundaryRequestHash: string;
+    expectedDraftRevision?: number | null;
+    /** Wait for an overlapping same-key transaction before checking committed replay truth. */
+    serializeOperation?: boolean;
+  },
+): Promise<SubmitHumanPromptResult | null> {
+  if (input.serializeOperation) {
+    await lockSessionPromptCommandOperation(db, input);
+  }
+  const receipt = await getCompletedSessionPromptCommandReceipt(db, {
+    workspaceId: input.workspaceId,
+    actor: input.actor,
+    action: input.delivery === "steer" ? "prompt.steer" : "prompt.send",
+    targetSessionId: input.sessionId,
+    operationKey: input.operationKey,
+    boundaryRequestHash: input.boundaryRequestHash,
+  });
+  if (!receipt) return null;
+  return await loadSubmittedHumanPromptReplay(db, { ...input, receipt });
 }
 
 export type AgentInternalUpdateCommandResult = {
@@ -1608,6 +1728,8 @@ export async function submitHumanPromptInTransaction(
     subjectLabel?: string;
     actor: SessionCommandActor;
     operationKey: string;
+    /** Stable parsed boundary-request identity used before mutable enrichment. */
+    boundaryRequestHash?: string;
     delivery: "send" | "steer";
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
@@ -1641,6 +1763,16 @@ export async function submitHumanPromptInTransaction(
     mcpCredentialUpdates?: Array<{
       id: string;
       headersEncrypted: Record<string, string>;
+    }>;
+    /** Trusted database-only admission seam. It runs only after a completed
+     * operation replay has been ruled out; throwing rolls the prompt back. */
+    beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    /** Backend-only authority capture, atomic with the newly accepted turn. */
+    captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
+    selectedHostMcpDelegations?: Array<{
+      serverId: string;
+      delegationId: string;
+      generation: number;
     }>;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
@@ -1698,6 +1830,9 @@ export async function submitHumanPromptInTransaction(
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
+    ...(input.selectedHostMcpDelegations?.length
+      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
+      : {}),
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -1708,91 +1843,41 @@ export async function submitHumanPromptInTransaction(
         }
       : {}),
   });
-  const reserved = await reserveSessionCommandReceipt(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    actor: input.actor,
-    action: input.delivery === "steer" ? "prompt.steer" : "prompt.send",
-    targetSessionId: input.sessionId,
-    targetTurnId: null,
-    operationKey: input.operationKey,
-    canonicalRequestHash: requestHash,
-  });
+  const action = input.delivery === "steer" ? "prompt.steer" : "prompt.send";
+  const reserved = input.boundaryRequestHash
+    ? await reserveSessionPromptCommandReceipt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actor: input.actor,
+        action,
+        targetSessionId: input.sessionId,
+        operationKey: input.operationKey,
+        canonicalRequestHash: requestHash,
+        boundaryRequestHash: input.boundaryRequestHash,
+      })
+    : await reserveSessionCommandReceipt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actor: input.actor,
+        action,
+        targetSessionId: input.sessionId,
+        targetTurnId: null,
+        operationKey: input.operationKey,
+        canonicalRequestHash: requestHash,
+      });
   if (reserved.replay && reserved.receipt.appliedQueueVersion !== null) {
-    const turnId = String(reserved.receipt.result.turnId ?? "");
-    const acceptedEventId = String(reserved.receipt.result.acceptedEventId ?? "");
-    const eventIds = Array.isArray(reserved.receipt.result.eventIds)
-      ? reserved.receipt.result.eventIds.filter((id): id is string => typeof id === "string")
-      : [];
-    const wakeRevision = Number(reserved.receipt.result.wakeRevision ?? 0);
-    if (!turnId || !acceptedEventId || wakeRevision < 1) {
-      throw new SessionControlInvariantError("Replayed prompt receipt is incomplete");
-    }
-    const replayEvents = await db
-      .select()
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, input.workspaceId),
-          eq(schema.sessionEvents.sessionId, input.sessionId),
-          inArray(schema.sessionEvents.id, eventIds),
-        ),
-      )
-      .orderBy(asc(schema.sessionEvents.sequence));
-    const [replayTurn] = await db
-      .select()
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, input.sessionId),
-          eq(schema.sessionTurns.id, turnId),
-        ),
-      )
-      .limit(1);
-    const events = replayEvents.map(mapSubmittedPromptEvent);
-    const accepted = events.find((event) => event.id === acceptedEventId);
-    if (!accepted || !replayTurn || events.length !== eventIds.length) {
-      throw new SessionControlInvariantError("Replayed prompt rows are incomplete");
-    }
-    const replayDraft =
-      input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
-        ? null
-        : await getComposerDraftInTransaction(db, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            subjectId: input.subjectId,
-          });
-    return {
+    return await loadSubmittedHumanPromptReplay(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      subjectId: input.subjectId,
+      delivery: input.delivery,
+      ...(input.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: input.expectedDraftRevision }
+        : {}),
       receipt: reserved.receipt,
-      routing:
-        reserved.receipt.result.routing === "accepted_for_execution" ||
-        reserved.receipt.result.routing === "queued_for_execution" ||
-        reserved.receipt.result.routing === "accepted_for_steering"
-          ? reserved.receipt.result.routing
-          : input.delivery === "steer"
-            ? "accepted_for_steering"
-            : // Pre-routing receipts cannot reconstruct admission-time activity
-              // or Pause truth. Queue is the only conservative placement; a
-              // later turn.started event moves it into chat without duplication.
-              "queued_for_execution",
-      queueVersion: Number(reserved.receipt.appliedQueueVersion),
-      accepted,
-      events,
-      turn: mapSubmittedPromptTurn(replayTurn),
-      draft: replayDraft,
-      acceptedEventId,
-      eventIds,
-      turnId,
-      wakeRevision,
-      interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
-      workspaceControlEventId:
-        typeof reserved.receipt.result.workspaceControlEventId === "string"
-          ? reserved.receipt.result.workspaceControlEventId
-          : null,
-      replay: true,
-    };
+    });
   }
+  await input.beforeFreshPromptCommit?.(db);
 
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
@@ -1801,7 +1886,9 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  const [session] = await withLatestStartedSessionPolicy(db, input.workspaceId, [storedSession]);
+  if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -1882,9 +1969,15 @@ export async function submitHumanPromptInTransaction(
           resources: withCanonicalResourceMountPaths(
             input.composerDraftResources ?? input.resources,
           ),
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
         })
     ) {
       throw new QueueCommandConflictError(
@@ -2082,9 +2175,15 @@ export async function submitHumanPromptInTransaction(
           resources: input.resources,
           tools: [],
           toolsProvided: false,
-          model: input.model ?? session.model,
-          reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
-          latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",
+          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+          reasoningEffort:
+            input.turnExecutionPolicy?.reasoningEffort ??
+            input.reasoningEffort ??
+            (session.reasoningEffort as ReasoningEffort),
+          latencyMode:
+            input.turnExecutionPolicy?.latencyMode ??
+            input.latencyMode ??
+            (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
             ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
@@ -2105,6 +2204,7 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  await input.captureTurnAuthority?.(db, turn.id);
   let committedTurn = turn;
   const personalResourceExpectedAuthorityEpoch =
     input.personalResourceAttachment?.expectedAuthorityEpoch;
@@ -2434,6 +2534,7 @@ export async function submitHumanPromptInTransaction(
     turnVersion: turn.version,
     ...(nextDraft ? { draftRevision: nextDraft.revision } : {}),
     result: {
+      ...(input.boundaryRequestHash ? { boundaryRequestHash: input.boundaryRequestHash } : {}),
       turnId,
       acceptedEventId,
       eventIds,

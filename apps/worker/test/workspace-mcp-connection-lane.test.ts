@@ -4,11 +4,13 @@
 // only the bounded pre-snapshot legacy path (a ref with no connection id).
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
-import type { Database, resolveAcceptedConnectionUse } from "@opengeni/db";
+import type { Database, SessionTurnForExecution, resolveAcceptedConnectionUse } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 
 type AuthorizeInput = Parameters<typeof resolveAcceptedConnectionUse>[1];
+
+const WORKSPACE_CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 
 const turn = {
   id: "turn-1",
@@ -34,6 +36,7 @@ function workspaceResolver(input: {
     rootSessionId: "session-root",
     attemptId: "attempt-1",
     turn,
+    getHostTurnForAttempt: async () => turn as SessionTurnForExecution,
     authorizeAcceptedUse: async (_db, authority) => input.authorize(authority),
     isSessionTenancyProductActivated: async () => input.activated ?? false,
     connectionCredentials: {
@@ -45,7 +48,7 @@ function workspaceResolver(input: {
           workspaceId: request.workspaceId,
           sessionId: request.sessionId,
           headers: { Authorization: "Bearer workspace-owned" },
-          connectionId: request.connectionRef.connectionId ?? "connection-ws",
+          connectionId: request.connectionRef.connectionId ?? WORKSPACE_CONNECTION_ID,
           providerDomain: request.connectionRef.providerDomain,
           ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
         };
@@ -62,7 +65,7 @@ const workspaceRequest = {
   connectionRef: {
     provider: "linear",
     providerDomain: "linear.app",
-    connectionId: "connection-ws",
+    connectionId: WORKSPACE_CONNECTION_ID,
     kind: "oauth2" as const,
     subjectScope: "workspace" as const,
   },
@@ -83,7 +86,7 @@ describe("workspace connection lane", () => {
             organizationId: "account-1",
             workspaceId: "workspace-1",
             sessionId: "session-1",
-            connectionId: "connection-ws",
+            connectionId: WORKSPACE_CONNECTION_ID,
             connectionGeneration: 2,
             scope: "workspace" as const,
             ownerSubjectId: null,
@@ -109,7 +112,7 @@ describe("workspace connection lane", () => {
       executionGeneration: 4,
       usePhase: "credential_resolution",
       serverId: "linear",
-      connectionId: "connection-ws",
+      connectionId: WORKSPACE_CONNECTION_ID,
       providerDomain: "linear.app",
       connectionKind: "oauth2",
       subjectScope: "workspace",
@@ -136,6 +139,92 @@ describe("workspace connection lane", () => {
     const result = await resolver(workspaceRequest);
     expect(result).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
     expect(hostCalls).toBe(0);
+  });
+
+  test("legacy opaque and explicit UUID host bindings bypass native authority", async () => {
+    let authorizeCalls = 0;
+    let hostCalls = 0;
+    const resolver = workspaceResolver({
+      activated: true,
+      authorize: () => {
+        authorizeCalls += 1;
+        throw new Error("opaque host bindings must not enter native connection authority");
+      },
+      onHostRequest: () => {
+        hostCalls += 1;
+      },
+    });
+
+    const result = await resolver({
+      ...workspaceRequest,
+      serverId: "cloudgeni-capability",
+      destinationUrl: "https://api.example.test/embedded/capability-mcp/mcp",
+      connectionRef: {
+        providerDomain: "api.example.test",
+        connectionId: "cloudgeni-capability",
+        kind: "delegated" as const,
+        subjectScope: "workspace" as const,
+      },
+    });
+
+    expect(result).toMatchObject({ status: "ok", connectionId: "cloudgeni-capability" });
+    if (result.status !== "ok") throw new Error("Expected host credentials");
+    expect(await result.authorizeProviderRequest?.()).toBe(true);
+
+    const uuidHostBindingId = "44444444-4444-4444-8444-444444444444";
+    const uuidHostBindingResult = await resolver({
+      ...workspaceRequest,
+      serverId: "host-uuid-binding",
+      destinationUrl: "https://api.example.test/embedded/host-mcp/mcp",
+      connectionRef: {
+        providerDomain: "api.example.test",
+        connectionId: uuidHostBindingId,
+        authoritySource: "host" as const,
+        kind: "delegated" as const,
+        subjectScope: "workspace" as const,
+      },
+    });
+
+    expect(uuidHostBindingResult).toMatchObject({
+      status: "ok",
+      connectionId: uuidHostBindingId,
+    });
+    if (uuidHostBindingResult.status !== "ok") throw new Error("Expected host credentials");
+    expect(await uuidHostBindingResult.authorizeProviderRequest?.()).toBe(true);
+    expect(authorizeCalls).toBe(0);
+    expect(hostCalls).toBe(2);
+  });
+
+  test("host authority fails closed when no host credential port is bound", async () => {
+    const resolver = connectionTokenResolverForTurn({
+      db: {} as Database,
+      settings: testSettings(),
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      rootSessionId: "session-root",
+      attemptId: "attempt-1",
+      turn,
+    });
+
+    await expect(
+      resolver({
+        ...workspaceRequest,
+        serverId: "host-only",
+        destinationUrl: "https://api.example.test/embedded/host-mcp/mcp",
+        connectionRef: {
+          providerDomain: "api.example.test",
+          connectionId: "host-only",
+          authoritySource: "host" as const,
+          kind: "delegated" as const,
+          subjectScope: "workspace" as const,
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "unsupported_auth",
+      connectionId: "host-only",
+    });
   });
 
   test("a ref with no connection id keeps the bounded pre-snapshot legacy path", async () => {

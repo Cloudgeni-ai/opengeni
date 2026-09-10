@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "e005986b098d8cfbbd1b899712c4f1825e2dcb4fc87543c1fc73803608d9888a"
+      "sha256": "82e0ba4ffd9693e923af86f75e835734b5e3dbcdc057b4829999fb3beeec9b30"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -34,11 +34,11 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "5933e981bf99403905c5967adc038a7da1155b15e1813b6dd3bf6caaa383186f"
+      "sha256": "65eda9e447d13bccaecd130c61182fbeddea2c49bda6fcd0529645f5e0eb591e"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "06c13c4bb0f87e04303e07c1d39082ff3463e19cecc44d60f94496e33cfaade6"
+      "sha256": "17902076236fd5cccd0d82163ecff8a126e18067e6c1784d5fae5a3e20b48764"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -92,7 +92,7 @@
   "actions": [
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "1d1865cf748e6cfa686eb69216057d6aa02037549f4728ae05a63828397942c7"
+      "sha256": "546880d5a15d618687b04dbd34c2ce8e4fee1c3af4b332296507502f823404eb"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -618,6 +618,12 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
+      "step": "Built embedding package exports",
+      "sha256": "e9fd69268d8d35f117eaf01cd4e99ab65e3d471dd58885c69b56f101760f246c"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
       "step": "Clean published consumer",
       "sha256": "d326dc84fc2a13a7f0c9d41e79fbc52abc77750b39811c0e882acfe42a99810c"
     },
@@ -715,7 +721,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "20a914e98aea4f6c8ff25ad17e14a0a5523db1faeeafcb8cf14aa8dc63ca10a8"
+      "sha256": "e4f7ba2c4878e2b12091455a670eebd39d611ba882da6f7f3adf85b19a51d46f"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -800,6 +806,12 @@
       "job": "publish",
       "step": "Verify exact source",
       "sha256": "e10d2a67ae143c5223960cad1b2433bdeba7046fecd1a05ae1519a8a880e5022"
+    },
+    {
+      "workflow": ".github/workflows/publish-desktop-image.yml",
+      "job": "desktop-image",
+      "step": "Verify anonymous desktop publication and installed runtime",
+      "sha256": "68f876fe64acfa9424639c2a7d477eef28e1a52f580d9e2054ac5aa0ce9f256c"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",

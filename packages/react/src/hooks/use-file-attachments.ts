@@ -26,6 +26,8 @@ export type FileAttachment = {
   file?: FileAsset | undefined;
   /** Object-URL for an inline preview; minted for `image/*` files only. */
   previewUrl?: string | undefined;
+  /** Stable SDK failure code for UI behavior that must not parse error copy. */
+  errorCode?: "secure_context_required" | undefined;
   error?: string | undefined;
 };
 
@@ -50,6 +52,12 @@ export type UseFileAttachmentsResult = {
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
   /** Restore already-ready server assets without recreating browser-local bytes. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
+  /**
+   * Resolve a ready image's short-lived server preview URL on demand. Optional
+   * for upload-only embedded clients; local object-URL previews remain usable
+   * without it.
+   */
+  loadPreview?: ((id: string, signal?: AbortSignal) => Promise<string | undefined>) | undefined;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -76,6 +84,27 @@ export type UseFileAttachmentsResult = {
 
 const isImage = (file: File): boolean => file.type.startsWith("image/");
 
+let fallbackAttachmentId = 0;
+
+function createAttachmentId(): string {
+  const cryptoSource = globalThis.crypto;
+  if (typeof cryptoSource?.randomUUID === "function") return cryptoSource.randomUUID();
+  fallbackAttachmentId += 1;
+  // This id is only a browser-local React key and retry lookup, never durable
+  // authority. Keep attachment tracking usable when HTTP withholds randomUUID
+  // or Web Crypto is unavailable so the SDK's typed failure reaches the card.
+  return `attachment:${Date.now().toString(36)}:${fallbackAttachmentId.toString(36)}`;
+}
+
+function secureContextRequiredErrorCode(error: unknown): "secure_context_required" | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "secure_context_required"
+    ? error.code
+    : undefined;
+}
+
 /**
  * Upload-and-track state for files attached to the next message. Owns the
  * full client-side upload layer: a per-file `uploading | ready | failed`
@@ -91,6 +120,8 @@ export function useFileAttachments(
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
@@ -198,6 +229,7 @@ export function useFileAttachments(
                     name: asset.filename,
                     contentType: asset.contentType,
                     sizeBytes: asset.sizeBytes,
+                    errorCode: undefined,
                     error: undefined,
                   }
                 : attachment,
@@ -212,6 +244,7 @@ export function useFileAttachments(
                 ? {
                     ...attachment,
                     status: "failed",
+                    errorCode: secureContextRequiredErrorCode(error),
                     error: error instanceof Error ? error.message : String(error),
                   }
                 : attachment,
@@ -225,7 +258,7 @@ export function useFileAttachments(
   const addFiles = useCallback(
     (files: Iterable<File>) => {
       for (const file of files) {
-        const id = crypto.randomUUID();
+        const id = createAttachmentId();
         sources.current.set(id, file);
         const previewUrl = isImage(file) ? URL.createObjectURL(file) : undefined;
         if (previewUrl) previewUrls.current.set(id, previewUrl);
@@ -255,7 +288,7 @@ export function useFileAttachments(
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.id === id
-            ? { ...attachment, status: "uploading", error: undefined }
+            ? { ...attachment, status: "uploading", errorCode: undefined, error: undefined }
             : attachment,
         ),
       );
@@ -305,6 +338,7 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                errorCode: undefined,
                 error: undefined,
               }
             : {
@@ -325,6 +359,31 @@ export function useFileAttachments(
       });
     },
     [workspaceId],
+  );
+
+  const loadPreview = useCallback(
+    async (id: string, signal?: AbortSignal): Promise<string | undefined> => {
+      const generation = scopeGeneration.current;
+      const attachment = attachmentsRef.current.find((candidate) => candidate.id === id);
+      const createDownloadUrl = client.createFileDownloadUrl;
+      if (
+        !attachment ||
+        attachment.status !== "ready" ||
+        !attachment.file ||
+        !attachment.contentType.startsWith("image/") ||
+        typeof createDownloadUrl !== "function" ||
+        signal?.aborted
+      ) {
+        return undefined;
+      }
+      const fileId = attachment.file.id;
+      const signed = await createDownloadUrl.call(client, workspaceId, fileId, { signal });
+      if (scopeGeneration.current !== generation || signal?.aborted) return undefined;
+      const current = attachmentsRef.current.find((candidate) => candidate.id === id);
+      if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
+      return signed.url;
+    },
+    [client, workspaceId],
   );
 
   const remove = useCallback(
@@ -368,6 +427,7 @@ export function useFileAttachments(
     addFiles,
     addFromPaste,
     restoreReadyFiles,
+    ...(typeof client.createFileDownloadUrl === "function" ? { loadPreview } : {}),
     retry,
     retainPreview,
     remove,

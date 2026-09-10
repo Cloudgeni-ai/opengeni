@@ -1,10 +1,12 @@
+import { ModelPolicyPickerMenu } from "../src/components/model-policy-picker-menu";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ClientModel } from "@opengeni/sdk";
-import { act, useState } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
+  BillingClassMark,
+  defaultModelPolicyPickerMessages,
   ModelPolicyPicker,
-  ModelPolicyPickerMenu,
   useModelPolicyPickerState,
 } from "../src/components/model-policy-picker";
 import { actRun, registerDom, renderHook } from "./render-hook";
@@ -116,6 +118,159 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test("shows subscription copy once per provider and keeps selection in its group", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const group = container.querySelector('section[aria-label="Codex"]')!;
+    expect(group.textContent?.match(/ChatGPT \/ Codex plan/g)?.length).toBe(1);
+    expect(group.querySelectorAll('[data-testid^="model-picker-choice-"]').length).toBe(2);
+    expect(group.querySelector('[aria-label="Selected"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("Current model");
+    for (const row of group.querySelectorAll("button")) {
+      expect(row.textContent).not.toContain("subscription");
+      expect(row.getAttribute("aria-description")).toBeNull();
+      expect(row.title).not.toContain("ChatGPT / Codex plan");
+    }
+  });
+
+  test("selects thinking inline without switching model or closing the picker", async () => {
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={(id) => calls.push(["model", id])}
+        onEffortChange={(effort) => calls.push(["effort", effort])}
+        onLatencyModeChange={() => {}}
+        onOpenChange={(open) => calls.push(["open", open])}
+      />,
+    );
+    expect(container.querySelector("select")).toBeNull();
+    expect(
+      container.querySelector('[role="radio"][aria-label="Medium"]')?.getAttribute("aria-checked"),
+    ).toBe("true");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click(),
+    );
+    expect(calls).toEqual([["effort", "high"]]);
+  });
+
+  test("hides thinking for models with no runnable reasoning controls", async () => {
+    const model = {
+      ...MODELS[0]!,
+      capabilities: {
+        ...MODELS[0]!.capabilities!,
+        reasoning: { ...MODELS[0]!.capabilities!.reasoning, runnable: false },
+        latencyModes: [],
+      },
+    };
+    const container = await mount(
+      <>
+        <ModelPolicyPicker
+          models={[model]}
+          model={model.id}
+          effort="low"
+          latencyMode="standard"
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+        <ModelPolicyPickerMenu
+          models={[model]}
+          model={model.id}
+          effort="low"
+          latencyMode="standard"
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+      </>,
+    );
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    expect(container.querySelector(".og-model-policy-effort")).toBeNull();
+    expect(container.textContent).not.toContain("Thinking");
+  });
+  test("combines deployment providers, preserves connection groups, and badges only explicit free cost", async () => {
+    const deployment = (id: string, cost?: "free" | "credits"): ClientModel => ({
+      id,
+      label: id,
+      provider: id.split("/")[0]!,
+      providerLabel: id.split("/")[0]!,
+      api: "chat",
+      cost,
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+    const models: ClientModel[] = [
+      deployment("azure/model", "credits"),
+      deployment("gateway/model", "credits"),
+      deployment("openrouter/starter:free", "free"),
+      deployment("openrouter/charged:free", "credits"),
+      deployment("anonymous/legacy:free"),
+      { ...deployment("workspace-openrouter/model"), cost: "workspace" },
+      { ...deployment("organization-gateway/model"), cost: "organization" },
+      ...MODELS,
+    ];
+    const before = JSON.stringify(models);
+    const calls: string[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={models}
+        model="unselected"
+        effort="low"
+        latencyMode="standard"
+        messages={{ free: "Gratis" }}
+        onModelChange={(id) => calls.push(id)}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const group = container.querySelector('section[aria-label="OpenGeni"]')!;
+    expect(group.querySelectorAll("button").length).toBe(5);
+    expect(container.querySelector('section[aria-label="External"]')).toBeNull();
+    for (const label of ["Workspace providers", "Organization providers", "Codex"]) {
+      expect(container.querySelector(`section[aria-label="${label}"]`)).toBeTruthy();
+    }
+    expect(group.textContent?.match(/Gratis/g)?.length).toBe(1);
+    expect(group.textContent).not.toContain("credits");
+    const paid = group.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-choice-openrouter/charged:free"]',
+    )!;
+    expect(paid.getAttribute("aria-description")).toBeNull();
+    expect(paid.title).toBe("openrouter/charged:free");
+    await act(async () => paid.click());
+    expect(calls).toEqual(["openrouter/charged:free"]);
+    expect(JSON.stringify(models)).toBe(before);
+  });
+
+  test("keeps the Free badge beside the current-model checkmark", async () => {
+    const model: ClientModel = { ...MODELS[0]!, id: "starter", source: "openrouter", cost: "free" };
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const row = container.querySelector('[data-testid="model-picker-choice-starter"]')!;
+    expect(row.textContent).toContain("Free");
+    expect(row.querySelector('[aria-label="Selected"]')).toBeTruthy();
+    expect(row.getAttribute("aria-description")).toBeNull();
+  });
   test("renders the polished model, effort, and Fast trigger from ClientModel data", async () => {
     const container = await mount(
       <ModelPolicyPicker
@@ -147,97 +302,165 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.className).toContain("max-sm:max-w-[7.5rem]");
   });
 
-  test("changes model policy only when an effort is chosen", async () => {
-    let selectedModel = "codex/gpt-5.6-sol";
-    let selectedEffort = "medium" as "low" | "medium" | "high";
-    let selectedLatency = "standard" as "standard" | "fast";
-
-    function Harness() {
-      const [, rerender] = useState(0);
-      return (
-        <ModelPolicyPickerMenu
-          models={MODELS}
-          model={selectedModel}
-          effort={selectedEffort}
-          latencyMode={selectedLatency}
-          onModelChange={(model) => {
-            selectedModel = model;
-            rerender((value) => value + 1);
-          }}
-          onEffortChange={(effort) => {
-            selectedEffort = effort as typeof selectedEffort;
-            rerender((value) => value + 1);
-          }}
-          onLatencyModeChange={(latencyMode) => {
-            selectedLatency = latencyMode === "fast" ? "fast" : "standard";
-            rerender((value) => value + 1);
-          }}
-        />
-      );
-    }
-
-    const container = await mount(<Harness />);
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-testid="model-picker-back"]')?.click();
-    });
-    await act(async () => {
+  test("selects immediately, coerces unsupported effort and speed, and closes", async () => {
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="fast"
+        onModelChange={(value) => calls.push(["model", value])}
+        onEffortChange={(value) => calls.push(["effort", value])}
+        onLatencyModeChange={(value) => calls.push(["latency", value])}
+        onOpenChange={(value) => calls.push(["open", value])}
+      />,
+    );
+    expect(container.querySelector('[data-testid="model-picker-back"]')).toBeNull();
+    await act(async () =>
       container
-        .querySelector<HTMLButtonElement>('[data-testid="model-picker-choice-codex/gpt-5.6-terra"]')
-        ?.click();
-    });
-    expect(selectedModel).toBe("codex/gpt-5.6-sol");
-
-    await act(async () => {
-      const high = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "High",
-      );
-      high?.click();
-    });
-    expect(selectedModel).toBe("codex/gpt-5.6-terra");
-    expect(selectedEffort).toBe("high");
-    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="model-picker-choice-codex/gpt-5.6-terra"]',
+        )!
+        .click(),
+    );
+    expect(calls).toEqual([
+      ["model", "codex/gpt-5.6-terra"],
+      ["effort", "low"],
+      ["latency", "standard"],
+      ["open", false],
+    ]);
   });
 
-  test("a controlled reopen returns to the active model's Thinking options", async () => {
+  test("commits supported effort after model selection and hides a model with only one level", async () => {
+    const calls: string[] = [];
+    const lowOnly: ClientModel = {
+      ...MODELS[1]!,
+      id: "low-only",
+      capabilities: {
+        ...MODELS[1]!.capabilities!,
+        reasoning: {
+          ...MODELS[1]!.capabilities!.reasoning,
+          efforts: ["low"],
+          defaultEffort: "low",
+        },
+      },
+    };
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[...MODELS, lowOnly]}
+        model="low-only"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={(value) => calls.push(value)}
+        onEffortChange={(value) => calls.push(value)}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-choice-codex/gpt-5.6-sol"]')!
+        .click(),
+    );
+    expect(calls).toEqual(["codex/gpt-5.6-sol", "low"]);
+  });
+
+  test("warns only when the selected model cannot receive images", async () => {
+    const warning = "This model cannot view the attached images.";
+    for (const [inputModalities, hasImageAttachments] of [
+      [["text"], false],
+      [["text"], true],
+      [["text", "image"], true],
+    ] as const) {
+      const model: ClientModel = {
+        ...MODELS[0]!,
+        capabilities: { ...MODELS[0]!.capabilities!, inputModalities: [...inputModalities] },
+      };
+      const container = await mount(
+        <ModelPolicyPickerMenu
+          hasImageAttachments={hasImageAttachments}
+          models={[model]}
+          model={model.id}
+          effort="medium"
+          latencyMode="standard"
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />,
+      );
+      expect(container.textContent?.includes(warning)).toBe(
+        hasImageAttachments && inputModalities.length === 1,
+      );
+      await act(async () => mounted!.root.unmount());
+      container.remove();
+      mounted = null;
+    }
+  });
+
+  test("controlled and uncontrolled open state stay independent of model selection", async () => {
     const hook = await renderHook(
-      (open: boolean) =>
+      (open: boolean | undefined) =>
         useModelPolicyPickerState({
           models: MODELS,
-          model: "codex/gpt-5.6-sol",
+          model: MODELS[0]!.id,
           effort: "high",
           latencyMode: "standard",
           open,
-          onModelChange: () => {},
-          onEffortChange: () => {},
-          onLatencyModeChange: () => {},
+          onModelChange() {},
+          onEffortChange() {},
+          onLatencyModeChange() {},
         }),
-      false as boolean,
+      undefined as boolean | undefined,
     );
     try {
-      expect(hook.result.current.nav).toEqual({
-        level: "thinking",
-        rail: "codex_subscription",
-        modelId: "codex/gpt-5.6-sol",
-      });
-
-      await actRun(() =>
-        hook.result.current.setNav({
-          level: "models",
-          rail: "codex_subscription",
-          modelId: null,
-        }),
-      );
-      expect(hook.result.current.nav.level).toBe("models");
-
-      await hook.rerender(true);
-      expect(hook.result.current.nav).toEqual({
-        level: "thinking",
-        rail: "codex_subscription",
-        modelId: "codex/gpt-5.6-sol",
-      });
+      await actRun(() => hook.result.current.setOpen(true));
+      expect(hook.result.current.open).toBe(true);
+      await hook.rerender(false);
+      await actRun(() => hook.result.current.setOpen(true));
+      expect(hook.result.current.open).toBe(false);
     } finally {
       await hook.unmount();
     }
+  });
+
+  test("filters names and payment sources and reports no matches", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="high"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    const search = async (value: string) => {
+      // React's change-event feature detection runs before Happy DOM is registered.
+      // Use the same event seam as human-input.test.ts; browser input is verified live.
+      input.value = value;
+      const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+      const handler = (
+        input as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[key]!;
+      await act(async () => handler.onChange({ target: input }));
+    };
+    await search("terra");
+    expect(
+      Boolean(container.querySelector('[data-testid="model-picker-choice-codex/gpt-5.6-sol"]')),
+    ).toBe(false);
+    expect(
+      Boolean(container.querySelector('[data-testid="model-picker-choice-codex/gpt-5.6-terra"]')),
+    ).toBe(true);
+    await search("no-such-model");
+    expect(container.textContent).toContain("No matching models");
+    await search("");
+    expect(container.querySelectorAll('[data-testid^="model-picker-choice-"]').length).toBe(2);
   });
 
   test("allows hosts to translate the generic picker labels", async () => {
@@ -256,6 +479,55 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector<HTMLButtonElement>('button[aria-label="Modell og tenking"]'),
     ).toBeTruthy();
+  });
+
+  test("translates search, selection, billing, and thinking in the open menu", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="high"
+        latencyMode="standard"
+        hasImageAttachments
+        messages={{
+          searchLabel: "Søk etter modell",
+          searchPlaceholder: "Søk…",
+          currentModel: "Valgt modell",
+          noMatches: "Ingen treff",
+          unsupportedAttachments: "Denne modellen kan ikke se vedleggene.",
+          thinking: "Tenking",
+          thinkingEffort: "Tenkenivå",
+          selected: "Valgt",
+          billingHints: {
+            ...defaultModelPolicyPickerMessages.billingHints,
+            codex_subscription: "Codex-abonnement",
+          },
+        }}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Søk etter modell"]',
+    )!;
+    expect(input.placeholder).toBe("Søk…");
+    expect(container.textContent).not.toContain("Valgt modell");
+    expect(container.textContent).toContain("Codex-abonnement");
+    expect(container.textContent).toContain("Denne modellen kan ikke se vedleggene.");
+    expect(container.querySelector('[role="radiogroup"][aria-label="Tenkenivå"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="Valgt"]')).toBeTruthy();
+    input.value = "no-such-model";
+    const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+    const handler = (
+      input as unknown as Record<
+        string,
+        { onChange: (event: { target: HTMLInputElement }) => void }
+      >
+    )[key]!;
+    await act(async () => handler.onChange({ target: input }));
+    expect(container.textContent).toContain("Ingen treff");
+    expect(container.textContent).not.toContain("No matching models");
   });
 
   test("can hide latency controls on policy surfaces that do not persist latency", async () => {
@@ -372,7 +644,68 @@ describe("ModelPolicyPicker", () => {
     ).toBeTruthy();
   });
 
-  test("renders the External rail mark for an anonymous provider", async () => {
+  test("preserves the Gateway billing rail for a removed custom-model selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-gateway/retired/provider-model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeNull();
+  });
+
+  test("preserves the workspace-provider rail for a removed OpenRouter selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-openrouter/retired/provider-model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
+  });
+
+  test("labels the shared BYOK rail as workspace-provider billing", async () => {
+    const container = await mount(<BillingClassMark billingClass="byok" />);
+
+    expect(container.querySelector('[aria-label="Workspace provider account"]')).toBeTruthy();
+  });
+
+  test("uses the credits-safe rail when a removed OpenRouter selection has no cost row", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="openrouter/retired/provider-model:free"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
+  });
+
+  test("renders the OpenGeni mark for an anonymous deployment provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
@@ -393,6 +726,49 @@ describe("ModelPolicyPicker", () => {
       />,
     );
 
-    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeTruthy();
+  });
+
+  test("badges only explicitly free deployment models", async () => {
+    const freeModel: ClientModel = {
+      ...MODELS[0]!,
+      id: "deployment/free-model",
+      label: "Deployment Free",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      source: "opengeni",
+      cost: "free",
+    };
+    const creditsModel: ClientModel = {
+      ...MODELS[1]!,
+      id: "deployment/credits-model",
+      label: "Deployment Credits",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      source: "opengeni",
+      cost: "credits",
+    };
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[freeModel, creditsModel]}
+        model="deployment/unavailable"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="model-picker-choice-deployment/free-model"]')
+        ?.textContent,
+    ).toContain("Free");
+    expect(
+      container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
+        ?.textContent,
+    ).not.toContain("OpenGeni credits");
   });
 });

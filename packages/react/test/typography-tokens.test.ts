@@ -26,7 +26,7 @@ describe("public typography token contract", () => {
       "--og-font-size-composer-wide: 15px",
       "--og-line-height-composer-wide: 24px",
       "--og-model-picker-trigger-height: 2rem",
-      "--og-model-picker-menu-width: 18rem",
+      "--og-model-picker-menu-width: 22rem",
       "--og-model-picker-row-padding-x: 0.625rem",
       "--og-model-picker-row-padding-y: 0.5rem",
       "--og-realtime-menu-width: 18rem",
@@ -64,7 +64,7 @@ describe("public typography token contract", () => {
     );
     expect(compact).toContain("--og-font-size-menu: 12px");
     expect(compact).toContain("--og-font-size-composer-wide: 13px");
-    expect(compact).toContain("--og-model-picker-menu-width: 15rem");
+    expect(compact).toContain("--og-model-picker-menu-width: 20rem");
     expect(compact).toContain("--og-realtime-menu-width: 15rem");
     expect(compact).not.toContain("--og-color-accent:");
   });

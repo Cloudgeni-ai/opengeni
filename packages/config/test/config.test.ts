@@ -6,6 +6,7 @@ import {
   SandboxBackend,
 } from "@opengeni/contracts";
 import {
+  DEFAULT_MODAL_IMAGE_REF,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
@@ -63,6 +64,62 @@ describe(".env.example", () => {
   });
 });
 
+describe("MCP OAuth settings", () => {
+  test("defaults off and requires a credential-free public origin when enabled", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.mcpOauthEnabled).toBe(false);
+    expect(defaults.mcpOauthTrustedProxyHops).toBe(0);
+    expect(() => withEnv({ OPENGENI_MCP_OAUTH_ENABLED: "true" }, () => getSettings())).toThrow(
+      "OPENGENI_PUBLIC_BASE_URL",
+    );
+    expect(
+      withEnv(
+        {
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+        },
+        () => getSettings(),
+      ).mcpOauthEnabled,
+    ).toBe(true);
+  });
+
+  test("bounds explicit trusted proxy hops", () => {
+    expect(
+      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2" }, () => getSettings())
+        .mcpOauthTrustedProxyHops,
+    ).toBe(2);
+    expect(() =>
+      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "17" }, () => getSettings()),
+    ).toThrow();
+  });
+
+  test("requires HTTPS outside local and test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "http://api.example.test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must use https");
+  });
+
+  test("requires a product mode with a canonical current-human session", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("requires managed or local product access mode");
+  });
+});
+
 describe("goal continuation pacing settings", () => {
   test("defaults to the input-aware idle backoff schedule and cap", () => {
     const settings = withEnv({}, () => getSettings());
@@ -115,7 +172,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("child lifecycle notices default off and parse the rollout flag", () => {
-    expect(getSettings().childLifecycleNoticesEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).childLifecycleNoticesEnabled).toBe(false);
     expect(
       withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true" }, () => getSettings())
         .childLifecycleNoticesEnabled,
@@ -126,8 +183,56 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("host MCP connection authority defaults off and parses the rollout flag", () => {
+    expect(withEnv({}, () => getSettings()).hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true" }, () => getSettings())
+        .hostMcpAuthoritySourceAdmissionEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false" }, () =>
+        getSettings(),
+      ).hostMcpAuthoritySourceAdmissionEnabled,
+    ).toBe(false);
+  });
+
+  test("remote host MCP resolver configuration is optional server configuration", () => {
+    expect(withEnv({}, () => getSettings()).hostMcpCredentialResolversJson).toBeUndefined();
+    const value = JSON.stringify([]);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON: value }, () => getSettings())
+        .hostMcpCredentialResolversJson,
+    ).toBe(value);
+  });
+
+  test("configured host MCP refs require the completed fleet activation", () => {
+    const mcpServers = JSON.stringify([
+      {
+        id: "host-tools",
+        url: "https://host.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-binding",
+          providerDomain: "host.example.test",
+        },
+      },
+    ]);
+    expect(() => withEnv({ OPENGENI_MCP_SERVERS: mcpServers }, () => getSettings())).toThrow(
+      /OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/,
+    );
+    expect(
+      withEnv(
+        {
+          OPENGENI_MCP_SERVERS: mcpServers,
+          OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
+        },
+        () => getSettings(),
+      ).mcpServers.find((server) => server.id === "host-tools")?.connectionRef,
+    ).toMatchObject({ authoritySource: "host", connectionId: "opaque-host-binding" });
+  });
+
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
-    expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
+    expect(withEnv({}, () => getSettings()).slackWorkspaceRoutingEnabled).toBe(true);
     expect(
       withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "false" }, () => getSettings())
         .slackWorkspaceRoutingEnabled,
@@ -139,7 +244,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("work discovery rollout stages have safe independent defaults", () => {
-    const defaults = getSettings();
+    const defaults = withEnv({}, () => getSettings());
     expect(defaults.workDiscoveryEnabled).toBe(true);
     expect(defaults.workClaimMutationsEnabled).toBe(true);
     expect(defaults.workDiscoveryHumanAdvisoriesEnabled).toBe(true);
@@ -457,6 +562,36 @@ describe("managed auth browser session-set rollout", () => {
         () => getSettings(),
       ),
     ).toThrow(/must use https when browser session sets are enabled/);
+  });
+});
+
+describe("organization setup email token transport rollout", () => {
+  test("defaults to fragment links and requires the explicit query edge-sanitization gate", () => {
+    expect(withEnv({}, () => getSettings()).organizationUserSetupEmailTokenTransport).toBe(
+      "fragment",
+    );
+    expect(
+      withEnv({}, () => getSettings()).organizationUserSetupQueryEdgeSanitizationConfirmed,
+    ).toBe(false);
+    expect(() =>
+      withEnv({ OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "query" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/QUERY_EDGE_SANITIZATION_CONFIRMED=true/);
+    expect(
+      withEnv(
+        {
+          OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "query",
+          OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "true",
+        },
+        () => getSettings(),
+      ).organizationUserSetupEmailTokenTransport,
+    ).toBe("query");
+    expect(() =>
+      withEnv({ OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "enabled" }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
   });
 });
 
@@ -1926,9 +2061,9 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
-  test("production modal+desktop requires a digest-pinned image ref", () => {
+  test("production modal+desktop defaults to a public pin and accepts an override", () => {
     const digestRef = `example.azurecr.io/opengeni-desktop@sha256:${"a".repeat(64)}`;
-    expect(() =>
+    expect(
       withEnv(
         {
           OPENGENI_ENVIRONMENT: "production",
@@ -1938,8 +2073,8 @@ describe("backend-gated sandbox required-credential validation", () => {
           OPENGENI_MODAL_TOKEN_SECRET: "as-test",
         },
         () => getSettings(),
-      ),
-    ).toThrow("digest-pinned");
+      ).modalImageRef,
+    ).toBe(DEFAULT_MODAL_IMAGE_REF);
     expect(
       withEnv(
         {
@@ -2215,6 +2350,35 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         sandboxLeaseReaperPeriodMs: 30_000,
       }),
     ).toBe(60 * 60_000);
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 60_000,
+        sandboxDrainSnapshotTimeoutMs: 30 * 60_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(30 * 60_000 + 50_000);
+  });
+
+  test("drain snapshots can use extended recovery headroom without changing ordinary snapshots", () => {
+    const settings = withEnv(
+      { OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(30 * 60_000) },
+      () => getSettings(),
+    );
+    expect(settings.sandboxSnapshotTimeoutMs).toBe(60_000);
+    expect(settings.sandboxDrainSnapshotTimeoutMs).toBe(30 * 60_000);
+  });
+
+  test("an explicit drain budget must fit dispatch, capture, and handoff inside the wait ceiling", () => {
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_590_000) }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/requires a sandbox lifecycle transition wait/i);
+    const settings = withEnv(
+      { OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_550_000) },
+      () => getSettings(),
+    );
+    expect(sandboxLifecycleTransitionWaitMs(settings)).toBe(60 * 60_000);
   });
 
   test("snapshot configuration cannot consume the durable claim's settlement window", () => {
@@ -2232,6 +2396,11 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         () => getSettings(),
       ).sandboxSnapshotTimeoutMs,
     ).toBe(59 * 60_000 + 30_000);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(60 * 60_000) }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
   });
 
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
@@ -2312,7 +2481,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         },
         () => getSettings(),
       ),
-    ).toThrow(/must exceed the durable capture timeout/i);
+    ).toThrow(/must exceed the largest durable snapshot or drain capture timeout/i);
     expect(
       withEnv(
         {
@@ -2324,6 +2493,36 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         () => getSettings(),
       ).sandboxRotationLeadMs,
     ).toBe(100_001);
+  });
+
+  test("boot reserves Modal rotation headroom for an extended drain capture", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: "120000",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160000" }, () => getSettings()),
+    ).toThrow(/largest durable snapshot or drain capture timeout/i);
+    expect(
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160001" }, () => getSettings())
+        .sandboxRotationLeadMs,
+    ).toBe(160_001);
+  });
+
+  test("boot preserves rotation headroom for historical Modal leases after a backend rollout", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "docker",
+      OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: "120000",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160000" }, () => getSettings()),
+    ).toThrow(/persisted Modal leases after a default-backend rollout/i);
+    expect(
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160001" }, () => getSettings())
+        .sandboxRotationLeadMs,
+    ).toBe(160_001);
   });
 
   test("the rotation batch is positive and bounded", () => {
@@ -2429,3 +2628,16 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
     process.env = original;
   }
 }
+
+test("existing pause-enabled sessions gain resume without changing unrelated selections", async () => {
+  const { allowedFirstPartyMcpToolsForSession } = await import("../src/index");
+  expect(allowedFirstPartyMcpToolsForSession({}, ["goal_pause"])).toEqual([
+    "goal_pause",
+    "goal_resume",
+  ]);
+  expect(allowedFirstPartyMcpToolsForSession({}, ["session_get"])).toEqual(["session_get"]);
+  expect(allowedFirstPartyMcpToolsForSession({}, ["goal_pause", "goal_resume"])).toEqual([
+    "goal_pause",
+    "goal_resume",
+  ]);
+});

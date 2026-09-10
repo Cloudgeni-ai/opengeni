@@ -21,6 +21,37 @@ const withheldMigrationNames = [
   "0345_tenant_scoped_session_tenancy_fence.sql",
   "0374_session_event_cursors.sql",
   "0379_session_event_raw_lane_activation.sql",
+  "0388_sandbox_provider_deadline_interactions.sql",
+  "0391_sandbox_provider_deadline_interaction_followup.sql",
+  "0397_sandbox_deadline_rotation_preemption.sql",
+  "0402_session_input_wait_and_background_command_results.sql",
+  "0407_connected_command_tracking_retirement.sql",
+  "0408_scheduled_session_target_index.sql",
+  "0414_scheduled_generated_producer_materialization.sql",
+  "0416_scheduled_inherited_tool_admission.sql",
+  // These cutovers patch the exact post-0299 lifecycle wrapper and build on
+  // scheduled authority withheld above. Replay them only after those originals.
+  "0437_organization_scoped_external_workspaces.sql",
+  "0438_durable_connect_attempts.sql",
+  "0439_external_identity_provisioning.sql",
+  "0440_external_workspace_member_removal.sql",
+  "0441_external_identity_membership_lifecycle.sql",
+  "0442_external_owning_user_authority.sql",
+  "0443_host_mcp_binding_registry.sql",
+  "0444_host_mcp_delegations.sql",
+  "0445_host_mcp_turn_authorities.sql",
+  "0446_host_mcp_causal_continuation.sql",
+  "0447_host_mcp_task_authorities.sql",
+  "0448_host_mcp_child_authority.sql",
+  "0449_external_identity_link_lifecycle.sql",
+  "0450_external_identity_link_work.sql",
+  "0451_external_link_preview_and_permission_ceiling.sql",
+  "0452_external_link_scheduled_origin.sql",
+  "0453_host_mcp_native_owner.sql",
+  "0454_connect_origin_authority.sql",
+  "0455_external_link_inventory_labels.sql",
+  "0456_social_connection_versions.sql",
+  "0457_canonical_session_scope_subject.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -97,7 +128,13 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       // in dependency order once the legacy claim exists. 0299 must repair the
       // replayed 0275 membership definitions before 0345 extends that exact
       // prefix with the session-tenancy fences. 0374 consumes the helper
-      // created by 0345, so it must remain behind the same withheld boundary.
+      // created by 0345, 0388 drift-guards the reaper definition produced
+      // there, 0391 extends that exact 0388 definition, and 0394 patches the
+      // resulting provider-deadline branch. The 0402 session-wait cutover also
+      // inventories the scheduled accepted-execution columns created by 0275,
+      // so it must remain behind the same withheld boundary. The 0408 target
+      // index depends on the deleted_at column introduced by 0275. Migration 0414
+      // patches the exact scheduled producer fence created by that same 0275.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;

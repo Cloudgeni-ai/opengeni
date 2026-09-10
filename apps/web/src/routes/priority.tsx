@@ -1,7 +1,5 @@
-// "For you" — the priority feed. One ranked ledger of root workstreams,
-// most expensive inaction first. Structure is typographic (rank numerals,
-// hairlines, a mono agent-time column); color is reserved for the status
-// dots and the single primary action per row.
+// For you ranks root workstreams by verified human wait duration. Child
+// requests remain separately addressable even when their parent has failed.
 import { useChannels, useWorkspaceSessions } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import { ChevronRightIcon } from "lucide-react";
@@ -9,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
+import { PriorityAttentionChildren } from "@/components/priority-attention-children";
 import { CreatorMonogram } from "@/components/creator-monogram";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
@@ -178,7 +177,7 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
             For you
           </h1>
           <span className="ml-auto font-mono text-2xs text-fg-subtle">
-            sorted by agent-time lost
+            oldest human waits first
           </span>
         </header>
 
@@ -202,12 +201,12 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
                 {today}
                 {feed.needsYou > 0 ? ` · ${feed.needsYou} need you` : " · nothing needs you"}
               </span>
-              <span className="ml-auto font-mono text-2xs text-fg-subtle">agent-time lost</span>
+              <span className="ml-auto font-mono text-2xs text-fg-subtle">time waiting</span>
             </div>
 
             {empty ? (
               <p className="px-1 py-10 text-sm text-fg-subtle">
-                Nothing to look at. New approvals, failures, and finished work land here first.
+                Nothing to look at. New approvals, failures, and updates land here first.
               </p>
             ) : (
               <>
@@ -232,8 +231,8 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
                   }}
                 />
                 <PriorityTierSection
-                  title="Recently finished"
-                  hint="results you may want to look at"
+                  title="Recently inactive"
+                  hint="check results and remaining goals"
                   entries={feed.finished}
                   workspaceId={workspaceId}
                   channelNames={channelNames}
@@ -361,19 +360,19 @@ function ledgerFigure(entry: PriorityEntry): {
 } {
   if (entry.tier === "blocked") {
     return {
-      figure: formatAgentMinutes(entry.costMinutes),
+      figure:
+        entry.oldestHumanWaitMinutes == null
+          ? "Unknown"
+          : formatAgentMinutes(entry.oldestHumanWaitMinutes),
       quiet: false,
-      basis:
-        entry.waitingAgents > 1
-          ? `${entry.waitingAgents} waiting × ${formatAgentMinutes(entry.waitingMinutes)}`
-          : `waiting ${formatAgentMinutes(entry.waitingMinutes)}`,
+      basis: entry.oldestHumanWaitMinutes == null ? "wait start unavailable" : "oldest human wait",
     };
   }
   if (entry.tier === "broken") {
     return {
       figure: formatAgentMinutes(entry.waitingMinutes),
       quiet: false,
-      basis: "since failure",
+      basis: "since update",
     };
   }
   if (entry.tier === "finished") {
@@ -467,6 +466,18 @@ function PriorityRow(props: {
             </button>
           ) : null}
         </div>
+        {(session.treeStats?.attentionDescendants ?? 0) > 0 || session.treeStats?.truncated ? (
+          <PriorityAttentionChildren
+            key={`${props.workspaceId}:${session.id}`}
+            workspaceId={props.workspaceId}
+            rootSessionId={session.id}
+            label={
+              (session.treeStats?.attentionDescendants ?? 0) > 0
+                ? undefined
+                : "Check waiting agents"
+            }
+          />
+        ) : null}
       </div>
       <div className="grid w-32 shrink-0 gap-0.5 pt-0.5 text-right">
         <span

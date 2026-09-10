@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-og-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Timeline table regression</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font: 14px sans-serif;
+      }
+      .table-test-shell {
+        display: flex;
+        height: 720px;
+        max-height: 100dvh;
+        flex-direction: column;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/timeline-table-test-harness.tsx"></script>
+  </body>
+</html>

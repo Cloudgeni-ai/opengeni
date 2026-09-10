@@ -1,4 +1,4 @@
-import { buildTimeline, humanizeFailureReason, type TimelineItem } from "@opengeni/react";
+import { buildTimeline, presentFailure, type TimelineItem } from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
 
@@ -60,10 +60,13 @@ export function projectSessionTimeline(
 }
 
 export type SessionFailureSummary = {
-  /** Human-readable reason from the most recent turn.failed event, if any. */
+  /** Human-readable reason from the latest recorded failure boundary, if any. */
   reason: string | null;
+  safetyRefusal?: boolean;
   /** When the most recent failure happened. */
   failedAt: string | null;
+  /** Exact durable event identity; independent of history hydration or clock precision. */
+  failureEventId?: string | null;
   /** Same-turn recovery attempts recorded by the control plane. */
   recoveryCount: number;
   /** Total failed turns in the log — > 1 means the session failed before and was revived. */
@@ -79,24 +82,50 @@ export function summarizeSessionFailure(
   _sessionStatus: SessionStatus,
 ): SessionFailureSummary {
   let reason: string | null = null;
+  let safetyRefusal = false;
   let failedAt: string | null = null;
+  let failureEventId: string | null = null;
   let recoveryCount = 0;
   let failedTurnCount = 0;
+  let latestFailedTurnId: string | null = null;
   for (const event of events) {
     if (event.type === "turn.recovery.requested") {
       recoveryCount += 1;
     }
     if (event.type === "turn.failed") {
       failedTurnCount += 1;
+      latestFailedTurnId = event.turnId ?? null;
       const payload =
         event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
           ? (event.payload as Record<string, unknown>)
           : {};
-      reason = humanizeFailureReason(failurePayloadMessage(payload) ?? null) ?? reason;
+      const presentation = presentFailure(payload);
+      reason = presentation.reason;
+      safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
+      failureEventId = event.id;
+    }
+    if (event.type === "session.status.changed") {
+      const payload = event.payload as Record<string, unknown>;
+      if (
+        payload?.status === "failed" &&
+        payload.code === "pre_claim_failure" &&
+        (!event.turnId || event.turnId !== latestFailedTurnId)
+      ) {
+        // An unclaimed machine update has no turn.failed event. Its status is a
+        // new failure boundary, never evidence that an older provider error
+        // happened again. Preserve a paired same-turn diagnostic when present.
+        const presentation = presentFailure(payload);
+        reason =
+          presentation.reason ??
+          "The session failed before a turn could start. No error details were recorded.";
+        safetyRefusal = presentation.safetyRefusal;
+        failedAt = event.occurredAt;
+        failureEventId = event.id;
+      }
     }
   }
-  return { reason, failedAt, recoveryCount, failedTurnCount };
+  return { reason, safetyRefusal, failedAt, failureEventId, recoveryCount, failedTurnCount };
 }
 
 export function reasoningSummaryText(payload: unknown): string {

@@ -684,19 +684,27 @@ spec:
             summary: OpenGeni sandbox inventory telemetry is stale or absent
             description: No control replica has completed a fresh database projection for at least one sandbox inventory domain. Threshold alerts for that domain intentionally fail closed until projection health returns.
         - alert: OpenGeniCodexCredentialPoolEmpty
-          expr: increase(opengeni_codex_pool_low_total{depth="zero"}[5m]) > 0
+          expr: |
+            sum by (namespace, release, environment, component, workspace_key) (
+              increase(opengeni_codex_pool_low_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},depth="zero"}[5m])
+            ) > 0
           for: 1m
           labels:
             severity: critical
           annotations:
             summary: A Codex workspace observed no eligible subscription credentials
+            description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed zero eligible subscription credentials. Restore or reconnect an allocator-enabled credential before new Codex turns require capacity.
         - alert: OpenGeniCodexCredentialPoolSingle
-          expr: increase(opengeni_codex_pool_low_total{depth="one"}[15m]) > 0
+          expr: |
+            sum by (namespace, release, environment, component, workspace_key) (
+              increase(opengeni_codex_pool_low_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},depth="one"}[15m])
+            ) > 0
           for: 5m
           labels:
             severity: warning
           annotations:
             summary: A Codex workspace is operating with only one eligible subscription credential
+            description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed exactly one eligible subscription credential. Add or restore a second allocator-enabled credential to remove the single-account failure domain.
         - alert: OpenGeniServiceDown
           expr: up{job=~".*opengeni.*"} == 0
           for: 5m
@@ -859,22 +867,22 @@ spec:
             description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
         # ── Context / compaction ─────────────────────────────────────────────
         - alert: OpenGeniCompactionNotFiring
-          # Contexts running hot (p90 observed input tokens high) while NO
-          # compaction has fired in 30m — sessions are drifting toward overflow.
-          # The 150k token threshold assumes a ~200k-window model; tune to yours.
-          # `or vector(0)` is load-bearing: on a fresh cluster the compaction
-          # counter has NEVER been created, so a bare `sum(increase(...)) == 0`
-          # is an EMPTY vector, not 0 — the conjunction would silently never fire
-          # exactly when compaction has never fired. The fallback forces a real 0.
+          # The control worker projects the latest exact-attempt compaction
+          # landmark from a trigger-maintained durable ledger. Filter age by the
+          # freshness series from the same scrape target so a stale replica
+          # cannot combine with another replica's successful read.
           expr: |
-            histogram_quantile(0.9, sum by (le) (rate(opengeni_model_input_tokens_bucket[30m]))) > 150000
-            and on()
-            (sum(increase(opengeni_context_compactions_total[30m])) or vector(0)) == 0
-          for: 15m
+            max(
+              opengeni_context_compaction_oldest_pending_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
+              and on(namespace, release, environment, component, instance)
+              opengeni_context_compaction_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} == 1
+            ) > 900
+          for: 1m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni contexts are running hot but compaction has not fired in 30m
+            summary: OpenGeni automatic compaction started but did not complete
+            description: An exact active attempt has retained a durable automatic context-compaction start without a compacted/skipped settlement for more than 15 minutes. Inspect the owning attempt, provider call, and worker recovery.
         - alert: OpenGeniCodexPromptCacheHitRatioLow
           # The codex-subscription prompt cache is doing little work: median per-call
           # cache-hit ratio below 40% over 30m while codex calls are actually flowing.

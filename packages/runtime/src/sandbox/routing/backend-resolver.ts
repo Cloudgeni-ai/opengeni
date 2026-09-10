@@ -28,6 +28,7 @@ import {
   type SelfhostedRelayConfig,
 } from "../selfhosted/session";
 import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
+import type { OpStreamOutputFrame } from "../selfhosted/op-stream";
 import type { ControlRpc } from "../selfhosted/control-rpc";
 import { resolveConnectedMachineWorkspaceRoot } from "../selfhosted/workspace-path";
 import type {
@@ -120,6 +121,10 @@ export interface ActiveBackendResolverDeps {
   selfhostedAdoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
+  selfhostedCaptureBackgroundCommandOutput?: (
+    commandId: string,
+    frames: OpStreamOutputFrame[],
+  ) => Promise<void>;
   selfhostedSettleBackgroundCommand?: (input: {
     commandId: string;
     controlWorkspaceId: string;
@@ -129,6 +134,7 @@ export interface ActiveBackendResolverDeps {
     outcome: "exited" | "lost";
     exitCode: number | null;
     reason: string;
+    failure?: import("@opengeni/contracts").SessionCommandFailure;
   }) => void | Promise<void>;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
@@ -390,6 +396,9 @@ export function makeActiveBackendResolver(
           : {}),
         ...(deps.selfhostedSettleBackgroundCommand !== undefined
           ? { settleBackgroundCommand: deps.selfhostedSettleBackgroundCommand }
+          : {}),
+        ...(deps.selfhostedCaptureBackgroundCommandOutput
+          ? { captureBackgroundCommandOutput: deps.selfhostedCaptureBackgroundCommandOutput }
           : {}),
         ...(connection.opStream !== undefined ? { opStream: connection.opStream } : {}),
         operationResourcePolicy: connection.operationResourcePolicy,
