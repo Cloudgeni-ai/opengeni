@@ -553,10 +553,11 @@ rather than failing the session, so a top-up lets the same session continue.
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain
-terminal model response does not join that background work. Every actual local
-function call does join the one exact preparation promise before Runner can
+terminal model response does not join that background work. Preparation-independent
+tools such as `skill_read` execute without joining it. Other local
+function calls join the one exact preparation promise before Runner can
 dispatch it, including always-visible base tools such as `exec_command` and
-`load_skill`; their stable first-request schemas remain eager, but their
+`write_stdin`; their stable first-request schemas remain eager, but their
 execution does not bypass catalog persistence. An in-process model-tool server
 is never bound to a provisional local-only catalog: its first invocation waits
 for and uses the final environment containing every admitted local and MCP
@@ -839,8 +840,18 @@ concrete `tools/call` and authentication fails, the event includes that tool
 name and remains actionable.
 
 Session creation persists skill selection but never starts a sandbox. At turn
-execution, bundled, curated, pack, and inline session skills remain SDK-lazy:
-only a selected skill directory is materialized when `load_skill` is called.
+execution, bundled, curated, pack, and inline session Skills use the shared
+descriptor index and eager sandbox-free `skill_read`. Only an explicit
+`skill_checkout` copies a selected Skill directory to the filesystem.
+The worker builds the configured Skill descriptor catalog during each turn-attempt
+preparation. `formatSkillCatalog` renders the bounded `Skills` instruction layer,
+after workspace governance (or workspace memory on the unstructured path) and
+before session instructions. A separate rendering supplies contribution telemetry;
+it does not append a history item. The constructed agent retains that index while
+it runs, including while lazy tool preparation completes. A subsequent turn or
+rebuilt attempt can see catalog changes; this is not a session-lifetime snapshot.
+Tool reads return current authorized content, so a read can observe a saved revision
+newer than its initial descriptor. Read outputs enter ordinary tool-call history.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound

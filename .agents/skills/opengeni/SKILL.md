@@ -77,6 +77,9 @@ Then open the smallest source files that answer the question:
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
+  `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
+  layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
+  exposes on-demand filesystem copies. Repository Skill discovery is independent.
   `packages/runtime/src/model-provider.ts` is the package-private model-provider facade over
   cohesive client, error, request-policy, routing, and transport leaves beside it;
   `packages/runtime/src/model-input.ts` owns final model-wire shaping and context guards;
@@ -303,7 +306,7 @@ For tools and MCP work, distinguish:
 
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
-- Built-in SDK sandbox capabilities such as shell/files/skills.
+- Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
 Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.

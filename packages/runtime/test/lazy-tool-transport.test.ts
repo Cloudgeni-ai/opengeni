@@ -938,7 +938,6 @@ describe("generic lazy tool dispatch", () => {
     const stdin = firstPartyTool("write_stdin", "Write to a running command's stdin");
     const image = firstPartyTool("view_image", "Return an image from a sandbox path");
     const patch = firstPartyTool("apply_patch", "Apply a create, update, or delete file patch");
-    const skill = firstPartyTool("load_skill", "Load a lazily configured skill into the sandbox");
     const skillRead = firstPartyTool("skill_read", "Read Skill text without a sandbox");
     const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
     const human = firstPartyTool(
@@ -954,7 +953,7 @@ describe("generic lazy tool dispatch", () => {
       name: "lazy-test",
       instructions: "Use tools.",
       model: "scripted",
-      tools: [exec, stdin, image, patch, skill, skillRead, skillSave, human, models, browser],
+      tools: [exec, stdin, image, patch, skillRead, skillSave, human, models, browser],
     });
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
     const visible = await agent.getAllTools(undefined as never);
@@ -968,7 +967,6 @@ describe("generic lazy tool dispatch", () => {
       "write_stdin",
       "view_image",
       "apply_patch",
-      "load_skill",
       "skill_read",
       "request_human_input",
       "list_models",
@@ -981,7 +979,6 @@ describe("generic lazy tool dispatch", () => {
       "write_stdin",
       "view_image",
       "apply_patch",
-      "load_skill",
       "skill_read",
       "request_human_input",
       "list_models",
@@ -1636,6 +1633,9 @@ describe("OpenAI/Azure native client tool search", () => {
       expect(reads).toBe(1);
       expect(JSON.stringify(model.requests[0])).toContain("builtin:opengeni-skills");
       expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toContain("skill_read");
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).not.toContain(
+        "load_skill",
+      );
     }
   });
 

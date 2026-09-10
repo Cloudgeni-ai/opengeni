@@ -62,4 +62,26 @@ describe("sandbox-independent Skill catalog", () => {
     expect(inspection.composed).not.toContain("opengeni-skills");
     expect(inspection.composed).not.toContain("skill_save");
   });
+
+  test("places a rendered catalog in instructions and refreshes only on a new composition", () => {
+    const descriptors = [{ id: "workspace:deploy", name: "deploy", description: "Original" }];
+    const options = {
+      workspaceGovernance: "Workspace governance",
+      skillCatalog: descriptors,
+      sessionInstructions: "Session instructions",
+    };
+    const settings = testSettings({ sandboxBackend: "none" });
+    const first = inspectPersistentAgentInstructions(settings, options);
+    const ids = first.layers.map((layer) => layer.id);
+    expect(ids.indexOf("skill_catalog")).toBeGreaterThan(ids.indexOf("workspace_governance"));
+    expect(ids.indexOf("skill_catalog")).toBeLessThan(ids.indexOf("session_instructions"));
+    const original = first.composed;
+    descriptors[0]!.description = "Updated";
+    expect(first.composed).toBe(original);
+    expect(first.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain(
+      "Original",
+    );
+    const next = inspectPersistentAgentInstructions(settings, options);
+    expect(next.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain("Updated");
+  });
 });

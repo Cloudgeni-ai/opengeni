@@ -197,7 +197,6 @@ import {
   inContainerMountStrategy,
   s3Mount,
   shell,
-  skills,
   type SandboxClient,
   type SandboxSessionLike,
   type SandboxSessionState,
@@ -214,6 +213,8 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+
+import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
@@ -278,13 +279,18 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
+  readRuntimeSkill,
+  skillCatalogFromComposition,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
+  type RuntimeSkillIndexEntry,
 } from "./runtime-skills";
 export {
   composeRuntimeSkills,
   loadNativeToolSkillArtifacts,
+  readRuntimeSkill,
+  skillCatalogFromComposition,
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
@@ -294,6 +300,7 @@ export {
   type RuntimeSkillArtifactFile,
   type RuntimeSkillComposition,
   type RuntimeSkillDescriptor,
+  type RuntimeSkillIndexEntry,
   type SessionSkillActivation,
 } from "./runtime-skills";
 import {
@@ -1612,6 +1619,8 @@ export type CodemodeTokenWriterSession = SandboxSessionLike;
 
 const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
 const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
+const agentRuntimeSkillIndex = new WeakMap<object, readonly RuntimeSkillIndexEntry[]>();
+const emptyRuntimeSkillIndex: readonly RuntimeSkillIndexEntry[] = Object.freeze([]);
 const agentInstructionInspection = new WeakMap<object, PersistentAgentInstructionInspection>();
 const emptyInstructionInspection: PersistentAgentInstructionInspection = Object.freeze({
   layers: Object.freeze([]),
@@ -1628,6 +1637,11 @@ export function effectiveSkillSelectionsForAgent(
   agent: object,
 ): readonly EffectiveSkillSelection[] {
   return agentSkillSelections.get(agent) ?? emptySkillSelections;
+}
+
+/** Sandbox-independent Skill index admitted for this agent. */
+export function runtimeSkillIndexForAgent(agent: object): readonly RuntimeSkillIndexEntry[] {
+  return agentRuntimeSkillIndex.get(agent) ?? emptyRuntimeSkillIndex;
 }
 
 export function persistentAgentInstructionInspectionFor(
@@ -1939,10 +1953,8 @@ export type BuildAgentOptions = {
    * executable tool catalog.
    */
   skillActivations?: readonly RuntimeSkillActivation[];
-  /** Server-backed Skill descriptors, independent of sandbox capabilities. */
+  /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
-  /** Shared reader serves configured Skills; filesystem discovery remains for repo Skills only. */
-  serverSkillReading?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2360,6 +2372,12 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+const SkillReadToolInput = z.object({
+  skill: z.string().min(1).max(512),
+  listFiles: z.boolean().optional(),
+  paths: z.array(z.string().min(1).max(1024)).min(1).max(128).optional(),
+});
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -2375,6 +2393,29 @@ export function buildOpenGeniAgent(
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
     options.attemptToolCatalog,
   );
+  const hostSuppliedSkillCatalog = options.skillCatalog !== undefined;
+  if (hostSuppliedSkillCatalog && options.skillActivations?.length) {
+    throw new Error(
+      "Supply either host Skill catalog/reader or runtime Skill activations, not both.",
+    );
+  }
+  // Site authoring needs filesystem execution; managed and connected compute
+  // are equivalent. Reading supplied Skill files never needs either.
+  const filesystemAvailable = (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
+  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
+    sites: !hostSuppliedSkillCatalog && filesystemAvailable,
+    videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),
+  });
+  const skillCatalog = hostSuppliedSkillCatalog
+    ? options.skillCatalog
+    : skillComposition.index.length > 0
+      ? skillCatalogFromComposition(skillComposition)
+      : undefined;
+  const instructionOptions: BuildAgentOptions = {
+    ...options,
+    ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+  };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2507,7 +2548,26 @@ export function buildOpenGeniAgent(
     ...(videoGenerationTool ? [videoGenerationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
-  const instructionInspection = inspectPersistentAgentInstructions(settings, options);
+  const embeddedSkillReadTool =
+    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+      ? agentTool({
+          name: "skill_read",
+          description:
+            "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
+          parameters: SkillReadToolInput,
+          errorFunction: null,
+          execute: (input) =>
+            JSON.stringify(
+              readRuntimeSkill(skillComposition, {
+                skill: input.skill,
+                ...(input.paths !== undefined ? { paths: input.paths } : {}),
+                ...(input.listFiles !== undefined ? { listFiles: input.listFiles } : {}),
+              }),
+            ),
+        })
+      : null;
+  if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
+  const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -2570,6 +2630,8 @@ export function buildOpenGeniAgent(
     const agent = new Agent(baseConfig);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
+    agentSkillSelections.set(agent, skillComposition.selections);
+    agentRuntimeSkillIndex.set(agent, skillComposition.index);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
@@ -2598,26 +2660,6 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
-  const skillComposition = composeRuntimeSkills(
-    options.serverSkillReading ? [] : (options.skillActivations ?? []),
-    {
-      editableArtifacts: !options.serverSkillReading && editableArtifactToolsAvailable,
-      // Sites guidance is bundled capability metadata, not eager tool authority.
-      // Tool discovery/execution remains governed by the lazy attempt gateway.
-      sites:
-        !options.serverSkillReading &&
-        (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
-      // A connected machine owns its filesystem, and its session deliberately
-      // does not materialize host-local lazy entries. Advertising this bundled
-      // skill there makes load_skill report a path that does not exist. Keep the
-      // executable tools (whose descriptions contain the full short workflow),
-      // but expose the filesystem-backed helper only where it can be delivered.
-      videoGeneration:
-        !options.serverSkillReading &&
-        Boolean(options.videoGeneration) &&
-        options.activeSandboxBackend !== "selfhosted",
-    },
-  );
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
@@ -2664,6 +2706,7 @@ export function buildOpenGeniAgent(
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
+  agentRuntimeSkillIndex.set(agent, skillComposition.index);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -3460,11 +3503,6 @@ function buildAgentCapabilitiesFromComposition(
       ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
     }),
   ];
-  caps.push(
-    skills({
-      lazyFrom: skillComposition.lazySource,
-    }),
-  );
   if (options.workspaceSkillPaths?.length) {
     caps.push(
       workspaceSkills(

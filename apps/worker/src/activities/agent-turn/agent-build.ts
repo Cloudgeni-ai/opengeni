@@ -707,7 +707,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,
-        serverSkillReading: true,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
