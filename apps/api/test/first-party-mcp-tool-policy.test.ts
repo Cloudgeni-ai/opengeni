@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  GoalSpec,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   MAX_SELECTED_VARIABLE_SETS,
@@ -19,6 +20,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { listSessionDiscoverySummaries } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import * as z4 from "zod/v4";
 import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { buildFilesMcpServer } from "../src/mcp/files";
@@ -682,6 +684,136 @@ describe("first-party MCP tool visibility policy", () => {
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+
+  test("session_create publishes the canonical nested goal input schema", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "session-goal-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "session_create",
+      );
+      expect(tool?.inputSchema.properties?.goal).toMatchObject({
+        type: "object",
+        required: ["text"],
+        properties: {
+          text: { type: "string", minLength: 1 },
+          successCriteria: { type: "string", minLength: 1 },
+          rootConstraints: { type: "array", items: { type: "string" } },
+          maxAutoContinuations: { type: "integer" },
+          mutationPolicy: {
+            type: "string",
+            enum: ["review_changes", "preserve_intent", "autonomous_adaptation"],
+          },
+        },
+      });
+      expect(tool?.inputSchema.required).not.toContain("goal");
+      const schema = registeredToolInputSchema(server, "session_create");
+      for (const goal of [
+        { text: "Run checks", successCriteria: "Checks pass" },
+        { objective: "Run checks", successCriteria: ["pass"] },
+        { text: "Run checks", successCriteria: ["pass"] },
+        { text: "Run checks", rootConstraints: [42] },
+        { text: "" },
+        { text: "Run checks", maxAutoContinuations: 0 },
+      ]) {
+        expect(schema.safeParse({ initialMessage: "work", goal }).success).toBe(
+          GoalSpec.safeParse(goal).success,
+        );
+      }
+      const rejected = await client.callTool({
+        name: "session_create",
+        arguments: {
+          initialMessage: "private-draft",
+          goal: { objective: "private-objective", successCriteria: ["private-success"] },
+        },
+      });
+      expect(rejected.isError).toBe(true);
+      expect(JSON.stringify(rejected)).toContain("text");
+      expect(JSON.stringify(rejected)).toContain("successCriteria");
+      expect(JSON.stringify(rejected)).not.toContain("private-");
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("session_create nested parser failures are actionable without reflecting input", async () => {
+    let databaseTouches = 0;
+    const routeDeps = deps();
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("private-storage-error");
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    // A sessionless grant reaches the pure request parser without live-attempt storage checks.
+    const server = buildOpenGeniMcpServer(routeDeps, {
+      ...grant(["sessions:create"], ["session_create"]),
+      principalKind: "human_session",
+      metadata: { firstPartyMcpTools: ["session_create"] },
+    });
+    const result = await callRegisteredTool(server, "session_create", {
+      initialMessage: "private-draft",
+      goal: { objective: "private-objective", successCriteria: ["private-success"] },
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_create_invalid_request",
+          message:
+            "Invalid session create request: goal.text expected string; goal.successCriteria expected string.",
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private-");
+    expect(databaseTouches).toBe(0);
+
+    const unknown = await callRegisteredTool(server, "session_create", {
+      initialMessage: "work",
+      goal: { text: "Run checks", successCriteria: "Checks pass" },
+    });
+    expect(databaseTouches).toBeGreaterThan(0);
+    expect(unknown).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_create_failed",
+          message: "OpenGeni could not complete the request.",
+        },
+      },
+    });
+    expect(JSON.stringify(unknown)).not.toContain("private-");
+
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          throw new z4.ZodError(
+            Array.from({ length: 20 }, () => ({
+              code: "custom" as const,
+              path: ["metadata", "private-record-key"],
+              message: "private-custom-message",
+            })),
+          );
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const bounded = await callRegisteredTool(server, "session_create", { initialMessage: "work" });
+    expect(bounded.structuredContent?.error?.code).toBe("session_create_invalid_request");
+    expect(bounded.structuredContent?.error?.message).toContain(
+      "additional fields failed validation",
+    );
+    expect(JSON.stringify(bounded)).not.toContain("private-");
+    expect(
+      new TextEncoder().encode(bounded.structuredContent?.error?.message).byteLength,
+    ).toBeLessThanOrEqual(1024);
   });
 
   test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {

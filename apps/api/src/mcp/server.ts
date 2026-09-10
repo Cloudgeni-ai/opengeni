@@ -15,6 +15,8 @@ import {
 } from "../site-uploads";
 import {
   CreateScheduledTaskRequest,
+  CreateSessionRequest,
+  GoalSpec,
   boundSessionMcpText as capSessionDiscoveryText,
   compactSessionMcpListRow,
   sessionMcpIncludesRelatedWork,
@@ -377,6 +379,38 @@ function orchestrationFailureCode(tool: OrchestrationToolName, error: HTTPExcept
 }
 
 function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+  if (tool === "session_create" && error instanceof z4.ZodError) {
+    // Paths may contain caller-controlled record keys, and custom issue messages
+    // may contain values. Only publish canonical field names and fixed type labels.
+    const details = error.issues.slice(0, 5).map((issue) => {
+      const [field, goalField] = issue.path;
+      let path =
+        typeof field === "string" && Object.hasOwn(CreateSessionRequest.out.shape, field)
+          ? field
+          : "request";
+      if (
+        field === "goal" &&
+        typeof goalField === "string" &&
+        Object.hasOwn(GoalSpec.shape, goalField)
+      ) {
+        path += `.${goalField}`;
+      }
+      const expected =
+        issue.code === "invalid_type" &&
+        ["string", "number", "boolean", "object", "array", "int"].includes(issue.expected)
+          ? `expected ${issue.expected === "int" ? "integer" : issue.expected}`
+          : "failed schema validation";
+      return `${path} ${expected}`;
+    });
+    return {
+      error: {
+        code: "session_create_invalid_request",
+        message: boundedOrchestrationFailureMessage(
+          `Invalid session create request: ${details.join("; ") || "request failed schema validation"}${error.issues.length > 5 ? "; additional fields failed validation" : ""}.`,
+        ),
+      },
+    };
+  }
   if (error instanceof SessionSpawnDeniedError) {
     const denial = sessionSpawnDenialEnvelope(error);
     return {
@@ -5102,7 +5136,7 @@ function registerWorkspaceOrchestrationTools(
             "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
           ),
         instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-        goal: z4.unknown().optional(),
+        goal: GoalSpec.optional(),
         resources: z4
           .array(z4.unknown())
           .optional()
