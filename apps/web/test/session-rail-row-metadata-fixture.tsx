@@ -1,4 +1,11 @@
 import { SessionWaitStatus } from "../src/components/session/session-wait-status";
+import { SessionBrowseOrderControls } from "../src/components/rail/session-browse-order-controls";
+import type { SessionBrowseGroupBy } from "../src/lib/sessions-group";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "../src/components/ui/dropdown-menu";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -37,6 +44,7 @@ const cases = [
 ] as const;
 
 function SessionRailRowMetadataFixture() {
+  const [groupBy, setGroupBy] = useState<SessionBrowseGroupBy>("activity");
   const [waitSession, setWaitSession] = useState({
     id: "waiting",
     workspaceId: "workspace",
@@ -67,6 +75,12 @@ function SessionRailRowMetadataFixture() {
 
   return (
     <main className="min-h-screen bg-background p-8 text-foreground">
+      <DropdownMenu>
+        <DropdownMenuTrigger>Session view</DropdownMenuTrigger>
+        <DropdownMenuContent className="w-56">
+          <SessionBrowseOrderControls groupBy={groupBy} onGroupByChange={setGroupBy} />
+        </DropdownMenuContent>
+      </DropdownMenu>
       <aside
         data-testid="production-session-rail"
         className="w-[244px] min-w-0 overflow-x-hidden border border-border bg-surface/40 py-3"

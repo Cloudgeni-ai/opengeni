@@ -278,12 +278,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
 
       await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Creator" }).click();
       await page.getByRole("button", { name: "Session filters, active" }).waitFor();
 
       await page.reload();
       await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
       await page.getByRole("button", { name: "Session filters, active" }).click();
+      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       expect(
         await page.getByRole("menuitemradio", { name: "Creator" }).getAttribute("aria-checked"),
       ).toBe("true");
@@ -580,6 +582,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await managerRow.waitFor();
       await page.getByRole("button", { name: "Session filters" }).click();
       expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
+      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Created date" }).click();
       await page.getByRole("button", { name: "Session filters, active" }).waitFor();
       const liveRegion = rail.locator('[aria-live="polite"]');
@@ -3173,6 +3176,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       ).toBe(false);
       expect(discovery.nextCursor).toBeTruthy();
       await page.getByRole("button", { name: "Session filters", exact: true }).click();
+      await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
       const discoverOlder = activeGroup.getByRole("button", {
