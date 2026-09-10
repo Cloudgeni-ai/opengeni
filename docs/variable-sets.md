@@ -120,12 +120,25 @@ Attachment points:
   ids and selected Rig defaults go through exact attachment resolution, which
   returns only accessible `{ id, scope }` pairs and omits inaccessible ids.
   This keeps inaccessible choices absent, preserves create-by-id authority, and
-  prevents a metadata request from blocking an otherwise valid selection. A
-  selected personal resource receives session-lifetime authority automatically;
-  workspace-visible creation keeps the required warning acknowledgement inline
-  with the resource selector. Established-session Send/Steer still presents the
-  explicit duration choice because that command can intentionally grant
-  authority for one message, the session, or future work in the workspace.
+  prevents a metadata request from blocking an otherwise valid selection. The
+  resource selector itself is consent for the owner's work in this session.
+  Private and workspace-visible setup and existing-session composers submit
+  session-scoped authorization with the human Create/Send/Steer/Continue command,
+  without a duration selector or another approval prompt. Selecting a resource
+  writes no grant until that command commits. Acceptance does not downgrade the
+  next submission or change the immutable retry payload. Healthy attachments
+  need no composer-top text; shared picker copy explains chat-visible results.
+  Existing sessions retain unavailable selected ids so they can still be removed,
+  and unavailable or stale authority still blocks submission pending recovery.
+  The web UI exposes neither `always` nor a new revoke control; ongoing work
+  still requires exact initiating-human authority. Public API scope semantics
+  and revocation/generation checks remain unchanged.
+  Migration 0430 repairs ordinary goal/machine continuation admission to include
+  every selected personal Variable Set in the session's fixed ordered attachment
+  list, matching atomic acceptance instead of considering only the final set.
+  Exact-session grants do not transfer to child or other sessions. Removing an
+  attachment changes the selected resources, not the durable grant's revocation
+  state; revocation blocks future use but cannot erase already-injected secrets.
 - `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Setting or changing a non-null attachment requires both permissions; detaching requires `variable-sets:attach`. Changing the attachment of a task with a live reusable session returns 409 because the task's accepted execution snapshot must remain stable; explicitly reconfigure the quiescent target session or recreate the task instead.
 - Organization- and workspace-scoped Variable Sets on scheduled runs materialize under the exact fenced service turn (`scheduler`) and do not invent an initiating human. User-scoped Variable Sets remain different: they require the frozen causal human and exact personal-resource grant described next. This distinction applies identically to standalone database decryption and a host-provided `sandboxSecrets` credential boundary.
 - When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.

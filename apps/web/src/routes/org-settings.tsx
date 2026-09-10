@@ -1,3 +1,4 @@
+import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 // Organization settings (formerly "Account"): identity, organization API
 // keys, account-wide billing usage, plan entitlements, and members.
 import { useBillingUsage } from "@opengeni/react";
@@ -19,6 +20,8 @@ import {
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
+import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
+import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
@@ -46,6 +49,8 @@ import { hasAccountPermission } from "@/lib/permissions";
 import type {
   BillingEntitlementsResponse,
   BillingSummary,
+  CompanyProfileAgentPolicy,
+  CompanyProfileAgentPolicyMode,
   OrganizationMembershipRole,
   UsageEvent,
 } from "@/types";
@@ -56,6 +61,153 @@ const LazyOrganizationApiKeysSection = lazy(async () => {
   const module = await import("@/components/organization-api-keys-section");
   return { default: module.OrganizationApiKeysSection };
 });
+
+const COMPANY_PROFILE_AGENT_MODE_COPY: Record<
+  CompanyProfileAgentPolicyMode,
+  { label: string; description: string }
+> = {
+  off: {
+    label: "Off",
+    description: "Agents cannot stage or activate organization identity changes.",
+  },
+  suggest: {
+    label: "Require approval",
+    description: "Agents prepare a proposal and the initiating owner approves each change.",
+  },
+  automatic: {
+    label: "Autonomous",
+    description:
+      "Eligible proposals from an owner-initiated live chat activate without another prompt.",
+  },
+};
+
+function OrganizationCompanyProfileAgentPolicy({ workspaceId }: { workspaceId: string }) {
+  const client = useAppContext().client;
+  const [policy, setPolicy] = useState<CompanyProfileAgentPolicy | null>(null);
+  const [mode, setMode] = useState<CompanyProfileAgentPolicyMode>("suggest");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const value = await client.getCompanyProfileAgentPolicy(workspaceId);
+      setPolicy(value);
+      setMode(value.mode);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    } finally {
+      setLoading(false);
+    }
+  }, [client, workspaceId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async (nextMode: CompanyProfileAgentPolicyMode): Promise<void> => {
+    if (!policy || saving) return;
+    setMode(nextMode);
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const value = await client.updateCompanyProfileAgentPolicy(workspaceId, {
+        mode: nextMode,
+        expectedVersion: policy.version,
+        operationId: crypto.randomUUID(),
+      });
+      setPolicy(value);
+      setMode(value.mode);
+      setMessage(
+        value.mode === "automatic"
+          ? "Autonomous organization identity updates are enabled."
+          : value.mode === "suggest"
+            ? "Organization identity changes require owner approval."
+            : "Agent-authored organization identity changes are off.",
+      );
+    } catch (saveError) {
+      setMode(policy.mode);
+      setError(saveError instanceof Error ? saveError : new Error(String(saveError)));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="grid gap-4 border-b border-border pb-6">
+      <div>
+        <h3 className="text-sm font-medium text-fg">Agent-managed organization identity</h3>
+        <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
+          Choose whether agents may update the small identity and mission shared by every workspace.
+          Only a live chat initiated by an active organization owner can use this authority.
+        </p>
+      </div>
+      {error && !policy ? (
+        <LoadErrorState
+          title="Couldn't load agent autonomy"
+          error={error}
+          onRetry={() => void load()}
+        />
+      ) : loading || !policy ? (
+        <p role="status" className="flex items-center gap-2 text-xs text-fg-muted">
+          <Loader2Icon className="size-3.5 animate-spin" /> Loading agent autonomy…
+        </p>
+      ) : (
+        <>
+          <fieldset className="grid gap-2 sm:grid-cols-3" disabled={saving}>
+            <legend className="sr-only">Agent-managed organization identity mode</legend>
+            {(Object.keys(COMPANY_PROFILE_AGENT_MODE_COPY) as CompanyProfileAgentPolicyMode[]).map(
+              (candidate) => (
+                <label
+                  key={candidate}
+                  className="cursor-pointer rounded-md border border-border p-3 has-[:checked]:border-brand has-[:checked]:bg-brand/5"
+                >
+                  <span className="flex items-center gap-2 text-sm font-medium text-fg">
+                    <input
+                      type="radio"
+                      name="company-profile-agent-policy"
+                      value={candidate}
+                      checked={mode === candidate}
+                      onChange={() => void save(candidate)}
+                    />
+                    {COMPANY_PROFILE_AGENT_MODE_COPY[candidate].label}
+                  </span>
+                  <span className="mt-1 block text-xs leading-5 text-fg-muted">
+                    {COMPANY_PROFILE_AGENT_MODE_COPY[candidate].description}
+                  </span>
+                </label>
+              ),
+            )}
+          </fieldset>
+          {mode === "automatic" ? (
+            <p className="rounded-md border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
+              This is organization-wide. Eligible changes still pass live-owner, stale-head, and
+              compare-and-swap checks, and apply only to newly accepted agent runs.
+            </p>
+          ) : null}
+          {error ? (
+            <p role="alert" className="text-xs text-status-error">
+              {error.message}
+            </p>
+          ) : null}
+          {saving ? (
+            <p role="status" className="text-xs text-fg-muted">
+              <Loader2Icon className="mr-1 inline size-3.5 animate-spin" /> Saving autonomy mode…
+            </p>
+          ) : message ? (
+            <p role="status" className="text-xs text-status-success">
+              {message}
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
 
 function OrganizationKnowledgeSummary({
   workspaceId,
@@ -202,6 +354,7 @@ export function OrgSettingsRoute({
   );
   const accountGrant =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
+  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
   const canManageOrganizationApiKeys = hasAccountPermission(
     context.accessContext,
     accountId,
@@ -213,6 +366,11 @@ export function OrgSettingsRoute({
     accountGrant?.role === "member"
       ? accountGrant.role
       : null;
+  const singleUser = context.clientConfig.productAccessMode === "local";
+  const organizationAdministratorSession =
+    context.clientConfig.auth.mode === "managedSession" || singleUser;
+  const canManageOrganizationModels =
+    organizationAdministratorSession && (actorRole === "owner" || actorRole === "admin");
   const adminIdentity = useMemo<OrganizationAdminIdentity>(
     () => ({
       principalGeneration: context.accessKeyVersion,
@@ -403,6 +561,7 @@ export function OrgSettingsRoute({
       workspaceId={workspaceId}
       organizationLabel={organizationLabel}
       section={section}
+      showModels={canManageOrganizationModels}
     >
       <section className="grid gap-5 text-left">
         {section === "overview" ? (
@@ -412,35 +571,87 @@ export function OrgSettingsRoute({
               client={client}
               identity={adminIdentity}
               actorRole={actorRole}
-              managedSession={context.clientConfig.auth.mode === "managedSession"}
+              managedSession={organizationAdministratorSession}
+              singleUser={singleUser}
               accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
               onOrganizationChanged={context.revalidatePrincipalAccess}
               onCreateWorkspace={async (name, operationId) => {
-                await client.createOrganizationWorkspace(accountId, {
-                  name,
-                  operationId,
-                });
+                if (singleUser) {
+                  const created = await context.createWorkspace({ accountId, name });
+                  if (!created) throw new Error("workspace creation did not complete");
+                } else {
+                  await client.createOrganizationWorkspace(accountId, {
+                    name,
+                    operationId,
+                  });
+                  await context.revalidatePrincipalAccess();
+                }
               }}
             />
-            <OrganizationPrivateSessionsSection
-              key={`${identityKey}:private-sessions`}
-              client={client}
-              identity={adminIdentity}
-              actorRole={actorRole}
-              managedSession={context.clientConfig.auth.mode === "managedSession"}
-            />
+            {!singleUser ? (
+              <OrganizationPrivateSessionsSection
+                key={`${identityKey}:private-sessions`}
+                client={client}
+                identity={adminIdentity}
+                actorRole={actorRole}
+                managedSession
+              />
+            ) : null}
           </>
         ) : null}
 
         {section === "people" ? (
-          <OrganizationPeopleSection
-            key={identityKey}
-            client={client}
-            identity={adminIdentity}
-            actorRole={actorRole}
-            managedSession={context.clientConfig.auth.mode === "managedSession"}
-            onAuthorityChanged={context.revalidatePrincipalAccess}
-          />
+          singleUser ? (
+            <p className="text-sm leading-6 text-fg-muted">
+              This installation has one local administrator. People, invitations, and private user
+              workspaces become available when managed sign-in is enabled.
+            </p>
+          ) : (
+            <OrganizationPeopleSection
+              key={identityKey}
+              client={client}
+              identity={adminIdentity}
+              actorRole={actorRole}
+              managedSession
+              onAuthorityChanged={context.revalidatePrincipalAccess}
+            />
+          )
+        ) : null}
+
+        {section === "models" && canManageOrganizationModels ? (
+          <section className="grid gap-2" aria-labelledby="organization-model-connections-heading">
+            <div>
+              <h2 id="organization-model-connections-heading" className="text-sm font-medium">
+                Connections
+              </h2>
+              <p className="mt-1 text-xs leading-5 text-fg-muted">
+                Choose which workspaces and models each connected account can serve. Codex and
+                SuperGrok subscriptions can also be made available to Personal workspaces.
+              </p>
+            </div>
+            <div className="min-w-0">
+              <OrganizationCodexSubscriptions
+                key={`${identityKey}:organization-codex`}
+                organizationId={accountId}
+              />
+              <SuperGrokSubscriptionsCard organizationId={accountId} canManage />
+              <OrganizationModelProviderConnection
+                organizationId={accountId}
+                providerKind="vercel_gateway"
+              />
+              <OrganizationModelProviderConnection
+                organizationId={accountId}
+                providerKind="openrouter"
+              />
+            </div>
+          </section>
+        ) : null}
+
+        {section === "models" && !canManageOrganizationModels ? (
+          <p className="text-xs leading-5 text-fg-muted">
+            Organization model subscriptions can be managed only by organization owners and admins
+            using an organization administrator session.
+          </p>
         ) : null}
 
         {section === "knowledge" ? (
@@ -457,7 +668,20 @@ export function OrgSettingsRoute({
               canManage={canManageOrganizationKnowledge}
             />
             {canManageOrganizationKnowledge ? (
-              <OrganizationKnowledgePrompt workspaceId={workspaceId} />
+              <>
+                {canManageCompanyProfileAgentPolicy ? (
+                  <OrganizationCompanyProfileAgentPolicy
+                    key={`${identityKey}:company-profile-agent-policy`}
+                    workspaceId={workspaceId}
+                  />
+                ) : (
+                  <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
+                    Agent-managed organization identity is owner-only. Ask an organization owner to
+                    change this mode.
+                  </p>
+                )}
+                <OrganizationKnowledgePrompt workspaceId={workspaceId} />
+              </>
             ) : (
               <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
                 Organization identity is read-only for you. An organization owner can update it.
@@ -490,17 +714,24 @@ export function OrgSettingsRoute({
             client={client}
             identity={adminIdentity}
             actorRole={actorRole}
-            managedSession={context.clientConfig.auth.mode === "managedSession"}
+            managedSession={organizationAdministratorSession}
           />
         ) : null}
 
         {section === "recovery" ? (
-          <OrganizationRecoverySection
-            key={`${identityKey}:recovery`}
-            client={client}
-            identity={adminIdentity}
-            managedSession={context.clientConfig.auth.mode === "managedSession"}
-          />
+          singleUser ? (
+            <p className="text-sm leading-6 text-fg-muted">
+              Organization recovery protects managed multi-user accounts. This single-user local
+              installation is recovered through its server backup and deployment configuration.
+            </p>
+          ) : (
+            <OrganizationRecoverySection
+              key={`${identityKey}:recovery`}
+              client={client}
+              identity={adminIdentity}
+              managedSession
+            />
+          )
         ) : null}
 
         {section === "developer" ? (

@@ -3,6 +3,8 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { formatWaitingSince } from "@/lib/format";
+import { sessionInputWait } from "./session-rail";
+import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { Session, SessionStatus } from "@/types";
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
@@ -41,7 +43,10 @@ function hasActiveEffectiveControl(session: Session): boolean {
 
 function isEffectivelyRunning(session: Session): boolean {
   if (session.backgroundCommandActivity) return true;
-  return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+  return (
+    hasActiveEffectiveControl(session) &&
+    (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
+  );
 }
 
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
@@ -161,6 +166,8 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
    -------------------------------------------------------------------------- */
 
 export type SessionTreeNode = {
+  /** Presentation-only group; never persisted or used for session actions. */
+  siteGroup?: SessionSiteOrigin;
   session: Session;
   children: SessionTreeNode[];
   /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
@@ -219,14 +226,18 @@ function ownRailStatusCounts(
     attention: session.status === "requires_action" ? 1 : 0,
     attentionSince:
       session.status === "requires_action" ? (session.requiresActionSince ?? null) : null,
-    failed: session.status === "failed" ? 1 : 0,
+    // Failed is a review signal in the rail, not a permanent copy of the
+    // lifecycle badge. Opening the session (or a parent agent consuming its
+    // result) acknowledges the failure together with the unread frontier.
+    failed: session.status === "failed" && session.unread ? 1 : 0,
     active:
       session.backgroundCommandActivity ||
       (hasActiveEffectiveControl(session) &&
         (session.status === "running" ||
           session.status === "queued" ||
           session.status === "recovering" ||
-          session.status === "waiting_capacity"))
+          session.status === "waiting_capacity" ||
+          Boolean(sessionInputWait(session))))
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -249,14 +260,32 @@ function railStatusCounts(
   node: SessionTreeNode,
   localDeliveryAttention: ReadonlyMap<string, number>,
 ): RailStatusCounts {
+  if (node.siteGroup) {
+    const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
+    for (const key of [
+      "total",
+      "sendFailed",
+      "attention",
+      "failed",
+      "active",
+      "unread",
+      "activeWork",
+    ] as const)
+      counts[key] = 0;
+    counts.attentionSince = null;
+    for (const child of node.children)
+      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+    return counts;
+  }
   const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
   const stats = node.session.treeStats;
   if (stats) {
     counts.total += stats.totalDescendants;
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
-    counts.failed += stats.failedDescendants;
-    counts.active += stats.runningDescendants + stats.queuedDescendants;
+    counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
+    counts.active +=
+      stats.runningDescendants + stats.queuedDescendants + (stats.waitingDescendants ?? 0);
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -467,6 +496,28 @@ export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption
   return [...sessionCreatorLabelMap(sessions)].map(([value, label]) => ({ value, label }));
 }
 
+/** Drop a flat-search creator selection that is not valid for hierarchical browse roots. */
+export function normalizeSessionBrowseCreator(
+  creator: string | null,
+  creatorLabels: ReadonlyMap<string, string>,
+  hierarchical: boolean,
+): string | null {
+  if (!hierarchical || !creator || creatorLabels.has(creator)) return creator;
+  return null;
+}
+
+/** Count matching rows in flat search, or matching workstream roots in hierarchical browse. */
+export function sessionBrowseResultCount(
+  sessions: readonly Session[],
+  hierarchical: boolean,
+): number {
+  if (!hierarchical) return sessions.length;
+  const loadedIds = new Set(sessions.map((session) => session.id));
+  return sessions.filter(
+    (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
+  ).length;
+}
+
 function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
   if (field === "activity") return sessionActivityTime(session);
   const created = Date.parse(session.createdAt);
@@ -479,6 +530,8 @@ export function filterSessionsForBrowse(
     creator: string | null;
     dateField: SessionBrowseDateField;
     dateRange: SessionBrowseDateRange;
+    /** Filter whole loaded workstreams by their root instead of orphaning descendants. */
+    hierarchical?: boolean;
     now?: Date;
   },
 ): Session[] {
@@ -492,16 +545,43 @@ export function filterSessionsForBrowse(
         : options.dateRange === "month"
           ? startOfToday - 29 * 24 * 60 * 60 * 1000
           : null;
-  return sessions.filter(
-    (session) =>
-      (!options.creator || sessionCreatorKey(session) === options.creator) &&
-      (threshold === null || browseTimestamp(session, options.dateField) >= threshold),
-  );
+  const matches = (session: Session): boolean =>
+    (!options.creator || sessionCreatorKey(session) === options.creator) &&
+    (threshold === null || browseTimestamp(session, options.dateField) >= threshold);
+  if (!options.hierarchical) return sessions.filter(matches);
+
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const rootById = new Map<string, Session>();
+  const hierarchyRoot = (session: Session): Session => {
+    const cached = rootById.get(session.id);
+    if (cached) return cached;
+
+    const path: Session[] = [];
+    const seen = new Set<string>();
+    let current = session;
+    while (current.parentSessionId) {
+      if (seen.has(current.id)) {
+        // A pathological cycle has no meaningful root. Fall back to direct
+        // row filtering so every member stays independently reachable.
+        return session;
+      }
+      seen.add(current.id);
+      path.push(current);
+      const parent = byId.get(current.parentSessionId);
+      if (!parent) break;
+      current = parent;
+    }
+    rootById.set(current.id, current);
+    for (const member of path) rootById.set(member.id, current);
+    return current;
+  };
+
+  return sessions.filter((session) => matches(hierarchyRoot(session)));
 }
 
-/** Flat browse projection used only when the operator selects custom grouping. */
-export function groupSessionsForBrowse(
-  sessions: Session[],
+/** Regroup already-built workstream roots without flattening their descendants. */
+export function groupSessionForestForBrowse(
+  forest: SessionForest,
   groupBy: Exclude<SessionBrowseGroupBy, "activity">,
   options: {
     now?: Date;
@@ -509,17 +589,17 @@ export function groupSessionsForBrowse(
   } = {},
 ): SessionForest {
   const now = options.now ?? new Date();
-  const running = sessions
-    .filter(isEffectivelyRunning)
-    .sort(compareSessionActivity)
-    .map((session) => ({ session, children: [], hasActiveDescendant: false }));
-  const rest = sessions.filter((session) => !isEffectivelyRunning(session));
+  const roots = forestRoots(forest);
+  const running = roots
+    .filter(nodeIsActive)
+    .sort((left, right) => compareSessionActivity(left.session, right.session));
+  const rest = roots.filter((node) => !nodeIsActive(node));
   if (groupBy === "created") {
-    const buckets = new Map<SessionRecencyGroup, Session[]>();
-    for (const session of rest) {
-      const group = recencyGroupFor(browseTimestamp(session, "created"), now);
+    const buckets = new Map<SessionRecencyGroup, SessionTreeNode[]>();
+    for (const node of rest) {
+      const group = recencyGroupFor(browseTimestamp(node.session, "created"), now);
       const list = buckets.get(group) ?? [];
-      list.push(session);
+      list.push(node);
       buckets.set(group, list);
     }
     return {
@@ -539,27 +619,28 @@ export function groupSessionsForBrowse(
           {
             group: `created:${group}`,
             label,
-            sessions: list
-              .sort(
-                (left, right) =>
-                  browseTimestamp(right, "created") - browseTimestamp(left, "created"),
-              )
-              .map((session) => ({ session, children: [], hasActiveDescendant: false })),
+            sessions: list.sort(
+              (left, right) =>
+                browseTimestamp(right.session, "created") -
+                  browseTimestamp(left.session, "created") ||
+                right.session.id.localeCompare(left.session.id),
+            ),
           },
         ];
       }),
     };
   }
 
-  const creatorLabels = options.creatorLabels ?? sessionCreatorLabelMap(sessions);
-  const creators = new Map<string, { label: string; sessions: Session[] }>();
-  for (const session of rest) {
-    const key = sessionCreatorKey(session);
+  const creatorLabels =
+    options.creatorLabels ?? sessionCreatorLabelMap(roots.map((node) => node.session));
+  const creators = new Map<string, { label: string; sessions: SessionTreeNode[] }>();
+  for (const node of rest) {
+    const key = sessionCreatorKey(node.session);
     const bucket = creators.get(key) ?? {
-      label: creatorLabels.get(key) ?? sessionCreatorLabel(session),
+      label: creatorLabels.get(key) ?? sessionCreatorLabel(node.session),
       sessions: [],
     };
-    bucket.sessions.push(session);
+    bucket.sessions.push(node);
     creators.set(key, bucket);
   }
   return {
@@ -569,13 +650,23 @@ export function groupSessionsForBrowse(
       .map(([key, bucket]) => ({
         group: `creator:${key}`,
         label: bucket.label,
-        sessions: bucket.sessions.sort(compareSessionActivity).map((session) => ({
-          session,
-          children: [],
-          hasActiveDescendant: false,
-        })),
+        sessions: bucket.sessions.sort((left, right) =>
+          compareSessionActivity(left.session, right.session),
+        ),
       })),
   };
+}
+
+/** Build and regroup a loaded session set while preserving its lineage tree. */
+export function groupSessionsForBrowse(
+  sessions: Session[],
+  groupBy: Exclude<SessionBrowseGroupBy, "activity">,
+  options: {
+    now?: Date;
+    creatorLabels?: ReadonlyMap<string, string>;
+  } = {},
+): SessionForest {
+  return groupSessionForestForBrowse(buildRailForest(sessions, options.now), groupBy, options);
 }
 
 export type PinnedRailSections = {
@@ -591,7 +682,12 @@ export type PinnedRailSections = {
 export function nodeIsActive(node: SessionTreeNode): boolean {
   const stats = node.session.treeStats;
   const summarizedActive = Boolean(
-    stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
+    stats &&
+    stats.runningDescendants +
+      stats.queuedDescendants +
+      (stats.waitingDescendants ?? 0) +
+      stats.attentionDescendants >
+      0,
   );
   return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
@@ -662,6 +758,39 @@ export function groupScheduledRuns(roots: SessionTreeNode[]): SessionTreeNode[] 
     });
   }
   return grouped;
+}
+
+/** Explicit project placement wins; pins have already been split out. */
+export function groupSiteConversations(roots: SessionTreeNode[]): SessionTreeNode[] {
+  const groups = new Map<string, SessionTreeNode[]>();
+  for (const node of roots) {
+    const origin = sessionSiteOrigin(node.session);
+    if (!origin || node.session.channelId || node.session.parentSessionId) continue;
+    const members = groups.get(origin.siteId) ?? [];
+    members.push(node);
+    groups.set(origin.siteId, members);
+  }
+  const emitted = new Set<string>();
+  return roots.flatMap((node) => {
+    const origin = sessionSiteOrigin(node.session);
+    const members =
+      origin && !node.session.channelId && !node.session.parentSessionId
+        ? groups.get(origin.siteId)
+        : undefined;
+    if (!members || !origin) return [node];
+    if (emitted.has(origin.siteId)) return [];
+    emitted.add(origin.siteId);
+    members.sort((a, b) => compareSessionActivity(a.session, b.session));
+    const latest = members[0]!;
+    return [
+      {
+        siteGroup: origin,
+        session: { ...latest.session, id: `site:${origin.siteId}`, treeStats: undefined },
+        children: members,
+        hasActiveDescendant: members.some(nodeIsActive),
+      },
+    ];
+  });
 }
 
 export function categorizeRailRoots(
@@ -756,22 +885,41 @@ type RemovedCounts = {
   total: number;
   running: number;
   queued: number;
+  waiting: number;
   attention: number;
   paused: number;
   failed: number;
+  unreadFailed: number;
+  unread: number;
+  activeWork: number;
 };
 
 function emptyRemovedCounts(): RemovedCounts {
-  return { total: 0, running: 0, queued: 0, attention: 0, paused: 0, failed: 0 };
+  return {
+    total: 0,
+    running: 0,
+    queued: 0,
+    waiting: 0,
+    attention: 0,
+    paused: 0,
+    failed: 0,
+    unreadFailed: 0,
+    unread: 0,
+    activeWork: 0,
+  };
 }
 
 function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
   target.total += source.total;
   target.running += source.running;
   target.queued += source.queued;
+  target.waiting += source.waiting;
   target.attention += source.attention;
   target.paused += source.paused;
   target.failed += source.failed;
+  target.unreadFailed += source.unreadFailed;
+  target.unread += source.unread;
+  target.activeWork += source.activeWork;
 }
 
 function subtreeCounts(node: SessionTreeNode): RemovedCounts {
@@ -781,18 +929,26 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     total: 1,
     running: active && (status === "running" || status === "recovering") ? 1 : 0,
     queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
+    waiting: sessionInputWait(node.session) ? 1 : 0,
     attention: status === "requires_action" ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
+    unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
+    unread: node.session.unread ? 1 : 0,
+    activeWork: node.session.activelyWorking ? 1 : 0,
   };
   const stats = node.session.treeStats;
   if (stats) {
     counts.total += stats.totalDescendants;
     counts.running += stats.runningDescendants;
     counts.queued += stats.queuedDescendants;
+    counts.waiting += stats.waitingDescendants ?? 0;
     counts.attention += stats.attentionDescendants;
     counts.paused += stats.pausedDescendants;
     counts.failed += stats.failedDescendants;
+    counts.unreadFailed += stats.unreadFailedDescendants ?? stats.failedDescendants;
+    counts.unread += stats.unreadDescendants ?? 0;
+    counts.activeWork += stats.activelyWorkingDescendants ?? 0;
   } else {
     for (const child of node.children) addRemovedCounts(counts, subtreeCounts(child));
   }
@@ -826,9 +982,31 @@ function prunePinnedSubtreesWithCounts(
           totalDescendants: Math.max(0, stats.totalDescendants - removed.total),
           runningDescendants: Math.max(0, stats.runningDescendants - removed.running),
           queuedDescendants: Math.max(0, stats.queuedDescendants - removed.queued),
+          ...(stats.waitingDescendants !== undefined
+            ? { waitingDescendants: Math.max(0, stats.waitingDescendants - removed.waiting) }
+            : {}),
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+          ...(stats.unreadFailedDescendants !== undefined
+            ? {
+                unreadFailedDescendants: Math.max(
+                  0,
+                  stats.unreadFailedDescendants - removed.unreadFailed,
+                ),
+              }
+            : {}),
+          ...(stats.unreadDescendants !== undefined
+            ? { unreadDescendants: Math.max(0, stats.unreadDescendants - removed.unread) }
+            : {}),
+          ...(stats.activelyWorkingDescendants !== undefined
+            ? {
+                activelyWorkingDescendants: Math.max(
+                  0,
+                  stats.activelyWorkingDescendants - removed.activeWork,
+                ),
+              }
+            : {}),
           // The pruned subtree may have held the oldest waiter; keep the server
           // timestamp only while some counted attention descendant remains.
           ...(stats.attentionSince !== undefined
@@ -871,11 +1049,9 @@ function forestRoots(forest: SessionForest): SessionTreeNode[] {
  * Rows as the rail will actually render them.
  *
  * Hierarchy mode nests spawned sessions under their parent, so lineage stays.
- * Search results and browse groupings are deliberately flat - a partial match
- * set is not a tree, and a browse bucket is a list - so every row there IS
- * top-level and must say so. Both flat consumers (`buildPinnedRailSections`
- * and `groupSessionsForBrowse`) read this one projection; a row that renders at
- * the top level while still naming an absent parent is the bug this prevents.
+ * Search results are deliberately flat because a partial match set is not a
+ * tree, so every result there IS top-level and must say so. A row that renders
+ * at the top level while still naming an absent parent is the bug this prevents.
  */
 export function projectRailSessions(sessions: Session[], hierarchyMode: boolean): Session[] {
   return hierarchyMode
@@ -887,6 +1063,7 @@ export function projectRailSessions(sessions: Session[], hierarchyMode: boolean)
 export function buildPinnedRailSections(
   sessions: Session[],
   now: Date = new Date(),
+  options: { groupSites?: boolean } = {},
 ): PinnedRailSections {
   const complete = buildRailForest(sessions, now);
   const roots = forestRoots(complete);
@@ -916,7 +1093,12 @@ export function buildPinnedRailSections(
   return {
     complete,
     pinned,
-    ordinary: categorizeRailRoots(groupScheduledRuns(ordinaryRoots), now),
+    ordinary: categorizeRailRoots(
+      options.groupSites === false
+        ? groupScheduledRuns(ordinaryRoots)
+        : groupSiteConversations(groupScheduledRuns(ordinaryRoots)),
+      now,
+    ),
   };
 }
 
@@ -945,7 +1127,7 @@ export function visibleTreeRows(
 ): { node: SessionTreeNode; depth: number }[] {
   const rows: { node: SessionTreeNode; depth: number }[] = [];
   const walk = (node: SessionTreeNode, depth: number): void => {
-    rows.push({ node, depth });
+    if (!node.siteGroup) rows.push({ node, depth });
     if (node.children.length > 0 && expanded.has(node.session.id)) {
       for (const child of node.children) {
         walk(child, depth + 1);

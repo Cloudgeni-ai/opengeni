@@ -18,19 +18,26 @@ import {
   applyCreditLedgerEntry,
   attachOpenSuffixToPendingToolCalls,
   claimSessionWorkForAttempt,
+  childRequiresActionDedupeKey,
+  childRequiresActionResolvedDedupeKey,
+  configureChildLifecycleNotices,
   createDb,
   createFileUpload,
   createScheduledTask,
+  deleteScheduledTask,
   createSession,
   createSessionGoal,
   createVariableSet,
   dbSql,
+  setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
   enablePackInstallation,
   loadVariableSetForRun,
   registerWorkspacePack,
   setVariableSetVariable,
   getSession,
+  getSessionTurn,
+  getSessionSystemUpdateOutboxByDedupeKey,
   getSessionGoal,
   getBillingBalance,
   getActiveSessionHistoryItems,
@@ -50,6 +57,7 @@ import {
   requireScheduledTask,
   saveRunState,
   mutateWorkspaceControlInTransaction,
+  mutateSessionControlInTransaction,
   sumUsageQuantity,
   updateSessionMcpServerCredentials,
   updateScheduledTask,
@@ -87,6 +95,7 @@ import {
 } from "../../apps/worker/src/activities/types";
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
+import { reconcilePendingParentSystemUpdates } from "../../apps/worker/src/activities/parent-wake";
 import {
   ScriptedModel,
   functionCall,
@@ -367,123 +376,315 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("a requireApproval session MCP tool pauses for approval and resumes on approve", async () => {
-    // End-to-end through the GENERIC interruption loop: a session MCP server with
-    // requireApproval:true makes its tool raise a run interruption, which the
-    // worker turns into session.requiresAction (tool NOT yet executed); a
-    // user.approvalDecision:approve then resumes the saved run state and the tool
-    // finally runs.
-    const encryptionKey = Buffer.alloc(32, 5);
-    const mcp = startTestMcpServer();
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      environmentsEncryptionKey: encryptionKey.toString("base64"),
-    });
-    try {
-      const grant = await testGrant(dbClient.db);
-      const session = await createOwnedSession(dbClient.db, grant, {
-        initialMessage: "search please",
-        resources: [],
-        tools: [{ kind: "mcp", id: "crm" }],
-        metadata: {},
-        model: "scripted-model",
-        sandboxBackend: "none",
-        mcpServers: [
-          {
-            id: "crm",
-            name: "CRM",
-            url: mcp.url,
-            cacheToolsList: false,
-            requireApproval: true,
-            headersEncrypted: {},
+  test.each(["approve", "reject"] as const)(
+    "a requireApproval session MCP tool survives Pause and resumes on %s exactly once",
+    async (decision) => {
+      // End-to-end through the GENERIC interruption loop: a session MCP server with
+      // requireApproval:true makes its tool raise a run interruption, which the
+      // worker turns into session.requiresAction (tool NOT yet executed); a
+      // a human decision resumes the saved run state. Only approval runs the
+      // harmless local MCP tool. No provider subscription or external write is used.
+      const encryptionKey = Buffer.alloc(32, 5);
+      const mcp = startTestMcpServer();
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: encryptionKey.toString("base64"),
+        childLifecycleNoticesEnabled: true,
+      });
+      try {
+        const grant = await testGrant(dbClient.db);
+        // Root -> parent -> child uses real claimed parent attempts, preserving
+        // the same lineage authority as agent-created sessions.
+        const root = await createOwnedSession(dbClient.db, grant, {
+          initialMessage: "coordinate approval fixture",
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+        });
+        const rootAttemptId = await claimOwnedSessionAttempt(
+          dbClient.db,
+          grant,
+          root.id,
+          "coordinate",
+        );
+        const rootTurnId = (await getSession(dbClient.db, grant.workspaceId, root.id))!
+          .activeTurnId!;
+        const rootTurn = (await getSessionTurn(dbClient.db, grant.workspaceId, rootTurnId))!;
+        const parent = await createOwnedSession(dbClient.db, grant, {
+          initialMessage: "delegate approval fixture",
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          parentSessionId: root.id,
+          createdByActor: {
+            type: "agent_attempt",
+            attemptId: rootAttemptId,
+            sessionId: root.id,
+            turnId: rootTurn.id,
+            executionGeneration: rootTurn.executionGeneration,
           },
-        ],
-      });
-      await appendOwnedEvents(dbClient.db, grant, session.id, [
-        { type: "user.message", payload: { text: "search please" } },
-      ]);
-      const model = new ScriptedModel([
-        {
-          id: "approval-call-1",
-          output: [
-            functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1"),
+        });
+        const parentAttemptId = await claimOwnedSessionAttempt(
+          dbClient.db,
+          grant,
+          parent.id,
+          "delegate",
+        );
+        const parentTurnId = (await getSession(dbClient.db, grant.workspaceId, parent.id))!
+          .activeTurnId!;
+        const parentTurn = (await getSessionTurn(dbClient.db, grant.workspaceId, parentTurnId))!;
+        const session = await createOwnedSession(dbClient.db, grant, {
+          initialMessage: "search please",
+          parentSessionId: parent.id,
+          createdByActor: {
+            type: "agent_attempt",
+            attemptId: parentAttemptId,
+            sessionId: parent.id,
+            turnId: parentTurn.id,
+            executionGeneration: parentTurn.executionGeneration,
+          },
+          resources: [],
+          tools: [{ kind: "mcp", id: "crm" }],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          mcpServers: [
+            {
+              id: "crm",
+              name: "CRM",
+              url: mcp.url,
+              cacheToolsList: false,
+              requireApproval: true,
+              headersEncrypted: {},
+            },
           ],
-        },
-        {
-          id: "approval-call-2",
-          outputText: "found it",
-          chunks: ["found ", "it"],
-        },
-      ]);
-      const activities = createWorkerActivities({
-        settings,
-        db: dbClient.db,
-        bus,
-        runtime: createProductionAgentRuntime({ model }),
-      });
+        });
+        await appendOwnedEvents(dbClient.db, grant, session.id, [
+          { type: "user.message", payload: { text: "search please" } },
+        ]);
+        const model = new ScriptedModel([
+          {
+            id: "approval-call-1",
+            output: [
+              functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1"),
+            ],
+          },
+          {
+            id: "approval-call-2",
+            outputText: decision === "approve" ? "found it" : "request rejected",
+          },
+        ]);
+        const activities = createWorkerActivities({
+          settings,
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime({ model }),
+        });
 
-      // Turn 1: the tool call is gated — the turn pauses instead of running it.
-      const first = await activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        trigger: { kind: "next" },
-        workflowId: "workflow-mcp-approval",
-        workflowRunId: crypto.randomUUID(),
-      });
-      expect(first.status).toBe("requires_action");
-      const afterFirst = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        0,
-        100,
-      );
-      expect(afterFirst.some((event) => event.type === "session.requiresAction")).toBe(true);
-      expect(latestStatus(afterFirst)).toBe("requires_action");
-      // The MCP tool did NOT execute while approval is pending.
-      expect(mcp.calls).toEqual([]);
+        // Turn 1: the tool call is gated — the turn pauses instead of running it.
+        const first = await activities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId: "workflow-mcp-approval",
+          workflowRunId: crypto.randomUUID(),
+        });
+        expect(first.status).toBe("requires_action");
+        const afterFirst = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          100,
+        );
+        expect(afterFirst.some((event) => event.type === "session.requiresAction")).toBe(true);
+        expect(latestStatus(afterFirst)).toBe("requires_action");
+        // The MCP tool did NOT execute while approval is pending.
+        expect(mcp.calls).toEqual([]);
 
-      const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))
-        ?.activeTurnId;
-      expect(activeTurnId).toBeTruthy();
+        const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))
+          ?.activeTurnId;
+        expect(activeTurnId).toBeTruthy();
+        const blockedTurn = (await getSessionTurn(dbClient.db, grant.workspaceId, activeTurnId!))!;
+        const childBoundary = {
+          childSessionId: session.id,
+          turnId: blockedTurn.id,
+          turnGeneration: blockedTurn.executionGeneration,
+        };
+        expect(
+          await getSessionSystemUpdateOutboxByDedupeKey(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            dedupeKey: childRequiresActionDedupeKey(childBoundary),
+          }),
+        ).toMatchObject({
+          targetSessionId: parent.id,
+          kind: "child_requires_action",
+          payload: {
+            childSessionId: session.id,
+            requests: [
+              { kind: "approval", approvalId: "call-appr-1", toolName: "crm__search_documents" },
+            ],
+          },
+        });
 
-      // Turn 2: approve → the saved run resumes and the tool finally runs.
-      const [approvalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        {
-          type: "user.approvalDecision",
-          payload: { approvalId: "call-appr-1", decision: "approve" },
-        },
-      ]);
-      const second = await activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
-        // Distinct workflowId so the resume's event producerId
-        // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
-        // system disambiguates via the Temporal activityId, which is absent here.
-        workflowId: "workflow-mcp-approval-resume",
-        workflowRunId: crypto.randomUUID(),
-      });
-      expect(second.status).toBe("idle");
-      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
-      const afterSecond = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        0,
-        100,
-      );
-      expect(afterSecond.some((event) => event.type === "turn.completed")).toBe(true);
-      expect(latestStatus(afterSecond)).toBe("idle");
-    } finally {
-      mcp.close();
-    }
-  });
+        // The test driver acts as the human; the scripted agent never decides.
+        const decide = (approvalId: string, clientEventId: string) =>
+          acceptSessionApprovalDecision(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+            payload: { approvalId, decision },
+            clientEventId,
+          });
+        expect(await decide("stale-call-id", crypto.randomUUID())).toMatchObject({
+          action: "conflict",
+        });
+        const control = (action: "pause" | "resume") =>
+          withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
+            db.transaction((tx) =>
+              mutateSessionControlInTransaction(tx as unknown as Database, {
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId,
+                sessionId: session.id,
+                actor: { type: "human", subjectId: grant.subjectId },
+                operationKey: crypto.randomUUID(),
+                action,
+              }),
+            ),
+          );
+        await control("pause");
+        const decisionKey = crypto.randomUUID();
+        const accepted = await decide("call-appr-1", decisionKey);
+        if (accepted.action !== "accepted") throw new Error("human decision was not accepted");
+        expect(
+          await getSessionSystemUpdateOutboxByDedupeKey(dbClient.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            dedupeKey: childRequiresActionResolvedDedupeKey({
+              ...childBoundary,
+              requestId: null,
+              approvalId: "call-appr-1",
+            }),
+          }),
+        ).toMatchObject({
+          targetSessionId: parent.id,
+          kind: "child_requires_action_resolved",
+          payload: {
+            approvalId: "call-appr-1",
+            outcome: decision === "approve" ? "approved" : "rejected",
+            respondedByKind: "human",
+          },
+        });
+        const replay = await decide("call-appr-1", decisionKey);
+        if (replay.action !== "accepted") throw new Error("decision replay was not accepted");
+        expect(replay.event.id).toBe(accepted.event.id);
+        expect(replay.events).toEqual([]);
+        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+          action: "conflict",
+        });
+        expect(
+          await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+            sessionId: session.id,
+            workflowId: "paused-approval-probe",
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "approval", triggerEventId: accepted.event.id },
+          }),
+        ).toMatchObject({ action: "unclaimed" });
+        expect(mcp.calls).toEqual([]);
+        await control("resume");
+
+        // Reconstruct the production runtime as a replacement worker would.
+        const resumeActivities = createWorkerActivities({
+          settings,
+          db: dbClient.db,
+          bus,
+          runtime: createProductionAgentRuntime({ model }),
+        });
+        const approvalTrigger = accepted.event;
+        const second = await resumeActivities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
+          // Distinct workflowId so the resume's event producerId
+          // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
+          // system disambiguates via the Temporal activityId, which is absent here.
+          workflowId: "workflow-mcp-approval-resume",
+          workflowRunId: crypto.randomUUID(),
+        });
+        expect(second.status).toBe("idle");
+        expect(mcp.calls).toEqual(
+          decision === "approve"
+            ? [{ tool: "search_documents", args: { query: "network policy" } }]
+            : [],
+        );
+        const afterSecond = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          100,
+        );
+        expect(afterSecond.some((event) => event.type === "turn.completed")).toBe(true);
+        expect(latestStatus(afterSecond)).toBe("idle");
+        // Human acceptance commits the resolution outbox. Deliver it through
+        // the ordinary control-worker reconciler before checking parent state.
+        expect(
+          await reconcilePendingParentSystemUpdates({
+            db: dbClient.db,
+            bus,
+            settings,
+            observability: createObservability(settings, { component: "worker" }),
+            wakeSessionWorkflow: null,
+          }),
+        ).toMatchObject({ failed: 0 });
+        const parentUpdates = await listOutstandingSessionSystemUpdates(
+          dbClient.db,
+          grant.workspaceId,
+          parent.id,
+        );
+        expect(parentUpdates.filter((update) => update.kind === "child_requires_action")).toEqual(
+          [],
+        );
+        expect(
+          parentUpdates.filter((update) => update.kind === "child_requires_action_resolved"),
+        ).toHaveLength(1);
+        expect(afterSecond.filter((event) => event.type === "user.approvalDecision")).toHaveLength(
+          1,
+        );
+        expect(await decide("call-appr-1", crypto.randomUUID())).toMatchObject({
+          action: "conflict",
+        });
+        const settledReplay = await decide("call-appr-1", decisionKey);
+        if (settledReplay.action !== "accepted") throw new Error("settled decision replay failed");
+        expect(settledReplay.event.id).toBe(accepted.event.id);
+        expect(
+          await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+            sessionId: session.id,
+            workflowId: "settled-approval-replay",
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "approval", triggerEventId: accepted.event.id },
+          }),
+        ).toMatchObject({ action: "unclaimed" });
+        expect(mcp.calls).toHaveLength(decision === "approve" ? 1 : 0);
+      } finally {
+        configureChildLifecycleNotices({ enabled: false });
+        mcp.close();
+      }
+    },
+  );
 
   test("manager session's first-party MCP token carries its granted permissions end to end", async () => {
     // A manager-style session (created with firstPartyMcpPermissions) calls
@@ -645,7 +846,7 @@ describe("worker activities integration", () => {
             functionCall(
               "opengeni__session_create",
               {
-                initialMessage: "worker: reply ready then goal_complete",
+                initialMessage: "Verify spawned worker inheritance",
                 sandboxBackend: "none",
               },
               "call-spawn-1",
@@ -692,6 +893,25 @@ describe("worker activities integration", () => {
       expect(worker?.parentSessionId).toBe(manager.id);
       expect(worker?.model).toBe("scripted-model");
       expect(worker?.metadata.reasoningEffort).toBe("medium");
+      expect(worker).toMatchObject({
+        title: "Verify spawned worker inheritance",
+        titleSource: "agent",
+      });
+      const workerEvents = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        worker!.id,
+        0,
+        20,
+      );
+      expect(workerEvents.map((event) => event.type).slice(0, 2)).toEqual([
+        "session.created",
+        "session.title_set",
+      ]);
+      expect(workerEvents[1]?.payload).toEqual({
+        title: "Verify spawned worker inheritance",
+        source: "agent",
+      });
     } finally {
       server.stop(true);
     }
@@ -1079,7 +1299,6 @@ describe("worker activities integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
-        codexCredentialLeasingEnabled: true,
       }),
       db: dbClient.db,
       bus,
@@ -1367,8 +1586,14 @@ describe("worker activities integration", () => {
     });
     const runtime: OpenGeniRuntime = {
       ...baseRuntime,
-      runStream: async () =>
-        ({
+      runStream: async (_agent, prepared) => {
+        // The SDK preserves the exact prepared input under external ownership.
+        // Keep this transport-error fixture faithful to that contract.
+        const original = Array.isArray(prepared.input)
+          ? prepared.input
+          : [{ type: "message", role: "user", content: prepared.input }];
+        state.history = [...original, ...state.history.slice(1)] as typeof state.history;
+        return {
           toStream: () =>
             (async function* () {
               yield {
@@ -1402,7 +1627,8 @@ describe("worker activities integration", () => {
           interruptions: [],
           state,
           finalOutput: "",
-        }) as never,
+        } as never;
+      },
     };
     const activities = createWorkerActivities({
       settings: testSettings({
@@ -2021,7 +2247,17 @@ describe("worker activities integration", () => {
           toStream: () => (async function* () {})(),
           completed: Promise.resolve(),
           interruptions: [],
-          state: { toString: () => "resumed-state" },
+          state: {
+            history: [
+              { type: "message", role: "user", content: "approved" },
+              {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "approved" }],
+              },
+            ],
+            toString: () => "resumed-state",
+          },
           finalOutput: "approved",
         } as never;
       },
@@ -3554,6 +3790,463 @@ describe("worker activities integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
+  });
+
+  test("invalidates unclaimed scheduled occurrences across pause, resume, and deletion", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-unclaimed-lifecycle",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "do not claim after lifecycle cutoff",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "must not run" }]),
+      }),
+    });
+
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    if (first.action !== "start") throw new Error("pause fixture did not create its session");
+
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "paused" });
+    const [pausedRun] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(pausedRun).toMatchObject({
+      status: "skipped",
+      error: "scheduled_task_paused_before_claim",
+    });
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({
+        status: "skipped",
+        error: "scheduled_task_paused_before_claim",
+      }),
+    ]);
+
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "active" });
+    await expect(
+      withWorkspaceRls(
+        dbClient.db,
+        grant.workspaceId,
+        async (scopedDb) =>
+          await scopedDb.execute(dbSql`
+          update session_system_updates
+          set state = 'delivered'
+          where workspace_id = ${grant.workspaceId}
+            and scheduled_task_run_id = ${pausedRun!.id}
+            and state = 'pending'
+        `),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+    const pausedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: first.sessionId,
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `paused-claim-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(pausedClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(0);
+    expect(
+      await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),
+    ).toHaveLength(0);
+    expect(
+      (await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 50)).some(
+        (event) =>
+          event.type === "system.update.cancelled" &&
+          event.payload.reason === "scheduled_task_inactive",
+      ),
+    ).toBe(true);
+
+    const second = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    expect(second).toMatchObject({ action: "signal", sessionId: first.sessionId });
+    await deleteScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    const deletedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: first.sessionId,
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `deleted-claim-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(deletedClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "skipped",
+          error: "scheduled_task_paused_before_claim",
+        }),
+        expect.objectContaining({
+          status: "skipped",
+          error: "scheduled_task_deleted_before_claim",
+        }),
+      ]),
+    );
+    expect(
+      await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),
+    ).toHaveLength(0);
+  });
+
+  test("preserves a claimed scheduled turn and its recovery after task deletion", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-claimed-lifecycle",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "preserve claimed recovery",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "recovered" }]),
+      }),
+    });
+    const dispatched = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    if (dispatched.action !== "start") throw new Error("claim fixture did not create its session");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `claimed-before-delete-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`scheduled turn was not claimed`);
+
+    await deleteScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({ status: "dispatched", error: null }),
+    ]);
+    expect(
+      await requestSessionTurnRecovery(dbClient.db, grant.workspaceId, {
+        sessionId: dispatched.sessionId,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    const recoveredAttemptId = crypto.randomUUID();
+    const recovered = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: recoveredAttemptId,
+      dispatchId: `recovered-after-delete-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(recovered).toMatchObject({
+      action: "claimed",
+      turn: {
+        id: claimed.turn.id,
+        activeAttemptId: recoveredAttemptId,
+        executionGeneration: claimed.turn.executionGeneration + 1,
+      },
+    });
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({ status: "dispatched", error: null }),
+    ]);
+  });
+
+  test("linearizes a concurrent scheduled claim ahead of task pause", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-claim-pause-race",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "claim before pause",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "claimed" }]),
+      }),
+    });
+    const dispatched = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    if (dispatched.action !== "start") throw new Error("race fixture did not create its session");
+    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    if (!run) throw new Error("race fixture did not create its run");
+
+    const blockerDb = createDb(services.databaseUrl);
+    let releaseRunLock = () => undefined;
+    const runLockReleased = new Promise<void>((resolve) => {
+      releaseRunLock = resolve;
+    });
+    let announceRunLock = () => undefined;
+    const runLocked = new Promise<void>((resolve) => {
+      announceRunLock = resolve;
+    });
+    const blocker = withWorkspaceRls(
+      blockerDb.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          await tx.execute(dbSql`
+          select id from scheduled_task_runs
+          where workspace_id = ${grant.workspaceId} and id = ${run.id}
+          for update
+        `);
+          announceRunLock();
+          await runLockReleased;
+        }),
+    );
+    await runLocked;
+
+    const attemptId = crypto.randomUUID();
+    const claim = claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `claim-pause-race-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    let pause: ReturnType<typeof updateScheduledTask> | null = null;
+    try {
+      expect(
+        await Promise.race([
+          claim.then(() => "settled" as const),
+          Bun.sleep(100).then(() => "waiting" as const),
+        ]),
+      ).toBe("waiting");
+      pause = updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "paused" });
+      expect(
+        await Promise.race([
+          pause.then(() => "settled" as const),
+          Bun.sleep(100).then(() => "waiting" as const),
+        ]),
+      ).toBe("waiting");
+    } finally {
+      releaseRunLock();
+      await blocker;
+      await blockerDb.close();
+    }
+    const [claimed, paused] = await Promise.all([claim, pause!]);
+    expect(claimed).toMatchObject({
+      action: "claimed",
+      turn: { activeAttemptId: attemptId },
+    });
+    expect(paused.status).toBe("paused");
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({ status: "dispatched", error: null }),
+    ]);
+  });
+
+  test("skips reusable scheduled occurrences until the session returns idle", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-reusable-skip",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "skip",
+      agentConfig: {
+        prompt: "maintain the reusable session",
+        resources: [],
+        tools: [],
+        metadata: {},
+        goal: {
+          text: "Keep the reusable session healthy",
+          successCriteria: "The scheduled maintenance turn completes",
+        },
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "maintenance complete" }]),
+      }),
+    });
+
+    const producerKey = `worker-activity-${crypto.randomUUID()}`;
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    if (first.action !== "start") {
+      throw new Error(`first reusable occurrence was not admitted: ${first.action}`);
+    }
+    const goalAfterFirst = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
+    if (!goalAfterFirst) throw new Error("reusable scheduled goal was not created");
+
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    expect(retry).toMatchObject({
+      sessionId: first.sessionId,
+      triggerEventId: first.triggerEventId,
+    });
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(1);
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterFirst.id,
+      status: goalAfterFirst.status,
+      version: goalAfterFirst.version,
+      objectiveRevision: goalAfterFirst.objectiveRevision,
+      updatedAt: goalAfterFirst.updatedAt,
+    });
+    const runsAfterSkip = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runsAfterSkip).toHaveLength(2);
+    expect(runsAfterSkip).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "dispatched" }),
+        expect.objectContaining({ status: "skipped", error: "scheduled_session_not_idle" }),
+      ]),
+    );
+
+    await setSessionGoalStatusWithEvent(dbClient.db, grant.workspaceId, first.sessionId, {
+      status: "completed",
+      evidence: "scheduled maintenance fixture completed",
+      event: {
+        type: "goal.completed",
+        evidence: "scheduled maintenance fixture completed",
+      },
+    });
+    const turn = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: first.sessionId,
+      trigger: { kind: "next" },
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(turn.status).toBe("idle");
+
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "pause",
+          reason: "verify scheduled idle reservation",
+          operationKey: `pause:${crypto.randomUUID()}`,
+          expectedRevision: 0,
+        }),
+      ),
+    );
+    const third = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    expect(third).toMatchObject({
+      action: "signal",
+      sessionId: first.sessionId,
+      workflowWakeRevision: null,
+    });
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "queued",
+      effectiveControl: { state: "paused" },
+    });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterFirst.id,
+      status: "active",
+      version: expect.any(Number),
+    });
+    const goalAfterThird = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
+    expect(goalAfterThird!.version).toBeGreaterThan(goalAfterFirst.version);
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterThird!.id,
+      status: goalAfterThird!.status,
+      version: goalAfterThird!.version,
+      objectiveRevision: goalAfterThird!.objectiveRevision,
+      updatedAt: goalAfterThird!.updatedAt,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(1);
+    expect(
+      (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
+        (run) => run.status === "skipped" && run.error === "scheduled_session_not_idle",
+      ),
+    ).toHaveLength(2);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {

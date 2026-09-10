@@ -10,6 +10,7 @@ import {
   aggregateModelContextContributions,
   aggregateRootSessionDrivers,
   aggregateScheduleFacts,
+  backfillModelCallFactsFromSessionEvents,
   createDb,
   createSession,
   ensureManagedAccessForUser,
@@ -34,8 +35,26 @@ setDefaultTimeout(120_000);
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("insights-model-bundle");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("insights-model-bundle");
+  shared = await acquireDatabase();
   if (!shared) return;
   client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -142,45 +161,46 @@ async function fixture(): Promise<Fixture> {
       provider_api, model, billing_path, scheduled_task_id,
       input_tokens, output_tokens, cached_tokens, cache_write_tokens,
       reasoning_tokens, total_tokens, priced_cost_micros,
-      estimated_provider_cost_micros, pricing_source, context_contributions,
+      estimated_provider_cost_micros, equivalent_credit_cost_micros,
+      pricing_source, context_contributions,
       occurred_at, recorded_at
     ) values
       (
         ${grant.accountId}, ${workspaceId}, ${sharedSession.id}, ${crypto.randomUUID()},
         ${`shared-openai-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'external',
-        ${sharedTaskId}, 100, 50, 20, null, 5, 150, 0, 25, 'gateway_reported',
+        ${sharedTaskId}, 100, 50, 20, null, 5, 150, 0, 25, 27, 'gateway_reported',
         ${shared.admin.json([{ source: "company_profile", items: 1, utf8Bytes: 80, estimatedTokens: 20 }])},
         '2026-08-11T09:15:00.000Z', '2026-08-11T09:15:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${sharedSession.id}, ${crypto.randomUUID()},
         ${`shared-azure-${suffix}`}, 'azure', 'responses', 'azure-bundle', 'opengeni_credits',
-        ${sharedTaskId}, null, 10, null, null, null, 10, 200, null, null, null,
+        ${sharedTaskId}, null, 10, null, null, null, 10, 200, null, null, null, null,
         '2026-08-12T10:30:00.000Z', '2026-08-12T10:30:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${privateSession.id}, ${crypto.randomUUID()},
         ${`private-openai-a-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${privateTaskId}, 40, 20, 10, 3, 2, 60, 300, 50, 'configured_list_price',
+        ${privateTaskId}, 40, 20, 10, 3, 2, 60, 300, 50, 53, 'configured_list_price',
         ${shared.admin.json([{ source: "workspace_instruction_policy", items: 2, utf8Bytes: 120, estimatedTokens: 30 }])},
         '2026-08-13T11:45:00.000Z', '2026-08-13T11:45:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${privateSession.id}, ${crypto.randomUUID()},
         ${`private-openai-b-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${privateTaskId}, 10, 5, null, null, null, 15, 75, null, null, '[]'::jsonb,
+        ${privateTaskId}, 10, 5, null, null, null, 15, 75, null, null, null, '[]'::jsonb,
         '2026-08-14T12:00:00.000Z', '2026-08-14T12:00:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${sharedSession.id}, ${crypto.randomUUID()},
         ${`prior-shared-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${sharedTaskId}, 70, 30, 10, null, null, 100, 100, 20, 'configured_list_price', null,
+        ${sharedTaskId}, 70, 30, 10, null, null, 100, 100, 20, 21, 'configured_list_price', null,
         '2026-08-02T08:00:00.000Z', '2026-08-02T08:00:01.000Z'
       ),
       (
         ${grant.accountId}, ${workspaceId}, ${privateSession.id}, ${crypto.randomUUID()},
         ${`prior-private-${suffix}`}, 'openai', 'responses', 'gpt-bundle', 'opengeni_credits',
-        ${privateTaskId}, 10, 10, 5, null, null, 20, 50, 10, 'configured_list_price', null,
+        ${privateTaskId}, 10, 10, 5, null, null, 20, 50, 10, 11, 'configured_list_price', null,
         '2026-08-03T08:00:00.000Z', '2026-08-03T08:00:01.000Z'
       )`;
 
@@ -374,6 +394,165 @@ describe("Workspace Insights model bundle", () => {
         ]);
       }
     }
+  });
+
+  test("backfill preserves free external billing when the live fact write was lost", async () => {
+    if (!shared || !client) return;
+    const seeded = await fixture();
+    const turnId = crypto.randomUUID();
+    const secondTurnId = crypto.randomUUID();
+    const sourceKey = `free-backfill-a-${crypto.randomUUID()}`;
+    const secondSourceKey = `free-backfill-b-${crypto.randomUUID()}`;
+    const occurredAt = new Date();
+    const sourceResourceId = `${turnId}:${sourceKey}`;
+    const secondSourceResourceId = `${secondTurnId}:${secondSourceKey}`;
+
+    await shared.admin`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, latency_mode, sandbox_backend, resources, tools,
+        metadata, started_at, finished_at
+      ) values (
+        ${turnId}, ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId},
+        ${crypto.randomUUID()}, ${`session-${seeded.sharedSessionId}`}, 'completed', 1,
+        'free external model backfill fixture', 'free-deployment-model',
+        'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+        ${occurredAt}, ${occurredAt}
+      ), (
+        ${secondTurnId}, ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId},
+        ${crypto.randomUUID()}, ${`session-${seeded.sharedSessionId}`}, 'completed', 2,
+        'second free external model backfill fixture', 'free-deployment-model',
+        'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+        ${occurredAt}, ${occurredAt}
+      )`;
+
+    // Absence of the model_call_facts row simulates the worker's intentionally
+    // swallowed live fact-write failure. The billing ledger still has both a
+    // token-cap row and the zero-cost marker for this deployment-funded call.
+    await shared.admin`
+      insert into usage_events (
+        account_id, workspace_id, event_type, quantity, unit,
+        source_resource_type, source_resource_id, session_id, turn_id,
+        idempotency_key, occurred_at
+      ) values
+        (
+          ${seeded.accountId}, ${seeded.workspaceId}, 'model.tokens', 1500, 'tokens',
+          'model_response', ${sourceResourceId}, ${seeded.sharedSessionId}, ${turnId},
+          ${`usage:model.tokens:${sourceResourceId}`}, ${occurredAt}
+        ),
+        (
+          ${seeded.accountId}, ${seeded.workspaceId}, 'model.cost', 0, 'usd_micros',
+          'model_response', ${sourceResourceId}, ${seeded.sharedSessionId}, ${turnId},
+          ${`usage:model.cost:${sourceResourceId}`}, ${occurredAt}
+        ),
+        (
+          ${seeded.accountId}, ${seeded.workspaceId}, 'model.tokens', 300, 'tokens',
+          'model_response', ${secondSourceResourceId}, ${seeded.sharedSessionId}, ${secondTurnId},
+          ${`usage:model.tokens:${secondSourceResourceId}`}, ${occurredAt}
+        ),
+        (
+          ${seeded.accountId}, ${seeded.workspaceId}, 'model.cost', 0, 'usd_micros',
+          'model_response', ${secondSourceResourceId}, ${seeded.sharedSessionId}, ${secondTurnId},
+          ${`usage:model.cost:${secondSourceResourceId}`}, ${occurredAt}
+        )`;
+    await shared.admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, turn_id, turn_association,
+        sequence, type, payload, occurred_at
+      ) values (
+        ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${turnId},
+        'current',
+        (
+          select coalesce(max(sequence), 0) + 1
+          from session_events
+          where workspace_id = ${seeded.workspaceId}
+            and session_id = ${seeded.sharedSessionId}
+        ),
+        'agent.model.usage',
+        ${shared.admin.json({
+          sourceKey,
+          provider: "workspace-gateway",
+          upstreamProvider: "anthropic",
+          providerApi: "responses",
+          model: "free-deployment-model",
+          billingPath: "external",
+          inputTokens: 1000,
+          outputTokens: 500,
+        })},
+        ${occurredAt}::timestamptz + interval '0.000123 seconds'
+      )`;
+    await shared.admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, turn_id, turn_association,
+        sequence, type, payload, occurred_at
+      ) values (
+        ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId}, ${secondTurnId},
+        'current',
+        (
+          select coalesce(max(sequence), 0) + 1
+          from session_events
+          where workspace_id = ${seeded.workspaceId}
+            and session_id = ${seeded.sharedSessionId}
+        ),
+        'agent.model.usage',
+        ${shared.admin.json({
+          sourceKey: secondSourceKey,
+          provider: "openai",
+          upstreamProvider: "../../not-a-provider",
+          providerApi: "responses",
+          model: "free-deployment-model",
+          billingPath: "external",
+          inputTokens: 200,
+          outputTokens: 100,
+        })},
+        ${occurredAt}::timestamptz + interval '0.000456 seconds'
+      )`;
+
+    const result = await backfillModelCallFactsFromSessionEvents(client.db, {
+      workspaceId: seeded.workspaceId,
+      since: new Date(occurredAt.getTime() - 60_000),
+      until: new Date(occurredAt.getTime() + 60_000),
+      limit: 10,
+      batchSize: 1,
+    });
+    expect(result).toEqual({ considered: 2, upserted: 2 });
+
+    const rows = await shared.admin<
+      Array<{
+        sourceKey: string;
+        provider: string;
+        billingPath: string;
+        pricedCostMicros: number;
+        totalTokens: number | null;
+      }>
+    >`
+      select
+        source_key as "sourceKey",
+        provider,
+        billing_path as "billingPath",
+        priced_cost_micros::int as "pricedCostMicros",
+        total_tokens::int as "totalTokens"
+      from model_call_facts
+      where workspace_id = ${seeded.workspaceId}
+        and turn_id in (${turnId}, ${secondTurnId})
+      order by source_key`;
+    expect(Array.from(rows)).toEqual([
+      {
+        sourceKey,
+        provider: "anthropic",
+        billingPath: "external",
+        pricedCostMicros: 0,
+        totalTokens: 1500,
+      },
+      {
+        sourceKey: secondSourceKey,
+        provider: "openai",
+        billingPath: "external",
+        pricedCostMicros: 0,
+        totalTokens: 300,
+      },
+    ]);
   });
 
   test("reduces model sources from nine to two by default and three with filtered facets", async () => {

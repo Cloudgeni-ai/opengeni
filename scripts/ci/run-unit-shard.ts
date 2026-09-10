@@ -13,6 +13,7 @@ import {
   deterministicShards,
   fileUsesProcessGlobalTestState,
 } from "./workspace";
+import { explicitBunTestPath } from "./run-test-shard";
 
 export type UnitTestProcess = {
   files: string[];
@@ -26,6 +27,10 @@ export type UnitTestProcessPlan = {
   sharedPostgresExclusive: UnitTestProcess[];
   clusterRoleSensitive: UnitTestProcess[];
 };
+
+export function explicitUnitTestPaths(files: readonly string[]): string[] {
+  return files.map(explicitBunTestPath);
+}
 
 export function sanitizedTestEnvironment(
   source: Readonly<Record<string, string | undefined>> = process.env,
@@ -250,7 +255,7 @@ async function run(
     "--no-orphans",
     "--timeout=30000",
     concurrencyArgument,
-    ...files,
+    ...explicitUnitTestPaths(files),
   ];
   process.stdout.write(
     `[unit-shard] ${isolated ? "isolated" : "batch"}: ${describeTestConcurrencyBudget(budget)} processPool=${processConcurrency} innerConcurrency=${innerConcurrency} files=${files.join(", ")}\n`,

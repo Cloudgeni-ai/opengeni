@@ -1,5 +1,188 @@
 # @opengeni/config
 
+## 1.1.1
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+
+## 1.1.0
+
+### Minor Changes
+
+- cffd21b: Add organization-scoped external users, explicit native identity linking, shared
+  white-label Connect flows and Site lifecycle/bridge surfaces. Add opt-in durable
+  host-MCP delegation and renewal while preserving simple short-lived credentials,
+  existing schedule authority and approval behavior. Share native/embedded device
+  polling and setup components, and synchronize developer integration Skills with
+  the installable Product Integration Pack.
+
+  Database migrations 0437–0457 require the documented maintenance/cutover procedure;
+  older API and worker writers must not be restarted after activation. Provider
+  OAuth applications and host resolvers remain deployment configuration, not
+  automatic external provisioning. No package is published by this changeset.
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/contracts@3.0.0
+
+## 1.0.4
+
+### Patch Changes
+
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+
+## 1.0.3
+
+### Patch Changes
+
+- 2fa33e4: Unify installed and authored workspace Skills behind one versioned text-folder
+  store and shared editor. Derive names and descriptions from mandatory SKILL.md
+  frontmatter, provide eager sandbox-free reading with exact requested paths, and
+  expose lazy search, install, save, checkout, and publish tools under workspace
+  Learning policy. Preserve workspace customizations on source updates and let
+  embedding hosts narrow bundled guidance independently of lazy tool discovery.
+
+  Migration 0433 is a maintenance cutover: drain old runtimes and use the
+  parser-backed migration runner. Preserve historical snapshots and archive legacy
+  configuration before conversion; invalid or pinned headerless configuration
+  requires explicit repair before migration. See docs/skills-lifecycle.md for the
+  deployment procedure and compatibility boundaries.
+
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/contracts@2.15.0
+
+## 1.0.1
+
+### Patch Changes
+
+- 694c1ff: Add GPT-6 Astra to the static Codex subscription catalog using the current Codex client version and the existing 272k context policy.
+- 1c4b707: Expose goal_resume so agents can resume any paused goal without a pause-reason restriction; include it for existing sessions with goal_pause.
+- ba890d1: Enable verified Low and Medium reasoning levels for the curated Nemotron 3 Super OpenRouter model, with Medium as its default.
+- d8a70ec: Unify first-party and integration tools behind one workspace gateway for MCP, model execution, Codemode, SDK, and browser clients; require host-confirmed SDK approval for human-gated model calls, keep Codemode claims live through gateway preparation, and deduplicate reclaimed tool-created events; add opt-in resource-bound MCP OAuth; ship governed self-contained HTML Sites with retained source, version rollback, an exact-version direct-call tool allowlist, and a native Site-authoring Skill; and default Modal self-hosts to OpenGeni's public digest-pinned desktop runtime image.
+- Updated dependencies [22a6704]
+- Updated dependencies [4536385]
+- Updated dependencies [7dac7e3]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [694c1ff]
+- Updated dependencies [fa12951]
+- Updated dependencies [c1dc59b]
+- Updated dependencies [1fc0889]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [c69ad5f]
+- Updated dependencies [1c4b707]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [414946c]
+- Updated dependencies [0c39126]
+- Updated dependencies [0c39126]
+- Updated dependencies [575af5b]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [0a81cc8]
+  - @opengeni/contracts@2.14.0
+  - @opengeni/codex@0.2.22
+  - @opengeni/xai-subscription@0.1.4
+
+## 1.0.0
+
+### Major Changes
+
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+  - @opengeni/contracts@2.13.0
+  - @opengeni/codex@0.2.21
+  - @opengeni/xai-subscription@0.1.3
+
+## 0.23.3
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+
+## 0.23.2
+
+### Patch Changes
+
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+
+## 0.23.1
+
+### Patch Changes
+
+- Updated dependencies [8f81b57]
+  - @opengeni/contracts@2.11.0
+
+## 0.23.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+- 9fe5c5b: Add organization-scoped Vercel AI Gateway and OpenRouter BYOK/custom models for shared workspaces while preserving independent workspace connections.
+
+### Patch Changes
+
+- c356468: Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades, retain host provenance after successful credential resolution, make auth-needed events inert in legacy browsers, and gate newly marked refs behind a default-off two-phase fleet activation.
+- 5ef0757: Allow zero-holder sandbox drains to use a separate extended provider snapshot timeout without lengthening ordinary periodic or turn-end snapshot finalization, while keeping current and historical Modal rotation admission inside provider-deadline headroom and making opted-in lifecycle waiters honor an in-flight child's persisted bounded capture deadline across rolling configuration changes.
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [9af1666]
+  - @opengeni/contracts@2.10.0
+
+## 0.22.5
+
+### Patch Changes
+
+- 59b286a: Add optional Modal CPU and memory reservations and preserve them through sandbox creation, exact resume, and snapshot replacement.
+- Updated dependencies [4fb337b]
+- Updated dependencies [5b9acd1]
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+
+## 0.22.4
+
+### Patch Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- Updated dependencies [b471a90]
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/contracts@2.9.1
+
 ## 0.22.3
 
 ### Patch Changes

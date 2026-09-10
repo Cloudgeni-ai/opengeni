@@ -15,13 +15,21 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { useAppContext } from "@/context";
+import { findPickerRow, groupPickerRowsByBillingClass } from "@/lib/model-policy";
+import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 
 export function PrReviewSetupCard(props: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
   canManage: boolean;
 }) {
+  const context = useAppContext();
   const client = useMemo(() => new OpenGeniPrReviewClient(props.client), [props.client]);
+  const connectTransport = useMemo(() => props.client.connectTransport(), [props.client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const modelCatalog = useWorkspaceModelCatalog(props.workspaceId);
   const [registrations, setRegistrations] = useState<PrReviewAppRegistration[]>([]);
   const [repositories, setRepositories] = useState<PrReviewRepositoryBinding[]>([]);
   const [managedGitHub, setManagedGitHub] = useState<PrReviewManagedGitHubSetup | null>(null);
@@ -42,6 +50,8 @@ export function PrReviewSetupCard(props: {
   const [repositoryId, setRepositoryId] = useState("");
   const [installationId, setInstallationId] = useState("");
   const [projectId, setProjectId] = useState("");
+  const [newRepositoryModel, setNewRepositoryModel] = useState("");
+  const [savingRepositoryIds, setSavingRepositoryIds] = useState<Set<string>>(() => new Set());
 
   const refresh = useCallback(async () => {
     const [result, github] = await Promise.all([
@@ -108,6 +118,7 @@ export function PrReviewSetupCard(props: {
         providerRepositoryId: repositoryId,
         ...(installationId ? { installationId } : {}),
         ...(projectId ? { projectId } : {}),
+        ...(newRepositoryModel ? { model: newRepositoryModel } : {}),
       });
       await refresh();
       setRepositoryUri("");
@@ -115,10 +126,32 @@ export function PrReviewSetupCard(props: {
       setRepositoryId("");
       setInstallationId("");
       setProjectId("");
+      setNewRepositoryModel("");
     } catch (reason) {
       setError(messageForError(reason));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function updateRepositoryModel(bindingId: string, model: string) {
+    setSavingRepositoryIds((current) => new Set(current).add(bindingId));
+    setError(null);
+    try {
+      const updated = await client.updateRepositoryBinding(props.workspaceId, bindingId, {
+        model: model || null,
+      });
+      setRepositories((current) =>
+        current.map((repository) => (repository.id === updated.id ? updated : repository)),
+      );
+    } catch (reason) {
+      setError(messageForError(reason));
+    } finally {
+      setSavingRepositoryIds((current) => {
+        const next = new Set(current);
+        next.delete(bindingId);
+        return next;
+      });
     }
   }
 
@@ -128,6 +161,15 @@ export function PrReviewSetupCard(props: {
   const manualRegistrations = registrations.filter(
     (registration) => registration.credentialKind !== "managed_github_app",
   );
+  const reviewModelRows = modelCatalog.rows.filter(
+    (row) => row.billingClass === "opengeni_credits" || row.billingClass === "codex_subscription",
+  );
+  const modelGroups = groupPickerRowsByBillingClass(reviewModelRows);
+  const defaultModel = context.clientConfig.defaultModel;
+  const defaultModelRow = findPickerRow(reviewModelRows, defaultModel);
+  const defaultModelLabel = defaultModelRow
+    ? `Deployment default · ${defaultModelRow.label} · ${defaultModelRow.billingClassLabel}`
+    : `Deployment default · ${defaultModel}`;
 
   if (loading) {
     return (
@@ -210,7 +252,14 @@ export function PrReviewSetupCard(props: {
             size="sm"
             disabled={busy || !props.canManage || !managedGitHub?.connectUrl}
             onClick={() =>
-              managedGitHub?.connectUrl && window.location.assign(managedGitHub.connectUrl)
+              setConnectRequest({
+                scope: { workspaceId: props.workspaceId, transport: connectTransport },
+                providerId: "github-lens",
+                ownership: "workspace",
+                displayName: "OpenGeni Lens",
+                returnUrl: window.location.href,
+                idempotencyKey: crypto.randomUUID(),
+              })
             }
           >
             <BotIcon />
@@ -239,6 +288,7 @@ export function PrReviewSetupCard(props: {
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="Registration name"
+              suppressAutofill
             />
             <Input
               value={providerBaseUrl}
@@ -380,6 +430,14 @@ export function PrReviewSetupCard(props: {
                   : "Project ID (optional)"
               }
             />
+            <ReviewModelSelect
+              ariaLabel="Review model for the new repository"
+              value={newRepositoryModel}
+              defaultLabel={defaultModelLabel}
+              modelGroups={modelGroups}
+              disabled={busy || modelCatalog.loading}
+              onChange={setNewRepositoryModel}
+            />
           </div>
           <div>
             <Button
@@ -400,23 +458,120 @@ export function PrReviewSetupCard(props: {
               Enable repository
             </Button>
           </div>
-          {repositories.length > 0 ? (
-            <div className="grid gap-2">
-              {repositories.map((repository) => (
-                <div
-                  key={repository.id}
-                  className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-xs"
-                >
-                  <CheckCircle2Icon className="size-4 text-status-completed" />
-                  <span className="min-w-0 flex-1 truncate">{repository.repositoryFullName}</span>
-                  <MetaChip>{repository.provider}</MetaChip>
-                </div>
-              ))}
-            </div>
-          ) : null}
         </div>
       ) : null}
+
+      {repositories.length > 0 ? (
+        <div className="grid gap-3 rounded-lg border border-border bg-surface/70 p-3">
+          <div>
+            <div className="text-xs font-medium">Review execution</div>
+            <p className="mt-1 text-xs leading-5 text-fg-muted">
+              Choose the model and billing source for each repository. Codex models use the
+              workspace&apos;s connected Codex subscription and do not consume OpenGeni credits. The
+              exact choice is frozen into each accepted pull-request run.
+            </p>
+          </div>
+          {modelCatalog.error ? (
+            <Notice tone="failed">Could not load review models: {modelCatalog.error}</Notice>
+          ) : null}
+          <div className="grid gap-2">
+            {repositories.map((repository) => {
+              const selectedRow = repository.model
+                ? findPickerRow(reviewModelRows, repository.model)
+                : defaultModelRow;
+              const unavailableModel = repository.model !== null && selectedRow === null;
+              return (
+                <div
+                  key={repository.id}
+                  className="grid gap-2 rounded-md border border-border px-3 py-2 md:grid-cols-[minmax(0,1fr)_minmax(16rem,24rem)] md:items-center"
+                >
+                  <div className="flex min-w-0 items-center gap-2 text-xs">
+                    <CheckCircle2Icon className="size-4 shrink-0 text-status-completed" />
+                    <span className="min-w-0 flex-1 truncate font-medium">
+                      {repository.repositoryFullName}
+                    </span>
+                    <MetaChip>{repository.provider}</MetaChip>
+                  </div>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <ReviewModelSelect
+                      ariaLabel={`Review model for ${repository.repositoryFullName}`}
+                      className="min-w-0 flex-1"
+                      value={repository.model ?? ""}
+                      defaultLabel={defaultModelLabel}
+                      modelGroups={modelGroups}
+                      unavailableModel={unavailableModel ? repository.model : null}
+                      disabled={
+                        !props.canManage ||
+                        modelCatalog.loading ||
+                        savingRepositoryIds.has(repository.id)
+                      }
+                      onChange={(model) => void updateRepositoryModel(repository.id, model)}
+                    />
+                    {savingRepositoryIds.has(repository.id) ? (
+                      <Loader2Icon
+                        aria-label={`Saving review model for ${repository.repositoryFullName}`}
+                        className="size-4 shrink-0 animate-spin text-fg-muted"
+                      />
+                    ) : selectedRow ? (
+                      <MetaChip>{selectedRow.billingClassLabel}</MetaChip>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      {connectRequest ? (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={props.workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={() => {
+            setConnectRequest(null);
+            void refresh().catch((reason) => setError(messageForError(reason)));
+          }}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function ReviewModelSelect(props: {
+  ariaLabel: string;
+  value: string;
+  defaultLabel: string;
+  modelGroups: ReturnType<typeof groupPickerRowsByBillingClass>;
+  unavailableModel?: string | null;
+  disabled: boolean;
+  className?: string | undefined;
+  onChange: (model: string) => void;
+}) {
+  return (
+    <Select
+      aria-label={props.ariaLabel}
+      className={props.className}
+      value={props.value}
+      disabled={props.disabled}
+      onChange={(event) => props.onChange(event.target.value)}
+    >
+      <option value="">{props.defaultLabel}</option>
+      {props.unavailableModel ? (
+        <option value={props.unavailableModel} disabled>
+          {props.unavailableModel} · currently unavailable
+        </option>
+      ) : null}
+      {props.modelGroups.map((group) => (
+        <optgroup key={group.billingClass} label={group.label}>
+          {group.rows.map((row) => (
+            <option key={row.id} value={row.id} disabled={!row.selectable}>
+              {row.unavailableReason ? `${row.label} · ${row.unavailableReason}` : row.label}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </Select>
   );
 }
 

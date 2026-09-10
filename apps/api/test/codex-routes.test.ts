@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { codexWorkerReadiness } from "../src/routes/codex";
 
 const DELEGATION_SECRET = "codex-routes-delegation-secret";
 const STATE_SECRET = "codex-routes-state-secret";
@@ -12,6 +14,7 @@ const ACCOUNT = "00000000-0000-4000-8000-0000000000c3";
 const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
+  environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
 });
 
 // db must never be touched on the paths under test (auth from token; start/poll
@@ -49,16 +52,157 @@ async function bearer(workspaceId: string, permissions: Permission[]): Promise<s
 }
 
 const realFetch = globalThis.fetch;
+const restores: Array<() => void> = [];
 afterEach(() => {
   globalThis.fetch = realFetch;
+  while (restores.length) restores.pop()!();
 });
 
-function mockDevice(handlers: { usercode?: () => Response; token?: () => Response }) {
+describe("Codex status readiness semantics", () => {
+  const now = new Date("2026-09-03T12:00:00.000Z");
+  const healthy = {
+    id: "healthy",
+    status: "active",
+    allocatorEnabled: true,
+    primaryUsedPercent: 0,
+    primaryResetAt: null,
+    secondaryUsedPercent: 0,
+    secondaryResetAt: null,
+    exhaustedUntil: null,
+  } as const;
+
+  test("reports pool readiness separately from rotation-off pointer routability", () => {
+    const result = codexWorkerReadiness({
+      effectiveSource: "workspace",
+      rotationEnabled: false,
+      activeCredentialId: "capped",
+      accounts: [
+        healthy,
+        {
+          ...healthy,
+          id: "capped",
+          primaryUsedPercent: 100,
+          primaryResetAt: new Date("2026-09-04T12:00:00.000Z"),
+        },
+      ],
+      now,
+    });
+
+    expect(result).toEqual({ poolReady: true, workerRoutable: false });
+  });
+
+  test("reports disabled sources as neither pool-ready nor worker-routable", () => {
+    expect(
+      codexWorkerReadiness({
+        effectiveSource: "disabled",
+        rotationEnabled: true,
+        activeCredentialId: healthy.id,
+        accounts: [healthy],
+        now,
+      }),
+    ).toEqual({ poolReady: false, workerRoutable: false });
+  });
+
+  test("status response keeps active-account probe fields distinct from pool readiness", async () => {
+    const active = {
+      id: "active",
+      source: "workspace" as const,
+      chatgptAccountId: "chatgpt-active",
+      label: "Active account",
+      accountEmail: null,
+      planType: "pro",
+      status: "active",
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+      allocatorUpdatedBySubjectId: null,
+      allocatorUpdatedAt: null,
+      resetCreditAvailableCount: null,
+      resetCreditsCheckedAt: null,
+      connectedBySubjectId: null,
+      isActive: true,
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastError: null,
+      primaryUsedPercent: 0,
+      primaryResetAt: null,
+      secondaryUsedPercent: 0,
+      secondaryResetAt: null,
+      usageCheckedAt: null,
+      exhaustedUntil: null,
+      exhaustedKind: null,
+    } satisfies opengeniDb.CodexAccountStatus;
+    const status = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue({
+      connected: true,
+      credentialId: active.id,
+      chatgptAccountId: active.chatgptAccountId,
+      scopes: null,
+      planType: active.planType,
+      status: active.status,
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastError: null,
+    });
+    const accounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([active]);
+    const source = spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue({
+      accountId: ACCOUNT,
+      workspaceId: WS_A,
+      workspaceKind: "shared",
+      mode: "workspace",
+      effectiveSource: "workspace",
+      workspaceAvailable: true,
+      organizationAvailable: false,
+    });
+    const rotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
+      activeCredentialId: active.id,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+    });
+    const load = spyOn(opengeniDb, "loadCodexCredentialForRun").mockResolvedValue(null);
+    restores.push(
+      () => status.mockRestore(),
+      () => accounts.mockRestore(),
+      () => source.mockRestore(),
+      () => rotation.mockRestore(),
+      () => load.mockRestore(),
+    );
+
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
+      headers: { authorization: await bearer(WS_A, ["workspace:read"]) },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      connected: true,
+      valid: false,
+      activeAccountValid: false,
+      poolReady: true,
+      workerRoutable: true,
+      activeAccount: {
+        id: active.id,
+        label: active.label,
+        chatgptAccountId: active.chatgptAccountId,
+      },
+      accountCount: 1,
+      models: [
+        { id: "codex/gpt-5.6-sol" },
+        { id: "codex/gpt-5.6-terra" },
+        { id: "codex/gpt-5.6-luna" },
+        { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
+      ],
+    });
+  });
+});
+
+function mockDevice(handlers: {
+  usercode?: () => Response;
+  token?: () => Response;
+  exchange?: () => Response;
+}) {
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.includes("/deviceauth/usercode") && handlers.usercode) return handlers.usercode();
     if (url.includes("/deviceauth/token") && handlers.token) return handlers.token();
+    if (url.includes("/oauth/token") && handlers.exchange) return handlers.exchange();
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
 }
@@ -68,6 +212,11 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
 }
 
 async function start(
@@ -116,6 +265,50 @@ describe("codex connect routes", () => {
     expect(await res.json()).toEqual({ status: "pending" });
   });
 
+  test("connect/poll maps an active source cutover fence to 409", async () => {
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
+    const { body } = await start(WS_A);
+    mockDevice({
+      token: () => json({ authorization_code: "authorization-code", code_verifier: "verifier" }),
+      exchange: () =>
+        json({
+          id_token: jwt({
+            email: "connector@example.com",
+            "https://api.openai.com/auth": {
+              chatgpt_account_id: "provider-account",
+              chatgpt_plan_type: "pro",
+            },
+          }),
+          access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+          refresh_token: "refresh-token",
+        }),
+    });
+    const mutation = spyOn(opengeniDb, "withSessionCodexCapacityMutation").mockRejectedValue(
+      new Error("Codex subscription source cannot change while active turns are using it"),
+    );
+    restores.push(() => mutation.mockRestore());
+
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(WS_A, ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ state: body.state }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        message: "Codex subscription source cannot change while active turns are using it",
+        status: 409,
+      },
+    });
+  });
+
   test("connect/poll rejects a state minted for a different workspace", async () => {
     mockDevice({
       usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
@@ -153,6 +346,16 @@ describe("codex connect routes", () => {
 });
 
 describe("codex multi-account routes (auth + validation)", () => {
+  test("organization Codex accounts require a managed human session", async () => {
+    const res = await app().request(`/v1/organizations/${ACCOUNT}/codex/accounts`);
+    expect(res.status).toBe(401);
+  });
+
+  test("workspace Codex source reads require workspace access", async () => {
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/source`);
+    expect([401, 403]).toContain(res.status);
+  });
+
   test("GET /codex/accounts requires auth (route exists, db untouched on the reject)", async () => {
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts`);
     expect([401, 403]).toContain(res.status);

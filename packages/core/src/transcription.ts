@@ -31,6 +31,9 @@ export type TranscriptionRequest = {
   providerDeadlineAt?: Date | undefined;
   /** Exact provider selected before a resumable segment is first sent upstream. */
   providerId?: string | undefined;
+  preferredProvider?: string | null | undefined;
+  fallbackEnabled?: boolean | undefined;
+  excludedProviders?: readonly string[] | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {
@@ -44,18 +47,22 @@ export class TranscriptionServiceError extends Error {
   readonly code: VoiceInputErrorCode;
   readonly status: number;
   readonly retryable: boolean;
+  /** Explicit rejection before any transcription result; safe to try another provider. */
+  readonly fallbackSafe: boolean;
 
   constructor(input: {
     code: VoiceInputErrorCode;
     message: string;
     status?: number;
     retryable?: boolean;
+    fallbackSafe?: boolean;
   }) {
     super(input.message);
     this.name = "TranscriptionServiceError";
     this.code = input.code;
     this.status = input.status ?? statusForVoiceInputError(input.code);
     this.retryable = input.retryable ?? false;
+    this.fallbackSafe = input.fallbackSafe ?? false;
   }
 }
 
@@ -88,6 +95,10 @@ export function statusForVoiceInputError(code: VoiceInputErrorCode): number {
 
 /** Optional workspace scope for readiness checks during provider selection. */
 export type TranscriptionAvailabilityContext = {
+  afterProvider?: string | undefined;
+  preferredProvider?: string | null | undefined;
+  fallbackEnabled?: boolean | undefined;
+  excludedProviders?: readonly string[] | undefined;
   workspaceId?: string | undefined;
   subjectId?: string | undefined;
 };
@@ -95,7 +106,8 @@ export type TranscriptionAvailabilityContext = {
 /**
  * Extensible transcription provider port. Implementations own credentials and
  * upstream request shape. Selection happens before audio is sent; providers must
- * not fall back to another vendor after an upstream request may have started.
+ * only fall back after an explicit rejection and before any successful or
+ * uncertain provider attempt. Recording persistence owns that eligibility.
  */
 export type TranscriptionProvider = {
   readonly id: string;

@@ -1,3 +1,4 @@
+import { assertModelConnectionAllowsTurn } from "@opengeni/db";
 import {
   setSessionLastInputTokensForTurnAttempt,
   getMaterializedSandboxFileResources,
@@ -22,7 +23,10 @@ import {
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
-import { xaiSubscriptionRequestStorage } from "@opengeni/xai-subscription";
+import {
+  xaiSubscriptionRequestStorage,
+  type XaiSubscriptionRequestContext,
+} from "@opengeni/xai-subscription";
 import { buildXaiTurnRequestAuthorization } from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
@@ -45,6 +49,7 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
+import { providerRecoveryCountAfterModelRequestPhase } from "./errors";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
@@ -78,6 +83,54 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
 
+/**
+ * Retain subscription credential/account authority for the title sidecar
+ * without sharing main-stream recovery, startup, audit, or opaque-artifact
+ * callbacks. Title usage is returned by the runtime and metered separately.
+ */
+export function sessionTitleCodexRequestContext(
+  context: CodexRequestContext,
+  nextRequestId: () => string,
+): CodexRequestContext {
+  return {
+    clientVersion: context.clientVersion,
+    ...(context.sessionId !== undefined ? { sessionId: context.sessionId } : {}),
+    getToken: context.getToken,
+    refresh: context.refresh,
+    resolveModel: context.resolveModel,
+    ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.beforeProviderDispatch
+      ? { beforeProviderDispatch: context.beforeProviderDispatch }
+      : {}),
+    ...(context.responseTimeoutPolicy
+      ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
+      : {}),
+    nextRequestId,
+    turnMetadata: { request_kind: "session_title" },
+  };
+}
+
+export function sessionTitleXaiRequestContext(
+  context: XaiSubscriptionRequestContext,
+  nextRequestId: () => string,
+): XaiSubscriptionRequestContext {
+  return {
+    clientVersion: context.clientVersion,
+    sessionId: context.sessionId,
+    turnId: context.turnId,
+    getToken: context.getToken,
+    refresh: context.refresh,
+    resolveModel: context.resolveModel,
+    ...(context.streamIdleTimeoutMs !== undefined
+      ? { streamIdleTimeoutMs: context.streamIdleTimeoutMs }
+      : {}),
+    ...(context.hostedToolContinuationTimeoutMs !== undefined
+      ? { hostedToolContinuationTimeoutMs: context.hostedToolContinuationTimeoutMs }
+      : {}),
+    nextRequestId,
+  };
+}
+
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
@@ -88,6 +141,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
+      catalogSourceSettings = settings,
       db,
       bus,
       runtime,
@@ -301,6 +355,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const claimed = await claimTurnAttempt({
         input,
         settings,
+        catalogSourceSettings,
         db,
         bus,
         runtime,
@@ -414,10 +469,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         requiredGeneratedVideoFiles,
       });
       if ("exit" in governance) return governance.exit;
+      await assertModelConnectionAllowsTurn(db, {
+        workspaceId: input.workspaceId,
+        subjectId: turn.initiatingHumanSubjectId ?? "worker:model-access",
+        modelId: turnExecutionPolicy.productModelId,
+        codexCredentialId: providerTurn.effectiveCodexCredentialId,
+        xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+      });
       const {
         runtimePreparationStartedAt,
         packRuntime,
-        installedSkillRuntime,
         rigVersion,
         rigName,
         agentHumanInputEnabled,
@@ -463,6 +524,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 input.workspaceId,
                 providerTurn.effectiveCodexCredentialId ?? "",
               );
+              const resolveTrackedToken = async (
+                resolve: () => ReturnType<typeof resolver.getToken>,
+              ) => {
+                const token = await resolve();
+                providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                return token;
+              };
               return {
                 clientVersion: CODEX_CLIENT_VERSION,
                 // Backend sticky cache-routing key — the SAME id as the body's
@@ -472,8 +540,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // (per-request shard lottery = prod's measured 48.6% on sol);
                 // with it, resends pin to the warm shard (Codex CLI parity).
                 sessionId: input.sessionId,
-                getToken: () => resolver.getToken(),
-                refresh: () => resolver.refresh(),
+                getToken: () => resolveTrackedToken(resolver.getToken),
+                refresh: () => resolveTrackedToken(resolver.refresh),
                 resolveModel: buildModelResolver(
                   CODEX_FALLBACK_MODEL_SLUGS,
                   CODEX_FALLBACK_MODEL_SLUGS[0],
@@ -481,6 +549,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onUsageHeaders: (snapshot) => {
                   providerTurn.latestCodexUsage = snapshot;
                 }, // latest wins; flushed once in finally
+                beforeProviderDispatch: () => {
+                  leases.codex.assertUsable();
+                },
                 onRequestPreparationDiagnostic: (phase) => {
                   if (
                     eventing.firstModelRequestCheckpointAt === null ||
@@ -599,6 +670,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         },
                       },
                     ]);
+                    attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
+                      attempt.providerRecoveryCount,
+                      event.phase,
+                    );
                   } catch (error) {
                     auditOutcome = "failed";
                     throw error;
@@ -744,6 +819,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 },
               ]);
+              attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
+                attempt.providerRecoveryCount,
+                event.phase,
+              );
             } catch (error) {
               auditOutcome = "failed";
               throw error;
@@ -769,6 +848,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         providerTurn.xaiRequestContext
           ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
           : withCodex(fn);
+      let codexSessionTitleRequestSequence = 0;
+      let xaiSessionTitleRequestSequence = 0;
+      const codexSessionTitleContext = codexContext
+        ? sessionTitleCodexRequestContext(
+            codexContext,
+            () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+          )
+        : null;
+      const xaiSessionTitleContext = providerTurn.xaiRequestContext
+        ? sessionTitleXaiRequestContext(
+            providerTurn.xaiRequestContext,
+            () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+          )
+        : null;
+      const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
+        xaiSessionTitleContext
+          ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+          : codexSessionTitleContext
+            ? codexRequestStorage.run(codexSessionTitleContext, fn)
+            : fn();
       const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
         withCodex(() =>
           withCodexRequestOverrides(
@@ -787,7 +886,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
       const compactionPrep = await prepareCompaction({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         bus,
         observability,
@@ -1052,7 +1151,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ).values(),
       ];
       const toolRuntime = await prepareTurnToolRuntime({
+        selectedSkillActivations: packRuntime.skillActivations,
         input,
+        catalogSourceSettings,
         db,
         bus,
         runtime,
@@ -1091,12 +1192,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const {
         attemptConnectorActionBindings,
-        connectorActionIdentity,
+        connectorActionPolicy,
+        generateSessionTitleInParallel,
         postToolPreparationStartedAt,
         preparationIndependentToolNames,
       } = toolRuntime;
 
       const builtAgent = await buildTurnAgent({
+        skillCatalog: toolRuntime.skillCatalog,
         input,
         db,
         runtime,
@@ -1131,8 +1234,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceMemory,
         rigVersion,
         rigName,
-        packRuntime,
-        installedSkillRuntime,
         buildCompanyBrainContributionReceiptFor,
         promptCacheKey,
         workspaceVariableSet,
@@ -1145,7 +1246,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxCodemodeToken,
         fileResourceDownloads,
         attemptConnectorActionBindings,
-        connectorActionIdentity,
+        connectorActionPolicy,
+        trigger,
         preparationIndependentToolNames,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
@@ -1153,8 +1255,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         postToolPreparationStartedAt,
         codexContext,
       });
-      const { agent, modelVisibleRuntimeSkillActivations, postAgentPreparationStartedAt } =
-        builtAgent;
+      const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
 
       await bindLazySandboxProvisioner({
         ...sandboxRoute,
@@ -1210,7 +1311,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         companyBrainContributionReceiptRecorded = true;
         try {
           const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
-            modelVisibleRuntimeSkillActivations,
+            modelVisibleSkillCatalogText,
           );
           eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
             companyBrainContributionReceipt,
@@ -1234,7 +1335,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
       const postAgentCompaction = await runPostAgentCompaction({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         bus,
         observability,
@@ -1399,8 +1500,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return await runTurnStreamAttempt({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
+        bus,
         runtime,
         objectStorage,
         observability,
@@ -1431,6 +1533,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attachCodemodeTokenRenewal,
         attachRunCredentialRenewal,
         withProviderRequestContext,
+        withSessionTitleProviderRequestContext,
         publishCompactionLiveEvents,
         publishCompactionOutcomeEvents,
         recordCompanyBrainContributionReceiptOnce,
@@ -1456,6 +1559,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         providerApi,
         runSettings,
         turnTools,
+        generateSessionTitleInParallel,
+        sessionTitlePrompt: session.initialMessage.trim() ? session.initialMessage : turn.prompt,
         compactSummarizer,
         settleDeferredSteerAfterCompaction,
         compactionModelHistoryProjector,
@@ -1472,6 +1577,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         videoGenerationAcceptancesByCallId,
       });
     } catch (error) {
+      // Stop new external wait mutations before asynchronous failure
+      // persistence. Do not drain here: the original failure/cancellation and
+      // durable attempt fence retain authority over already-running calls.
+      eventing.preparedTools?.inputWaitYield?.closeAdmission();
       return await settleTurnFailure({
         error,
         input,
@@ -1480,7 +1589,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         bus,
         observability,
         wakeSessionWorkflow,
-        signalCodexCapacityWorkflow,
         cancellationSignal,
         sandboxRotationController,
         noteCancellationRequested,

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "2.9.0",
+  "version": "3.0.1",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,22 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./host-mcp-bindings": {
+      "types": "./src/host-mcp-bindings.ts",
+      "default": "./src/host-mcp-bindings.ts"
+    },
+    "./external-identities": {
+      "types": "./src/external-identities.ts",
+      "default": "./src/external-identities.ts"
+    },
+    "./connect": {
+      "types": "./src/connect.ts",
+      "default": "./src/connect.ts"
+    },
+    "./site-session-http": {
+      "types": "./src/site-session-http.ts",
+      "default": "./src/site-session-http.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -33,6 +49,14 @@
     "./personal-github": {
       "types": "./src/personal-github.ts",
       "default": "./src/personal-github.ts"
+    },
+    "./github-repository": {
+      "types": "./src/github-repository.ts",
+      "default": "./src/github-repository.ts"
+    },
+    "./github-repository-contracts": {
+      "types": "./src/github-repository-contracts.ts",
+      "default": "./src/github-repository-contracts.ts"
     },
     "./atlassian": {
       "types": "./src/atlassian.ts",
@@ -77,6 +101,10 @@
     "./xai-provider-account-authority": {
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
+    },
+    "./model-picker-order": {
+      "types": "./src/model-picker-order.ts",
+      "default": "./src/model-picker-order.ts"
     },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
@@ -142,6 +170,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "yaml": "2.9.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {

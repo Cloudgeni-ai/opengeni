@@ -105,4 +105,78 @@ describe("published HTML artifact browser acceptance", () => {
 
     await context.close();
   }, 30_000);
+
+  test("retains the document bootstrap for a Site client created after load", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    await page.evaluate(async () => {
+      const { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument } =
+        await import("/src/components/artifacts/artifact-sandbox.tsx");
+      const iframe = document.createElement("iframe");
+      iframe.setAttribute("sandbox", PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX);
+      iframe.srcdoc = publishedHtmlArtifactDocument(
+        `<!doctype html><body><script>
+          window.addEventListener("load", () => setTimeout(function connect(attempt = 0) {
+            const bootstrap = window.__opengeniSiteBridgeBootstrapV2?.port;
+            if (!bootstrap) {
+              if (attempt >= 100) {
+                document.body.dataset.bootstrap = "missing";
+                return;
+              }
+              setTimeout(() => connect(attempt + 1), 0);
+              return;
+            }
+            const channel = new MessageChannel();
+            channel.port1.addEventListener("message", event => {
+              if (event.data?.type === "opengeni.site.ready" && event.data?.version === 2) {
+                document.body.dataset.bootstrap = "connected";
+              }
+            });
+            channel.port1.start();
+            bootstrap.postMessage({ type: "opengeni.site.connect", version: 2 }, [channel.port2]);
+          }, 0));
+        </script></body>`,
+        true,
+      );
+      iframe.addEventListener("load", () => {
+        const bootstrap = new MessageChannel();
+        bootstrap.port1.addEventListener("message", (event) => {
+          if (
+            event.data?.type !== "opengeni.site.connect" ||
+            event.data?.version !== 2 ||
+            event.ports.length !== 1
+          ) {
+            return;
+          }
+          const toolPort = event.ports[0]!;
+          toolPort.start();
+          toolPort.postMessage({ type: "opengeni.site.ready", version: 2 });
+        });
+        bootstrap.port1.start();
+        iframe.contentWindow?.postMessage({ type: "opengeni.site.ready", version: 2 }, "*", [
+          bootstrap.port2,
+        ]);
+      });
+      document.body.replaceChildren(iframe);
+    });
+
+    const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
+    expect(frame).toBeDefined();
+    await page.waitForTimeout(1_000);
+    expect(
+      await frame!.evaluate(() => ({
+        state: document.body.dataset.bootstrap ?? null,
+        retained: Boolean(
+          (
+            window as typeof window & {
+              __opengeniSiteBridgeBootstrapV2?: { port?: MessagePort };
+            }
+          ).__opengeniSiteBridgeBootstrapV2?.port,
+        ),
+      })),
+    ).toEqual({ state: "connected", retained: true });
+
+    await context.close();
+  }, 30_000);
 });

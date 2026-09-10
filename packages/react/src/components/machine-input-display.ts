@@ -3,9 +3,11 @@ import type { MachineInputMember } from "../timeline/types";
 export const MACHINE_INPUT_META: Record<MachineInputMember["kind"], string> = {
   scheduled_occurrence: "Scheduled update",
   goal_continuation: "Goal continued",
+  background_command_result: "Command result received",
+  session_wait_timeout: "Wait ended",
   agent_message: "Agent update",
   agent_steer_instruction: "Agent direction",
-  child_terminal_result: "Agent finished",
+  child_terminal_result: "Agent result received",
   media_generation_result: "Video update",
   child_requires_action: "Agent needs input",
   child_requires_action_resolved: "Agent unblocked",
@@ -28,8 +30,12 @@ export function machineInputBatchLabel(members: readonly MachineInputMember[]): 
     const kind = members[0]!.kind;
     const n = members.length;
     switch (kind) {
+      case "background_command_result":
+        return n === 1 ? "Command result received" : `${n} command results received`;
+      case "session_wait_timeout":
+        return n === 1 ? "Wait ended" : `${n} waits ended`;
       case "child_terminal_result":
-        return n === 1 ? "Agent finished" : `${n} agents finished`;
+        return n === 1 ? "Agent result received" : `${n} agent results received`;
       case "goal_continuation":
         return n === 1 ? "Goal continued" : `${n} goal continuations`;
       case "scheduled_occurrence":

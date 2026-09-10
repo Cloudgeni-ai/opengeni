@@ -86,6 +86,33 @@ restarts, or reinterprets current work. A small
 `session.mcp.approval_policy.updated` event tells other clients to reload the
 authoritative session metadata.
 
+## Deterministic approval regression fixture
+
+Run the real worker approval fixture without a model subscription:
+
+```bash
+bun test --timeout 300000 ./test/integration/worker-activity.integration.ts -t 'a requireApproval session MCP tool'
+```
+
+The existing `@opengeni/testing` local MCP server records harmless search calls
+in memory, and `ScriptedModel` deterministically requests that tool. The test
+uses real Postgres, NATS, production runtime preparation, durable interruption
+state, and the human decision acceptance lifecycle. It covers both Approve and
+Reject, a root/parent/child lineage, parent request/resolution notices, a stale
+call id, decision replay before and after settlement, a separate human Pause,
+and resuming with a fresh runtime. Approval executes one call; rejection executes
+none. Accepting approval while paused must not admit an execution attempt.
+
+The driver submits the human actor's decision directly to the storage acceptance
+lifecycle, outside the scripted agent. This is a worker integration regression,
+not proof of browser/API authorization, Temporal delivery, or live staging UX.
+Those boundaries have separate coverage in `packages/db/test/child-lifecycle-notices.test.ts`,
+`test/integration/temporal-workflow.integration.ts`, and the API/UI approval
+suites. A live browser run must still use a human-authorized decision and verify
+the actual approval card; asking an agent to write "approval needed" is not a
+tool-approval test. The fixture is loopback-only and is not a deployed staging
+endpoint.
+
 ## Storage and rotation
 
 Credential headers are encrypted in `session_mcp_servers.headers_encrypted` with
@@ -200,12 +227,17 @@ startup choice. Approval/human-input resumes and editable-artifact turns remain
 fully prepared because continuation requires their exact prior execution/catalog
 identity.
 
-For model MCP execution, the worker also supplies attempt-bound connector policy
-hooks to the runtime. The runtime wraps converted MCP function tools and every
-sandbox clone, evaluates approval before interruption, rechecks durable
-admission immediately before invocation, and commits completion or uncertainty
-afterward. This wrapper does not change tool selection, connector visibility,
-the shared Codemode catalog/executor, or Slack interaction progress delivery.
+The worker supplies attempt-bound connector policy hooks to the runtime before
+the attempt catalog is frozen. The canonical gateway lifecycle evaluates exact
+arguments during prepare, before Codemode's execution-start marker; performs
+durable begin at the actual executor boundary; and settles completed versus
+not-executed or uncertain afterward. Model MCP and Codemode therefore share the
+same connection-backed policy path. The model SDK wrapper remains only the
+ordinary human-approval projection for Ask and propagates the exact approved
+call id on resume. Dedicated provider adapters may classify their result or
+thrown failure, but do not run a second connector-policy lifecycle. None of this
+changes tool selection, connector visibility, request-time credential/live
+authority checks, or Slack interaction progress delivery.
 
 ## Dedicated-read invariant
 

@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
+import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
 import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
@@ -40,8 +41,13 @@ import {
   validateMcpCapabilityConnection,
 } from "@opengeni/core";
 import { CODEX_APPS_MCP_URL } from "@opengeni/codex";
-import { configuredAllowedModels, type Settings } from "@opengeni/config";
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  configuredAllowedModels,
+  type Settings,
+} from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
+import * as opengeniDb from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
@@ -55,6 +61,21 @@ import {
 } from "@opengeni/contracts";
 
 describe("API helpers", () => {
+  test("rejects embedded query setup transport without the edge-sanitization proof", () => {
+    expect(() =>
+      createApp({
+        settings: testSettings({
+          organizationUserSetupEmailTokenTransport: "query",
+          organizationUserSetupQueryEdgeSanitizationConfirmed: false,
+        }),
+        db: {} as never,
+        bus: {} as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      }),
+    ).toThrow(/QUERY_EDGE_SANITIZATION_CONFIRMED=true/);
+  });
+
   test("appends response negotiation without duplicating Vary fields", () => {
     expect(appendVary(null, "Accept-Encoding")).toBe("Accept-Encoding");
     expect(appendVary("Origin", "Accept-Encoding")).toBe("Origin, Accept-Encoding");
@@ -69,6 +90,7 @@ describe("API helpers", () => {
     );
     expect(isApiContractProtectedMutation("GET", "/v1/workspaces/ws/sessions/s")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/mcp")).toBe(false);
+    expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/codemode/calls")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/webhooks/stripe")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/enrollments/device/poll")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/auth/organization-onboarding")).toBe(true);
@@ -78,7 +100,11 @@ describe("API helpers", () => {
 
   test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
+    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(true);
+    expect(workspaceActorContextExempt("GET", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp/docs`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp/files`)).toBe(true);
     expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/connect`)).toBe(
       true,
     );
@@ -499,6 +525,10 @@ describe("API helpers", () => {
     expect(external.headers.get("access-control-allow-credentials")).toBeNull();
     expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
     expect(external.headers.get("access-control-allow-headers")).toContain("Range");
+    expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Site-Id");
+    expect(external.headers.get("access-control-allow-headers")).toContain(
+      "X-OpenGeni-Site-Version",
+    );
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
@@ -512,6 +542,16 @@ describe("API helpers", () => {
     expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
       "Content-Range",
     );
+    for (const eventHeader of [
+      "X-OpenGeni-Forensic-Exact",
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Next-After",
+      "X-OpenGeni-Next-Before",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Truncated-By",
+    ]) {
+      expect(externalResponse.headers.get("access-control-expose-headers")).toContain(eventHeader);
+    }
 
     const trusted = await preflight("http://localhost:5173");
     expect(trusted.status).toBe(204);
@@ -544,6 +584,15 @@ describe("API helpers", () => {
 
   test("normalizes dynamic route labels for metrics", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
+    expect(routeLabel("/.well-known/oauth-authorization-server")).toBe(
+      "/.well-known/oauth-authorization-server",
+    );
+    expect(
+      routeLabel(`/.well-known/oauth-protected-resource/v1/workspaces/${workspace}/mcp/docs`),
+    ).toBe("/.well-known/oauth-protected-resource/v1/workspaces/:workspaceId/mcp/docs");
+    expect(routeLabel("/oauth/register")).toBe("/oauth/register");
+    expect(routeLabel("/oauth/authorize")).toBe("/oauth/authorize");
+    expect(routeLabel("/oauth/token")).toBe("/oauth/token");
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
     );
@@ -587,6 +636,9 @@ describe("API helpers", () => {
     expect(
       routeLabel(`/v1/workspaces/${workspace}/connections/connection-1/github/repositories/verify`),
     ).toBe("/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify");
+    expect(routeLabel(`/v1/workspaces/${workspace}/github/action-policies`)).toBe(
+      "/v1/workspaces/:workspaceId/github/action-policies",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );
@@ -771,6 +823,8 @@ describe("API helpers", () => {
   });
 
   test("preserves HTTPException status codes in error metrics", () => {
+    expect(httpStatusForError(new ConnectAttemptConflictError())).toBe(409);
+    expect(httpStatusForError(new ConnectAttemptNotFoundError())).toBe(404);
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
     expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
@@ -778,6 +832,41 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
+  });
+
+  test("rejects OAuth access tokens outside MCP and challenges invalid MCP tokens", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const oauthToken = `ogmcp_at_${"a".repeat(43)}`;
+    const app = createApp({
+      settings: testSettings({
+        mcpOauthEnabled: true,
+        publicBaseUrl: "https://api.example.test",
+      }),
+      db: { execute: async () => [] } as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    const rest = await app.request(`/v1/workspaces/${workspaceId}/tools/catalog`, {
+      headers: { authorization: `Bearer ${oauthToken}` },
+    });
+    expect(rest.status).toBe(401);
+    expect(await rest.json()).toEqual({ error: "invalid_token" });
+
+    for (const path of [
+      `/v1/workspaces/${workspaceId}/mcp`,
+      `/v1/workspaces/${workspaceId}/mcp/docs`,
+      `/v1/workspaces/${workspaceId}/mcp/files`,
+    ]) {
+      const response = await app.request(path, {
+        headers: { authorization: `Bearer ${oauthToken}` },
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toContain(
+        `resource_metadata="https://api.example.test/.well-known/oauth-protected-resource${path}"`,
+      );
+    }
   });
 
   test("returns secret-safe typed bounded /v1 errors with a correlation id", async () => {
@@ -1775,12 +1864,26 @@ describe("GET /v1/config/client", () => {
     }
   });
 
+  test("leaves Codemode calls outside the production browser contract fence", async () => {
+    const response = await appFor(testSettings({ environment: "production" })).request(
+      "/v1/workspaces/ws/codemode/calls",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    const body = (await response.json()) as { code?: string };
+    expect(body.code).not.toBe("API_CONTRACT_CHANGED");
+  });
+
   test("returns a models[] whose ids match configuredAllowedModels", async () => {
     const settings = testSettings();
     const config = await fetchClientConfig(settings);
 
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.managedAuthSessionSetMode).toBe("legacy");
+    expect(config.billingMode).toBe(settings.billingMode);
     expect(config.defaultSandboxBackend).toBe(settings.sandboxBackend);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
@@ -1796,6 +1899,37 @@ describe("GET /v1/config/client", () => {
     expect(defaultModel).not.toHaveProperty("credentialSource");
   });
 
+  test("fails readiness closed when database catalog mode has no singleton row", async () => {
+    const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue(null);
+    try {
+      const settings = testSettings({ modelCatalogSource: "database" });
+      const app = createApp({
+        settings,
+        db: {} as never,
+        bus: new MemoryEventBus(),
+        workflowClient: {} as never,
+        managedAuth: null,
+        readinessChecks: {
+          db: async () => undefined,
+          nats: async () => undefined,
+          temporal: async () => undefined,
+        },
+      } satisfies AppDependencies);
+      const response = await app.request("/readyz");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        checks: {
+          db: { ok: false, error: "dependency_unavailable" },
+          nats: { ok: true },
+          temporal: { ok: true },
+        },
+      });
+    } finally {
+      getCatalog.mockRestore();
+    }
+  });
+
   test("projects the safe dual/broker session-set rollout discriminator", async () => {
     expect(
       (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "dual" })))
@@ -1805,6 +1939,15 @@ describe("GET /v1/config/client", () => {
       (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "broker" })))
         .managedAuthSessionSetMode,
     ).toBe("broker");
+  });
+
+  test("projects whether Stripe checkout is available", async () => {
+    expect((await fetchClientConfig(testSettings({ billingMode: "disabled" }))).billingMode).toBe(
+      "disabled",
+    );
+    expect((await fetchClientConfig(testSettings({ billingMode: "stripe" }))).billingMode).toBe(
+      "stripe",
+    );
   });
 
   test("projects only configured managed social provider names", async () => {
@@ -1911,6 +2054,24 @@ describe("GET /v1/config/client", () => {
     expect(glm).not.toHaveProperty("deployment");
     expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");
+  });
+
+  test("projects managed OpenRouter as a secret-free external rail with explicit cost", async () => {
+    const settings = testSettings({ openrouterApiKey: "openrouter-client-config-secret" });
+    const config = await fetchClientConfig(settings);
+    expect(config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID)).toMatchObject({
+      id: DEFAULT_OPENROUTER_MODEL_ID,
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      api: "chat",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      capabilities: { functionCalling: { runnable: true } },
+    });
+    expect(
+      config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID),
+    ).not.toHaveProperty("source");
+    expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
   });
 });
 

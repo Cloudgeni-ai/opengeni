@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "@opengeni/sdk";
 
 import type { Session } from "@/types";
+import { compareSessionActivity } from "./sessions-group";
 import * as sessionChannelMove from "./session-channel-move";
 import {
   applySessionChannelProjection,
@@ -936,6 +937,26 @@ describe("session pin reconciliation", () => {
     });
   });
 
+  test("selection and deselection do not borrow a detail timestamp for rail ordering", () => {
+    const listed = { ...session, status: "idle" } as Session;
+    const peer = { ...listed, id: "peer", updatedAt: "2026-07-10T00:02:00.000Z" };
+    const order = (row: Session) => [row, peer].sort(compareSessionActivity).map((item) => item.id);
+
+    // Detail can be either ahead of the list poll or behind a refreshed page.
+    for (const updatedAt of ["2026-07-10T00:03:00.000Z", "2026-07-09T00:00:00.000Z"]) {
+      const detail = { ...listed, updatedAt, initialMessage: "Fresh route content" };
+      const selected = applySessionRailProjection(detail, listed);
+      expect(order(selected)).toEqual(order(listed));
+      expect(selected.updatedAt).toBe(listed.updatedAt);
+      expect(selected.initialMessage).toBe("Fresh route content");
+      // Selecting a different row restores the unmodified list projection.
+      expect(order(listed)).toEqual(order(selected));
+    }
+
+    const refreshed = { ...listed, updatedAt: "2026-07-10T00:04:00.000Z" };
+    expect(order(applySessionRailProjection(listed, refreshed))).toEqual([listed.id, peer.id]);
+  });
+
   test("retains display-only list fields without copying an expired channel projection", () => {
     const current = { ...session, channelId: "channel-new" } as Session;
     const retained = {
@@ -978,6 +999,137 @@ describe("session pin reconciliation", () => {
     const refreshed = { ...current, treeStats: { ...treeStats } };
 
     expect(applySessionRailProjection(current, refreshed)).toBe(current);
+  });
+
+  test("adopts personal descendant attention changes from a fresh list summary", () => {
+    const treeStats = {
+      directChildren: 1,
+      totalDescendants: 1,
+      runningDescendants: 0,
+      queuedDescendants: 0,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+      activelyWorkingDescendants: 0,
+      truncated: false,
+    };
+    const current = { ...session, treeStats } as Session;
+    const refreshed = {
+      ...current,
+      treeStats: { ...treeStats, unreadFailedDescendants: 0, unreadDescendants: 0 },
+    } as Session;
+
+    expect(applySessionRailProjection(current, refreshed).treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      unreadDescendants: 0,
+    });
+  });
+
+  test("does not resurrect locally acknowledged failed-descendant attention", () => {
+    const acknowledged = {
+      ...session,
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 2,
+        runningDescendants: 1,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 1,
+        unreadFailedDescendants: 0,
+        unreadDescendants: 0,
+        activelyWorkingDescendants: 0,
+        truncated: false,
+      },
+    } as Session;
+    const stale = {
+      ...acknowledged,
+      treeStats: {
+        ...acknowledged.treeStats!,
+        unreadFailedDescendants: 1,
+        unreadDescendants: 1,
+      },
+    } as Session;
+
+    expect(applySessionRailProjection(acknowledged, stale).treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      unreadDescendants: 0,
+    });
+  });
+
+  test("removes only stale failed attention from a legacy summary", () => {
+    const acknowledged = {
+      ...session,
+      treeStats: {
+        directChildren: 3,
+        totalDescendants: 3,
+        runningDescendants: 2,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 1,
+        unreadFailedDescendants: 0,
+        unreadDescendants: 0,
+        activelyWorkingDescendants: 0,
+        truncated: false,
+      },
+    } as Session;
+    const staleLegacyWithNewUnread = {
+      ...acknowledged,
+      treeStats: {
+        ...acknowledged.treeStats!,
+        unreadFailedDescendants: undefined,
+        unreadDescendants: 2,
+      },
+    } as Session;
+
+    expect(
+      applySessionRailProjection(acknowledged, staleLegacyWithNewUnread).treeStats,
+    ).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      // One legacy unread is the acknowledged failure; the other is new work.
+      unreadDescendants: 1,
+    });
+  });
+
+  test("adopts newly failed descendants instead of treating them as stale", () => {
+    const current = {
+      ...session,
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 1,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        unreadFailedDescendants: 0,
+        unreadDescendants: 0,
+        activelyWorkingDescendants: 0,
+        truncated: false,
+      },
+    } as Session;
+    const newlyFailed = {
+      ...current,
+      treeStats: {
+        ...current.treeStats!,
+        runningDescendants: 0,
+        failedDescendants: 1,
+        unreadFailedDescendants: 1,
+        unreadDescendants: 1,
+      },
+    } as Session;
+
+    expect(applySessionRailProjection(current, newlyFailed).treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+    });
   });
 
   test("keeps a newer context pin while adopting detail content", () => {

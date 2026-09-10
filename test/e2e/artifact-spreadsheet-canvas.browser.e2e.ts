@@ -81,11 +81,44 @@ describe("artifact spreadsheet retained canvas", () => {
           deviceScaleFactor: 2,
         });
         const page = await context.newPage();
+        const bootEvents: string[] = [];
+        const recordBootEvent = (event: string) => {
+          bootEvents.push(event.slice(0, 1_000));
+          if (bootEvents.length > 20) bootEvents.shift();
+        };
+        page.on("pageerror", (error) => recordBootEvent(`pageerror: ${error.message}`));
+        page.on("console", (message) => {
+          if (message.type() === "error") recordBootEvent(`console: ${message.text()}`);
+        });
+        page.on("requestfailed", (request) =>
+          recordBootEvent(`requestfailed: ${request.url()} ${request.failure()?.errorText}`),
+        );
         await prewarmDenseFixture(page, baseUrl);
         await mountDenseFixture(page, baseUrl);
 
         const grid = page.getByRole("grid", { name: "Dense sheet spreadsheet" });
-        await grid.waitFor();
+        try {
+          await grid.waitFor();
+        } catch (error) {
+          // Preserve the original failure; diagnostics must not replace it if the page closed.
+          try {
+            const dom = await page
+              .locator("html")
+              .evaluate((element) => element.outerHTML.slice(0, 4_000), undefined, {
+                timeout: 1_000,
+              })
+              .catch((cause: unknown) => `DOM unavailable: ${String(cause).slice(0, 1_000)}`);
+            console.error("Spreadsheet canvas boot diagnostics", {
+              url: page.url(),
+              events: bootEvents,
+              dom,
+              server: web.logs().slice(-8_000),
+            });
+          } catch {
+            // The original grid wait below remains authoritative even if diagnostics fail.
+          }
+          throw error;
+        }
         await page.waitForFunction(() => {
           const canvas = document.querySelector<HTMLCanvasElement>(
             "canvas[data-og-spreadsheet-canvas]",

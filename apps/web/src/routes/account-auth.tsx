@@ -16,6 +16,7 @@ import {
   isAccountAuthTransactionId,
   postAccountAuthPopupMessage,
 } from "@/lib/browser-account-popup";
+import { readOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -40,7 +41,8 @@ export function AccountAuthRoute({
     expectedGeneration: string;
   } | null>(null);
   const finishInFlight = useRef(false);
-  const [email, setEmail] = useState("");
+  const [invitation] = useState(readInvitationFromOpener);
+  const [email, setEmail] = useState(invitation?.targetEmail ?? "");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
@@ -233,16 +235,22 @@ export function AccountAuthRoute({
         <div className="mb-5">
           <h1 className="text-base font-semibold">Authenticate this account</h1>
           <p className="mt-1 text-sm text-fg-subtle">
-            This window keeps the account you choose separate until OpenGeni verifies the sign-in.
+            {invitation
+              ? `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+              : "This window keeps the account you choose separate until OpenGeni verifies the sign-in."}
           </p>
         </div>
-        <ManagedSocialAuthButtons
-          providers={socialProviders}
-          busyProvider={socialBusy}
-          disabled={busy}
-          onSelect={(provider) => void submitSocial(provider)}
-        />
-        {socialProviders.length > 0 ? <ManagedAuthDivider /> : null}
+        {!invitation ? (
+          <>
+            <ManagedSocialAuthButtons
+              providers={socialProviders}
+              busyProvider={socialBusy}
+              disabled={busy}
+              onSelect={(provider) => void submitSocial(provider)}
+            />
+            {socialProviders.length > 0 ? <ManagedAuthDivider /> : null}
+          </>
+        ) : null}
         <div className="mb-3">
           <Label htmlFor="account-auth-email">Email</Label>
           <Input
@@ -251,6 +259,7 @@ export function AccountAuthRoute({
             autoComplete="username"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
+            readOnly={invitation !== null}
             className="mt-2 min-h-11"
             autoFocus
             disabled={busy || socialBusy !== null}
@@ -297,4 +306,14 @@ export function AccountAuthRoute({
       </form>
     </section>
   );
+}
+
+function readInvitationFromOpener() {
+  try {
+    return window.opener
+      ? readOrganizationInvitationContinuation(window.opener.sessionStorage)
+      : null;
+  } catch {
+    return null;
+  }
 }

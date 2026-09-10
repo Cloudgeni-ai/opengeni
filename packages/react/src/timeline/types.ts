@@ -215,6 +215,7 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  blockedReason?: "rotation_in_progress" | undefined;
   occurredAt: string;
 };
 
@@ -279,7 +280,14 @@ export type FleetDecisionItem = {
   policyVersion: "adaptive-shadow-v1";
   actualOutcome: "selected" | "waiting" | "none";
   actualCandidateKey: string | null;
-  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  actualReason:
+    | "lease_reused"
+    | "pin"
+    | "rotation"
+    | "active"
+    | "all_capped"
+    | "allocator_disabled"
+    | "none";
   shadowOutcome: "selected" | "paced" | "none";
   shadowCandidateKey: string | null;
   shadowReason:
@@ -342,6 +350,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** A preserved turn-end outcome, not a claim about current session state. */
+  recordedOutcome?: true;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
@@ -371,6 +381,8 @@ export type MachineInputMember = {
   kind:
     | "scheduled_occurrence"
     | "goal_continuation"
+    | "background_command_result"
+    | "session_wait_timeout"
     | "agent_message"
     | "agent_steer_instruction"
     | "child_terminal_result"
@@ -420,6 +432,8 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
+  /** Host-owned bindings must never be routed into OpenGeni's native reconnect flow. */
+  authoritySource?: ToolAuthNeededPayload["authoritySource"] | null | undefined;
   reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
   scopes: string[];
@@ -438,6 +452,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** Keep an existing answer visible when a recorded input wait ends without final output. */
+  preserveWaitResponse?: true;
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;

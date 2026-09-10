@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "0dd7111339f87b03e8c330fdfbeb235c6a4238f5372559efb9b394565a62472f"
+      "sha256": "182363157bd87ca47b0e67ab2365976849f7f88efa62bd82bf2ebd922976834b"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -34,11 +34,11 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "5933e981bf99403905c5967adc038a7da1155b15e1813b6dd3bf6caaa383186f"
+      "sha256": "65eda9e447d13bccaecd130c61182fbeddea2c49bda6fcd0529645f5e0eb591e"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "06c13c4bb0f87e04303e07c1d39082ff3463e19cecc44d60f94496e33cfaade6"
+      "sha256": "17902076236fd5cccd0d82163ecff8a126e18067e6c1784d5fae5a3e20b48764"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -92,7 +92,7 @@
   "actions": [
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "1d1865cf748e6cfa686eb69216057d6aa02037549f4728ae05a63828397942c7"
+      "sha256": "546880d5a15d618687b04dbd34c2ce8e4fee1c3af4b332296507502f823404eb"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -595,13 +595,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
-      "sha256": "e71506956e77d0c0cb1eee25ae8b1895d284614c349a9aa062892a046923e606"
+      "sha256": "9a2431314e5cdf5185503a5d6bf04803d26eaeb185e0bd952615ba9c4d6910c2"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Write exact-main-SHA canary receipt",
-      "sha256": "b5030683a20f69f187a9ae6337e5359c45af4544112182c6f05b5cd9bba265b8"
+      "sha256": "af201a1f4f55151cc8f220d4f0911f1fc0bda4aece1fa5c17ed367a1db8a5962"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -614,6 +614,12 @@
       "job": "package-contracts",
       "step": "Build React demo harness",
       "sha256": "70903471db4d7508f1e7e3e60e06259d1a936bc290469ed38f117692e45d548e"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
+      "step": "Built embedding package exports",
+      "sha256": "e9fd69268d8d35f117eaf01cd4e99ab65e3d471dd58885c69b56f101760f246c"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -715,7 +721,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "20a914e98aea4f6c8ff25ad17e14a0a5523db1faeeafcb8cf14aa8dc63ca10a8"
+      "sha256": "e4f7ba2c4878e2b12091455a670eebd39d611ba882da6f7f3adf85b19a51d46f"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -800,6 +806,12 @@
       "job": "publish",
       "step": "Verify exact source",
       "sha256": "e10d2a67ae143c5223960cad1b2433bdeba7046fecd1a05ae1519a8a880e5022"
+    },
+    {
+      "workflow": ".github/workflows/publish-desktop-image.yml",
+      "job": "desktop-image",
+      "step": "Verify anonymous desktop publication and installed runtime",
+      "sha256": "68f876fe64acfa9424639c2a7d477eef28e1a52f580d9e2054ac5aa0ce9f256c"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",

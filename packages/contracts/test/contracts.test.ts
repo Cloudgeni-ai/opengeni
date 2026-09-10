@@ -43,6 +43,7 @@ import {
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
+  SCHEDULED_OCCURRENCE_TASK_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
@@ -53,6 +54,7 @@ import {
   OrganizationInvitation,
   RequestHumanInputToolInput,
   RepositoryResourceRef,
+  CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   ResourceRef,
   SessionBusMessage,
@@ -89,11 +91,14 @@ import {
   ToolAuthNeededPayload,
   CredentialAuthNeededPayload,
   defaultRepositoryMountPath,
+  CodexCredentialPolicySnapshotV1,
+  metadataWithCodexCredentialPolicySnapshotV1,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   readTurnExecutionPolicyV1,
+  readCodexCredentialPolicySnapshotV1,
   resourceMountPath,
   resourceMountPathCollisionKey,
   sandboxShellPath,
@@ -131,7 +136,14 @@ describe("API key descriptions", () => {
       name: "Product backend",
       description: "Provisions tenants",
       expiresAt: "2027-01-01T00:00:00+00:00",
+      access: "full",
     });
+    expect(CreateOrganizationApiKeyRequest.parse({ name: "reader", access: "read" }).access).toBe(
+      "read",
+    );
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({ name: "backend", access: "write" }).success,
+    ).toBe(false);
     expect(
       CreateOrganizationApiKeyRequest.safeParse({ name: "backend", permissions: [] }).success,
     ).toBe(false);
@@ -387,6 +399,84 @@ describe("contracts", () => {
     expect(metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(turnExecutionPolicy);
   });
 
+  test("reads and merges a bounded Codex allocator policy snapshot without disturbing metadata", () => {
+    const snapshot = CodexCredentialPolicySnapshotV1.parse({
+      schemaVersion: 1,
+      activeCredentialId: "credential-active",
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      source: "workspace",
+      pinnedCredentialId: null,
+      pinSource: null,
+      lastCredentialId: "credential-last",
+    });
+    const metadata = metadataWithCodexCredentialPolicySnapshotV1(
+      { dispatchRevision: 3, recovery: { generation: 2 } },
+      snapshot,
+    );
+
+    expect(metadata.dispatchRevision).toBe(3);
+    expect(metadata.recovery).toEqual({ generation: 2 });
+    expect(readCodexCredentialPolicySnapshotV1(metadata)).toEqual({
+      kind: "valid",
+      policy: snapshot,
+    });
+    expect(metadata[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]).toEqual(snapshot);
+  });
+
+  test("requires Codex policy pins to carry a matching pin source", () => {
+    const base = {
+      schemaVersion: 1 as const,
+      activeCredentialId: null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      source: "workspace" as const,
+      lastCredentialId: null,
+    };
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: null,
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: null,
+        pinSource: "policy",
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: "manual",
+      }),
+    ).toMatchObject({ pinnedCredentialId: "credential-pinned", pinSource: "manual" });
+  });
+
+  test("treats only an absent Codex snapshot key as legacy and rejects malformed values", () => {
+    expect(readCodexCredentialPolicySnapshotV1(null)).toEqual({ kind: "absent" });
+    expect(readCodexCredentialPolicySnapshotV1({ dispatchRevision: 3 })).toEqual({
+      kind: "absent",
+    });
+    expect(() =>
+      readCodexCredentialPolicySnapshotV1({
+        [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: {
+          schemaVersion: 1,
+          activeCredentialId: null,
+          rotationEnabled: true,
+          rotationStrategy: "sharded",
+          pinnedCredentialId: null,
+          pinSource: null,
+          lastCredentialId: null,
+          unexpected: "reject-me",
+        },
+      }),
+    ).toThrow("Malformed Codex credential policy snapshot metadata");
+  });
+
   test("treats only an absent policy key as legacy and reports malformed paths without values", () => {
     for (const malformed of [null, undefined, { ...turnExecutionPolicy, extra: true }]) {
       expect(() =>
@@ -599,6 +689,7 @@ describe("contracts", () => {
   test("models provider-neutral MCP bindings with exact selected repository scope", () => {
     const binding = McpServerConnectionRef.parse({
       connectionId: "host:github:one",
+      authoritySource: "host",
       provider: "github",
       providerDomain: "github.com",
       kind: "app_install",
@@ -608,6 +699,13 @@ describe("contracts", () => {
       ],
     });
     expect(binding.selectedResources?.map((resource) => resource.id)).toEqual(["101", "202"]);
+    expect(binding.authoritySource).toBe("host");
+    expect(() =>
+      McpServerConnectionRef.parse({
+        authoritySource: "host",
+        providerDomain: "host.example",
+      }),
+    ).toThrow("host authority requires connectionId");
     expect(() =>
       McpServerConnectionRef.parse({
         connectionId: "azure-one",
@@ -633,11 +731,32 @@ describe("contracts", () => {
         serverId: "provider-tools",
         providerDomain: "provider.example",
         connectionId: "host:connection:42",
+        authoritySource: "host",
         provider: "gitlab",
         reason: "unsupported_auth",
+        hostReason: "resource_scope_unavailable",
         selectedResources: [{ kind: "repository", id: "project-42" }],
       }).connectionId,
     ).toBe("host:connection:42");
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "unsupported_auth",
+        hostReason: "refresh_failed",
+      }).authoritySource,
+    ).toBe("host");
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "refresh_failed",
+      }).success,
+    ).toBe(false);
     expect(
       CredentialAuthNeededPayload.parse({
         credentialClass: "run",
@@ -881,7 +1000,6 @@ describe("contracts", () => {
           ],
         },
         {
-          name: "RELEASE",
           files: [
             {
               path: "SKILL.md",
@@ -904,15 +1022,41 @@ describe("contracts", () => {
         skills: [
           {
             name: "release",
-            files: [{ path: "SKILL.md", content: "# One\n" }],
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# One\n",
+              },
+            ],
           },
           {
-            name: "RELEASE",
-            files: [{ path: "SKILL.md", content: "# Two\n" }],
+            name: "release",
+            files: [
+              {
+                path: "SKILL.md",
+                content: "---\nname: release\ndescription: Prepare a release.\n---\n# Two\n",
+              },
+            ],
           },
         ],
       }),
     ).toThrow("conflicting session skill definitions");
+  });
+
+  test("accepts only unique installed Skill selections", () => {
+    const capabilityId = "skill:pack-inline/session-selected/implementation@abc";
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "implement the integration",
+        installedSkillIds: [capabilityId],
+      }).installedSkillIds,
+    ).toEqual([capabilityId]);
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "implement the integration",
+        installedSkillIds: [capabilityId, capabilityId],
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts only a UUID as a caller-preallocated session id", () => {
@@ -1161,6 +1305,7 @@ describe("contracts", () => {
           url: "https://gitlab-tools.example/mcp",
           connectionRef: {
             connectionId: "cloud-connection:gitlab:42",
+            authoritySource: "host",
             providerDomain: "gitlab.example",
             kind: "oauth2",
           },
@@ -1170,6 +1315,7 @@ describe("contracts", () => {
     expect(hostPayload.mcpServers[0]?.connectionRef?.connectionId).toBe(
       "cloud-connection:gitlab:42",
     );
+    expect(hostPayload.mcpServers[0]?.connectionRef?.authoritySource).toBe("host");
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "bad url",
@@ -1452,8 +1598,93 @@ describe("contracts", () => {
       lineage: {},
     };
     const internal = sessionSystemUpdateBatchHistoryItem([update], goalSnapshot);
+    expect(internal.role).toBe("system");
     expect(internal.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`);
     expect(internal.content).toContain("[OpenGeni internal updates]");
+  });
+
+  test("renders scheduled occurrences as fresh user-role task boundaries", () => {
+    const scheduledTaskId = "33333333-3333-4333-8333-333333333333";
+    const scheduledTaskRunId = "44444444-4444-4444-8444-444444444444";
+    const updateId = "55555555-5555-4555-8555-555555555555";
+    const completedGoal = {
+      state: "completed" as const,
+      goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      objectiveRevision: 1,
+      text: "Review an earlier pull-request snapshot",
+      successCriteria: null,
+      rootConstraints: [],
+      mutationPolicy: "preserve_intent" as const,
+      capturedAt: "2026-08-31T05:00:00.000Z",
+    };
+    const completedGoalContext = renderSessionGoalContext(completedGoal)!;
+    const updates = [
+      {
+        id: updateId,
+        kind: "scheduled_occurrence" as const,
+        classification: "info" as const,
+        sourceId: scheduledTaskRunId,
+        summary: "Review and merge pull requests",
+        payload: {
+          type: "scheduled_occurrence" as const,
+          text: "Review every currently open pull request and merge the approved ones.",
+          scheduledTaskId,
+          scheduledTaskRunId,
+        },
+        lineage: {
+          scheduledTaskId,
+          scheduledTaskRunId,
+          causalHumanSubjectId: "user:owner",
+        },
+      },
+    ];
+    const attached = sessionSystemUpdateBatchHistoryItem(updates, completedGoal);
+    expect(attached.role).toBe("system");
+    expect(attached.content).toContain("[OpenGeni internal updates]");
+
+    const scheduled = sessionSystemUpdateBatchHistoryItem(updates, completedGoal, {
+      promoteScheduledOccurrenceToUser: true,
+    });
+
+    expect(scheduled.role).toBe("user");
+    expect(scheduled.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${completedGoalContext}`);
+    expect(scheduled.content.indexOf(SCHEDULED_OCCURRENCE_TASK_LABEL)).toBeGreaterThan(
+      scheduled.content.indexOf(SESSION_GOAL_CONTEXT_LABEL),
+    );
+    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_TASK_LABEL);
+    expect(scheduled.content).toContain("Execute the instructions below for this occurrence now.");
+    expect(scheduled.content).toContain(`Scheduled task ID: ${scheduledTaskId}`);
+    expect(scheduled.content).toContain(`Scheduled task run ID: ${scheduledTaskRunId}`);
+    expect(scheduled.content).toContain(`Update ID: ${updateId}`);
+    expect(scheduled.content).toContain(
+      "Review every currently open pull request and merge the approved ones.",
+    );
+    expect(scheduled.content).toContain("Earlier completed goals");
+    expect(scheduled.content).toContain("query that state during this occurrence");
+    expect(scheduled.content).not.toContain("[OpenGeni internal updates]");
+    expect(scheduled.content).not.toContain("They are not human prompts");
+  });
+
+  test("keeps inconsistent scheduled occurrence identity on the system update path", () => {
+    const scheduled = sessionSystemUpdateBatchHistoryItem([
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        kind: "scheduled_occurrence",
+        classification: "info",
+        sourceId: "77777777-7777-4777-8777-777777777777",
+        summary: "Malformed legacy occurrence",
+        payload: {
+          type: "scheduled_occurrence",
+          text: "Do not manufacture authority.",
+          scheduledTaskId: "88888888-8888-4888-8888-888888888888",
+          scheduledTaskRunId: "99999999-9999-4999-8999-999999999999",
+        },
+        lineage: {},
+      },
+    ]);
+
+    expect(scheduled.role).toBe("system");
+    expect(scheduled.content).toContain("[OpenGeni internal updates]");
   });
 
   test("accepts client config payloads", () => {
@@ -1972,12 +2203,27 @@ describe("contracts", () => {
             mcpServerId: "example",
             transport: "streamable-http",
           },
+          enabled: true,
+          connectionRef: {
+            authoritySource: "host",
+            connectionId: "host:example:42",
+            providerDomain: "example.com",
+            kind: "delegated",
+            subjectScope: "subject",
+          },
         },
       ],
       installations: [],
     });
     expect(catalog.items[0]?.runtime.mcpServerId).toBe("example");
-    expect(catalog.items[0]?.enabled).toBe(false);
+    expect(catalog.items[0]?.enabled).toBe(true);
+    expect(catalog.items[0]?.connectionRef).toEqual({
+      authoritySource: "host",
+      connectionId: "host:example:42",
+      providerDomain: "example.com",
+      kind: "delegated",
+      subjectScope: "subject",
+    });
   });
 
   test("rejects empty user message command", () => {

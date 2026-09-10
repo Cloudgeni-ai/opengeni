@@ -36,10 +36,12 @@ Creating the App and binding an installation are distinct operations. A caller
 with `github:manage` receives a signed, ten-minute browser handoff and first
 authorizes the App as a GitHub user. OpenGeni discovers existing installations
 visible to that user, but retains only exact personal-account ownership or live
-active organization-owner membership. One retained installation advances
-directly; several produce an owner-only chooser; none enters GitHub's new
-installation UI. This order lets an existing installation connect without
-depending on GitHub's Configure page to return OpenGeni state.
+active organization-owner membership. Any retained installation produces an
+owner-only chooser that also offers installing the App on another account; none
+enters GitHub's new installation UI directly. This lets an existing installation
+connect without preventing the owner from adding a different personal account or
+organization, and does not depend on GitHub's Configure page to return OpenGeni
+state.
 
 The selected installation then receives a second, exact fresh GitHub user
 authorization immediately before binding. The second pass is deliberate: no

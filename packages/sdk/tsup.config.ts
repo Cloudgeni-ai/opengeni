@@ -12,10 +12,13 @@ import { defineConfig } from "tsup";
 // closure guard: a stray server import stays visible in dist.
 export default defineConfig({
   entry: [
+    "src/chat/index.ts",
     "src/index.ts",
     "src/accounts.ts",
     "src/core.ts",
     "src/browser.ts",
+    "src/site.ts",
+    "src/github-repositories.ts",
     "src/document-authority.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
@@ -29,6 +32,7 @@ export default defineConfig({
     "src/interaction.ts",
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",
+    "src/model-picker-order.ts",
   ],
   format: ["esm"],
   target: "es2022",
@@ -36,5 +40,5 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//],
-  noExternal: ["@opengeni/contracts/session-titles"],
+  noExternal: ["@opengeni/contracts/session-titles", "@opengeni/contracts/site-session-http"],
 });

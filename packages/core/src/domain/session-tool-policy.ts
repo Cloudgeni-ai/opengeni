@@ -188,7 +188,7 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   const availableDefaults = defaultSessionMcpServerIds(runtimeSettings.mcpServers);
   const workspace = await requireWorkspace(db, workspaceId);
   const configured = resolveWorkspaceSessionToolDefaults(workspace.settings);
-  if (!configured) return availableDefaults;
+  if (!configured?.mcpServerIds) return availableDefaults;
   const available = new Set(availableDefaults);
   return sortedIds(configured.mcpServerIds.filter((id) => available.has(id)));
 }

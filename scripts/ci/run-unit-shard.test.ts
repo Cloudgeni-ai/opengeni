@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import {
+  explicitUnitTestPaths,
   planUnitTestProcesses,
   runBoundedTestProcesses,
   sourceMutatesSharedPostgresRole,
@@ -63,6 +64,20 @@ describe("bounded unit process execution", () => {
 });
 
 describe("unit process planning", () => {
+  test("passes custom test suffixes to Bun as explicit repository paths", () => {
+    expect(
+      explicitUnitTestPaths([
+        "packages/core/test/example.test.ts",
+        "test/integration/api.integration.ts",
+        "./test/e2e/browser.e2e.ts",
+      ]),
+    ).toEqual([
+      "./packages/core/test/example.test.ts",
+      "./test/integration/api.integration.ts",
+      "./test/e2e/browser.e2e.ts",
+    ]);
+  });
+
   test("recognizes authored concurrent-test syntax without matching prose", () => {
     expect(sourceUsesExplicitTestConcurrency("test.concurrent('race', () => {})")).toBe(true);
     expect(sourceUsesExplicitTestConcurrency("it ['concurrent']('race', () => {})")).toBe(true);

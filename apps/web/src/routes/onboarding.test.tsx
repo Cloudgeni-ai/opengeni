@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import type { OrganizationInvitation } from "@/types";
 
 const completeSetup = mock(
   async (_input: { token: string; name: string; password: string; operationId: string }) => ({
@@ -27,11 +28,49 @@ const previewSetup = mock(
     expiresAt: "2026-09-01T00:00:00.000Z",
   }),
 );
+let currentAuthSession: {
+  session: { id: string; userId: string; expiresAt: string };
+  user: { id: string; name: string; email: string; emailVerified: boolean };
+} | null = null;
+const fetchSession = mock(async () => currentAuthSession);
+const listSetupInvitations = mock(
+  async (): Promise<{
+    invitations: OrganizationInvitation[];
+    nextCursor: null;
+  }> => ({
+    invitations: [],
+    nextCursor: null,
+  }),
+);
+const acceptSetupInvitation = mock(async () => ({
+  status: "complete" as const,
+}));
+const setupClient = {
+  listOrganizationInvitations: listSetupInvitations,
+  acceptOrganizationInvitation: acceptSetupInvitation,
+  getBilling: mock(async () => ({
+    mode: "stripe" as const,
+    balance: { balanceMicros: 0 },
+  })),
+};
+
+class TestAuthApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    readonly field: string | null,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 mock.module("@/api", () => ({
-  AuthApiError: class AuthApiError extends Error {},
+  AuthApiError: TestAuthApiError,
   apiBaseUrl: "",
   completeOrganizationUserSetup: completeSetup,
+  createOpenGeniClient: () => setupClient,
+  fetchAuthSession: fetchSession,
   managedActorMutationBusySnapshot: () => false,
   previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
@@ -39,16 +78,25 @@ mock.module("@/api", () => ({
     state: "required" as const,
   })),
   sendVerificationEmail: resendVerification,
+  requestPasswordReset: mock(async () => ({ status: true })),
   subscribeManagedActorInvalidation: () => () => undefined,
   subscribeManagedActorMutationBusy: () => () => undefined,
 }));
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#signin">{children}</a>,
+  Link: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => (
+    <a href="#signin" onClick={onClick}>
+      {children}
+    </a>
+  ),
 }));
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
+const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
+const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
+const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
+const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -109,10 +157,60 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+      sessionStorage.clear();
     }
   });
 
-  test("broker registration can expose signup and resend without a direct sign-in form", async () => {
+  test("anchors invitation sign-in to the invited email until the user dismisses it", async () => {
+    const onDismissInvitation = mock(() => undefined);
+    const onSocialSubmit = mock(async () => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            invitation={{
+              organizationName: "Northwind Research",
+              targetEmail: "invited@example.test",
+            }}
+            onDismissInvitation={onDismissInvitation}
+            socialProviders={["google", "github"]}
+            onSocialSubmit={onSocialSubmit}
+            onSubmit={async () => undefined}
+          />,
+        ),
+      );
+      const email = container.querySelector<HTMLInputElement>("#managed-auth-email")!;
+      expect(email.value).toBe("invited@example.test");
+      expect(email.readOnly).toBeTrue();
+      expect(container.textContent).toContain(
+        "Sign in as invited@example.test to continue joining Northwind Research",
+      );
+      expect(container.textContent).not.toContain("Continue with Google");
+      expect(container.textContent).not.toContain("Continue with GitHub");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find(
+            (button) =>
+              button.textContent?.trim() === "Use another account without this invitation",
+          )!
+          .click(),
+      );
+      expect(onDismissInvitation).toHaveBeenCalledTimes(1);
+      expect(email.value).toBe("");
+      expect(email.readOnly).toBeFalse();
+      expect(container.textContent).toContain("Continue with Google");
+      expect(container.textContent).toContain("Continue with GitHub");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("broker registration reveals resend only after signup succeeds", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -128,12 +226,110 @@ describe("organization onboarding UI", () => {
         ),
       );
       expect(container.textContent).toContain("Create account");
-      expect(container.textContent).toContain("Resend verification email");
+      expect(container.textContent).not.toContain("Resend verification email");
       expect(
         Array.from(container.querySelectorAll("button")).some(
           (button) => button.textContent?.trim() === "Sign in",
         ),
       ).toBe(false);
+      await enter(container.querySelector("#managed-auth-name")!, "Ada Lovelace");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Resend verification email");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("submit and resend keep identity controls fixed until the request settles", async () => {
+    let resolveSubmit!: () => void;
+    const submitted = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<ManagedAuthPanel initialMode="signup" onSubmit={submitted} />),
+      );
+      await enter(container.querySelector("#managed-auth-name")!, "Ada Lovelace");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      expect(container.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled).toBeTrue();
+      expect(
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+          (button) => button.textContent?.trim() === "Sign in",
+        )!.disabled,
+      ).toBeTrue();
+
+      await act(async () => resolveSubmit());
+      await flush();
+      expect(container.textContent).toContain("Resend verification email");
+
+      let resolveResend!: (value: { status: true }) => void;
+      resendVerification.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveResend = resolve;
+          }),
+      );
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Resend verification email")!
+          .click(),
+      );
+      expect(container.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled).toBeTrue();
+      expect(
+        container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled,
+      ).toBeTrue();
+
+      await act(async () => resolveResend({ status: true }));
+      await flush();
+      expect(
+        container.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled,
+      ).toBeFalse();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("ordinary sign-in hides resend until the account is known to be unverified", async () => {
+    const submitted = mock(async () => {
+      throw new TestAuthApiError(403, "EMAIL_NOT_VERIFIED", null, "Email not verified");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<ManagedAuthPanel onSubmit={submitted} />));
+      expect(container.textContent).not.toContain("Resend verification email");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Verify your email before signing in.");
+      expect(container.textContent).toContain("Resend verification email");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Resend verification email")!
+          .click(),
+      );
+      await flush();
+      expect(resendVerification).toHaveBeenCalledWith({ email: "ada@example.test" });
+
+      await enter(container.querySelector("#managed-auth-email")!, "other@example.test");
+      expect(container.textContent).not.toContain("Resend verification email");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -154,10 +350,224 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Create your organization");
       expect(container.textContent).toContain("Organization name");
       expect(container.textContent).not.toContain("Workspace name");
+      expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.querySelectorAll("input")).toHaveLength(1);
+      expect(onComplete).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("after organization create, the model-access step stays until skip", async () => {
+    const onComplete = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={setupClient as never}
+            billingMode="stripe"
+            codexEnabled
+            supergrokEnabled
+            previewState="required"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(completeSelfServiceSetup).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
+      expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(setupClient.getBilling).not.toHaveBeenCalled();
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
+          .click(),
+      );
+      await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect OpenRouter"]')!
+          .click(),
+      );
+      expect(container.querySelector<HTMLInputElement>("#onboarding-provider-key")!.value).toBe("");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Skip for now")!
+          .click(),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the model-access step omits subscription providers disabled by the deployment", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={setupClient as never}
+            previewState="required"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).toBeNull();
+      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a connected provider stays in onboarding until its model becomes selectable", async () => {
+    const onComplete = mock(() => undefined);
+    const createConnection = mock(async () => undefined);
+    const client = {
+      createConnection,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
+          .click(),
+      );
+      await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Connect Vercel AI Gateway")!
+          .click(),
+      );
+      await flush();
+      expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Your service is connected");
+      expect(container.textContent).toContain("Try again");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("SuperGrok onboarding starts an actor-private connection", async () => {
+    const supergrokConnectStart = mock(async () => ({
+      state: "state-a",
+      userCode: "CODE-1234",
+      verificationUri: "https://example.test/authorize",
+      verificationUriComplete: null,
+      intervalSeconds: 60,
+      expiresInSeconds: 600,
+      scope: "user" as const,
+    }));
+    const client = {
+      supergrokConnectStart,
+      supergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const priorOpen = window.open;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            supergrokEnabled
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
+          .click(),
+      );
+      await flush();
+      expect(supergrokConnectStart).toHaveBeenCalledWith("personal-workspace", "user");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
+  test("Codex authorization keeps Skip disabled while device login is pending", async () => {
+    const codexConnectStart = mock(async () => ({
+      state: "state-a",
+      userCode: "CODE-1234",
+      verificationUri: "https://example.test/authorize",
+      intervalSeconds: 60,
+    }));
+    const client = {
+      codexConnectStart,
+      codexConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const priorOpen = window.open;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            codexEnabled
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
+      );
+      await flush();
+      expect(codexConnectStart).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Waiting for authorization");
+      expect(
+        Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent?.trim() === "Skip for now",
+        )!.disabled,
+      ).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
     }
   });
 
@@ -265,19 +675,180 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("focuses the exact continued invitation across every page before the onboarding gate", async () => {
+    sessionStorage.clear();
+    const exactId = crypto.randomUUID();
+    const exactOrganizationId = crypto.randomUUID();
+    const unrelatedOrganizationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const exactInvitation = {
+      id: exactId,
+      organizationId: exactOrganizationId,
+      organizationName: "Northwind Research",
+      targetEmail: "grace@example.test",
+      targetName: "Grace",
+      initialWorkspaceIds: [],
+      role: "member" as const,
+      status: "pending" as const,
+      revision: 2,
+      expiresAt: "2026-09-08T00:00:00.000Z",
+      acceptedMembershipId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const listOrganizationInvitations = mock(async (options: { cursor?: string; limit?: number }) =>
+      options.cursor
+        ? { invitations: [exactInvitation], nextCursor: null }
+        : {
+            invitations: [
+              {
+                ...exactInvitation,
+                id: crypto.randomUUID(),
+                organizationId: unrelatedOrganizationId,
+                organizationName: "Contoso Engineering",
+              },
+            ],
+            nextCursor: "page-2",
+          },
+    );
+    const client = {
+      listOrganizationInvitations,
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={client as never}
+            previewState="required"
+            activeEmail="grace@example.test"
+            invitation={{
+              organizationId: exactOrganizationId,
+              organizationName: exactInvitation.organizationName,
+              targetEmail: exactInvitation.targetEmail,
+              expiresAt: exactInvitation.expiresAt,
+              createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      expect(listOrganizationInvitations.mock.calls).toEqual([
+        [{ limit: 100 }],
+        [{ cursor: "page-2", limit: 100 }],
+      ]);
+      expect(container.textContent).toContain("Join Northwind Research");
+      expect(container.textContent).not.toContain("Contoso Engineering");
+      expect(
+        Array.from(container.querySelectorAll("button")).filter(
+          (button) => button.textContent?.trim() === "Join organization",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
+  test("keeps unrelated invitations hidden while a no-workspace user switches accounts", async () => {
+    sessionStorage.clear();
+    const onUseInvitedAccount = mock(() => undefined);
+    const targetOrganizationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const client = {
+      listOrganizationInvitations: mock(async () => ({
+        invitations: [
+          {
+            id: crypto.randomUUID(),
+            organizationId: crypto.randomUUID(),
+            organizationName: "Unrelated Organization",
+            targetEmail: "other@example.test",
+            targetName: null,
+            initialWorkspaceIds: [],
+            role: "member" as const,
+            status: "pending" as const,
+            revision: 1,
+            expiresAt: "2026-09-08T00:00:00.000Z",
+            acceptedMembershipId: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        nextCursor: null,
+      })),
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={client as never}
+            previewState="required"
+            activeEmail="other@example.test"
+            invitation={{
+              organizationId: targetOrganizationId,
+              organizationName: "Northwind Research",
+              targetEmail: "grace@example.test",
+              expiresAt: "2026-09-08T00:00:00.000Z",
+              createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
+            }}
+            onUseInvitedAccount={onUseInvitedAccount}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain("This invitation is for grace@example.test");
+      expect(container.textContent).toContain("You're signed in as other@example.test");
+      expect(container.textContent).not.toContain("Unrelated Organization");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Switch account")!
+          .click(),
+      );
+      expect(onUseInvitedAccount).toHaveBeenCalledWith("grace@example.test");
+      expect(
+        sessionStorage.getItem("opengeni:organization-invitation-continuation:v1"),
+      ).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
   test("invited-user setup requires confirmation and creates no implicit sign-in UI", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     try {
       await act(async () => root.render(<SetupAccountRoute token="setup-token" />));
-      expect(container.textContent).toContain("Create your login for the organization");
+      await flush();
+      expect(container.textContent).toContain("Join Test Organization");
+      expect(container.textContent).toContain("create an account to accept this invitation");
+      expect(container.textContent).toContain("This invitation is for invitee@example.test");
+      expect(container.textContent).toContain("you don't need to enter the email again");
+      const existingAccountLink = Array.from(container.querySelectorAll("a")).find(
+        (link) => link.textContent?.trim() === "Sign in as invitee@example.test",
+      )!;
+      await act(async () => existingAccountLink.click());
+      expect(sessionStorage.getItem("opengeni:organization-invitation-continuation:v1")).toContain(
+        "Test Organization",
+      );
       await enter(container.querySelector("#setup-account-name")!, "Grace Hopper");
       await enter(container.querySelector("#setup-account-password")!, "password1234");
       await enter(container.querySelector("#setup-account-confirm")!, "password1234");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent?.trim() === "Create account")!
+          .find((button) => button.textContent?.trim() === "Create account and join")!
           .click(),
       );
       await flush();
@@ -290,6 +861,100 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Account ready");
       expect(container.textContent).toContain("Sign in");
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
+  test("lets the invited signed-in account accept directly without account creation", async () => {
+    const invitationId = crypto.randomUUID();
+    const otherInvitationId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const otherWorkspaceId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    previewSetup.mockImplementationOnce(async () => ({
+      state: "pending",
+      organizationId: "00000000-0000-4000-8000-000000000001",
+      organizationName: "Test Organization",
+      targetEmail: "invitee@example.test",
+      targetName: "Grace Hopper",
+      organizationRole: "member",
+      sharedWorkspaceAccess: [{ workspaceId, workspaceName: "Expected workspace", role: "member" }],
+      expiresAt: now,
+    }));
+    currentAuthSession = {
+      session: { id: "session-1", userId: "user-1", expiresAt: now },
+      user: {
+        id: "user-1",
+        name: "Grace Hopper",
+        email: "INVITEE@example.test",
+        emailVerified: true,
+      },
+    };
+    listSetupInvitations.mockImplementationOnce(async () => ({
+      invitations: [
+        {
+          id: otherInvitationId,
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: "Grace Hopper",
+          initialWorkspaceIds: [otherWorkspaceId],
+          role: "admin" as const,
+          status: "pending" as const,
+          revision: 3,
+          expiresAt: now,
+          acceptedMembershipId: null,
+          createdAt: now,
+          updatedAt: now,
+          delivery: null,
+        },
+        {
+          id: invitationId,
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: "Grace Hopper",
+          initialWorkspaceIds: [workspaceId],
+          role: "member" as const,
+          status: "pending" as const,
+          revision: 7,
+          expiresAt: now,
+          acceptedMembershipId: null,
+          createdAt: now,
+          updatedAt: now,
+          delivery: null,
+        },
+      ],
+      nextCursor: null,
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SetupAccountRoute token="signed-in-token" />));
+      await flush();
+      await flush();
+      expect(container.textContent).toContain("Signed in as INVITEE@example.test");
+      expect(container.textContent).toContain("No new account or password is needed");
+      expect(container.querySelector("#setup-account-password")).toBeNull();
+      const acceptButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Accept and join",
+      )!;
+      await act(async () => acceptButton.click());
+      await flush();
+      expect(acceptSetupInvitation).toHaveBeenCalledWith(invitationId, {
+        expectedRevision: 7,
+        operationId: expect.any(String),
+      });
+      expect(completeSetup).not.toHaveBeenCalledWith(
+        expect.objectContaining({ token: "signed-in-token" }),
+      );
+      expect(container.textContent).toContain("Invitation accepted");
+      expect(container.textContent).toContain("Open OpenGeni");
+    } finally {
+      currentAuthSession = null;
       await act(async () => root.unmount());
       container.remove();
     }
@@ -364,15 +1029,30 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("accepts setup authority only from a bounded fragment and scrubs every URL token", () => {
+  test("accepts one canonical fragment or compatibility query bearer and scrubs every URL token", () => {
     expect(
       setupAccountTokenFromUrl(
-        "https://opengeni.test/setup-account?token=logged&preview=1#token=fragment-secret&tab=invite",
+        `https://opengeni.test/setup-account?preview=1#token=${VALID_FRAGMENT_SETUP_TOKEN}&tab=invite`,
       ),
     ).toEqual({
-      token: "fragment-secret",
+      token: VALID_FRAGMENT_SETUP_TOKEN,
       scrubbedPath: "/setup-account?preview=1#tab=invite",
     });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}&preview=1`,
+      ),
+    ).toEqual({ token: VALID_QUERY_SETUP_TOKEN, scrubbedPath: "/setup-account?preview=1" });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}#token=${VALID_FRAGMENT_SETUP_TOKEN}`,
+      ),
+    ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}&token=${VALID_QUERY_SETUP_TOKEN}`,
+      ),
+    ).toEqual({ token: null, scrubbedPath: "/setup-account" });
     expect(setupAccountTokenFromUrl("https://opengeni.test/setup-account?token=logged")).toEqual({
       token: null,
       scrubbedPath: "/setup-account",
@@ -380,6 +1060,21 @@ describe("organization onboarding UI", () => {
     expect(
       setupAccountTokenFromUrl(`https://opengeni.test/setup-account#token=${"x".repeat(2_049)}`),
     ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+  });
+
+  test("takes the early bootstrap bearer exactly once and revalidates its canonical shape", () => {
+    Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+      configurable: true,
+      value: VALID_QUERY_SETUP_TOKEN,
+    });
+    expect(takeBootstrappedSetupAccountToken(window)).toBe(VALID_QUERY_SETUP_TOKEN);
+    expect(takeBootstrappedSetupAccountToken(window)).toBeNull();
+    Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+      configurable: true,
+      value: "malformed",
+    });
+    expect(takeBootstrappedSetupAccountToken(window)).toBeNull();
+    expect("__OPENGENI_SETUP_ACCOUNT_TOKEN__" in window).toBe(false);
   });
 
   test("keeps the scrubbed fragment bearer across the lazy-route history remount only until preview settles", async () => {
@@ -395,14 +1090,14 @@ describe("organization onboarding UI", () => {
         }),
     );
     window.history.replaceState(null, "", "/setup-account");
-    window.location.hash = "token=lazy-remount-fragment-token";
-    expect(window.location.hash).toBe("#token=lazy-remount-fragment-token");
+    window.location.hash = `token=${VALID_FRAGMENT_SETUP_TOKEN}`;
+    expect(window.location.hash).toBe(`#token=${VALID_FRAGMENT_SETUP_TOKEN}`);
 
     const firstContainer = document.createElement("div");
     document.body.appendChild(firstContainer);
     const firstRoot = createRoot(firstContainer);
     await act(async () => firstRoot.render(<SetupAccountRoute />));
-    expect(window.location.href).not.toContain("lazy-remount-fragment-token");
+    expect(window.location.href).not.toContain(VALID_FRAGMENT_SETUP_TOKEN);
     expect(firstContainer.textContent).toContain("Checking this invitation");
     await act(async () => firstRoot.unmount());
     firstContainer.remove();
@@ -414,8 +1109,8 @@ describe("organization onboarding UI", () => {
       await act(async () => secondRoot.render(<SetupAccountRoute />));
       expect(secondContainer.textContent).toContain("Checking this invitation");
       expect(previewSetup.mock.calls.slice(-2).map(([request]) => request)).toEqual([
-        { token: "lazy-remount-fragment-token" },
-        { token: "lazy-remount-fragment-token" },
+        { token: VALID_FRAGMENT_SETUP_TOKEN },
+        { token: VALID_FRAGMENT_SETUP_TOKEN },
       ]);
       await act(async () =>
         resolveSecondPreview({

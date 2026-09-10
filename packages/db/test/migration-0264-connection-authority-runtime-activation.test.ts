@@ -15,6 +15,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import { migrate } from "../src/migrate";
+import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationUrl = new URL(
   "../drizzle/0264_connection_authority_runtime_activation.sql",
@@ -25,14 +26,32 @@ const migrationName = "0264_connection_authority_runtime_activation.sql";
 // 0275 replaces the accepted-authority capture installed by 0264, 0299 repairs
 // that membership wrapper, and 0315 extends the 0275 ledgers. Migration 0345
 // patches the frozen 0275 routine, while 0374 consumes the tenancy helpers
-// installed by 0345. The synthetic upgrade must therefore withhold all five
-// dependents alongside 0264 and replay all six in real filename order.
+// installed by 0345, 0379 activates the cursor as public sequence authority,
+// and 0388 drift-guards the reaper definition produced by 0345. Migration 0391
+// extends that exact 0388 definition, and 0394 patches the resulting deadline
+// branch. Migration 0402 inventories accepted-execution columns created by
+// 0275. The synthetic upgrade must therefore withhold every dependent beside
+// 0264 and replay them in real filename order.
 const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
 const organizationMembershipLockOrderMigrationName = "0299_organization_membership_lock_order.sql";
 const personalGitHubRepositorySelectionMigrationName =
   "0315_personal_github_repository_selection.sql";
 const sessionTenancyFenceMigrationName = "0345_tenant_scoped_session_tenancy_fence.sql";
 const sessionEventCursorMigrationName = "0374_session_event_cursors.sql";
+const sessionEventRawLaneActivationMigrationName = "0379_session_event_raw_lane_activation.sql";
+const sandboxProviderDeadlineInteractionMigrationName =
+  "0388_sandbox_provider_deadline_interactions.sql";
+const sandboxProviderDeadlineInteractionFollowupMigrationName =
+  "0391_sandbox_provider_deadline_interaction_followup.sql";
+const sandboxDeadlineRotationPreemptionMigrationName =
+  "0397_sandbox_deadline_rotation_preemption.sql";
+const sessionInputWaitMigrationName = "0402_session_input_wait_and_background_command_results.sql";
+const commandTrackingRetirementMigrationName = "0407_connected_command_tracking_retirement.sql";
+const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_index.sql";
+// 0414 patches the producer fence created by withheld 0275; replay them together.
+const scheduledProducerMaterializationMigrationName =
+  "0414_scheduled_generated_producer_materialization.sql";
+const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_tool_admission.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -83,9 +102,30 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${organizationMembershipLockOrderMigrationName}),
           (${personalGitHubRepositorySelectionMigrationName}),
           (${sessionTenancyFenceMigrationName}),
-          (${sessionEventCursorMigrationName})
+          (${sessionEventCursorMigrationName}),
+          (${sessionEventRawLaneActivationMigrationName}),
+          (${sandboxProviderDeadlineInteractionMigrationName}),
+          (${sandboxProviderDeadlineInteractionFollowupMigrationName}),
+          (${sandboxDeadlineRotationPreemptionMigrationName}),
+          (${sessionInputWaitMigrationName}),
+          (${commandTrackingRetirementMigrationName}),
+          (${scheduledSessionTargetIndexMigrationName}),
+          (${scheduledProducerMaterializationMigrationName}),
+          (${scheduledInheritedToolAdmissionMigrationName})
       `;
+      await sql`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(blank.databaseUrl);
+      // Current session adapters select the complete sessions row while this
+      // fixture intentionally withholds 0402. Supply only its later columns
+      // during fixture setup, then remove them before the ordered replay.
+      await sql`
+        alter table sessions
+        add column scope_subject_id text,
+        add column input_wait_turn_id uuid,
+        add column input_wait_until timestamptz,
+        add column input_wait_reason text,
+        add column input_wait_set_at timestamptz
+      `;
 
       const [account] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('connection cutover drain') returning id
@@ -179,13 +219,22 @@ describe("migration 0264 connection authority runtime activation", () => {
       `;
       await sql`
         delete from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
           ${personalGitHubRepositorySelectionMigrationName},
           ${sessionTenancyFenceMigrationName},
-          ${sessionEventCursorMigrationName}
+          ${sessionEventCursorMigrationName},
+          ${sessionEventRawLaneActivationMigrationName},
+          ${sandboxProviderDeadlineInteractionMigrationName},
+          ${sandboxProviderDeadlineInteractionFollowupMigrationName},
+          ${sandboxDeadlineRotationPreemptionMigrationName},
+          ${sessionInputWaitMigrationName},
+          ${commandTrackingRetirementMigrationName},
+          ${scheduledSessionTargetIndexMigrationName},
+          ${scheduledProducerMaterializationMigrationName},
+          ${scheduledInheritedToolAdmissionMigrationName}
         )
       `;
       await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
@@ -224,16 +273,33 @@ describe("migration 0264 connection authority runtime activation", () => {
         await appSql.end({ timeout: 1 });
       }
 
+      await sql`
+        alter table sessions
+        drop column scope_subject_id,
+        drop column input_wait_turn_id,
+        drop column input_wait_until,
+        drop column input_wait_reason,
+        drop column input_wait_set_at
+      `;
       await migrate(blank.databaseUrl);
       const receipts = await sql<Array<{ name: string }>>`
         select name from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
           ${personalGitHubRepositorySelectionMigrationName},
           ${sessionTenancyFenceMigrationName},
-          ${sessionEventCursorMigrationName}
+          ${sessionEventCursorMigrationName},
+          ${sessionEventRawLaneActivationMigrationName},
+          ${sandboxProviderDeadlineInteractionMigrationName},
+          ${sandboxProviderDeadlineInteractionFollowupMigrationName},
+          ${sandboxDeadlineRotationPreemptionMigrationName},
+          ${sessionInputWaitMigrationName},
+          ${commandTrackingRetirementMigrationName},
+          ${scheduledSessionTargetIndexMigrationName},
+          ${scheduledProducerMaterializationMigrationName},
+          ${scheduledInheritedToolAdmissionMigrationName}
         )
         order by name
       `;
@@ -244,6 +310,16 @@ describe("migration 0264 connection authority runtime activation", () => {
         personalGitHubRepositorySelectionMigrationName,
         sessionTenancyFenceMigrationName,
         sessionEventCursorMigrationName,
+        sessionEventRawLaneActivationMigrationName,
+        sandboxProviderDeadlineInteractionMigrationName,
+        sandboxProviderDeadlineInteractionFollowupMigrationName,
+        sandboxDeadlineRotationPreemptionMigrationName,
+        sessionInputWaitMigrationName,
+        commandTrackingRetirementMigrationName,
+        scheduledSessionTargetIndexMigrationName,
+        scheduledProducerMaterializationMigrationName,
+        scheduledInheritedToolAdmissionMigrationName,
+        ...embeddingMigrationTail,
       ]);
     } finally {
       await sql.end({ timeout: 1 });

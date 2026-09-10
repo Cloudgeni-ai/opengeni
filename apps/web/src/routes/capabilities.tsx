@@ -1,3 +1,5 @@
+import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Plugins: the workspace integrations marketplace. A single scrollable
 // page with exactly three sections: Integrations, Connectors, and Bundles.
 // Integrations (Slack, GitHub, Google
@@ -7,18 +9,20 @@
 // still gets exactly one row, with every account listed in its sheet's
 // Connected accounts block. Connectors are MCP servers from the catalog plus
 // workspace-defined Custom APIs: a curated Featured strip, then a large
-// search, kind filters, an "Enabled" strip the user manages daily, a Custom
+// kind filters, an "Enabled" strip the user manages daily, a Custom
 // APIs list, and a logo tile grid over the full catalog (1,000+ items,
-// rendered incrementally). Credentialed MCP servers connect through the
+// rendered in explicit 48-item windows). Credentialed MCP servers connect through the
 // connections spine (OAuth redirect or an API-key form) in a right-hand detail
 // sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
 // and Packs: a named collection of tools and instructions rather than a live
-// connection, so they get their own section, their own search, and one uniform
+// connection, so they get their own section and one uniform
 // row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
-import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
-import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import { usePacks, useVariableSets } from "@opengeni/react";
+import { PlugIcon, PlusIcon } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
   Suspense,
@@ -34,9 +38,15 @@ import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
+import { SkillsPanel } from "./skills-panel";
+import {
+  skillReleaseMessage,
+  skillInstallationMessage,
+} from "@/components/capabilities/skill-release-message";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
+  PluginSearch,
   EnabledCapabilitiesSection,
 } from "@/components/capabilities/capability-catalog-sections";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
@@ -117,7 +127,6 @@ import {
   personalGitHubOAuthReturn,
 } from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { cn } from "@/lib/utils";
 import { request } from "@/api";
 
 // Custom API creation is a fundamentally different "define a new connector
@@ -159,7 +168,7 @@ export function canManageApiIntegrations(
  * It must wait for the catalog: on first commit Browse is a skeleton, and
  * resolving a 1000+ item catalog then inserts thousands of pixels above the
  * Bundles section, leaving a reader who followed the link stranded in the
- * middle of the Browse grid. It must also fire exactly once, so a later
+ * first Browse window. It must also fire exactly once, so a later
  * loading/settled cycle (a refresh) never yanks the page back.
  */
 export function shouldScrollToDeepLinkedBundles(
@@ -170,16 +179,24 @@ export function shouldScrollToDeepLinkedBundles(
   return initialSection === "packs" && !loading && !alreadyScrolled;
 }
 
-export function CapabilitiesRoute({
-  workspaceId,
-  initialSection,
-  slackLinkToken,
-}: {
+type CapabilitiesRouteProps = {
   workspaceId: string;
   initialSection?: "packs";
   slackLinkToken?: string;
-}) {
+  legacyRedirect?: boolean;
+};
+
+export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
+  return props.legacyRedirect ? (
+    <CapabilitiesLegacyRedirect workspaceId={props.workspaceId} section={props.initialSection} />
+  ) : (
+    <CapabilitiesBody {...props} />
+  );
+}
+
+function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const client = context.client;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
@@ -232,7 +249,10 @@ export function CapabilitiesRoute({
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
-  const [openIntegration, setOpenIntegration] = useState<string | null>(null);
+  const [openIntegration, setOpenIntegration] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("integration") === "slack" || params.has("slack") ? "slack" : null;
+  });
   const [skillRemoval, setSkillRemoval] = useState<{
     item: CapabilityCatalogItem;
     preview: SkillUninstallPreview;
@@ -270,7 +290,7 @@ export function CapabilitiesRoute({
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
-  const rigs = useRigs({ workspaceId });
+  const rigs = useWorkspaceRigs({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
   // The Connectors surface owns exactly MCP servers and API connectors. Skills,
@@ -501,8 +521,8 @@ export function CapabilitiesRoute({
 
   // Honour the `?section=packs` deep link exactly once, after the catalog has
   // settled. Scrolling on first commit lands in the wrong place: Browse is
-  // still a skeleton then, and resolving a 1000+ item catalog inserts thousands
-  // of pixels above the Bundles section afterwards.
+  // still a skeleton then, and resolving and rendering the first client-side
+  // 48-item window inserts the Browse grid above the Bundles section afterwards.
   useEffect(() => {
     if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
     bundlesScrolled.current = true;
@@ -530,11 +550,6 @@ export function CapabilitiesRoute({
   // still matching the live query so an old search never renders against a new
   // one (invalidation without a clearing effect that flashes stale tiles first).
   const visibleRegistry = registryResultsForQuery(query, registrySearched, registryResults);
-
-  function refreshAll() {
-    void refresh();
-    void packs.refresh();
-  }
 
   // `snapshotFallback` defaults to `registry` (a registry result renders from its
   // snapshot until persisted); the add-custom flow passes it explicitly for a
@@ -777,11 +792,27 @@ export function CapabilitiesRoute({
       });
   }
 
+  async function enableMcpThroughConnect(capabilityId: string) {
+    const attempt = await client.beginConnect(workspaceId, {
+      providerId: "mcp-install",
+      ownership: "workspace",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const completed = await client.connectTransport().advance(workspaceId, attempt.id, {
+      expectedRevision: attempt.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: { type: "credentials", values: { capabilityId } },
+    });
+    if (completed.state !== "complete" || !completed.integrationInstalled)
+      throw new Error("MCP setup did not complete. Reload connection setup before retrying.");
+  }
+
   async function quickEnable(item: CapabilityCatalogItem) {
     setBusyId(item.id);
     try {
       const persisted = await persistIfRegistry(item, false);
-      await client.enableCapability(workspaceId, persisted.id);
+      await enableMcpThroughConnect(persisted.id);
       await refresh();
       onRuntimeChanged();
       toast.success(`Enabled ${item.name}`);
@@ -881,269 +912,32 @@ export function CapabilitiesRoute({
   }
 
   async function handleAction(action: ConnectAction) {
-    // Act on the LIVE item (derived from the catalog by id), never the stored
-    // snapshot - a mutation elsewhere may have changed it since the sheet opened.
-    if (!selected || !selectedItem) return;
-    const item = selectedItem;
-    setBusyId(item.id);
+    if (!selected || !selectedItem || busyId !== null) return;
+    setBusyId(selectedItem.id);
     setSheetError(null);
     try {
-      // The plan is derived from the current catalog/registry item (it carries
-      // authKind/mcpUrl/providerDomain); connect calls use the persisted id.
-      const plan = capabilityConnectPlan(item);
-
-      if (action.type === "install_skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to install Skills.");
-        }
-        const libraryId = metadataString(item.metadata.libraryId);
-        const expectedVersion = metadataString(item.metadata.version);
-        const expectedContentSha256 = metadataString(item.metadata.contentSha256);
-        if (!libraryId || !expectedVersion || !expectedContentSha256) {
-          throw new Error(
-            "This Skill is missing its reviewed library identity. Refresh and try again.",
-          );
-        }
-        const installationVersion = installedSkillVersion(item);
-        await client.installLibrarySkill(workspaceId, libraryId, {
-          expectedVersion,
-          expectedContentSha256,
-          ...(installationVersion !== null
-            ? { expectedInstallationVersion: installationVersion }
-            : {}),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(item.enabled ? `Updated ${item.name}` : `Installed ${item.name}`, {
-          description: `Pinned to reviewed Skill version ${expectedVersion}.`,
-        });
-        setSelected(null);
-        return;
-      }
-
-      if (action.type === "remove_skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to remove Skills.");
-        }
-        const preview = await client.previewSkillUninstall(workspaceId, item.id);
-        if (!preview.installed || preview.installationVersion === null || !preview.directOwner) {
-          throw new Error("This Skill is no longer directly installed. Refresh and try again.");
-        }
-        setSkillRemoval({ item, preview });
-        return;
-      }
-
-      if (action.type === "disconnect") {
-        if (item.kind !== "mcp" || !item.actions.includes("disconnect")) {
-          throw new Error(`${item.name} must be managed through its dedicated controls.`);
-        }
-        await client.disableCapability(workspaceId, item.id);
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Disabled ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      if (action.type === "social_oauth" && plan.mode === "social_oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await client.startSocialOAuth(workspaceId, {
-          provider: action.provider,
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "disconnect_social") {
-        await client.disconnectSocialConnection(workspaceId, action.connectionId);
-        await refresh();
-        toast.success(`Disconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // First-party Fiken connect / token replacement. The install route
-      // verifies the token against Fiken before storing it, so a bad paste
-      // fails here with a specific message instead of at first tool use.
-      if (action.type === "fiken_api_token") {
-        await client.installFikenConnection(workspaceId, {
-          apiToken: action.apiToken,
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Connected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Full-page redirect into Fiken's consent screen; the API callback
-      // stores the workspace connection and returns to this page with a
-      // `fiken` query param handled by the return effect below.
-      if (action.type === "fiken_oauth") {
-        const response = await client.startFikenOAuth(workspaceId, {
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("Fiken did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "fiken_disconnect") {
-        await client.deleteConnection(workspaceId, action.connectionId);
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Disconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Reconnect an already-enabled item whose credential lapsed. When the
-      // connection row survives, OAuth reuses it (pass connectionId) and the
-      // return handler just refreshes; when it was deleted (null id), OAuth
-      // mints a fresh row and the return handler re-enables against it. API-key
-      // reactivates the surviving row in place, or mints + re-enables if gone.
-      if (action.type === "reconnect_oauth") {
-        // Trust the installation's connectionRef.kind (the sheet already chose this
-        // branch from it), not the catalog plan - on drift plan.mode can read
-        // "enable", so fall back to the ref's domain and the item's own MCP URL.
-        const providerDomain =
-          plan.mode === "oauth"
-            ? plan.providerDomain
-            : (item.connectionRef?.providerDomain ?? null);
-        const mcpUrl =
-          plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-          ...(mcpUrl ? { mcpUrl } : {}),
-          ...(providerDomain ? { providerDomain } : {}),
-          // Reuse the existing row when it survives; a null id means the row was
-          // deleted, so OAuth mints a fresh connection and the return handler
-          // re-enables against it.
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "reconnect_api_key") {
-        if (action.connectionId) {
-          // The existing row went inactive - rewrite its credential and
-          // reactivate it in place; the installation ref already points at it.
-          await client.updateConnection(workspaceId, action.connectionId, {
-            credential: { headers: action.headers },
-            status: "active",
-          });
-        } else {
-          // The row was deleted - mint a fresh connection and re-enable the
-          // installation against it (enable upserts the installation config). Domain
-          // comes from the plan, or the installation's ref when the catalog drifted.
-          const providerDomain =
-            plan.mode === "api_key"
-              ? plan.providerDomain
-              : (item.connectionRef?.providerDomain ?? "");
-          const connection = await client.createConnection(workspaceId, {
-            providerDomain,
-            kind: "api_key",
-            ownership: action.ownership,
-            credential: { headers: action.headers },
-          });
-          await client.enableCapability(workspaceId, item.id, {
-            connectionRef: apiKeyConnectionRef(
-              action.ownership,
-              connection.id,
-              connection.providerDomain,
-            ),
-          });
-        }
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Reconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      if (item.kind !== "mcp") {
-        throw new Error(`${item.name} must be installed through its dedicated controls.`);
-      }
-      const persisted = await persistIfRegistry(item, selected.registry);
-
-      if (action.type === "oauth" && plan.mode === "oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-          ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
-          ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        // Full-page redirect into the provider's consent screen; we return to
-        // returnPath and resume in the OAuth-return effect below.
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "api_key" && plan.mode === "api_key") {
-        // Reuse only a connection with the selected ownership rather than creating
-        // a duplicate on retry; workspace and personal rows never cross-reuse.
-        const reuseId = connectionToReuseForApiKey(
-          item,
-          connections ?? [],
-          plan.providerDomain,
-          action.ownership,
-        );
-        const connection = reuseId
-          ? await client.updateConnection(workspaceId, reuseId, {
-              credential: { headers: action.headers },
-              status: "active",
-            })
-          : await client.createConnection(workspaceId, {
-              providerDomain: plan.providerDomain,
-              kind: "api_key",
-              ownership: action.ownership,
-              credential: { headers: action.headers },
-            });
-        // Build the enable ref from the connection row the API returns, never the
-        // catalog domain - the API may canonicalize providerDomain, and the row
-        // is the authoritative match the enable path validates against.
-        await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: apiKeyConnectionRef(
-            action.ownership,
-            connection.id,
-            connection.providerDomain,
-          ),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Connected and enabled ${persisted.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Plain enable (no credentials).
-      await client.enableCapability(workspaceId, persisted.id);
-      await refresh();
-      if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(`Enabled ${persisted.name}`);
-      setSelected(null);
+      await performCapabilityAction(
+        {
+          client,
+          workspaceId,
+          item: selectedItem,
+          registry: selected.registry,
+          connections: connectionsLoadFailed ? null : connections,
+          canManageSkills,
+          refresh,
+          onRuntimeChanged,
+          onComplete: () => setSelected(null),
+          onSkillRemoval: setSkillRemoval,
+          connectReturnUrl: window.location.href,
+          returnPathFor: (id) =>
+            `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`,
+          redirect: (url) => window.location.assign(url),
+        },
+        action,
+      );
     } catch (error) {
+      await refresh();
       const copy = capabilityErrorToast(error, "Something went wrong");
-      // In-sheet human copy; the raw missing-credentials 422 becomes a prompt to
-      // connect rather than an error string.
       setSheetError(
         isMissingCredentialsError(error)
           ? "This integration needs credentials before it can be enabled."
@@ -1166,9 +960,10 @@ export function CapabilitiesRoute({
       onRuntimeChanged();
       toast.success(`Removed ${skillRemoval.item.name}`, {
         description:
-          result.status === "retained_by_other_owners"
+          skillReleaseMessage(result.skillReleases) ??
+          (result.status === "retained_by_other_owners"
             ? "Another Plugin or Pack still owns this Skill, so it remains available."
-            : "The Skill is no longer active in this workspace.",
+            : "The Skill is no longer active in this workspace."),
       });
       setSkillRemoval(null);
       setSelected(null);
@@ -1577,7 +1372,7 @@ export function CapabilitiesRoute({
   ): Promise<boolean> {
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.installPack(workspaceId, pack.id, {
+      const installed = await client.installPack(workspaceId, pack.id, {
         expectedManifestDigest: preview.manifestDigest,
         idempotencyKey,
         ...selection,
@@ -1593,6 +1388,13 @@ export function CapabilitiesRoute({
           : preview.action === "update"
             ? `Updated ${pack.name}`
             : `Repaired ${pack.name}`,
+        {
+          description: skillInstallationMessage(
+            installed.skillWrites,
+            installed.skillReleases,
+            installed.skillPublications,
+          ),
+        },
       );
       return true;
     } catch (error) {
@@ -1625,13 +1427,15 @@ export function CapabilitiesRoute({
     if (preview.installationVersion === null) return false;
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.uninstallPack(workspaceId, pack.id, {
+      const result = await client.uninstallPack(workspaceId, pack.id, {
         expectedInstallationVersion: preview.installationVersion,
         idempotencyKey,
       });
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Uninstalled ${pack.name}`);
+      toast.success(`Uninstalled ${pack.name}`, {
+        description: skillReleaseMessage(result.skillReleases),
+      });
       return true;
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to uninstall pack");
@@ -1680,25 +1484,14 @@ export function CapabilitiesRoute({
           title="Plugins"
           description="Connect apps, MCP servers, skills, and packs for agents in this workspace."
           actions={
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-fg-muted transition-none disabled:opacity-100"
-                onClick={refreshAll}
-                disabled={loading || packs.loading}
-              >
-                <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
-                Refresh
-              </Button>
-              <Button type="button" onClick={() => setAddOpen(true)}>
-                <PlusIcon />
-                Add MCP server
-              </Button>
-            </>
+            <Button type="button" onClick={() => setAddOpen(true)}>
+              <PlusIcon />
+              Add MCP server
+            </Button>
           }
         />
+
+        <PluginSearch query={query} onQueryChange={setQuery} />
 
         <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
           <div>
@@ -1714,23 +1507,29 @@ export function CapabilitiesRoute({
             </p>
           </div>
           <div className="grid gap-2" data-integration-list>
-            {integrations.map((adapter) => {
-              const quickConnect = integrationQuickConnect(adapter.model);
-              return (
-                <IntegrationRow
-                  key={adapter.model.id}
-                  model={adapter.model}
-                  onOpen={() => {
-                    const active = document.activeElement;
-                    integrationOpenerRef.current =
-                      active instanceof HTMLElement && active !== document.body ? active : null;
-                    setOpenIntegration(adapter.model.id);
-                  }}
-                  busy={integrationRowBusy(adapter.model)}
-                  {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
-                />
-              );
-            })}
+            {integrations
+              .filter(({ model }) =>
+                `${model.name} ${model.description}`
+                  .toLowerCase()
+                  .includes(query.trim().toLowerCase()),
+              )
+              .map((adapter) => {
+                const quickConnect = integrationQuickConnect(adapter.model);
+                return (
+                  <IntegrationRow
+                    key={adapter.model.id}
+                    model={adapter.model}
+                    onOpen={() => {
+                      const active = document.activeElement;
+                      integrationOpenerRef.current =
+                        active instanceof HTMLElement && active !== document.body ? active : null;
+                      setOpenIntegration(adapter.model.id);
+                    }}
+                    busy={integrationRowBusy(adapter.model)}
+                    {...(quickConnect ? { onQuickConnect: quickConnect } : {})}
+                  />
+                );
+              })}
           </div>
         </section>
 
@@ -1786,13 +1585,7 @@ export function CapabilitiesRoute({
             </div>
           ) : null}
 
-          <CapabilityDiscoveryControls
-            query={query}
-            filter={filter}
-            counts={counts}
-            onQueryChange={setQuery}
-            onFilterChange={setFilter}
-          />
+          <CapabilityDiscoveryControls filter={filter} counts={counts} onFilterChange={setFilter} />
 
           <div className="mt-8 space-y-10">
             <EnabledCapabilitiesSection
@@ -1846,7 +1639,9 @@ export function CapabilitiesRoute({
         </section>
 
         <div ref={bundlesRef}>
+          <SkillsPanel key={workspaceId} workspaceId={workspaceId} />
           <BundlesSection
+            query={query}
             client={client}
             workspaceId={workspaceId}
             connections={connections}
@@ -1874,6 +1669,13 @@ export function CapabilitiesRoute({
             onPreviewPackUninstall={previewPackUninstall}
             onUninstallPack={uninstallPack}
             onUnregisterPack={unregisterPack}
+            onStartPackSession={(skillCapabilityId) => {
+              void navigate({
+                to: "/workspaces/$workspaceId/sessions",
+                params: { workspaceId },
+                search: { skillCapabilityId },
+              });
+            }}
             onChanged={async () => {
               await refresh();
               onRuntimeChanged();
@@ -2002,17 +1804,4 @@ export function integrationQuickConnect(
   if (chip.tone !== "idle" || footer.kind !== "setup") return undefined;
   if (footer.disabled === true || footer.busy === true) return undefined;
   return footer.onSetup;
-}
-
-function metadataString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function installedSkillVersion(item: CapabilityCatalogItem): number | null {
-  const installedSkill = item.metadata.installedSkill;
-  if (!installedSkill || typeof installedSkill !== "object" || Array.isArray(installedSkill)) {
-    return null;
-  }
-  const value = (installedSkill as Record<string, unknown>).installationVersion;
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }

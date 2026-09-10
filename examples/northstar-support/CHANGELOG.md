@@ -1,5 +1,197 @@
 # @opengeni/example-northstar-support
 
+## 0.0.145
+
+### Patch Changes
+
+- @opengeni/react@5.0.3
+- @opengeni/sdk@5.0.3
+
+## 0.0.144
+
+### Patch Changes
+
+- Updated dependencies [05957ee]
+  - @opengeni/react@5.0.2
+
+## 0.0.143
+
+### Patch Changes
+
+- Updated dependencies [be17b8e]
+  - @opengeni/react@5.0.1
+
+## 0.0.142
+
+### Patch Changes
+
+- Updated dependencies [cffd21b]
+- Updated dependencies [f8be7df]
+- Updated dependencies [cffd21b]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/react@5.0.0
+
+## 0.0.141
+
+### Patch Changes
+
+- Updated dependencies [39adecb]
+- Updated dependencies [1b0f4f2]
+- Updated dependencies [87fbd92]
+  - @opengeni/react@4.0.2
+  - @opengeni/sdk@4.0.2
+
+## 0.0.140
+
+### Patch Changes
+
+- Updated dependencies [068be26]
+- Updated dependencies [d1cb266]
+- Updated dependencies [2fa33e4]
+  - @opengeni/sdk@4.0.1
+  - @opengeni/react@4.0.1
+
+## 0.0.139
+
+### Patch Changes
+
+- Updated dependencies [0c5e2fd]
+- Updated dependencies [231b103]
+- Updated dependencies [9827c25]
+- Updated dependencies [c915b0f]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+- Updated dependencies [9d36a0f]
+  - @opengeni/react@4.0.0
+  - @opengeni/sdk@4.0.0
+
+## 0.0.138
+
+### Patch Changes
+
+- Updated dependencies [4536385]
+- Updated dependencies [0ca6728]
+- Updated dependencies [fa2b99a]
+- Updated dependencies [fa12951]
+- Updated dependencies [1fc0889]
+- Updated dependencies [d06450c]
+- Updated dependencies [d9dbd5d]
+- Updated dependencies [e271780]
+- Updated dependencies [1c4b707]
+- Updated dependencies [cc1bfe0]
+- Updated dependencies [3db0b05]
+- Updated dependencies [c90f3fc]
+- Updated dependencies [952331e]
+- Updated dependencies [ecffc88]
+- Updated dependencies [8be8a72]
+- Updated dependencies [0c39126]
+- Updated dependencies [ba890d1]
+- Updated dependencies [0c39126]
+- Updated dependencies [730b78b]
+- Updated dependencies [4708cfb]
+- Updated dependencies [575af5b]
+- Updated dependencies [e9d092a]
+- Updated dependencies [6de9fe3]
+- Updated dependencies [cda46e8]
+- Updated dependencies [ca2b4e2]
+- Updated dependencies [3673900]
+- Updated dependencies [b1d3673]
+- Updated dependencies [2fb17fd]
+- Updated dependencies [3a29372]
+- Updated dependencies [107aa14]
+- Updated dependencies [eeb5500]
+- Updated dependencies [0f3dc9a]
+- Updated dependencies [fe73da9]
+- Updated dependencies [d8a70ec]
+- Updated dependencies [f0f1e17]
+- Updated dependencies [0a81cc8]
+  - @opengeni/sdk@3.8.0
+  - @opengeni/react@3.8.0
+
+## 0.0.137
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/sdk@3.7.0
+  - @opengeni/react@3.7.0
+
+## 0.0.136
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+- Updated dependencies [fab39d2]
+  - @opengeni/sdk@3.6.0
+  - @opengeni/react@3.6.0
+
+## 0.0.135
+
+### Patch Changes
+
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/sdk@3.5.1
+  - @opengeni/react@3.5.1
+
+## 0.0.134
+
+### Patch Changes
+
+- Updated dependencies [32b9de4]
+- Updated dependencies [633f9bf]
+- Updated dependencies [8f81b57]
+  - @opengeni/sdk@3.5.0
+  - @opengeni/react@3.5.0
+
+## 0.0.133
+
+### Patch Changes
+
+- Updated dependencies [b88a194]
+  - @opengeni/react@3.4.2
+
+## 0.0.132
+
+### Patch Changes
+
+- Updated dependencies [a8da2c5]
+  - @opengeni/react@3.4.1
+
+## 0.0.131
+
+### Patch Changes
+
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [dd98677]
+- Updated dependencies [9af1666]
+  - @opengeni/react@3.4.0
+  - @opengeni/sdk@3.4.0
+
+## 0.0.130
+
+### Patch Changes
+
+- Updated dependencies [5b9acd1]
+  - @opengeni/sdk@3.3.2
+  - @opengeni/react@3.3.2
+
+## 0.0.129
+
+### Patch Changes
+
+- Updated dependencies [b471a90]
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/sdk@3.3.1
+  - @opengeni/react@3.3.1
+
 ## 0.0.128
 
 ### Patch Changes

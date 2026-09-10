@@ -15,8 +15,13 @@ import { sleep } from "./sandbox-provision";
 export function shouldRunTurnEndWorkspacePersistence(input: {
   activityStatus: RunAgentTurnResult["status"] | "unknown";
   cancellationRequested: boolean;
+  deadlineRotationRequested?: boolean;
 }): boolean {
-  return input.activityStatus !== "cancelled" && !input.cancellationRequested;
+  return (
+    input.activityStatus !== "cancelled" &&
+    !input.cancellationRequested &&
+    input.deadlineRotationRequested !== true
+  );
 }
 
 /**
@@ -29,9 +34,13 @@ export function shouldStartPeriodicWorkspaceSnapshot(input: {
   firstProviderRequestStarted: boolean;
   snapshotInFlight: boolean;
   turnEndCaptureInProgress: boolean;
+  deadlineRotationRequested: boolean;
 }): boolean {
   return (
-    input.firstProviderRequestStarted && !input.snapshotInFlight && !input.turnEndCaptureInProgress
+    input.firstProviderRequestStarted &&
+    !input.snapshotInFlight &&
+    !input.turnEndCaptureInProgress &&
+    !input.deadlineRotationRequested
   );
 }
 
@@ -80,6 +89,7 @@ export function assertSessionAttemptQuiescenceRecoveryDurable(input: {
 export const QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS = 250;
 export const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
 export const TURN_QUIESCENCE_WATCHDOG_MS = 5 * 60_000;
+export const TURN_FINALIZER_STEP_TIMEOUT_MS = 30_000;
 
 /** A fenced activity must never heartbeat forever while its physical writer
  * drain is stuck. The last-resort worker exit stops every in-process writer;
@@ -232,35 +242,40 @@ export async function releaseTurnSandboxAfterWriterDrain(
 }
 
 /**
- * Await a finalizer operation only while this Temporal activity still owns its
- * execution window. Once Pause/Steer cancellation arrives, the operation keeps
- * its own rejection handler and may finish its idempotent, attempt-scoped
- * cleanup in the background, but it cannot pin activity terminalization or
- * delay the separately receipt-gated replacement dispatch.
+ * Await bounded, idempotent finalizer housekeeping only while this Temporal
+ * activity still owns its execution window. A completed turn must never keep
+ * heartbeating forever because a provider/tool close promise did not settle:
+ * that strands every later durable prompt behind an already-terminal attempt.
+ * Cancellation or the hard timeout detaches the operation with a rejection
+ * handler; the operation may still finish its attempt-scoped cleanup, but it
+ * cannot pin activity terminalization.
  */
 export async function waitForTurnFinalizerStep<T>(
   operation: Promise<T>,
   signal: AbortSignal | undefined,
+  timeoutMs = TURN_FINALIZER_STEP_TIMEOUT_MS,
 ): Promise<T | undefined> {
-  if (!signal) return await operation;
-  if (signal.aborted) {
+  if (signal?.aborted) {
     void operation.catch(() => undefined);
     return undefined;
   }
 
-  let resolveCancellation: (() => void) | undefined;
-  const cancelled = new Promise<undefined>((resolve) => {
-    resolveCancellation = () => resolve(undefined);
+  let resolveDetached: (() => void) | undefined;
+  const detached = new Promise<undefined>((resolve) => {
+    resolveDetached = () => resolve(undefined);
   });
-  const cancel = (): void => {
+  const detach = (): void => {
     void operation.catch(() => undefined);
-    resolveCancellation?.();
+    resolveDetached?.();
   };
-  signal.addEventListener("abort", cancel, { once: true });
+  signal?.addEventListener("abort", detach, { once: true });
+  const timeout = setTimeout(detach, Math.max(1, timeoutMs));
+  timeout.unref?.();
   try {
-    return await Promise.race([operation, cancelled]);
+    return await Promise.race([operation, detached]);
   } finally {
-    signal.removeEventListener("abort", cancel);
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", detach);
   }
 }
 
@@ -331,8 +346,14 @@ export function assertAgentStreamNotCancelled(cancelled: boolean): void {
 }
 
 /** Interruption streams do not produce a normal final output. Call this only
- * after the interruption branch has settled any required action. */
-export function requireAgentStreamFinalOutput(finalOutput: unknown | undefined): unknown {
+ * after the interruption branch has settled any required action. A successful
+ * runtime-owned input wait is a normal terminal result without assistant text;
+ * its authority comes from prepared tools, never the provider's output. */
+export function requireAgentStreamFinalOutput(
+  finalOutput: unknown | undefined,
+  inputWaitYielded = false,
+): unknown {
+  if (inputWaitYielded) return "";
   if (finalOutput === undefined) {
     throw new IncompleteAgentStreamError();
   }

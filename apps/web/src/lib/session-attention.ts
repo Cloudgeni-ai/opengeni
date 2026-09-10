@@ -62,31 +62,22 @@ export function subscribeToLocalSessionDeliveryAttention(onChange: () => void): 
 }
 
 function isOlder(
-  current: Pick<SessionAttentionProjection, "attentionVersion" | "lastSequence">,
+  current: Pick<SessionAttentionProjection, "unread" | "attentionVersion" | "lastSequence">,
   projected: SessionAttentionProjection,
 ): boolean {
   return (
     projected.attentionVersion! < current.attentionVersion! ||
-    projected.lastSequence < current.lastSequence
+    projected.lastSequence < current.lastSequence ||
+    (projected.attentionVersion === current.attentionVersion &&
+      projected.lastSequence === current.lastSequence &&
+      !current.unread &&
+      Boolean(projected.unread))
   );
 }
 
 /** One foreground-view receipt per exact session event frontier. */
 export function sessionReadProjectionKey(sessionId: string, latestEventSequence: number): string {
   return `${sessionId}:${latestEventSequence}`;
-}
-
-export function restoreUnreadSessionAttentionProjection(
-  session: Pick<Session, "id" | "workspaceId" | "attentionVersion">,
-  lastSequence: number,
-): SessionAttentionProjection {
-  return {
-    id: session.id,
-    workspaceId: session.workspaceId,
-    unread: true,
-    attentionVersion: session.attentionVersion,
-    lastSequence,
-  };
 }
 
 type ActiveSessionReadEligibility = {
@@ -98,9 +89,9 @@ type ActiveSessionReadEligibility = {
 };
 
 /**
- * An unread chat can clear optimistically as soon as its exact route is the
- * foreground destination. Durable acknowledgement still waits for the live
- * timeline tip, but loading that timeline must not keep the rail stale.
+ * An unread chat clears as soon as its exact route is the foreground
+ * destination. The durable writer receives the exact known frontier and can
+ * advance again when later events render.
  */
 export function shouldProjectActiveSessionRead(input: ActiveSessionReadEligibility): boolean {
   const { session } = input;
@@ -120,10 +111,8 @@ export function shouldProjectActiveSessionRead(input: ActiveSessionReadEligibili
  * Merely leaving a session route mounted in a background tab/window must not
  * consume its unread signal.
  */
-export function shouldAcknowledgeActiveSession(
-  input: ActiveSessionReadEligibility & { liveTipLoaded: boolean },
-): boolean {
-  return input.liveTipLoaded && shouldProjectActiveSessionRead(input);
+export function shouldAcknowledgeActiveSession(input: ActiveSessionReadEligibility): boolean {
+  return shouldProjectActiveSessionRead(input);
 }
 
 /**
@@ -131,8 +120,11 @@ export function shouldAcknowledgeActiveSession(
  * resurrect a read marker. Attention revisions order explicit mutations,
  * while lastSequence orders new durable activity; either older coordinate is
  * stale. Equal coordinates let the latest mutation response replace the page
- * projection immediately. The rail calls this only after an id-keyed lookup,
- * so both arguments represent the same session.
+ * projection immediately. At an equal coordinate, read wins over unread: a
+ * cleanup or stale render cannot resurrect a dot after the user viewed it.
+ * Explicit mark-unread actions still win because they increment
+ * `attentionVersion`. The rail calls this only after an id-keyed lookup, so
+ * both arguments represent the same session.
  */
 export function applySessionAttentionProjection(
   current: Session,
@@ -154,6 +146,61 @@ export function latestSessionAttentionProjection(
   projected: SessionAttentionProjection,
 ): SessionAttentionProjection {
   return current && isOlder(current, projected) ? current : projected;
+}
+
+/**
+ * Apply personal attention projections to rows and their loaded ancestor
+ * aggregates in one pass. Server `treeStats` count every descendant, so a
+ * foreground child read must adjust each loaded ancestor immediately instead
+ * of leaving a stale blue or red parent marker until the next list poll.
+ */
+export function applySessionAttentionProjections(
+  sessions: readonly Session[],
+  projections: ReadonlyMap<string, SessionAttentionProjection>,
+): Session[] {
+  const sourceById = new Map(sessions.map((session) => [session.id, session]));
+  const projectedById = new Map(sourceById);
+
+  for (const [sessionId, projection] of projections) {
+    const source = sourceById.get(sessionId);
+    if (!source) continue;
+    // A descendant projection may already have adjusted this session's
+    // treeStats. Apply its own attention state to that accumulated row so map
+    // iteration order cannot wipe an earlier descendant delta.
+    const projected = applySessionAttentionProjection(projectedById.get(sessionId)!, projection);
+    projectedById.set(sessionId, projected);
+
+    const unreadDelta = Number(projected.unread) - Number(source.unread);
+    if (unreadDelta === 0) continue;
+    const failedDelta = source.status === "failed" ? unreadDelta : 0;
+    const visited = new Set<string>([sessionId]);
+    let parentSessionId = source.parentSessionId;
+    while (parentSessionId && !visited.has(parentSessionId)) {
+      visited.add(parentSessionId);
+      const ancestorSource = sourceById.get(parentSessionId);
+      const ancestor = projectedById.get(parentSessionId);
+      if (!ancestorSource || !ancestor) break;
+      const stats = ancestor.treeStats;
+      if (stats) {
+        const unreadDescendants = Math.max(0, (stats.unreadDescendants ?? 0) + unreadDelta);
+        const unreadFailedDescendants = Math.max(
+          0,
+          (stats.unreadFailedDescendants ?? stats.failedDescendants) + failedDelta,
+        );
+        projectedById.set(parentSessionId, {
+          ...ancestor,
+          treeStats: {
+            ...stats,
+            unreadDescendants,
+            unreadFailedDescendants,
+          },
+        });
+      }
+      parentSessionId = ancestorSource.parentSessionId;
+    }
+  }
+
+  return sessions.map((session) => projectedById.get(session.id) ?? session);
 }
 
 export function notifySessionAttentionChanged(projection: SessionAttentionProjection): void {

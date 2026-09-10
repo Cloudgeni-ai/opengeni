@@ -9,14 +9,35 @@ import {
 } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
-import { githubBindingStatus, githubInstallationBindingLifecycle } from "../src/github-access";
-import { registerGitHubRoutes } from "../src/routes/github";
+import {
+  githubBindingStatus,
+  githubInstallationBindingLifecycle,
+  GitHubRepositoryBranchAuthorityError,
+  listWorkspaceGitHubRepositoryBranches,
+  type WorkspaceGitHubRepositoryBranchServices,
+} from "../src/github-access";
+import {
+  registerGitHubRoutes,
+  requirePublicGitHubRepositoryVerificationPermission,
+} from "../src/routes/github";
 
 const stateSecret = "github-binding-authority-test-secret";
 const accountId = "00000000-0000-4000-8000-000000000101";
 const workspaceId = "00000000-0000-4000-8000-000000000102";
 const otherWorkspaceId = "00000000-0000-4000-8000-000000000103";
 const subjectId = "configured-owner";
+
+test("public GitHub verification accepts create or follow-up session authority", () => {
+  expect(() =>
+    requirePublicGitHubRepositoryVerificationPermission({ permissions: ["sessions:create"] }),
+  ).not.toThrow();
+  expect(() =>
+    requirePublicGitHubRepositoryVerificationPermission({ permissions: ["sessions:control"] }),
+  ).not.toThrow();
+  expect(() =>
+    requirePublicGitHubRepositoryVerificationPermission({ permissions: ["workspace:read"] }),
+  ).toThrow("sessions:create or sessions:control");
+});
 
 function appWithProvider(
   provider: NonNullable<ApiRouteDeps["githubAppApi"]> = {},
@@ -99,8 +120,27 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
     `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState!)}`,
     { headers: { cookie: discoveryCookie! } },
   );
-  expect(discovery.status).toBe(302);
-  const location = new URL(discovery.headers.get("location")!);
+  expect(discovery.status).toBe(200);
+  const html = await discovery.text();
+  expect(html).toContain("Choose a GitHub account");
+  expect(html).toContain("owner");
+  expect(html).toContain('value="new"');
+  const selectionState = html.match(/name="state" value="([^"]+)"/)?.[1];
+  const selectionCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
+  expect(selectionState).toBeTruthy();
+  expect(selectionCookie).toBeTruthy();
+  expect(readSignedState(selectionState!, stateSecret)).toMatchObject({
+    accountId,
+    workspaceId,
+    allowedInstallationIds: [42],
+    intent: "installation_authority_selection",
+  });
+  const selection = await app.request(
+    `http://test/v1/workspaces/${workspaceId}/github/installations/select?state=${encodeURIComponent(selectionState!)}&installation_id=42`,
+    { headers: { cookie: selectionCookie! } },
+  );
+  expect(selection.status).toBe(302);
+  const location = new URL(selection.headers.get("location")!);
   const oauthState = location.searchParams.get("state");
   expect(oauthState).toBeTruthy();
   const payload = readSignedState(oauthState!, stateSecret);
@@ -110,7 +150,7 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
     installationId: 42,
     intent: "installation_authority_oauth",
   });
-  const oauthCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
+  const oauthCookie = selection.headers.get("set-cookie")?.split(";", 1)[0];
   expect(oauthCookie).toBeTruthy();
   return { state: oauthState!, browserHeader: oauthCookie! };
 }
@@ -145,6 +185,106 @@ async function startInstall(app: Hono): Promise<{ state: string; browserHeader: 
 }
 
 describe("GitHub owner-authority binding routes", () => {
+  test("branch suggestions require and recheck one exact audited allowlist", async () => {
+    const providerInputs: unknown[] = [];
+    let allowedChecks = 0;
+    const services: WorkspaceGitHubRepositoryBranchServices = {
+      listInstallationAccess: async () => [auditedInstallation()],
+      areRepositoriesAllowed: async (_db, _workspaceId, installationId, repositoryIds) => {
+        allowedChecks += 1;
+        expect({ installationId, repositoryIds }).toEqual({
+          installationId: 42,
+          repositoryIds: [1001],
+        });
+        return true;
+      },
+      listProviderBranches: async (_deps, input) => {
+        providerInputs.push(input);
+        return {
+          installationId: 42,
+          repositoryId: 1001,
+          defaultBranch: "main",
+          branches: ["feature/picker", "main"],
+          nextPage: 3,
+        };
+      },
+    };
+    await expect(
+      listWorkspaceGitHubRepositoryBranches(
+        { db: {}, settings: {} } as ApiRouteDeps,
+        {
+          accountId,
+          workspaceId,
+          installationId: 42,
+          repositoryId: 1001,
+          query: { cursor: 2, limit: 2 },
+        },
+        services,
+      ),
+    ).resolves.toEqual({
+      branches: [
+        { name: "feature/picker", isDefault: false },
+        { name: "main", isDefault: true },
+      ],
+      nextCursor: 3,
+    });
+    expect(providerInputs).toEqual([{ installationId: 42, repositoryId: 1001, page: 2, limit: 2 }]);
+    expect(allowedChecks).toBe(2);
+  });
+
+  test("branch suggestions fail before provider use and discard in-flight revocation", async () => {
+    let providerCalls = 0;
+    const services: WorkspaceGitHubRepositoryBranchServices = {
+      listInstallationAccess: async () => [auditedInstallation()],
+      areRepositoriesAllowed: async () => true,
+      listProviderBranches: async () => {
+        providerCalls += 1;
+        return {
+          installationId: 42,
+          repositoryId: 1001,
+          defaultBranch: "main",
+          branches: ["main"],
+          nextPage: null,
+        };
+      },
+    };
+    await expect(
+      listWorkspaceGitHubRepositoryBranches(
+        { db: {}, settings: {} } as ApiRouteDeps,
+        {
+          accountId,
+          workspaceId,
+          installationId: 42,
+          repositoryId: 1002,
+          query: { cursor: 1, limit: 100 },
+        },
+        services,
+      ),
+    ).rejects.toMatchObject({ code: "not_authorized" });
+    expect(providerCalls).toBe(0);
+
+    let checks = 0;
+    services.areRepositoriesAllowed = async () => {
+      checks += 1;
+      return checks === 1;
+    };
+    await expect(
+      listWorkspaceGitHubRepositoryBranches(
+        { db: {}, settings: {} } as ApiRouteDeps,
+        {
+          accountId,
+          workspaceId,
+          installationId: 42,
+          repositoryId: 1001,
+          query: { cursor: 1, limit: 100 },
+        },
+        services,
+      ),
+    ).rejects.toBeInstanceOf(GitHubRepositoryBranchAuthorityError);
+    expect(providerCalls).toBe(1);
+    expect(checks).toBe(2);
+  });
+
   test("projects only current audited installation bindings as healthy", () => {
     const stored = auditedInstallation();
     const active = new Map([[42, { installationId: 42, accountId: 501, suspended: false }]]);
@@ -193,9 +333,45 @@ describe("GitHub owner-authority binding routes", () => {
     expect(githubBindingStatus(true, [binding])).toBe("bound");
   });
 
-  test("existing owner installation discovery advances to exact fresh GitHub OAuth", async () => {
+  test("one existing owner installation still offers another account before exact OAuth", async () => {
     const app = appWithProvider();
     await startOAuth(app);
+  });
+
+  test("one existing owner installation can advance to a new account installation", async () => {
+    const app = appWithProvider();
+    const state = managerState();
+    const connect = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+    );
+    const discoveryLocation = new URL(connect.headers.get("location")!);
+    const discoveryState = discoveryLocation.searchParams.get("state")!;
+    const discoveryCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const discovery = await app.request(
+      `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState)}`,
+      { headers: { cookie: discoveryCookie } },
+    );
+    expect(discovery.status).toBe(200);
+    const html = await discovery.text();
+    const selectionState = html.match(/name="state" value="([^"]+)"/)?.[1];
+    const selectionCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(selectionState).toBeTruthy();
+    expect(selectionCookie).toBeTruthy();
+
+    const install = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/installations/select?state=${encodeURIComponent(selectionState!)}&installation_id=new`,
+      { headers: { cookie: selectionCookie! } },
+    );
+    expect(install.status).toBe(302);
+    const installLocation = new URL(install.headers.get("location")!);
+    expect(installLocation.origin + installLocation.pathname).toBe(
+      "https://github.com/apps/opengeni-test/installations/new",
+    );
+    expect(readSignedState(installLocation.searchParams.get("state")!, stateSecret)).toMatchObject({
+      accountId,
+      workspaceId,
+      intent: "installation_authority_install",
+    });
   });
 
   test("no existing owner installation advances to GitHub installation", async () => {

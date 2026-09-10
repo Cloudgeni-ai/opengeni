@@ -72,3 +72,10 @@ jobs:
           NPM_CONFIG_PROVENANCE: "true"
           OPENGENI_RELEASE: "1"
         run: bun scripts/publish-canary.ts
+
+      - name: Retain exact Site package pins for this deployment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: site-package-versions-${{ inputs.source_sha }}
+          path: .release/site-package-versions.json
+          if-no-files-found: error

@@ -597,6 +597,8 @@ export type ConnectionHealth =
  * subject bindings intentionally store no id and resolve only among the current
  * caller's visible personal rows by provider and kind. `loaded` distinguishes a
  * failed connection-list read from a genuinely missing or inactive row.
+ * Host bindings are not represented in that native list and therefore remain
+ * enabled without a native health or repair action.
  *
  * The `loaded` gate matters because listConnections needs a distinct
  * `connections:read` scope: a grant with catalog access but not that sctracking-403s,
@@ -648,6 +650,7 @@ export function connectionHealth(
   }
   const ref = installedConnectionRef(item);
   if (!ref) return { state: "none" };
+  if (ref.authoritySource === "host") return { state: "none" };
   if (!loaded) return { state: "unverified" };
   const connection =
     ref.subjectScope === "subject"
@@ -689,6 +692,7 @@ export function capabilityReconnectPlan(
   if (!item.enabled || health.state !== "attention") return null;
   const ref = item.connectionRef;
   if (!ref) return null;
+  if (ref.authoritySource === "host") return null;
   const connectionId = health.connection?.id ?? null;
   return ref.kind === "oauth2"
     ? {

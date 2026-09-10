@@ -8,8 +8,10 @@ import {
   sessionEventsToSseStream,
 } from "../src/proxy";
 import { parseSseStream } from "../src/sse";
+import { streamSessionEvents, type SessionEventStreamTransport } from "../src/stream";
 import type { SessionEvent } from "../src/types";
 import {
+  bytesStream,
   collect,
   hangingBytesStream,
   makeEvent,
@@ -32,6 +34,13 @@ describe("proxy re-streaming", () => {
     );
   });
 
+  test("formatSseEvent preserves valid REST compact coverage", () => {
+    const event = { ...makeEvent(7), coveredThrough: 42 };
+    expect(formatSseEvent(event)).toBe(
+      `id: 42\nevent: agent.message.delta\ndata: ${JSON.stringify(event)}\n\n`,
+    );
+  });
+
   test("re-emitted stream round-trips through the SDK parser unchanged", async () => {
     const source = [
       makeEvent(1, "session.created", {}),
@@ -48,6 +57,36 @@ describe("proxy re-streaming", () => {
       "turn.completed",
     ]);
     expect(messages.map((message) => JSON.parse(message.data))).toEqual(source as never);
+  });
+
+  test("preserves compact coverage so downstream gap recovery does not replay covered deltas", async () => {
+    const compact = makeEvent(1, "agent.message.delta", { text: "complete streamed answer" });
+    const upstreamFetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response(bytesStream([sseBlock(compact, 100), sseBlock(makeEvent(101))]), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      })) as typeof fetch;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      apiKey: "og_test_key",
+      fetch: upstreamFetch,
+    });
+    const proxied = proxySessionEventStream(client, WORKSPACE_ID, SESSION_ID, {
+      reconnect: false,
+    });
+    const listCalls: Array<{ after: number; limit: number }> = [];
+    const downstream: SessionEventStreamTransport = {
+      openStream: async () => proxied.body!,
+      listEvents: async (after, limit) => {
+        listCalls.push({ after, limit });
+        return Array.from({ length: limit }, (_, index) => makeEvent(after + index + 1));
+      },
+    };
+
+    const received = await collect(streamSessionEvents(downstream, { reconnect: false }));
+
+    expect(received.map((event) => event.sequence)).toEqual([1, 101]);
+    expect(listCalls).toEqual([]);
   });
 
   test("cancelling the downstream fires onCancel and ends the upstream iterator", async () => {

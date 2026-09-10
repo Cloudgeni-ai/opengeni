@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { RequestHumanInputToolInput } from "@opengeni/contracts";
+import {
+  RequestHumanInputToolInput,
+  type CompanyProfileAgentReviewRequiredReceipt,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
@@ -14,11 +17,13 @@ import {
   createSession,
   createWorkspaceLearningPolicyRevision,
   ensureManagedAccessForUser,
+  getCompanyProfileAgentPolicy,
   initializeSessionStartAtomically,
   listCompanyProfile,
   nestedPostgresSqlState,
   proposeCompanyProfileForAgent,
   requestSessionTurnRecovery,
+  updateCompanyProfileAgentPolicy,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -154,9 +159,19 @@ function profile() {
   };
 }
 
+function reviewRequired(
+  receipt: Awaited<ReturnType<typeof proposeCompanyProfileForAgent>>,
+): CompanyProfileAgentReviewRequiredReceipt {
+  expect(receipt.status).toBe("confirmation_required");
+  if (receipt.status !== "confirmation_required") {
+    throw new Error("expected a review-required company-profile proposal");
+  }
+  return receipt;
+}
+
 async function freezeProposal(
   f: Awaited<ReturnType<typeof fixture>>,
-  proposal: Awaited<ReturnType<typeof proposeCompanyProfileForAgent>>,
+  proposal: CompanyProfileAgentReviewRequiredReceipt,
   attempt: Attempt = f.attempt,
 ): Promise<string> {
   if (!client) throw new Error("test database unavailable");
@@ -389,10 +404,12 @@ describe("company-profile agent administration", () => {
       profile: profile(),
       reason: "The organization owner explicitly asked to set this profile and strategic goal.",
     };
-    const proposed = await proposeCompanyProfileForAgent(client.db, {
-      attempt: f.attempt,
-      request,
-    });
+    const proposed = reviewRequired(
+      await proposeCompanyProfileForAgent(client.db, {
+        attempt: f.attempt,
+        request,
+      }),
+    );
     expect(proposed).toMatchObject({
       status: "confirmation_required",
       confirmWith: "company_profile_confirm",
@@ -593,17 +610,132 @@ describe("company-profile agent administration", () => {
     expect(receipt.requestGeneration < receipt.liveGeneration).toBe(true);
   }, 180_000);
 
+  test("activates under an owner-enabled automatic policy and blocks new proposals when off", async () => {
+    if (!shared || !client) return;
+    const f = await fixture();
+    expect(
+      await getCompanyProfileAgentPolicy(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        actorSubjectId: f.ownerSubjectId,
+      }),
+    ).toMatchObject({ mode: "suggest", version: 0 });
+    const policyOperationId = crypto.randomUUID();
+    const automaticPolicy = await updateCompanyProfileAgentPolicy(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      actorSubjectId: f.ownerSubjectId,
+      mode: "automatic",
+      expectedVersion: 0,
+      operationId: policyOperationId,
+    });
+    expect(automaticPolicy).toMatchObject({ mode: "automatic", version: 1, changed: true });
+    expect(
+      await updateCompanyProfileAgentPolicy(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        actorSubjectId: f.ownerSubjectId,
+        mode: "automatic",
+        expectedVersion: 0,
+        operationId: policyOperationId,
+      }),
+    ).toEqual(automaticPolicy);
+    await expect(
+      updateCompanyProfileAgentPolicy(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        actorSubjectId: f.ownerSubjectId,
+        mode: "suggest",
+        expectedVersion: 0,
+        operationId: policyOperationId,
+      }),
+    ).rejects.toMatchObject({ code: "operation_reused" });
+    await expect(
+      updateCompanyProfileAgentPolicy(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId,
+        actorSubjectId: f.ownerSubjectId,
+        mode: "off",
+        expectedVersion: 0,
+        operationId: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: "policy_conflict" });
+    const request = {
+      operationId: crypto.randomUUID(),
+      profile: profile(),
+      reason: "The owner enabled autonomous organization identity updates.",
+    };
+    const activated = await proposeCompanyProfileForAgent(client.db, {
+      attempt: f.attempt,
+      request,
+    });
+    expect(activated).toMatchObject({
+      status: "activated",
+      policyMode: "automatic",
+      replayed: false,
+      mutation: {
+        head: { activationVersion: 1 },
+        event: {
+          type: "activate",
+          actorSubjectId: "service:company-profile-autonomy",
+        },
+      },
+    });
+    if (activated.status !== "activated") {
+      throw new Error("automatic company-profile policy did not activate the proposal");
+    }
+    expect(await proposeCompanyProfileForAgent(client.db, { attempt: f.attempt, request })).toEqual(
+      { ...activated, replayed: true },
+    );
+    const [automaticReceiptCount] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from company_profile_agent_automatic_activation_receipts
+      where proposal_receipt_id = ${activated.proposalReceiptId}`;
+    expect(automaticReceiptCount?.count).toBe(1);
+
+    await updateCompanyProfileAgentPolicy(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      actorSubjectId: f.ownerSubjectId,
+      mode: "off",
+      expectedVersion: 1,
+      operationId: crypto.randomUUID(),
+    });
+    const [before] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from company_profile_revisions
+      where account_id = ${f.grant.accountId}`;
+    await expect(
+      proposeCompanyProfileForAgent(client.db, {
+        attempt: f.attempt,
+        request: {
+          operationId: crypto.randomUUID(),
+          profile: {
+            ...profile(),
+            mission: "This proposal must be blocked before it becomes durable.",
+          },
+          reason: "Policy-off proof.",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "policy_disabled" });
+    const [after] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from company_profile_revisions
+      where account_id = ${f.grant.accountId}`;
+    expect(after?.count).toBe(before?.count);
+  }, 180_000);
+
   test("keeps an owner rejection inactive through the canonical answer and resume lifecycle", async () => {
     if (!shared || !client) return;
     const f = await fixture();
-    const proposed = await proposeCompanyProfileForAgent(client.db, {
-      attempt: f.attempt,
-      request: {
-        operationId: crypto.randomUUID(),
-        profile: profile(),
-        reason: "The organization owner will reject this staged profile.",
-      },
-    });
+    const proposed = reviewRequired(
+      await proposeCompanyProfileForAgent(client.db, {
+        attempt: f.attempt,
+        request: {
+          operationId: crypto.randomUUID(),
+          profile: profile(),
+          reason: "The organization owner will reject this staged profile.",
+        },
+      }),
+    );
     const humanInputRequestId = await freezeProposal(f, proposed);
     const answerEventId = await answerProposal(
       f,
@@ -687,14 +819,16 @@ describe("company-profile agent administration", () => {
       }),
     ).rejects.toMatchObject({ code: "authority_unavailable" });
 
-    const proposal = await proposeCompanyProfileForAgent(client.db, {
-      attempt: first.attempt,
-      request: {
-        operationId: crypto.randomUUID(),
-        profile: profile(),
-        reason: "Authority will be revalidated after the human-input resume.",
-      },
-    });
+    const proposal = reviewRequired(
+      await proposeCompanyProfileForAgent(client.db, {
+        attempt: first.attempt,
+        request: {
+          operationId: crypto.randomUUID(),
+          profile: profile(),
+          reason: "Authority will be revalidated after the human-input resume.",
+        },
+      }),
+    );
     const humanInputRequestId = await freezeProposal(first, proposal);
     const answerEventId = await answerProposal(
       first,
@@ -815,8 +949,10 @@ describe("company-profile agent administration", () => {
         profile: profile(),
         reason: "Lock-order proof: propose against a concurrent same-session event writer.",
       };
-      const proposed = await raceAgainstSessionWriter(() =>
-        proposeCompanyProfileForAgent(client!.db, { attempt: f.attempt, request }),
+      const proposed = reviewRequired(
+        await raceAgainstSessionWriter(() =>
+          proposeCompanyProfileForAgent(client!.db, { attempt: f.attempt, request }),
+        ),
       );
       expect(proposed.status).toBe("confirmation_required");
       // A real same-turn event append proceeds once nothing is held.

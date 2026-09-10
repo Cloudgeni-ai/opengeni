@@ -247,6 +247,55 @@ describe("summarizeRailNodes", () => {
     });
   });
 
+  test("shows a failed task in red only until that viewer has acknowledged it", () => {
+    const unreadFailure = buildRailForest([
+      session({ id: "failed-unread", status: "failed", unread: true }),
+    ]);
+    expect(summarizeRailNodes(unreadFailure.grouped[0]!.sessions)).toEqual({
+      kind: "failed",
+      count: 1,
+      total: 1,
+      label: "1 failed",
+    });
+
+    const reviewedFailure = buildRailForest([
+      session({ id: "failed-reviewed", status: "failed", unread: false }),
+    ]);
+    expect(summarizeRailNodes(reviewedFailure.grouped[0]!.sessions)).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 1,
+      label: "Read",
+    });
+  });
+
+  test("does not keep a parent red for an acknowledged failed descendant", () => {
+    const forest = buildRailForest([
+      session({
+        id: "root-with-reviewed-failure",
+        treeStats: {
+          directChildren: 1,
+          totalDescendants: 1,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 0,
+          pausedDescendants: 0,
+          failedDescendants: 1,
+          unreadFailedDescendants: 0,
+          unreadDescendants: 0,
+          activelyWorkingDescendants: 0,
+          truncated: false,
+        },
+      }),
+    ]);
+    expect(summarizeRailNodes(forest.grouped[0]!.sessions)).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 2,
+      label: "Read",
+    });
+  });
+
   test("solid unread wins over the actively-working follow-up label", () => {
     const forest = buildRailForest([
       session({ id: "one", unread: true, activelyWorking: true }),

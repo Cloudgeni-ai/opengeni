@@ -8,6 +8,8 @@ export type SessionBranchPage = {
   channelGenerations: ReadonlyMap<string, number>;
   nextCursor: string | null;
   loading: boolean;
+  /** Whether this load cycle may paint loading or retry feedback in the tree. */
+  feedbackVisible: boolean;
   failed: boolean;
   stale: boolean;
   requestId: number | null;
@@ -26,10 +28,11 @@ export type SessionBranchSummaryDecision = {
  * changes advance the status aggregates. Title/content stays owned by the
  * child page or active route projection.
  */
-export function sessionBranchSummaryKey(session: Session): string {
+export function sessionBranchSummaryKey(session: Session, readRevision = 0): string {
   const stats = session.treeStats;
-  if (!stats) return `${session.id}:${session.updatedAt}:unknown`;
+  if (!stats) return `${session.id}:${session.updatedAt}:unknown:${readRevision}`;
   return [
+    readRevision,
     session.id,
     session.updatedAt,
     stats.directChildren,
@@ -39,6 +42,7 @@ export function sessionBranchSummaryKey(session: Session): string {
     stats.attentionDescendants,
     stats.pausedDescendants,
     stats.failedDescendants,
+    stats.unreadFailedDescendants ?? stats.failedDescendants,
     stats.unreadDescendants ?? 0,
     stats.activelyWorkingDescendants ?? 0,
     stats.attentionSince ?? "",
@@ -74,6 +78,7 @@ export function upsertSessionBranchChild(
     channelGenerations: page?.channelGenerations ?? new Map(),
     nextCursor: page?.nextCursor ?? null,
     loading: page?.loading ?? false,
+    feedbackVisible: page?.feedbackVisible ?? false,
     failed: page?.failed ?? false,
     stale: page?.stale ?? false,
     requestId: page?.requestId ?? null,
@@ -87,6 +92,7 @@ export function beginSessionBranchRequest(
   parentSessionId: string,
   requestId: number,
   cursor?: string,
+  options: { feedbackVisible?: boolean | undefined } = {},
 ): ReadonlyMap<string, SessionBranchPage> {
   const previous = pages.get(parentSessionId);
   return new Map(pages).set(parentSessionId, {
@@ -94,6 +100,7 @@ export function beginSessionBranchRequest(
     channelGenerations: previous?.channelGenerations ?? new Map(),
     nextCursor: previous?.nextCursor ?? null,
     loading: true,
+    feedbackVisible: options.feedbackVisible ?? true,
     failed: false,
     stale: false,
     requestId,
@@ -101,14 +108,39 @@ export function beginSessionBranchRequest(
   });
 }
 
-/** Commit one server child page into the existing branch state. */
+/** Refresh the already-loaded window with bounded, opaque-cursor reads. */
+export async function readLoadedSessionBranchWindow(
+  readPage: (
+    cursor?: string,
+  ) => Promise<{ sessions: Session[]; pinned: Session[]; nextCursor: string | null }>,
+  minimumCount: number,
+  initialCursor?: string,
+): Promise<{ sessions: Session[]; nextCursor: string | null }> {
+  const sessions = new Map<string, Session>();
+  const seen = new Set<string>();
+  let cursor = initialCursor;
+  for (let reads = 0; reads <= Math.max(1, minimumCount); reads += 1) {
+    const page = await readPage(cursor);
+    for (const session of [...page.sessions, ...page.pinned]) sessions.set(session.id, session);
+    if (!page.nextCursor || sessions.size >= minimumCount) {
+      return { sessions: [...sessions.values()], nextCursor: page.nextCursor };
+    }
+    if (seen.has(page.nextCursor)) throw new Error("Child pagination cursor repeated");
+    seen.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new Error("Child pagination made no progress");
+}
+
+/** Commit one server child page or a fully refreshed loaded window. */
 export function commitSessionBranchPage(
   pages: ReadonlyMap<string, SessionBranchPage>,
   parentSessionId: string,
   input: { sessions: readonly Session[]; nextCursor: string | null },
   options: {
     append?: boolean;
-    preserve?: readonly Session[];
+    replaceWindow?: boolean;
+    preserve?: readonly Session[] | undefined;
     requestId?: number;
     readGeneration?: number;
   } = {},
@@ -131,7 +163,10 @@ export function commitSessionBranchPage(
     // A refreshed first page owns the leading order. Retain already-loaded
     // tail entries (including an active child outside the first 50) behind it.
     for (const session of input.sessions) merged.set(session.id, session);
-    for (const session of [...(previous?.sessions ?? []), ...(options.preserve ?? [])]) {
+    for (const session of [
+      ...(options.replaceWindow ? [] : (previous?.sessions ?? [])),
+      ...(options.preserve ?? []),
+    ]) {
       if (!merged.has(session.id)) merged.set(session.id, session);
     }
   }
@@ -146,6 +181,7 @@ export function commitSessionBranchPage(
     channelGenerations,
     nextCursor: input.nextCursor,
     loading: false,
+    feedbackVisible: false,
     failed: false,
     stale: false,
     requestId: null,
@@ -166,7 +202,7 @@ export function authoritativeSessionBranchChannels(
   return evidence;
 }
 
-/** Fail only the still-current request and retain its exact retry cursor. */
+/** Fail only the still-current request and expose its exact retry cursor. */
 export function failSessionBranchRequest(
   pages: ReadonlyMap<string, SessionBranchPage>,
   parentSessionId: string,
@@ -177,10 +213,19 @@ export function failSessionBranchRequest(
   return new Map(pages).set(parentSessionId, {
     ...previous,
     loading: false,
+    // Background hydration may suppress transient loading feedback, but a
+    // failure must become actionable instead of leaving the branch silently
+    // incomplete for the rest of the active route.
+    feedbackVisible: true,
     failed: true,
     stale: false,
     requestId: null,
   });
+}
+
+/** A fresh cached page already owns the active child's parent branch. */
+export function sessionBranchNeedsHydration(page: SessionBranchPage | undefined): boolean {
+  return page === undefined || page.failed || page.stale;
 }
 
 /** Decide whether a changed parent summary can be acknowledged right now. */

@@ -9,6 +9,7 @@ export type ManagedAuthFailure = {
   fields: ManagedAuthFormErrors;
   message: string | null;
   switchTo: ManagedAuthMode | null;
+  canResendVerification: boolean;
 };
 
 export class ManagedAuthSessionUnavailableError extends Error {
@@ -57,6 +58,7 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
           ? "Your account was created, but we couldn't start your session. Switch to sign in and use the password you just chose."
           : "Your details were accepted, but we couldn't start your session. Please try again.",
       switchTo: error.mode === "signup" ? "signin" : null,
+      canResendVerification: false,
     };
   }
 
@@ -66,6 +68,7 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         fields: { email: "An account already exists for this email." },
         message: "Sign in with this email instead, or use a different email address.",
         switchTo: "signin",
+        canResendVerification: false,
       };
     }
     if (error.code === "INVALID_EMAIL_OR_PASSWORD") {
@@ -73,6 +76,15 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         fields: {},
         message: "Email or password is incorrect.",
         switchTo: null,
+        canResendVerification: false,
+      };
+    }
+    if (error.code === "EMAIL_NOT_VERIFIED") {
+      return {
+        fields: {},
+        message: "Verify your email before signing in.",
+        switchTo: null,
+        canResendVerification: true,
       };
     }
     if (
@@ -83,6 +95,7 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         fields: { email: "Enter a valid email address." },
         message: null,
         switchTo: null,
+        canResendVerification: false,
       };
     }
     if (
@@ -98,6 +111,7 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         },
         message: null,
         switchTo: null,
+        canResendVerification: false,
       };
     }
     if (error.status === 429) {
@@ -105,6 +119,7 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         fields: {},
         message: "Too many attempts. Wait a moment and try again.",
         switchTo: null,
+        canResendVerification: false,
       };
     }
   }
@@ -116,5 +131,6 @@ export function managedAuthFailure(mode: ManagedAuthMode, error: unknown): Manag
         ? "We couldn't create your account. Please try again."
         : "We couldn't sign you in. Please try again.",
     switchTo: null,
+    canResendVerification: false,
   };
 }

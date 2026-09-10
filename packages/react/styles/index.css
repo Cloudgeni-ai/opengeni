@@ -17,6 +17,29 @@
 @import "./tokens.css";
 @import "./effective-tokens.css";
 
+/* Standalone embeds do not necessarily load Tailwind Preflight. Keep the
+   control reset inside SDK roots, before utilities, without resetting the host.
+   :where keeps controls at the same specificity as component utilities. */
+@layer base {
+  .og-root :where([hidden]:not([hidden="until-found"])) {
+    display: none !important;
+  }
+  .og-root :where(button, input, textarea, select) {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid;
+    border-radius: 0;
+    background-color: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+  }
+  .og-root :where(button, input[type="button"], input[type="submit"], input[type="reset"]) {
+    appearance: button;
+  }
+}
+
 @theme inline {
   --font-og-sans: var(--og-font-sans);
   --font-og-mono: var(--og-font-mono);

@@ -21,8 +21,9 @@ export type CompanyProfileAgentAdminRouterOptions = {
 /**
  * Explicit organization administration is intentionally separate from derived
  * workspace learning. The database capabilities own exact-attempt admission,
- * current organization-owner authority, canonical human confirmation,
- * tenant isolation, CAS, and immutable receipts.
+ * current organization-owner authority, the separate organization policy,
+ * canonical review when required, tenant isolation, CAS, and immutable
+ * receipts.
  */
 export function createCompanyProfileAgentAdminRouter(
   options: CompanyProfileAgentAdminRouterOptions,

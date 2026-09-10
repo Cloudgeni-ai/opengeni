@@ -14,6 +14,12 @@ type OrganizationKnowledgeModelSelection = {
 };
 
 function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
+  if (model.cost === "free") return "Free in this deployment";
+  if (model.cost === "credits") return "OpenGeni credits";
+  if (model.cost === "workspace") return "Workspace AI Gateway";
+  if (model.cost === "subscription") {
+    return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
+  }
   if (model.source === "codex") return "Codex subscription";
   if (model.source === "supergrok") return "SuperGrok subscription";
   if (model.source === "workspace_gateway") return "Workspace AI Gateway";
@@ -152,7 +158,7 @@ export function OrganizationKnowledgePrompt({ workspaceId }: { workspaceId: stri
         },
         {
           instructions:
-            "Help the user create a concise organization identity containing only identity (who the organization is) and mission (why it exists). Ask only essential follow-up questions and do not expand this into products, customers, goals, constraints, strategy, procedures, or a general company summary. Those changing or detailed facts belong in organization-scoped Documents and should be retrieved when relevant, not injected into every agent prompt. Show the complete proposed identity and mission before applying it. Use company_profile_propose, pass its humanInput payload verbatim to request_human_input, and only after the organization owner confirms Activate call company_profile_confirm. This explicit administration path is independent of workspace learning policy. Do not save identity or mission as ordinary Memory, Documents, workspace policy, or a Skill. If either company-profile tool is unavailable, say so briefly and leave the final proposal ready for an authorized governance client.",
+            "Help the user create a concise organization identity containing only identity (who the organization is) and mission (why it exists). Ask only essential follow-up questions and do not expand this into products, customers, goals, constraints, strategy, procedures, or a general company summary. Those changing or detailed facts belong in organization-scoped Documents and should be retrieved when relevant, not injected into every agent prompt. Show the complete proposed identity and mission before applying it. Use company_profile_propose. If it returns activated, report the applied change without asking again. If it returns confirmation_required, pass its humanInput payload verbatim to request_human_input and only after the organization owner confirms Activate call company_profile_confirm. This explicit administration path follows the organization-level Agent-managed identity mode and is independent of workspace learning policy. Do not save identity or mission as ordinary Memory, Documents, workspace policy, or a Skill. If the company-profile tools are unavailable, say so briefly and leave the final proposal ready for an authorized governance client.",
         },
       );
       if (created) {

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   PRIMARY_WORKSPACE_ITEMS,
   WORKSPACE_CONFIG_GROUPS,
+  isConfigItemActive,
   isWorkspaceConfigPath,
 } from "./workspace-nav-data";
 
@@ -11,7 +12,9 @@ const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`
 describe("workspace rail destinations", () => {
   test("labels the settings entry without changing its destination", () => {
     expect(workspaceNavSource).toContain('aria-label="Settings"');
-    expect(workspaceNavSource).toContain('title={rail.collapsed ? "Settings" : undefined}');
+    expect(workspaceNavSource).toContain(
+      '<TooltipContent side={rail.collapsed ? "right" : "top"}>Settings</TooltipContent>',
+    );
     expect(workspaceNavSource).toContain('<span className="min-w-0 truncate">Settings</span>');
     expect(workspaceNavSource).toContain('to="/workspaces/$workspaceId/settings"');
     expect(workspaceNavSource).toContain('search={{ section: "general" }}');
@@ -25,16 +28,23 @@ describe("workspace rail destinations", () => {
 
     expect(primaryTargets).toEqual([
       "/workspaces/$workspaceId/plugins",
-      "/workspaces/$workspaceId/documents",
       "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/schedules",
       "/workspaces/$workspaceId/artifacts",
     ]);
+    expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.label)).not.toContain("Documents");
     expect(settingsTargets.filter((target) => primaryTargets.includes(target))).toEqual([]);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/schedules", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/artifacts", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/documents", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/state", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/settings", "ws-1")).toBe(true);
+    expect(
+      isConfigItemActive(
+        "/workspaces/ws-1/artifacts/site-1",
+        "ws-1",
+        "/workspaces/$workspaceId/artifacts",
+      ),
+    ).toBe(true);
   });
 });

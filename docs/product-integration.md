@@ -11,15 +11,140 @@ tools, and execution.
 The canonical server-side integration uses:
 
 - one **organization API key** held only by the external backend;
-- one OpenGeni **organization workspace** for each product tenant or other
-  operational boundary that needs isolated sessions;
+- one OpenGeni **organization workspace** for each smallest product group that
+  may share workspace-scoped agent authority and resources;
 - workspace-scoped session and file APIs after the backend resolves that
   mapping; and
 - inline session Skills loaded from the external backend's own Skill store.
 
 An organization workspace has wire `kind: "shared"`. Use “organization
-workspace” in customer-facing integration guidance; `shared` is the exact wire
-value. Personal workspaces are excluded from this integration model.
+workspace" in customer-facing integration guidance; `shared` is the exact wire
+value. Personal workspaces are excluded from this service-provisioning model.
+The separate verified `asUser` lane can access its own provisioned Personal
+workspace; an unscoped service key cannot. See the external-user section below.
+
+The built-in `opengeni-product-integration` Pack is guidance for the coding
+session that builds this integration, not for the resulting product chatbot.
+Its Skill is session-selected: installation alone does not add it to any agent.
+Use **Start with Pack** in the web console, or create the implementation session
+with the reviewed Skill component ID in `installedSkillIds`. Never include that
+ID in customer-facing session creation.
+The Pack content is generated from `.agents/skills/opengeni-client`, with only
+an explicit install-name/description/activation wrapper. After editing the
+developer guide, run `bun scripts/sync-product-integration-skill.ts`; use
+`bun run check:product-integration-skill` to detect drift. Published runtime
+packages contain the generated content and do not read repository Markdown.
+When a create uses an idempotency key, its ordered `installedSkillIds`
+selection is immutable: a retry may repeat it exactly, but changing or removing
+the selection conflicts instead of replaying a differently configured session.
+
+## Simplest integration
+
+Install the packages, keep the organization API key on your server, and put one
+handler behind your existing chat endpoint:
+
+```bash
+bun add @opengeni/sdk @opengeni/react
+```
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!, // organization API key
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
+
+// Your endpoint. `resolve` is your auth hook: tenant and user come from the
+// request you authenticated, never from the request body.
+export const POST = createChatHandler(og, {
+  resolve: async (request) => {
+    const me = await authenticate(request);
+    if (!me) return new Response("Unauthorized", { status: 401 });
+    return { tenant: me.accountId, user: me.userId };
+  },
+});
+```
+
+Or drive it from any server code:
+
+```ts
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+const reply = await chat.send("What did we decide about the invoice?");
+console.log(reply.text);
+for await (const chunk of chat.stream("And the next step?")) {
+  if (chunk.type === "text") process.stdout.write(chunk.text);
+}
+```
+
+`tenant` becomes one organization workspace, created idempotently on first use
+through `ensureWorkspace`; `conversation` becomes one deterministic session; and
+`send` or `stream` creates that session on the first message. Conversation ids
+are independent of the acting user: the handler reads the client's conversation
+ID (`x-opengeni-conversation`, else the wire format's field), and ordinary API
+authorization decides whether the resolved user can use that session. Use private
+visibility when other members must not read it. Without a `user`, the host must name the
+`conversation` from `resolve`. A custom browser client can restore
+history and unresolved approvals/questions with `GET` on the same endpoint.
+There is no dedicated React component for this simplified protocol. If the product already uses the
+Vercel AI SDK, pass `format: "vercel"` and keep `useChat` unchanged; for an
+OpenAI-shaped client pass `format: "openai-chat"` or
+`format: "openai-responses"`. These adapters send only the latest user message
+and import the earlier messages in the request once, as context on the first
+message of a conversation; after that OpenGeni owns the history. The runnable
+[chat quickstart example](../examples/chat-quickstart) is this section as one
+backend server file with a command-line request example.
+
+### Pick the privacy and memory of each chat
+
+Every chat lives in the customer's one workspace, so all of them share that
+customer's documents, workspace instructions, Connections, and integrations.
+Two per-session options decide what the agent may reach beyond its own
+conversation:
+
+| Scenario | `agentAccess` | `memory` |
+| --- | --- | --- |
+| Support desk: each agent stays in its chat tree | `"session"` (facade default) | `false` (default) |
+| One customer's agents may reach that same user's chats | `"user"` with authenticated `asUser` identity | `"user"` |
+| A team that collaborates across chats | `"workspace"` | `"workspace"` |
+| Any of the above without Memory tools | any | `false` |
+
+`agentAccess` is enforced for agents in the single session-authorization seam:
+a session's own tree (its children and their children) is always reachable,
+peers are reachable when the caller's task scope and ordinary target authorization
+allow it. Target task scope adds no incoming restriction. `memory` selects which Memory rows the agent reads and where it saves:
+user-scoped memories use the verified user of the active turn, not an arbitrary
+product label or the person who first created a shared conversation. Use task
+notes for temporary conversation-tree coordination. There is no active session
+Memory scope. The facade's `user` selects the server-side `asUser()` client; the
+organization API key authenticates that assertion. The server derives canonical
+identity, and children inherit and may only narrow agent reach and Memory mode.
+On the raw API select `CreateSessionRequest.agentAccess` and `memoryScope`;
+the platform default for a raw create stays `agentAccess: "workspace"`.
+
+Human visibility is a separate axis: use `visibility: "user_private"` with
+verified owning-user authority when other humans must not see the transcript.
+Workspace-shared conversations remain accessible to their authorized members.
+Use the same OpenGeni session ID for collaborators; identity must not change the
+conversation address. See [Choose the credential boundary](#choose-the-credential-boundary).
+
+### When to graduate to the full client
+
+User-mode chat uses canonical `asUser()` authority and requires explicitly
+approved workspace membership. Provision it in product onboarding, not on every
+message; a removed membership must stay removed. The service-only mode remains
+available for backend-triggered work without a product user. Reopen existing
+user-namespaced conversations with `chatBySessionId`; the new conversation-ID
+convention is shared across users and does not migrate historical addresses.
+
+`og.client` is the ordinary `OpenGeniClient`, and `chat.sessionId` with
+`chat.workspaceId` name the session the facade created, so files, tools,
+approvals with policies, forks, realtime voice, and `SessionConversation` all
+work on the same session without a migration. Pass anything the facade does not
+name through `create` (a partial `CreateSessionRequest`); identity and
+idempotency fields always come from the facade. A turn that stops for an
+approval or structured human input returns a `pending` reply, and
+`chat.respond` continues it.
 
 ## Boundary and ownership
 
@@ -51,11 +176,57 @@ tool output, prompts, logs, or generated Skills. A short-lived signed storage
 URL returned by the upload flow is scoped file-transfer authority; it is not an
 OpenGeni API credential.
 
+## Choose the isolation unit first
+
+The workspace is the unit that shares documents, workspace instructions,
+Connections, and integrations. Session isolation inside it is a per-session
+setting, so the default is one workspace per customer:
+
+| Product rule | Default OpenGeni mapping |
+| --- | --- |
+| Everyone in one product tenant may collaborate across chats | One workspace per tenant, `agentAccess: "workspace"` |
+| Each user's chats must be private from other users | One workspace per tenant, `asUser()` and `visibility: "user_private"`; choose agent reach separately |
+| Every chat must be isolated, including from the same user's other chats | One workspace per tenant, `agentAccess: "session"` |
+| Several users access the same upstream data but their chats are private | One workspace per tenant; shared data lives there, chats use `visibility: "user_private"` |
+| Groups need different Connections, integrations, or workspace instructions | One workspace per group |
+
+This is an agent-authority decision, not only a UI visibility decision. A live
+agent attempt may read, message, and control another session in the same
+workspace only when the caller's `agentAccess` and target resource authorization allow it; the seam in
+`packages/core/src/session-authorization.ts` enforces outbound-only task scope,
+always allows a session's own tree, and filters `sessions_list` and the session
+list routes the same way. Turning `memoryEnabled` off only disables workspace
+Memory retrieval/saving; use `memoryScope` for per-session memory behavior.
+
+A top-level session created by an unscoped organization service key is
+`workspace_shared`. The owning-user `user_private` / **Only me** capability
+requires verified native-cookie or external `asUser` provenance, plus the
+existing platform/organization readiness policy. An unscoped service key cannot
+claim that provenance. External identity admission does not create an OpenGeni
+login. Broader personal-resource and durable external execution guarantees must
+be verified separately from core private-session access.
+
+`firstPartyMcpTools` and `firstPartyMcpPermissions` still narrow what a session
+can do, and narrowing is monotone: a child session, an agent updating its own
+tool policy, a scheduled task created by an agent, and the Codemode SDK proxy
+can never widen tools, permissions, `agentAccess`, canonical scope identity, or `memoryScope`
+beyond the creating session. Omitting `firstPartyMcpTools` inherits the
+deployment's non-connector default catalog, and omitting `tools` inherits
+workspace MCP defaults; explicit empty arrays suppress those respective
+selections.
+
+Creating a workspace does not create a dedicated cluster or permanently
+running sandbox. It adds control-plane state and may require per-workspace
+settings, Connections, and Integration installations. Provisioning hundreds of
+workspaces is therefore reasonable, but a per-chat design needs automated
+reconciliation and cleanup rather than repeated manual setup.
+
 ## Choose the credential boundary
 
 | Credential | Use it when | Do not use it for |
 | --- | --- | --- |
 | Organization API key | One server-side product integration provisions or manages many organization workspaces in one organization | Browser/mobile clients or Personal workspaces |
+| Organization API key with `access: "read"` | A reporting, audit, or analytics backend that must read every shared workspace's sessions and transcripts and nothing else | Creating sessions, controlling turns, or minting keys |
 | Workspace API key | One backend or automation is deliberately constrained to a single organization workspace | Multi-workspace provisioning or organization administration |
 | Delegated token | A host acts with short-lived, explicit user/workspace authority | A standing multi-tenant backend credential |
 | Deployment access key | An operator needs a coarse configured/self-hosted deployment perimeter | Tenant identity, account selection, or workspace authorization |
@@ -63,6 +234,15 @@ OpenGeni API credential.
 An organization API key is the default for the product shape on this page.
 Choosing it does not remove the product backend's obligation to authenticate
 its own users and resolve their allowed tenant before every proxy call.
+
+Either organization key reads every shared workspace in the organization. To
+read all transcripts without touching each workspace, call
+`listOrganizationSessions(organizationId, { limit, cursor, scopeSubjectId?, status? })`
+or iterate `iterateOrganizationSessions`; the route is
+`GET /v1/organizations/:organizationId/sessions`, every row carries its
+`workspaceId`, and events are then read through the ordinary workspace routes.
+Personal workspaces and managed-human **Only me** sessions are never included.
+Mint the narrower key with `createOrganizationApiKey(organizationId, { name, access: "read" })`.
 
 ## Canonical provisioning flow
 
@@ -82,15 +262,23 @@ Rotate by creating the replacement, switching backend traffic, and then
 revoking the old key. Do not use the legacy workspace-scoped API-key routes for
 a new multi-workspace product integration.
 
+Upgrades that introduce explicit organization-key provenance revoke ambiguous
+historical null-workspace keys. If an integration predates the organization
+API-key control plane, create a new organization key through the route above,
+replace the stored backend secret, and discard the legacy token.
+
 Organization keys have one fixed scope: `account:read`, `workspace:create`,
 `workspace:read`, `workspace:admin`, and `api_keys:manage`. Workspace admin
 implies ordinary workspace operations but not the literal `secrets:read`
 permission. `api_keys:manage` also permits issuing narrower workspace keys when
-an integration component should be constrained to one tenant workspace.
+an integration component should be constrained to one tenant workspace. Those
+child keys cannot receive account, member, workspace-creation, billing, or
+plaintext-secret permissions that the workspace grant does not literally hold.
 
 ### 2. Ensure an organization workspace
 
-For each product tenant, project, or other chosen isolation boundary, call:
+For each product tenant, user, chat, project, or other chosen isolation
+boundary, call:
 
 | Operation | SDK method | Route |
 | --- | --- | --- |
@@ -103,9 +291,10 @@ workspace id beside the product tenant record so later session requests do not
 depend on a name lookup.
 
 `ensureWorkspace` never selects, returns, or creates a Personal workspace.
-Personal workspaces belong to managed humans and are not product tenant
-containers. Do not use `/v1/access/me`'s personal/default workspace as a
-fallback for an external backend integration.
+Personal workspaces belong to individual native or external identities and are
+not product tenant containers. Only an authenticated owning-user lane can use
+its exact Personal pointer. Do not use `/v1/access/me`'s personal/default
+workspace as a fallback for an unscoped service integration.
 
 A server-side setup flow has this shape; use the request types exported by the
 installed SDK as the exact schema authority:
@@ -122,15 +311,15 @@ const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
 const { workspace, created } = await client.ensureWorkspace({
   accountId: organizationId,
   externalSource: "acme-product",
-  externalId: productTenant.id,
-  name: productTenant.displayName,
+  externalId: productBoundary.id,
+  name: productBoundary.displayName,
 });
 
 if (workspace.kind !== "shared") {
   throw new Error("Product integrations require an organization workspace");
 }
 
-await productTenants.storeOpenGeniWorkspaceId(productTenant.id, workspace.id);
+await productBoundaries.storeOpenGeniWorkspaceId(productBoundary.id, workspace.id);
 
 await client.updateWorkspaceSettings(workspace.id, {
   memoryEnabled: true,
@@ -138,7 +327,7 @@ await client.updateWorkspaceSettings(workspace.id, {
 });
 
 const selectedSkills = await productSkillStore.resolveForSession({
-  tenantId: productTenant.id,
+  boundaryId: productBoundary.id,
   agentType: "support-agent",
 });
 
@@ -146,6 +335,9 @@ const session = await client.createSession(workspace.id, {
   initialMessage: userMessage,
   idempotencyKey: productRequest.id,
   skills: selectedSkills,
+  // Headless customer-facing sessions should choose an explicit minimal set.
+  firstPartyMcpTools: selectedFirstPartyTools,
+  tools: selectedIntegrationServers,
 });
 ```
 
@@ -153,13 +345,20 @@ const session = await client.createSession(workspace.id, {
 same nested `workspace` with `created: false` and does not overwrite its name,
 slug, or agent instructions with stale retry data.
 
-The external source/id pair is globally unique. Namespace `externalSource` to
-the product and treat a `409` response as an identity already owned by another
-organization, not as a successful replay.
+The external source/id pair is unique within the organization. Two organizations
+may independently use the same pair; neither can discover or replay the other's
+workspace through this mapping. Within one organization, retries preserve the
+existing workspace ID and presentation. Namespace `externalSource` to the product
+to avoid collisions between products in the same organization.
 
 The organization API key identifies the organization boundary. Never accept an
 organization id, external mapping identity, or OpenGeni workspace id directly
 from an unauthenticated browser request.
+
+The `externalId` identifies the product boundary; it does not create an
+OpenGeni human or membership. Provision lazily on first use, from the product's
+user/tenant lifecycle, through a bounded backfill, or a combination. Every path
+should call the same idempotent reconciler.
 
 `getAccessContext()` / `GET /v1/access/me` intentionally returns the
 organization account grant without enumerating every organization workspace in
@@ -190,6 +389,19 @@ operation.
 
 ## Skills are external product data
 
+Control OpenGeni's bundled guidance separately from your product Skills with
+`CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
+`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. Selection
+only narrows each bundle's normal inclusion conditions and grants no tool
+permissions. Child sessions inherit the choice and may only narrow it.
+Scheduled-task `agentConfig` and automation `sessionTemplate` accept the same
+field. Keep the same effective choice when retrying keyed session creation.
+
+This does not disable workspace-authored/installed Skills or your inline
+`skills`. Those keep their own ownership and sharing rules. The eager
+`skill_read` tool remains available even with no bundled guidance. Bundle
+selection does not wait for lazy tool discovery or sandbox startup.
+
 The external backend owns its reusable Skills. Store and version them with the
 product's integration code or in the product's own Skill store, then pass the
 selected Skill definitions inline in `CreateSessionRequest.skills` for each
@@ -205,8 +417,6 @@ const session = await client.createSession(workspace.id, {
   initialMessage: userMessage,
   idempotencyKey: productRequest.id,
   skills: selectedSkills.map((skill) => ({
-    name: skill.name,
-    description: skill.description,
     files: skill.files.map((file) => ({
       path: file.path,
       content: file.content,
@@ -215,9 +425,13 @@ const session = await client.createSession(workspace.id, {
 });
 ```
 
-Every inline Skill must include a top-level `SKILL.md`; additional reference
-files remain relative to that Skill directory. Skill content is session
-configuration, not a secret store.
+Every inline Skill must include a top-level `SKILL.md` with valid YAML
+frontmatter containing `name` and `description`. Those values are the source of
+the context index metadata; do not maintain a separate short description.
+Submit `files` alone. Legacy `name` and `description` fields are optional
+consistency assertions and, when supplied, must exactly match the frontmatter.
+Additional reference files remain relative to that Skill directory. Skill
+content is session configuration, not a secret store.
 
 There is no organization-wide Skill registry or Skill inheritance for this
 integration contract. Installing or selecting a Skill in the external product
@@ -243,11 +457,101 @@ Use each prompt surface for its actual lifetime:
 
 `modelContext` and Skill content are not secrets. Full audit or session readers
 may return them. If the agent needs current product state or must mutate product
-records, expose a tenant-scoped product MCP server instead of copying the
-product's database into OpenGeni or embedding long-lived credentials in a
-prompt.
+records, expose a tenant-scoped tool surface instead of copying the product's
+database into OpenGeni or embedding long-lived credentials in a prompt.
+
+### Existing APIs without MCP
+
+A customer that has suitable APIs does not need to build an MCP server first.
+OpenGeni can deterministically compile a focused OpenAPI 3.0/3.1 document or a
+GraphQL endpoint into the same model-visible tool shape through the API
+Integration lifecycle:
+
+1. Host the API description and provider endpoint where the OpenGeni control
+   plane can reach them under the deployment network policy.
+2. Create a workspace Connection when authentication is required.
+3. Call `previewApiIntegration` with the source and Connection.
+4. Apply the customer's policy to the compiled operations, safety metadata,
+   warnings, and approval modes.
+5. Call `installApiIntegration` with the exact preview revision and digest,
+   stable instance key, Connection, and selected operations.
+6. Persist the returned non-secret instance/server identifiers and select that
+   server in sessions.
+
+Preview/install is deterministic backend control-plane work, not an agent
+re-reading and approving the same documentation for every workspace. It can be
+automated for many workspaces. Definitions, Connections, and installations are
+workspace-scoped, so a per-user/per-chat workspace design needs a versioned
+reconciler; do not preview or reinstall on every message.
+
+The SDK cannot turn arbitrary in-process customer backend functions into
+remote tools. Existing functions must be exposed through an authorized network
+API described by OpenAPI/GraphQL, or through MCP. A narrow agent-facing API
+description may reference existing endpoints and omit irrelevant or dangerous
+operations.
+
+An installed API Integration and a remote MCP server remain distinct
+control-plane resources even though both become model-callable tools at
+runtime. Their installation identifiers, failure surfaces, and credential
+lifecycle should not be described as interchangeable.
+
+API-key Connections may carry validated header, query, or cookie placement;
+exact supported auth behavior comes from the live preview and installed SDK.
+Rotate an ordinary API-key Connection with `updateConnection` and its expected
+version. OAuth Connections use the supported reconnect flow. Installed API
+Integrations continue to refer to the stable Connection ID.
+
+A session-specific remote MCP server may instead be supplied in
+`createSession.mcpServers` with a URL, allowed tools, approval policy, and
+write-only credential headers or a non-secret `connectionRef`. Credential
+headers are encrypted at rest and omitted from session/event responses. A later
+accepted message can carry the supported MCP credential update for rotation.
+
+OpenGeni credential brokerage is not zero knowledge: the trusted control plane
+can decrypt a stored credential to construct the authorized provider request.
+The model and sandbox receive the tool schema and bounded result, not the
+credential itself. The customer API must still enforce tenant/user scope on
+every call and must not trust a model-supplied tenant id.
+
+### Model and runtime behavior
+
+Use `settings.sessionDefaults` for a workspace's default model and reasoning,
+and `model` / `reasoningEffort` on session or message requests for deliberate
+overrides. Workspace model access policy is the hard allowlist. Model ids and
+availability are live deployment facts; do not hard-code a remembered catalog.
+
+OpenGeni credits are held at the organization account. All of that
+organization's workspaces using the OpenGeni-credits model path draw from the
+same account balance; creating one workspace per user or chat does not create
+separate wallets. Connected subscriptions and workspace-owned provider
+credentials can use their separately reported external billing path. Retain
+workspace and product-boundary identifiers in usage reporting when the customer
+needs per-user or per-tenant attribution over the shared balance.
+
+Customer-facing runtime behavior belongs in customer-owned configuration:
+
+- workspace `agentInstructions` for stable behavior shared by that workspace;
+- session `instructions` for one agent role or conversation;
+- Skills for conditional procedures and tool-use guidance;
+- `modelContext` for current dashboard/route/filter state; and
+- explicit first-party and external tool selections for capability.
+
+Inline Skills are sent once at `createSession` and stored with that session;
+they are not retransmitted on each turn. Existing sessions retain the exact
+selected content. Version the customer runtime profile and apply updates to new
+sessions, with an explicit migration decision if old sessions must change. Do
+not attach implementation guidance about integrating OpenGeni to the end-user
+runtime agent.
 
 ## Browser and React integration
+
+Use `SessionConversation` for a packaged existing-session experience, or
+compose the timeline and composer. These use the normal SDK, not the
+simplified backend chat-handler protocol. Custom clients of that protocol
+must implement history restoration, pending decisions, and streaming themselves.
+On sign-out or user/tenant changes, clear private UI state and abort old
+requests before restoring another conversation. Backend authorization remains
+mandatory regardless of UI state.
 
 Use `@opengeni/react/session` for headless session semantics, or the focused
 styled subpaths when the product wants packaged OpenGeni visuals. The React
@@ -265,6 +569,20 @@ server-held credential, a tenant-safe API/SSE proxy, authenticated product MCP,
 and React composition. It uses a preselected workspace for demo setup; use the
 organization-key and `ensureWorkspace` flow above for production tenant
 provisioning.
+
+Before replacing chat UI in a React host, compare packaged styled surfaces,
+headless hooks/projections with customer-native components, and a fully custom
+SDK UI. The styled package can be branded through its scoped compiled CSS and
+`--og-*` tokens. For Svelte/SvelteKit, Vue, mobile, or other non-React hosts,
+build framework-native components against authenticated product backend routes;
+the backend may use the TypeScript SDK where compatible or the public HTTP
+contract otherwise.
+
+The product controls whether it renders final answers only, assistant progress,
+selected tool calls, or a full operational timeline. Presentation filtering
+does not remove the corresponding durable events from authorized OpenGeni
+history. A minimal UI must still surface actionable approvals, human-input
+requests, failures, cancellation, reconnect state, and credit/policy denials.
 
 ## Failures and next steps
 
@@ -289,21 +607,26 @@ Before calling a product integration complete, verify:
 1. The organization API key exists only in the product backend's secret store.
 2. Every product user request resolves an authorized product tenant before an
    OpenGeni workspace or session id is used.
-3. Every mapped workspace has `kind: "shared"`; Personal workspaces are rejected
-   rather than used as a fallback.
+3. The chosen product sharing boundary maps to the expected distinct or shared
+   `kind: "shared"` workspaces; Personal workspaces are rejected rather than
+   used as a fallback.
 4. Workspace provisioning retries call `ensureWorkspace` with the same stable
    external mapping identity.
 5. Session creation retries reuse one stable `idempotencyKey`.
-6. The external backend loads and passes the selected inline Skills for every
+6. The effective first-party and external tool policy is explicit and contains
+   only capabilities the customer-facing agent needs.
+7. Cross-user, cross-tenant, and manipulated workspace/session-id tests fail
+   closed at both the product and provider-data boundaries.
+8. The external backend loads and passes the selected inline Skills for every
    product-created session; no organization-wide registry or inheritance is
    assumed.
-7. SSE reconnect resumes by sequence, backfills gaps, and does not duplicate
+9. SSE reconnect resumes by sequence, backfills gaps, and does not duplicate
    product-side effects.
-8. File upload succeeds from every intended browser origin, including signed
+10. File upload succeeds from every intended browser origin, including signed
    storage PUT CORS and upload completion.
-9. Product MCP tools independently enforce the same tenant/user boundary as the
-   product API.
-10. The integration checks `/v1/config/client`, uses installed SDK types, and
+11. Product API/MCP tools independently enforce the same tenant/user boundary
+   as the product API and support credential rotation.
+12. The integration checks `/v1/config/client`, uses installed SDK types, and
     pins a compatible SDK/server major version instead of hard-coding volatile
     model, tool, or compute catalogs.
 

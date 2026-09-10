@@ -1,6 +1,8 @@
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   SandboxLeaseTransitionError,
@@ -11,6 +13,7 @@ import {
   EmptyCompactionSummaryError,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
+  isModalTaskExecStartDnsResolutionError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
@@ -21,6 +24,7 @@ import {
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
+import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CodexReloginRequired,
@@ -105,6 +109,7 @@ export function providerRecoveryResult(input: {
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
           input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
@@ -150,6 +155,13 @@ export function providerRecoveryExhaustedFailure<
 export function providerRecoveryCountFromMetadata(metadata: Record<string, unknown>): number {
   const value = metadata.providerRecoveryCount;
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+export function providerRecoveryCountAfterModelRequestPhase(
+  currentCount: number,
+  phase: string,
+): number {
+  return phase === "completed" ? 0 : currentCount;
 }
 
 export function headerValue(headers: unknown, name: string): string | null {
@@ -257,22 +269,21 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
  * but SQL text, parameters, and arbitrary invariant messages never enter
- * workflow history. Contention and operational database unavailability are
- * safe to re-read after backoff because the claim transaction contains no
- * model/tool effects; permanent database and state failures require terminal
- * settlement.
+ * workflow history. Every database failure is safe to re-read after backoff
+ * because the claim transaction contains no model/tool effects. Database
+ * constraints and authorization guards can also be repaired by a deployment or
+ * authority refresh, so they must preserve pending work. Only a non-database
+ * claim invariant is terminal.
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const retryableCode = retryableDatabaseFailureCode(error);
-  // The database transaction itself retries only the two contention failures
-  // proven safe for immediate replay. Once the activity has failed, the
-  // workflow may also retry operational outages after a durable re-read and
-  // bounded delay. Unknown driver/database failures stay recoverable because
-  // they commonly represent a lost connection; known constraint, auth, and
-  // application SQLSTATEs are permanent and must not create an infinite loop.
+  // The workflow retries after a durable re-read and bounded delay. A
+  // SessionEventPersistenceError proves the failure happened inside the atomic
+  // claim boundary, before provider or tool work; retaining it is safer than
+  // destroying accepted machine input on an application SQLSTATE.
   const detail: PreClaimFailureDetail = {
-    disposition: retryableCode ? "retryable" : "permanent",
+    disposition: persistenceFailure || retryableCode ? "retryable" : "permanent",
     code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
   };
   return ApplicationFailure.create({
@@ -716,7 +727,22 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
   return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
 }
 
+function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
+  return collectErrorStrings(error).find(
+    (value) =>
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+        value,
+      ) || /\bthis request was blocked by our safety systems\b/i.test(value),
+  );
+}
+
+function isProviderSafetyRefusal(error: unknown): boolean {
+  return providerSafetyRefusalDiagnostic(error) !== undefined;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
+  // A semantic refusal can arrive inside a 5xx transport envelope.
+  if (isProviderSafetyRefusal(error)) return false;
   const status =
     typeof error === "object" && error !== null
       ? Number(
@@ -760,6 +786,7 @@ export type XaiCredentialFailure = {
  * without an accepted model response; refresh relogin is equally definitive.
  */
 export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+  if (isProviderSafetyRefusal(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
@@ -801,6 +828,26 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
   return null;
 }
 
+// The generic turn-failure boundary also receives application/provider errors.
+// A five-character code or generic severity alone does not establish a driver error.
+function findPostgresDriverError(error: unknown): Record<string, unknown> | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  for (let index = 0; index < queue.length && index < 64; index += 1) {
+    const current = queue[index];
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (record.name === "PostgresError") return record;
+    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
+      const nested = record[key];
+      if (Array.isArray(nested)) queue.push(...nested.slice(0, 64));
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -824,6 +871,9 @@ export function agentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
 } {
+  if (error instanceof RetainedAttachmentTransportLimitError) {
+    return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
+  }
   if (error instanceof MandatoryHistoryPersistenceError) {
     const underlying = isSessionEventPersistenceError(error.cause)
       ? agentRunFailurePayload(error.cause, options)
@@ -833,6 +883,16 @@ export function agentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
+  if (safetyRefusalDiagnostic !== undefined) {
+    return {
+      error:
+        "The model provider blocked this request through its safety systems. Automatic retries stopped.",
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: safetyRefusalDiagnostic,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -870,6 +930,14 @@ export function agentRunFailurePayload(
       error:
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+      retryable: true,
+    };
+  }
+  if (isModalTaskExecStartDnsResolutionError(error)) {
+    return {
+      error:
+        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+      code: "sandbox_command_start_unavailable",
       retryable: true,
     };
   }
@@ -1023,6 +1091,18 @@ export function agentRunFailurePayload(
     }
     return { error: message, code: "provider_unavailable", retryable: true };
   }
+  const postgresDriverError = findPostgresDriverError(error);
+  if (postgresDriverError) {
+    const database = safeDatabaseErrorFacts(postgresDriverError);
+    const sqlState = nestedPostgresSqlState(postgresDriverError);
+    if (sqlState !== null || Object.keys(database).length > 0) {
+      return {
+        error: message,
+        sqlState,
+        ...(Object.keys(database).length > 0 ? { database } : {}),
+      };
+    }
+  }
   return { error: message };
 }
 
@@ -1089,6 +1169,8 @@ export function codexCredentialCooldownUntil(
  * progress and therefore MUST NOT walk the credential pool automatically.
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
+  // A request safety refusal is not evidence that another account should run it.
+  if (isProviderSafetyRefusal(error)) return null;
   // A permanent OAuth refresh failure is definitive and the shared resolver has
   // already fenced/stamped the exact credential version. The OpenAI client can
   // wrap a rejection from its custom fetch in APIConnectionError, so recognize
@@ -1190,7 +1272,7 @@ export function codexUsageLimitFailurePayload(
   info: { resetsInSeconds: number | null },
   detail: string,
   opts?: { allAccounts?: boolean },
-): { error: string; code: string; retryable: boolean; detail?: string } {
+): { error: string; code: string; retryable: false; detail?: string } {
   // P3: when EVERY connected subscription is rate-limited the message names the
   // earliest reset across accounts; the single-account message is unchanged.
   const error = opts?.allAccounts

@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
-import { Manifest } from "@openai/agents/sandbox";
-import { buildOpenGeniAgent, composeRuntimeSkills } from "../src";
+import { buildOpenGeniAgent, composeRuntimeSkills, runtimeSkillIndexForAgent } from "../src";
 
 const capabilities = {
   schemaVersion: 1 as const,
@@ -49,34 +48,25 @@ describe("video generation runtime surface", () => {
         (tool) => tool.name,
       );
     expect(names(disabled)).toEqual([]);
-    expect(names(enabled)).toEqual(["get_video_generation_capabilities", "generate_video"]);
+    expect(names(enabled)).toEqual([
+      "get_video_generation_capabilities",
+      "generate_video",
+      "skill_read",
+    ]);
   });
 
-  test("keeps its lazy skill absent unless the same executable boundary is enabled", () => {
-    const manifest = new Manifest({
-      root: "/workspace",
-      entries: {},
-      environment: {},
-    });
-    const disabled = composeRuntimeSkills([]).lazySource;
+  test("keeps its Skill absent unless the same executable boundary is enabled", () => {
+    const disabled = composeRuntimeSkills([]);
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
+      sites: false,
       videoGeneration: true,
-    }).lazySource;
-    expect(disabled.getIndex?.(manifest, ".agents")?.map((entry) => entry.name)).not.toContain(
-      "opengeni-video-generation",
-    );
-    expect(enabled.getIndex?.(manifest, ".agents")?.map((entry) => entry.name)).toContain(
-      "opengeni-video-generation",
-    );
+    });
+    expect(disabled.index.map((entry) => entry.name)).not.toContain("opengeni-video-generation");
+    expect(enabled.index.map((entry) => entry.name)).toContain("opengeni-video-generation");
   });
 
-  test("keeps video tools but does not advertise an undeliverable skill on connected machines", () => {
-    const manifest = new Manifest({
-      root: "/workspace",
-      entries: {},
-      environment: {},
-    });
+  test("keeps video tools and server-readable guidance on connected machines", () => {
     const agent = buildOpenGeniAgent(
       testSettings({ sandboxBackend: "selfhosted", webSearchEnabled: false }),
       [],
@@ -94,24 +84,18 @@ describe("video generation runtime surface", () => {
         },
       },
     );
-    const skillsCapability = (
-      agent as unknown as {
-        capabilities: Array<{
-          type: string;
-          lazyFrom?: {
-            getIndex?: (manifest: Manifest, skillsPath: string) => Array<{ name: string }>;
-          };
-        }>;
-      }
-    ).capabilities.find((capability) => capability.type === "skills");
-    const skillNames =
-      skillsCapability?.lazyFrom?.getIndex?.(manifest, ".agents").map((entry) => entry.name) ?? [];
     const toolNames = (agent as unknown as { tools: Array<{ name: string }> }).tools.map(
       (tool) => tool.name,
     );
 
-    expect(toolNames).toEqual(["get_video_generation_capabilities", "generate_video"]);
-    expect(skillNames).not.toContain("opengeni-video-generation");
+    expect(toolNames).toEqual([
+      "get_video_generation_capabilities",
+      "generate_video",
+      "skill_read",
+    ]);
+    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain(
+      "opengeni-video-generation",
+    );
   });
 
   test("returns pre-admission reference rejection as normal tool output", async () => {

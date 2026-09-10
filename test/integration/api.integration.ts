@@ -257,7 +257,7 @@ describe("API component integration", () => {
         body: JSON.stringify({ initialMessage, model: "scripted-model" }),
         headers: { "content-type": "application/json" },
       });
-      expect(response.status).toBe(202);
+      expect(response.status, await response.clone().text()).toBe(202);
       return (await response.json()) as {
         id: string;
         updatedAt: string;
@@ -363,6 +363,36 @@ describe("API component integration", () => {
       pinned: [{ id: pinnedTarget.id }],
       sessions: [],
     });
+    const currentDateFiltered = await app.request(
+      workspacePath(
+        workspaceId,
+        "/sessions?view=page&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z",
+      ),
+    );
+    expect(currentDateFiltered.status).toBe(200);
+    expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
+    for (const name of ["updatedFrom", "updatedBefore", "createdFrom", "createdBefore"]) {
+      const response = await app.request(
+        workspacePath(workspaceId, `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("millisecond precision");
+    }
+
+    expect(
+      (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            "/sessions?view=page&updatedFrom=2026-09-05T00%3A00%3A00.000Z&updatedBefore=2026-09-04T00%3A00%3A00.000Z",
+          ),
+        )
+      ).status,
+    ).toBe(400);
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
@@ -412,6 +442,16 @@ describe("API component integration", () => {
         )
       ).status,
     ).toBe(200);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&channelId=null&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
@@ -887,7 +927,7 @@ describe("API component integration", () => {
     expect(await isSessionCompactionRequested(dbClient.db, workspaceId, session.id)).toBe(true);
   });
 
-  test("registers session-scoped goal MCP tools only for session-bound grants", async () => {
+  test("registers session lifecycle MCP tools only for session-bound grants", async () => {
     const settings = testSettings({ databaseUrl: services.databaseUrl });
     const baseGrant = await bootstrapMcpGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
@@ -934,7 +974,7 @@ describe("API component integration", () => {
       resumeBoxById: fakeResumeBoxById,
     };
 
-    // Without the worker-asserted sessionId claim, goal tools do not exist.
+    // Without the worker-asserted sessionId claim, lifecycle tools do not exist.
     const sessionlessMcp = buildOpenGeniMcpServer(mcpDeps, baseGrant);
     await expect(callMcpTool(sessionlessMcp, "goal_set", { text: "x" })).rejects.toThrow(
       "MCP tool not registered",
@@ -949,6 +989,15 @@ describe("API component integration", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: [
+          "goal_set",
+          "goal_update",
+          "goal_progress",
+          "wait_for_input",
+          "goal_pause",
+          "goal_resume",
+          "goal_complete",
+        ],
       },
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
@@ -997,42 +1046,40 @@ describe("API component integration", () => {
     });
     expect(progress.operationId).toBeTruthy();
 
-    // goal_wait: self-only, exact-attempt fenced, bounded deadline, and
-    // idempotent per (turn, exact arguments) without a caller key.
+    // wait_for_input: self-only, exact-attempt fenced, bounded relative timeout,
+    // and idempotent per (turn, exact arguments) without a caller key.
     const waitArgs = {
       reason: "two child sessions are still implementing their slices",
-      untilSeconds: 900,
+      timeoutSeconds: 900,
     };
     const held = await callMcpTool<{
       status: string;
-      goalId: string;
-      untilAt: string;
+      deadlineAt: string;
       operationId: string;
       replay: boolean;
       nextAction: string;
-    }>(mcp, "goal_wait", waitArgs);
-    expect(held).toMatchObject({ status: "held", replay: false });
-    expect(held.goalId).toBeTruthy();
-    expect(new Date(held.untilAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
-    expect(held.nextAction).toContain("End your turn now");
-    const heldReplay = await callMcpTool<{ replay: boolean; untilAt: string }>(
+    }>(mcp, "wait_for_input", waitArgs);
+    expect(held).toMatchObject({ status: "waiting_for_input", replay: false });
+    expect(new Date(held.deadlineAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
+    expect(held.nextAction).toContain("runtime yields this turn");
+    const heldReplay = await callMcpTool<{ replay: boolean; deadlineAt: string }>(
       mcp,
-      "goal_wait",
+      "wait_for_input",
       waitArgs,
     );
-    expect(heldReplay).toMatchObject({ replay: true, untilAt: held.untilAt });
+    expect(heldReplay).toMatchObject({ replay: true, deadlineAt: held.deadlineAt });
     await expect(
-      callMcpTool(mcp, "goal_wait", { reason: "too short", untilSeconds: 5 }),
+      callMcpTool(mcp, "wait_for_input", { reason: "too short", timeoutSeconds: 5 }),
     ).rejects.toThrow();
-    const [heldGoalRow] = await dbClient.db.execute<{
-      continuation_hold_turn_id: string | null;
-      continuation_hold_until: string | Date | null;
+    const [waitRow] = await dbClient.db.execute<{
+      input_wait_turn_id: string | null;
+      input_wait_until: string | Date | null;
     }>(sql`
-      select continuation_hold_turn_id, continuation_hold_until
-      from session_goals
-      where workspace_id = ${grant.workspaceId} and session_id = ${session.id}`);
-    expect(heldGoalRow?.continuation_hold_turn_id).toBe(claimed.turn.id);
-    expect(new Date(heldGoalRow!.continuation_hold_until!).toISOString()).toBe(held.untilAt);
+      select input_wait_turn_id, input_wait_until
+      from sessions
+      where workspace_id = ${grant.workspaceId} and id = ${session.id}`);
+    expect(waitRow?.input_wait_turn_id).toBe(claimed.turn.id);
+    expect(new Date(waitRow!.input_wait_until!).toISOString()).toBe(held.deadlineAt);
 
     const pausedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_pause", {
       rationale: "waiting on upstream fix",
@@ -1061,6 +1108,22 @@ describe("API component integration", () => {
       text: "upstream fixed; finish the job",
       outcome: "applied",
     });
+
+    const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
+    const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(alreadyActive).toMatchObject({ changed: false, resource: { state: "active" } });
+
+    for (const pausedReason of ["user_pause", "api", "agent", "limits", "max_auto_continuations"]) {
+      await setSessionGoalStatus(dbClient.db, baseGrant.workspaceId, session.id, {
+        status: "paused",
+        pausedReason,
+      });
+      const resumed = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+      expect(resumed).toMatchObject({ changed: true, resource: { state: "active" } });
+      const goal = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+      expect(goal).toMatchObject({ autoContinuations: 0, noProgressStreak: 0, pausedReason: null });
+    }
 
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
       evidence: "CI green for 3 consecutive runs",
@@ -1097,9 +1160,9 @@ describe("API component integration", () => {
       "goal.set",
       "goal.updated",
       "goal.progress",
-      "goal.held",
       "goal.paused",
       "goal.updated",
+      ...Array(6).fill("goal.resumed"),
       "goal.completed",
       "goal.set",
     ]);
@@ -4017,7 +4080,7 @@ describe("API component integration", () => {
           files: [
             {
               path: "SKILL.md",
-              content: `---\nname: ${skillName}\ndescription: Operate infrastructure.\n---\n# Infra ops\n`,
+              content: `---\nname: ${skillName}\ndescription: Operate infrastructure with the pack runbook.\n---\n# Infra ops\n`,
             },
             { path: "references/runbook.md", content: "Runbook." },
           ],
@@ -4039,7 +4102,7 @@ describe("API component integration", () => {
         body: JSON.stringify(packManifest(packId)),
         headers: { "content-type": "application/json" },
       });
-      expect(registered.status).toBe(201);
+      expect(registered.status, await registered.text()).toBe(201);
     }
 
     // Packs that compose runtime components cannot use the legacy enable
@@ -6649,12 +6712,13 @@ describe("API component integration", () => {
     });
     expect(badSearch.status).toBe(400);
 
-    // Settings default off, PATCH round-trips + preserves unknown keys.
+    // Workspace Memory defaults on; explicit opt-out and re-enable round-trip
+    // while preserving unknown settings keys.
     const beforeSettings = await app.request(workspacePath(workspaceId, ""));
     const workspaceBefore = (await beforeSettings.json()) as {
       settings: Record<string, unknown>;
     };
-    expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
+    expect(workspaceBefore.settings.memoryEnabled).toBe(true);
 
     const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",
@@ -6662,6 +6726,17 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(seedUnknown.status).toBe(200);
+    const disableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ memoryEnabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(disableResponse.status).toBe(200);
+    const disabled = (await disableResponse.json()) as {
+      settings: Record<string, unknown>;
+    };
+    expect(disabled.settings.memoryEnabled).toBe(false);
+    expect(disabled.settings.someFutureKey).toBe("keep-me");
     const enableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",
       body: JSON.stringify({ memoryEnabled: true }),
@@ -7676,6 +7751,7 @@ describe("API component integration", () => {
       const grant = await bootstrapMcpGrant(dbClient.db);
       const workspaceId = grant.workspaceId;
       const accountId = grant.accountId;
+      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: false });
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,
@@ -8456,7 +8532,7 @@ describe("API component integration", () => {
       model: string;
       temporalWorkflowId: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id });
+    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id, detail: "full" });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
     expect(created.temporalWorkflowId).toBe(`session-${created.id}`);
@@ -8473,19 +8549,34 @@ describe("API component integration", () => {
     const fetched = await callMcpTool<{
       id: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: created.id });
+    }>(mcp, "session_get", { sessionId: created.id, detail: "full" });
     expect(fetched.id).toBe(created.id);
     expect(fetched.environmentId).toBeNull();
+    const compact = await callMcpTool<{ id: string; goal: { status: string; summary: string } }>(
+      mcp,
+      "session_get",
+      { sessionId: created.id },
+    );
+    expect(compact.goal).toEqual({ status: "active", summary: "staging deployed" });
+    expect(compact).not.toHaveProperty("effectiveToolPolicy");
+    expect(compact).not.toHaveProperty("initialMessage");
     await expect(
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
     ).rejects.toThrow("session not found");
 
+    const conversation = await callMcpTool<{ view: string; events: unknown[] }>(
+      mcp,
+      "session_events",
+      { sessionId: created.id },
+    );
+    expect(conversation.view).toBe("conversation");
+    expect(conversation.events).toEqual([]);
     const timeline = await callMcpTool<{
       events: Array<{ type: string; sequence: number }>;
       direction: "before";
       nextBefore: number;
       nextAfter: null;
-    }>(mcp, "session_events", { sessionId: created.id });
+    }>(mcp, "session_events", { sessionId: created.id, view: "debug" });
     // The MCP monitoring read omits the human prompt while its turn is unclaimed;
     // the exact row remains in forensic mode and in the REST events API.
     expect(timeline.events.map((event) => event.type)).toEqual([
@@ -8518,6 +8609,7 @@ describe("API component integration", () => {
     }>(mcp, "session_events", {
       sessionId: created.id,
       after: lastTimelineSequence,
+      view: "debug",
     });
     expect(caughtUp.events).toHaveLength(0);
     expect(caughtUp.direction).toBe("after");
@@ -8680,9 +8772,21 @@ describe("API component integration", () => {
       "session_create",
       {
         initialMessage: "wait for manager control",
+        title: "Manager-controlled child",
         model: "scripted-model",
       },
     );
+    expect(
+      await requireSession(dbClient.db, grant.workspaceId, controlledChild.resource.id),
+    ).toMatchObject({
+      title: "Manager-controlled child",
+      titleSource: "agent",
+    });
+    expect(
+      (await listSessionEvents(dbClient.db, grant.workspaceId, controlledChild.resource.id, 0, 10))
+        .slice(0, 2)
+        .map((event) => event.type),
+    ).toEqual(["session.created", "session.title_set"]);
     const childAttemptId = crypto.randomUUID();
     const childClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
       sessionId: controlledChild.resource.id,
@@ -9583,6 +9687,33 @@ describe("API component integration", () => {
     expect(catalogResponse.status).toBe(200);
     expect(await catalogResponse.json()).toEqual(environment.catalog);
 
+    const staleOperationId = crypto.randomUUID();
+    const stale = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        operationId: staleOperationId,
+        catalogDigest: "f".repeat(64),
+        identity: { serverId: "crm", toolName: "search_documents" },
+        arguments: { query: "stale catalog" },
+      }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        retryable: true,
+        details: { code: "codemode_catalog_stale" },
+      },
+    });
+    expect(
+      (
+        await app.request(`${base}/calls/${staleOperationId}`, {
+          headers: { authorization },
+        })
+      ).status,
+    ).toBe(404);
+
     const operationId = crypto.randomUUID();
     const request = {
       operationId,
@@ -10142,13 +10273,11 @@ describe("API component integration", () => {
     const plain = await requireSession(dbClient.db, grant.workspaceId, plainReceipt.resource.id);
     expect(plain.sandboxBackend).toBe("none");
 
-    // The fix: targetSandboxId is now declared on the session_create inputSchema,
-    // so the MCP SDK no longer strips it before the handler runs — it reaches
-    // createSessionForRequest's seedTargetSandbox path. With backend:"none" the
-    // seed guard rejects (you cannot pin a machine for a sandbox-less session),
-    // which PROVES the value flowed end-to-end. Before the fix the unknown key
-    // was dropped and this create would have succeeded, silently swallowing the
-    // agent's machine-targeting request.
+    // targetSandboxId is declared on the session_create inputSchema, so the MCP
+    // SDK does not strip it before the handler runs. The synthetic unknown id
+    // reaches createSessionForRequest's ordinary workspace-scoped route
+    // validator, which proves the value flowed end-to-end. A backend:"none"
+    // home does not bypass target ownership or liveness checks.
     await expectMcpOrchestrationFailure(
       mcp,
       "session_create",
@@ -10159,7 +10288,7 @@ describe("API component integration", () => {
         machineTarget: { targetSandboxId: crypto.randomUUID() },
       },
       "session_create_rejected",
-      "cannot target a machine for a session with no sandbox",
+      "not found in this workspace",
     );
   });
 
@@ -10420,6 +10549,7 @@ describe("API component integration", () => {
         turnId: claimed.turn.id,
         attemptId,
         executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: ["variable_set_get_variable"],
       },
     };
 

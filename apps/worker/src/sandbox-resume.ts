@@ -709,7 +709,13 @@ export async function persistSandboxDeadlineRotationCheckpoint(
  * the user's machine IS the persistence), or a snapshot newer than the
  * interval already rides the lease.
  */
-export async function maybePersistWarmWorkspaceSnapshot(
+export type WarmWorkspaceSnapshotPromise = Promise<boolean> & {
+  /** Settles only after any provider capture continuation has published or
+   * failed and released its exact workspace-capture admission. */
+  readonly settled: Promise<void>;
+};
+
+export function maybePersistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
   ids: {
     accountId: string;
@@ -723,6 +729,50 @@ export async function maybePersistWarmWorkspaceSnapshot(
   leaseEpoch: number,
   signal?: AbortSignal,
   force = false,
+): WarmWorkspaceSnapshotPromise {
+  let continuationRegistered = false;
+  let resolvePhysicalSettlement: () => void = () => undefined;
+  const physicalSettlement = new Promise<void>((resolve) => {
+    resolvePhysicalSettlement = resolve;
+  });
+  const result = persistWarmWorkspaceSnapshot(
+    services,
+    ids,
+    session,
+    leaseEpoch,
+    signal,
+    force,
+    (continuation) => {
+      continuationRegistered = true;
+      void continuation.then(resolvePhysicalSettlement, resolvePhysicalSettlement);
+    },
+  );
+  void result.then(
+    () => {
+      if (!continuationRegistered) resolvePhysicalSettlement();
+    },
+    () => {
+      if (!continuationRegistered) resolvePhysicalSettlement();
+    },
+  );
+  return Object.assign(result, { settled: physicalSettlement });
+}
+
+async function persistWarmWorkspaceSnapshot(
+  services: SandboxResumeServices,
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    sandboxGroupId: string;
+  },
+  session: unknown,
+  leaseEpoch: number,
+  signal: AbortSignal | undefined,
+  force: boolean,
+  registerOwnedContinuation: (continuation: Promise<void>) => void,
 ): Promise<boolean> {
   const { db, settings } = services;
   const intervalMs = settings.sandboxSnapshotIntervalMs;
@@ -989,6 +1039,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
         return { kind: "settled" as const, persisted: false };
       },
     );
+    registerOwnedContinuation(settled.then(() => undefined));
     let cancelListener: (() => void) | undefined;
     const outcome = await Promise.race([
       settled,
@@ -1223,13 +1274,12 @@ export async function resumeBoxForTurn(
   // holder is gone / its attempt is no longer the active writer" from "the lease
   // could not be extended" (rotation requested, draining, another epoch). The
   // second is NOT a reason to release: once a provider-deadline rotation is
-  // requested the lease heartbeat is fenced by design while the still-running
-  // turn checkpoints, and the turn-side heartbeat owns that orderly
-  // SandboxDeadlineRotationError abort. Dropping the live holder here instead
-  // flips the lease to draining under the running turn, the reaper terminates
-  // the box, and the checkpoint then fails `attempt_fenced` (the staging
-  // ~61-minute box-age failure). Both loops therefore converge on
-  // "holder alive -> never release"; this loop keeps touching the holder.
+  // requested the turn-side heartbeat immediately preempts the attempt, whose
+  // finalizer retains this holder until every attempt-owned writer is physically
+  // drained. Dropping it here would let the reaper capture or terminate while a
+  // provider operation may still be mutating /workspace. Both loops therefore
+  // converge on "holder alive -> never release"; finalization performs the
+  // proof-bearing release.
   const releaseDeadHolder = (reason: string): void => {
     const message = "sandbox resume holder released: holder no longer live";
     const fields = {

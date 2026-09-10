@@ -34,4 +34,17 @@ describe("destructive action focus restoration", () => {
 
     fallback.remove();
   });
+
+  test("uses the logical fallback when the surviving trigger becomes disabled", () => {
+    const trigger = document.createElement("button");
+    const fallback = document.createElement("section");
+    fallback.tabIndex = -1;
+    document.body.append(trigger, fallback);
+    trigger.disabled = true;
+
+    expect(destructiveActionFocusTarget(trigger, fallback)).toBe(fallback);
+
+    trigger.remove();
+    fallback.remove();
+  });
 });

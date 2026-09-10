@@ -31,6 +31,8 @@ export type {
   BillingBalance,
   BillingEntitlementsResponse,
   BillingSummary,
+  CompanyProfileAgentPolicy,
+  CompanyProfileAgentPolicyMode,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -73,6 +75,7 @@ export type {
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
+  GitHubRepositoryBranch,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,
   GoogleDriveConnectionLifecycle,
@@ -142,6 +145,8 @@ export type {
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceSettingsRequest,
   UsageEvent,
+  VerifyPublicGitHubRepositoryRefRequest,
+  VerifyPublicGitHubRepositoryRefResponse,
   Workspace,
   WorkspaceEnvironment,
   VariableSet,
@@ -214,6 +219,7 @@ export type TurnSubmission = {
 
 export type AuthSession = {
   session: {
+    createdAt?: string;
     id: string;
     userId: string;
     expiresAt: string;

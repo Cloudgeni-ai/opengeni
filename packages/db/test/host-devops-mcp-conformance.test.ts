@@ -16,6 +16,7 @@ type Binding = McpServerConnectionRef & {
 const BINDINGS: Binding[] = [
   {
     connectionId: "github-installation-a",
+    authoritySource: "host",
     provider: "github",
     providerDomain: "github.com",
     kind: "app_install",
@@ -26,6 +27,7 @@ const BINDINGS: Binding[] = [
   },
   {
     connectionId: "github-installation-b",
+    authoritySource: "host",
     provider: "github",
     providerDomain: "github.com",
     kind: "app_install",
@@ -33,6 +35,7 @@ const BINDINGS: Binding[] = [
   },
   {
     connectionId: "gitlab-account-a",
+    authoritySource: "host",
     provider: "gitlab",
     providerDomain: "gitlab.example",
     kind: "delegated",
@@ -40,6 +43,7 @@ const BINDINGS: Binding[] = [
   },
   {
     connectionId: "azure-organization-a",
+    authoritySource: "host",
     provider: "azure_devops",
     providerDomain: "dev.azure.com",
     kind: "delegated",
@@ -149,6 +153,7 @@ describe("provider-neutral host DevOps MCP conformance", () => {
       ),
     ).toBe(true);
     expect(calls.every((request) => request.initiator.subjectId === "host:user:one")).toBe(true);
+    expect(calls.every((request) => request.connectionRef.authoritySource === "host")).toBe(true);
   });
 
   test("refuses incompatible auth and widened repository scope without affecting other bindings", async () => {

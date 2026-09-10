@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   CompanyProfileContent,
+  CompanyProfileAgentPolicy,
+  CompanyProfileAgentProposalReceipt,
   CompanyProfileLearningWrite,
+  UpdateCompanyProfileAgentPolicyRequest,
   normalizeCompanyProfileStableKey,
 } from "../src";
 
@@ -92,6 +95,44 @@ describe("company-profile contracts", () => {
           content: "x".repeat(2_049),
           stableKey: null,
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("keeps organization agent autonomy explicit and receipt outcomes unambiguous", () => {
+    expect(
+      CompanyProfileAgentPolicy.parse({
+        organizationId: "00000000-0000-4000-8000-000000000001",
+        mode: "automatic",
+        version: 2,
+        updatedAt: "2026-08-29T12:00:00.000Z",
+      }),
+    ).toMatchObject({ mode: "automatic", version: 2 });
+    expect(
+      UpdateCompanyProfileAgentPolicyRequest.safeParse({
+        mode: "automatic",
+        expectedVersion: 1,
+        operationId: "00000000-0000-4000-8000-000000000002",
+        workspaceMode: "automatic",
+      }).success,
+    ).toBe(false);
+    expect(
+      CompanyProfileAgentProposalReceipt.safeParse({
+        status: "activated",
+        operationId: "00000000-0000-4000-8000-000000000003",
+        proposalReceiptId: "00000000-0000-4000-8000-000000000004",
+        automaticActivationReceiptId: "00000000-0000-4000-8000-000000000005",
+        policyMode: "automatic",
+        mutation: { revision: null, head: null, event: null },
+        replayed: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      CompanyProfileAgentProposalReceipt.safeParse({
+        status: "confirmation_required",
+        operationId: "00000000-0000-4000-8000-000000000003",
+        proposalReceiptId: "00000000-0000-4000-8000-000000000004",
+        policyMode: "automatic",
       }).success,
     ).toBe(false);
   });

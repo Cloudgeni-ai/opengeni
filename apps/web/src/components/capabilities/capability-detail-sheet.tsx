@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -221,6 +222,8 @@ export function CapabilityDetailSheet({
 
 export function DetailBody({
   item,
+  inline = false,
+  onCancel,
   health,
   logoSrc,
   busy,
@@ -231,6 +234,8 @@ export function DetailBody({
   onAction,
 }: {
   item: CapabilityCatalogItem;
+  inline?: boolean;
+  onCancel?: (() => void) | undefined;
   health: ConnectionHealth;
   logoSrc: string | null;
   busy: boolean;
@@ -253,7 +258,8 @@ export function DetailBody({
     [item.id, personalOnly],
   );
 
-  const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+  const canDisconnect =
+    !inline && item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   // Repair is driven by the installation's OWN connectionRef.kind, not the catalog
   // plan — on catalog/registry drift an enabled item can carry a live connectionRef
@@ -266,25 +272,59 @@ export function DetailBody({
     plan.mode === "api_key" && plan.fields.length > 0 ? plan.fields : [GENERIC_API_KEY_FIELD];
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* Header */}
-      <SheetHeader className="gap-3 border-b border-border p-5 pr-12">
+    <div
+      className={cn(
+        "flex min-h-0 flex-col",
+        inline
+          ? "[&_form]:flex [&_form]:flex-col [&_form>button]:ml-auto [&_form>button]:w-auto"
+          : "h-full",
+      )}
+    >
+      {inline ? (
         <div className="flex items-start gap-3">
-          <CapabilityLogo src={logoSrc} name={item.name} size="lg" />
+          <CapabilityLogo
+            src={logoSrc}
+            name={item.name}
+            size="lg"
+            fallback={item.kind === "skill" ? <SparklesIcon className="size-5" /> : undefined}
+          />
           <div className="min-w-0 flex-1">
-            <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
-            <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
-              {capabilityItemKindLabel(item)}
-              {capabilityCategoryLabel(item.category)
-                ? ` · ${capabilityCategoryLabel(item.category)}`
-                : ""}
-            </SheetDescription>
+            <h3 className="text-sm font-medium text-fg">{item.name}</h3>
+            {item.providerDomain ? (
+              <p className="mt-0.5 text-xs text-fg-subtle">{item.providerDomain}</p>
+            ) : null}
           </div>
+          <MetaChip>{capabilityItemKindLabel(item)}</MetaChip>
         </div>
-      </SheetHeader>
+      ) : (
+        <SheetHeader className="gap-3 border-b border-border p-5 pr-12">
+          <div className="flex items-start gap-3">
+            <CapabilityLogo
+              src={logoSrc}
+              name={item.name}
+              size="lg"
+              fallback={item.kind === "skill" ? <SparklesIcon className="size-5" /> : undefined}
+            />
+            <div className="min-w-0 flex-1">
+              <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
+              <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
+                {capabilityItemKindLabel(item)}
+                {capabilityCategoryLabel(item.category)
+                  ? ` · ${capabilityCategoryLabel(item.category)}`
+                  : ""}
+              </SheetDescription>
+            </div>
+          </div>
+        </SheetHeader>
+      )}
 
       {/* Scrollable body */}
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
+      <div
+        className={cn(
+          "min-h-0 flex-1",
+          inline ? "mt-3 space-y-3" : "space-y-5 overflow-y-auto p-5",
+        )}
+      >
         {item.stale ? (
           <Notice tone="muted">
             No longer listed in the public registry. Existing installations keep working.
@@ -295,7 +335,7 @@ export function DetailBody({
           <p className="text-sm leading-6 text-fg-muted">{item.description}</p>
         ) : null}
 
-        {item.tags.length > 0 ? (
+        {!inline && item.tags.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {item.tags.slice(0, 10).map((tag) => (
               <MetaChip key={tag}>{tag}</MetaChip>
@@ -303,31 +343,40 @@ export function DetailBody({
           </div>
         ) : null}
 
-        <dl className="grid gap-2.5 text-xs">
-          <MetaRow label="Source">{capabilitySourceLabel(item.source)}</MetaRow>
-          {item.homepageUrl ? (
-            <MetaRow label="Homepage">
-              <ExternalMetaLink href={item.homepageUrl} />
-            </MetaRow>
-          ) : null}
-          {item.installUrl && item.installUrl !== item.homepageUrl ? (
-            <MetaRow label="Setup">
-              <ExternalMetaLink href={item.installUrl} />
-            </MetaRow>
-          ) : null}
-          {item.endpointUrl ? (
-            <MetaRow label="Endpoint">
-              <span className="min-w-0 truncate font-mono text-fg-muted">{item.endpointUrl}</span>
-            </MetaRow>
-          ) : null}
-        </dl>
+        {!inline ? (
+          <dl className="grid gap-2.5 text-xs">
+            <MetaRow label="Source">{capabilitySourceLabel(item.source)}</MetaRow>
+            {item.homepageUrl ? (
+              <MetaRow label="Homepage">
+                <ExternalMetaLink href={item.homepageUrl} />
+              </MetaRow>
+            ) : null}
+            {item.installUrl && item.installUrl !== item.homepageUrl ? (
+              <MetaRow label="Setup">
+                <ExternalMetaLink href={item.installUrl} />
+              </MetaRow>
+            ) : null}
+            {item.endpointUrl ? (
+              <MetaRow label="Endpoint">
+                <span className="min-w-0 truncate font-mono text-fg-muted">{item.endpointUrl}</span>
+              </MetaRow>
+            ) : null}
+          </dl>
+        ) : null}
 
         <CuratedSkillProvenanceSection item={item} />
 
         {/* Action — flows directly after the content so a sparse item stays a
             compact top-flowing column, with no dead void before a bottom-pinned
             button. The whole body scrolls only when content actually overflows. */}
-        <div className="space-y-3 border-t border-border pt-5">
+        <div
+          className={cn(
+            "space-y-3",
+            inline
+              ? "[&>button]:ml-auto [&>button]:flex [&>button]:w-auto [&>div>button]:ml-auto [&>div>button]:flex [&>div>button]:w-auto"
+              : "border-t border-border pt-5",
+          )}
+        >
           {errorMessage ? <Notice tone="failed">{errorMessage}</Notice> : null}
 
           {item.surfaceType === "codex_apps" ? (
@@ -348,6 +397,8 @@ export function DetailBody({
               item={item}
               busy={busy}
               canManage={canManageSkills}
+              setupOnly={inline}
+              onCancel={onCancel}
               onAction={onAction}
             />
           ) : plan.mode === "social_oauth" ? (
@@ -359,6 +410,7 @@ export function DetailBody({
               onOwnershipChange={setConnectionOwnership}
               busy={busy}
               canManage={canManageSocial}
+              setupOnly={inline}
               onAction={onAction}
             />
           ) : plan.mode === "fiken_api_token" ? (
@@ -367,6 +419,7 @@ export function DetailBody({
               health={health}
               keyPageUrl={keyPageUrl}
               busy={busy}
+              setupOnly={inline}
               onAction={onAction}
             />
           ) : item.enabled ? (
@@ -394,6 +447,7 @@ export function DetailBody({
                   </Button>
                 ) : reconnecting ? (
                   <CredentialForm
+                    onCancel={onCancel}
                     fields={reconnectFields}
                     itemName={item.name}
                     keyPageUrl={keyPageUrl}
@@ -433,11 +487,11 @@ export function DetailBody({
                   {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
                   Disconnect
                 </Button>
-              ) : (
+              ) : !inline ? (
                 <p className="text-center text-xs text-fg-subtle">
                   Manage this capability from its dedicated controls.
                 </p>
-              )}
+              ) : null}
             </div>
           ) : plan.mode === "api_key" ? (
             <div className="space-y-3">
@@ -451,6 +505,7 @@ export function DetailBody({
                 <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               )}
               <CredentialForm
+                onCancel={onCancel}
                 fields={plan.fields}
                 itemName={item.name}
                 keyPageUrl={keyPageUrl}
@@ -482,44 +537,48 @@ export function DetailBody({
               ) : (
                 <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
               )}
-              <Button
-                type="button"
-                className="w-full"
-                disabled={busy}
-                onClick={() =>
-                  onAction({
-                    type: "oauth",
-                    item,
-                    ownership: connectionOwnership,
-                  })
-                }
-              >
-                {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-                {connectionOwnership === "workspace"
-                  ? "Connect for workspace"
-                  : "Connect only for me"}
-              </Button>
               <p className="text-center text-xs text-fg-subtle">
                 {connectionOwnership === "workspace"
                   ? `You'll authorize ${item.name} once for this workspace. Provider actions may appear as the account you connect.`
                   : `You'll authorize ${item.name} for your personal use, then return here.`}
               </p>
+              <ConnectionActions onCancel={onCancel} busy={busy}>
+                <Button
+                  type="button"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() =>
+                    onAction({
+                      type: "oauth",
+                      item,
+                      ownership: connectionOwnership,
+                    })
+                  }
+                >
+                  {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+                  {connectionOwnership === "workspace"
+                    ? "Connect for workspace"
+                    : "Connect only for me"}
+                </Button>
+              </ConnectionActions>
             </div>
           ) : item.kind === "mcp" ? (
-            <Button
-              type="button"
-              className="w-full"
-              disabled={busy || (item.kind === "mcp" && !item.runtime.available)}
-              title={
-                item.kind === "mcp" && !item.runtime.available
-                  ? (item.runtime.notes ?? undefined)
-                  : undefined
-              }
-              onClick={() => onAction({ type: "enable", item })}
-            >
-              {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              Enable
-            </Button>
+            <ConnectionActions onCancel={onCancel} busy={busy}>
+              <Button
+                type="button"
+                className="w-full"
+                disabled={busy || (item.kind === "mcp" && !item.runtime.available)}
+                title={
+                  item.kind === "mcp" && !item.runtime.available
+                    ? (item.runtime.notes ?? undefined)
+                    : undefined
+                }
+                onClick={() => onAction({ type: "enable", item })}
+              >
+                {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+                Enable
+              </Button>
+            </ConnectionActions>
           ) : (
             <p className="text-center text-xs text-fg-subtle">
               Install or connect this capability from its dedicated controls.
@@ -536,9 +595,13 @@ function SkillControls({
   busy,
   canManage,
   onAction,
+  onCancel,
+  setupOnly = false,
 }: {
   item: CapabilityCatalogItem;
   busy: boolean;
+  onCancel?: (() => void) | undefined;
+  setupOnly?: boolean;
   canManage: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
@@ -552,17 +615,19 @@ function SkillControls({
         </div>
       ) : null}
       {!item.enabled || updateAvailable ? (
-        <Button
-          type="button"
-          className="w-full"
-          disabled={busy || !canManage || !item.runtime.available}
-          onClick={() => onAction({ type: "install_skill", item })}
-        >
-          {busy ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
-          {item.enabled ? "Update Skill" : "Install Skill"}
-        </Button>
+        <ConnectionActions onCancel={onCancel} busy={busy}>
+          <Button
+            type="button"
+            className="w-full"
+            disabled={busy || !canManage || !item.runtime.available}
+            onClick={() => onAction({ type: "install_skill", item })}
+          >
+            {busy ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
+            {item.enabled ? "Update Skill" : setupOnly ? "Install for workspace" : "Install Skill"}
+          </Button>
+        </ConnectionActions>
       ) : null}
-      {item.enabled ? (
+      {item.enabled && !setupOnly ? (
         <Button
           type="button"
           variant="outline"
@@ -670,6 +735,7 @@ export function SocialConnectorControls({
   busy,
   canManage,
   onAction,
+  setupOnly = false,
 }: {
   item: CapabilityCatalogItem;
   provider: "x" | "reddit";
@@ -677,6 +743,7 @@ export function SocialConnectorControls({
   ownership: ConnectionOwnership;
   onOwnershipChange: (ownership: ConnectionOwnership) => void;
   busy: boolean;
+  setupOnly?: boolean;
   canManage: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
@@ -720,7 +787,7 @@ export function SocialConnectorControls({
                   @{connection.accountHandle} · {socialConnectionStatusLabel(connection.status)}
                 </p>
               </div>
-              {connection.status !== "disabled" ? (
+              {!setupOnly && connection.status !== "disabled" ? (
                 <Button
                   type="button"
                   variant="ghost"
@@ -786,11 +853,13 @@ export function FikenConnectorControls({
   keyPageUrl,
   busy,
   onAction,
+  setupOnly = false,
 }: {
   item: CapabilityCatalogItem;
   health: ConnectionHealth;
   keyPageUrl: string | null;
   busy: boolean;
+  setupOnly?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const [replacing, setReplacing] = useState(false);
@@ -870,22 +939,24 @@ export function FikenConnectorControls({
             Replace credential
           </Button>
         )}
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
-          disabled={busy}
-          onClick={() =>
-            onAction({
-              type: "fiken_disconnect",
-              item,
-              connectionId: connection.id,
-            })
-          }
-        >
-          {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
-          Disconnect
-        </Button>
+        {!setupOnly ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+            disabled={busy}
+            onClick={() =>
+              onAction({
+                type: "fiken_disconnect",
+                item,
+                connectionId: connection.id,
+              })
+            }
+          >
+            {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+            Disconnect
+          </Button>
+        ) : null}
         <p className="text-center text-xs text-fg-subtle">
           Credentials are stored encrypted and used only for this workspace's Fiken tools.
         </p>
@@ -940,10 +1011,12 @@ export function OwnershipSelector({
   value: ConnectionOwnership;
   onChange: (value: ConnectionOwnership) => void;
 }) {
+  const groupName = useId();
   return (
     <fieldset className="space-y-2">
       <legend className="text-xs font-medium text-fg-muted">Who can use this connection?</legend>
       <OwnershipOption
+        groupName={groupName}
         checked={value === "workspace"}
         value="workspace"
         title="Connect for workspace"
@@ -951,6 +1024,7 @@ export function OwnershipSelector({
         onChange={() => onChange("workspace")}
       />
       <OwnershipOption
+        groupName={groupName}
         checked={value === "personal"}
         value="personal"
         title="Connect only for me"
@@ -962,12 +1036,14 @@ export function OwnershipSelector({
 }
 
 function OwnershipOption({
+  groupName,
   checked,
   value,
   title,
   description,
   onChange,
 }: {
+  groupName: string;
   checked: boolean;
   value: ConnectionOwnership;
   title: string;
@@ -983,7 +1059,7 @@ function OwnershipOption({
     >
       <input
         type="radio"
-        name="connection-ownership"
+        name={groupName}
         value={value}
         checked={checked}
         onChange={onChange}
@@ -1075,6 +1151,7 @@ function CredentialForm({
   submitIcon,
   busy,
   onSubmit,
+  onCancel,
 }: {
   fields: { name: string; label: string }[];
   itemName: string;
@@ -1082,8 +1159,10 @@ function CredentialForm({
   submitLabel: string;
   submitIcon: ReactNode;
   busy: boolean;
+  onCancel?: (() => void) | undefined;
   onSubmit: (headers: Record<string, string>) => void;
 }) {
+  const inputId = useId();
   const [headers, setHeaders] = useState<Record<string, string>>({});
   const ready = fields.every((field) => headers[field.name]?.trim());
 
@@ -1097,11 +1176,11 @@ function CredentialForm({
     >
       {fields.map((field) => (
         <div key={field.name} className="space-y-1.5">
-          <Label htmlFor={`cred-${field.name}`} className="text-xs text-fg-muted">
+          <Label htmlFor={`${inputId}-cred-${field.name}`} className="text-xs text-fg-muted">
             {field.label}
           </Label>
           <Input
-            id={`cred-${field.name}`}
+            id={`${inputId}-cred-${field.name}`}
             type="password"
             autoComplete="off"
             value={headers[field.name] ?? ""}
@@ -1130,10 +1209,12 @@ function CredentialForm({
           Stored encrypted and used only to reach {itemName}.
         </p>
       )}
-      <Button type="submit" className="w-full" disabled={busy || !ready}>
-        {busy ? <Loader2Icon className="animate-spin" /> : submitIcon}
-        {submitLabel}
-      </Button>
+      <ConnectionActions onCancel={onCancel} busy={busy}>
+        <Button type="submit" className="w-full" disabled={busy || !ready}>
+          {busy ? <Loader2Icon className="animate-spin" /> : submitIcon}
+          {submitLabel}
+        </Button>
+      </ConnectionActions>
     </form>
   );
 }
@@ -1211,5 +1292,26 @@ function ExternalMetaLink({ href }: { href: string }) {
       <span className="truncate">{label}</span>
       <ExternalLinkIcon className="size-3 shrink-0" />
     </a>
+  );
+}
+
+/** The same action row for inline OAuth review, credentials, and Skills. */
+function ConnectionActions({
+  onCancel,
+  busy,
+  children,
+}: {
+  onCancel?: (() => void) | undefined;
+  busy: boolean;
+  children: ReactNode;
+}) {
+  if (!onCancel) return children;
+  return (
+    <div className="flex items-center justify-end gap-2 [&>button]:w-auto">
+      <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
+        Cancel
+      </Button>
+      {children}
+    </div>
   );
 }

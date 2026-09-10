@@ -150,6 +150,8 @@ export type OrganizationUserSetupDeliveryClaim =
         role: "viewer" | "member" | "admin";
       }>;
       expiresAt: string;
+      setupTokenTransport: "fragment" | "query" | null;
+      payloadDigest: string | null;
     };
 
 export async function claimOrganizationUserSetupDelivery(
@@ -169,7 +171,7 @@ export async function claimOrganizationUserSetupDelivery(
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       const [row] = await rawRows<{ result: unknown }>(
         scopedDb,
-        sql`select claim_organization_user_setup_delivery(
+        sql`select claim_organization_user_setup_delivery_v2(
           ${JSON.stringify(input)}::jsonb
         ) as result`,
       );
@@ -188,6 +190,7 @@ export async function prepareOrganizationUserSetupDelivery(
     claimHolderId: string;
     tokenDigest: string;
     payloadDigest: string;
+    setupTokenTransport: "fragment" | "query";
     providerIdempotencyScope: string;
     providerIdempotencyRetentionSeconds: number;
   },
@@ -199,7 +202,7 @@ export async function prepareOrganizationUserSetupDelivery(
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       await rawRows(
         scopedDb,
-        sql`select prepare_organization_user_setup_delivery(
+        sql`select prepare_organization_user_setup_delivery_v2(
           ${JSON.stringify(input)}::jsonb
         )`,
       );
@@ -273,7 +276,13 @@ function parseOrganizationUserSetupDeliveryClaim(
     typeof candidate.organizationName !== "string" ||
     !["owner", "admin", "member"].includes(String(candidate.organizationRole)) ||
     !workspaceAccess.success ||
-    typeof candidate.expiresAt !== "string"
+    typeof candidate.expiresAt !== "string" ||
+    (candidate.setupTokenTransport !== null &&
+      candidate.setupTokenTransport !== "fragment" &&
+      candidate.setupTokenTransport !== "query") ||
+    (candidate.payloadDigest !== null &&
+      (typeof candidate.payloadDigest !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(candidate.payloadDigest)))
   ) {
     throw new Error("Organization user setup delivery claim returned an invalid result");
   }
@@ -290,6 +299,8 @@ function parseOrganizationUserSetupDeliveryClaim(
     organizationRole: candidate.organizationRole as "owner" | "admin" | "member",
     sharedWorkspaceAccess: workspaceAccess.data,
     expiresAt: candidate.expiresAt,
+    setupTokenTransport: candidate.setupTokenTransport,
+    payloadDigest: candidate.payloadDigest,
   };
 }
 

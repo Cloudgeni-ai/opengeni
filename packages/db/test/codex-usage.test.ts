@@ -13,6 +13,7 @@ import {
   listCodexAccountStatuses,
   recordCodexAccountUsage,
   setActiveCodexCredential,
+  setCodexCredentialExhausted,
   upsertCodexSubscriptionCredential,
   type Database,
   type DbClient,
@@ -116,7 +117,10 @@ function json(body: unknown, status = 200): Response {
 }
 
 // Install a mock fetch that answers the OAuth refresh + wham endpoints.
-function mockFetch(handlers: { refresh?: () => Response; wham?: () => Response }): void {
+function mockFetch(handlers: {
+  refresh?: () => Response | Promise<Response>;
+  wham?: () => Response | Promise<Response>;
+}): void {
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -190,7 +194,9 @@ beforeAll(async () => {
     `GRANT USAGE ON SCHEMA public, opengeni_private TO codex_app;` +
       ` GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO codex_app;` +
       ` GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO codex_app;`,
+      ` GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO codex_app;` +
+      ` GRANT EXECUTE ON FUNCTION public.get_workspace_kind(uuid, uuid) TO codex_app;` +
+      ` GRANT EXECUTE ON FUNCTION public.resolve_workspace_codex_subscription_source(uuid, uuid) TO codex_app;`,
   );
   client = createDb(APP_URL);
   db = client.db;
@@ -258,6 +264,148 @@ describe("recordCodexAccountUsage + the cached read", () => {
 });
 
 describe("fetchCodexUsageForAccount under RLS", () => {
+  test("a fresh open allowance clears the exact older quota cooldown", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const id = await connect(
+      ws,
+      "acct_recovered_quota",
+      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
+      new Date(Date.now() + 3_600_000),
+    );
+    await setCodexCredentialExhausted(
+      db,
+      ws.workspaceId,
+      id,
+      new Date(Date.now() + 5 * 24 * 60 * 60_000),
+      "quota",
+    );
+    const [before] = await admin<
+      { exhausted_revision: number; exhausted_kind: string | null }[]
+    >`select exhausted_revision, exhausted_kind from codex_subscription_credentials where id = ${id}`;
+
+    mockFetch({ wham: () => json(whamBody(0, 0)) });
+    const out = await fetchCodexUsageForAccount(db, settings, ws.workspaceId, id);
+
+    expect(out.status).toBe("ok");
+    const [after] = await admin<
+      {
+        exhausted_until: Date | null;
+        exhausted_kind: string | null;
+        exhausted_revision: number;
+      }[]
+    >`select exhausted_until, exhausted_kind, exhausted_revision from codex_subscription_credentials where id = ${id}`;
+    expect(after?.exhausted_until).toBeNull();
+    expect(after?.exhausted_kind).toBeNull();
+    expect(Number(after?.exhausted_revision)).toBe(Number(before?.exhausted_revision ?? 0) + 1);
+  });
+
+  test("an open allowance does not clear generic provider backpressure", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const id = await connect(
+      ws,
+      "acct_backpressure",
+      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
+      new Date(Date.now() + 3_600_000),
+    );
+    const until = new Date(Date.now() + 60_000);
+    await setCodexCredentialExhausted(db, ws.workspaceId, id, until, "rate_limit");
+
+    mockFetch({ wham: () => json(whamBody(0, 0)) });
+    await fetchCodexUsageForAccount(db, settings, ws.workspaceId, id);
+
+    const [after] = await admin<
+      { exhausted_until: Date | null; exhausted_kind: string | null }[]
+    >`select exhausted_until, exhausted_kind from codex_subscription_credentials where id = ${id}`;
+    expect(after?.exhausted_until?.getTime()).toBe(until.getTime());
+    expect(after?.exhausted_kind).toBe("rate_limit");
+  });
+
+  test("an older usage response cannot clear a concurrently newer quota cooldown", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const id = await connect(
+      ws,
+      "acct_cooldown_race",
+      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
+      new Date(Date.now() + 3_600_000),
+    );
+    await setCodexCredentialExhausted(
+      db,
+      ws.workspaceId,
+      id,
+      new Date(Date.now() + 60_000),
+      "quota",
+    );
+    let releaseUsage: () => void = () => {};
+    let usageStarted: () => void = () => {};
+    const usageGate = new Promise<void>((resolve) => {
+      releaseUsage = resolve;
+    });
+    const usageEntered = new Promise<void>((resolve) => {
+      usageStarted = resolve;
+    });
+    mockFetch({
+      wham: async () => {
+        usageStarted();
+        await usageGate;
+        return json(whamBody(0, 0));
+      },
+    });
+
+    const refresh = fetchCodexUsageForAccount(db, settings, ws.workspaceId, id);
+    await usageEntered;
+    const newerUntil = new Date(Date.now() + 5 * 24 * 60 * 60_000);
+    await setCodexCredentialExhausted(db, ws.workspaceId, id, newerUntil, "quota");
+    releaseUsage();
+    await refresh;
+
+    const [after] = await admin<
+      { exhausted_until: Date | null; exhausted_kind: string | null }[]
+    >`select exhausted_until, exhausted_kind from codex_subscription_credentials where id = ${id}`;
+    expect(after?.exhausted_until?.getTime()).toBe(newerUntil.getTime());
+    expect(after?.exhausted_kind).toBe("quota");
+  });
+
+  test("a legacy cooldown rewrite loses typed auto-clear authority", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const id = await connect(
+      ws,
+      "acct_legacy_writer",
+      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
+      new Date(Date.now() + 3_600_000),
+    );
+    await setCodexCredentialExhausted(
+      db,
+      ws.workspaceId,
+      id,
+      new Date(Date.now() + 60_000),
+      "quota",
+    );
+    const [before] = await admin<
+      { exhausted_revision: number }[]
+    >`select exhausted_revision from codex_subscription_credentials where id = ${id}`;
+    const legacyUntil = new Date(Date.now() + 120_000);
+    await admin`
+      update codex_subscription_credentials
+      set exhausted_until = ${legacyUntil}
+      where id = ${id}
+    `;
+
+    const [after] = await admin<
+      {
+        exhausted_until: Date | null;
+        exhausted_kind: string | null;
+        exhausted_revision: number;
+      }[]
+    >`select exhausted_until, exhausted_kind, exhausted_revision from codex_subscription_credentials where id = ${id}`;
+    expect(after?.exhausted_until?.getTime()).toBe(legacyUntil.getTime());
+    expect(after?.exhausted_kind).toBeNull();
+    expect(Number(after?.exhausted_revision)).toBe(Number(before?.exhausted_revision ?? 0) + 1);
+  });
+
   test("a fresh-token account: no refresh, normalizes the 200, and writes the cache", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

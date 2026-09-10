@@ -1,7 +1,10 @@
+import { WorkspaceRuntimeControl } from "@/components/workspace-runtime-control";
 // Workspace settings hub: browse links to workspace config surfaces, then
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
+import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
+import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -9,9 +12,7 @@ import {
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
-  PauseIcon,
   PencilIcon,
-  PlayIcon,
   PlusIcon,
   ShrinkIcon,
   Trash2Icon,
@@ -19,14 +20,17 @@ import {
   UserIcon,
   XIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { ModelAccessPolicySection } from "@/components/model-access-policy";
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
-import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
+import {
+  AiGatewayConnectionCard,
+  OpenRouterConnectionCard,
+} from "@/components/ai-gateway-connection";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
@@ -35,6 +39,10 @@ import {
   WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
 } from "@/components/settings/workspace-settings-shell";
+import {
+  useOrganizationWorkspaceAdministration,
+  type OrganizationWorkspaceAdministration,
+} from "@/components/settings/organization-workspace-administration";
 import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
@@ -51,21 +59,45 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
+  completeWorkspaceDeletionFollowUp,
+  deleteOrganizationWorkspaceWithReconciliation,
+} from "@/lib/workspace-deletion";
+import {
   apiKeyPermissionGroups,
+  canManageWorkspaceSettings,
   defaultApiKeyPermissions,
   delegableApiKeyPermissions,
   hasWorkspacePermission,
 } from "@/lib/permissions";
-import type { ApiKey } from "@/types";
+import type { ApiKey, OrganizationMember, OrganizationWorkspaceAccessMember } from "@/types";
 import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
 export function WorkspaceSettingsRoute({
+  workspaceId,
+  section,
+}: {
+  workspaceId: string;
+  section: WorkspaceSettingsSection;
+}) {
+  const context = useAppContext();
+  const administration = useOrganizationWorkspaceAdministration();
+  const activeWorkspace = context.workspaces.some((workspace) => workspace.id === workspaceId);
+  if (!activeWorkspace && administration) {
+    return (
+      <OrganizationManagedWorkspaceSettings section={section} administration={administration} />
+    );
+  }
+  return <OperationalWorkspaceSettingsRoute workspaceId={workspaceId} section={section} />;
+}
+
+function OperationalWorkspaceSettingsRoute({
   workspaceId,
   section,
 }: {
@@ -83,6 +115,11 @@ export function WorkspaceSettingsRoute({
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
+  const canManageSettings = canManageWorkspaceSettings(
+    context.accessContext,
+    activeWorkspace,
+    context.managedSelfContext,
+  );
 
   const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
   const [nameEditing, setNameEditing] = useState(false);
@@ -123,7 +160,6 @@ export function WorkspaceSettingsRoute({
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
-  const [controlBusy, setControlBusy] = useState(false);
   const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
@@ -201,26 +237,6 @@ export function WorkspaceSettingsRoute({
   function cancelRename() {
     setNameDraft(activeWorkspace?.name ?? "");
     setNameEditing(false);
-  }
-
-  async function toggleWorkspaceControl() {
-    if (!activeWorkspace || !canRename || controlBusy) return;
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
-    setControlBusy(true);
-    try {
-      const updated = await context.setWorkspaceInferenceControl(workspaceId, action);
-      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
-      }
-    } catch (error) {
-      toast.error(`Couldn't ${action} the workspace`, {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setControlBusy(false);
-    }
   }
 
   async function createKey() {
@@ -368,11 +384,12 @@ export function WorkspaceSettingsRoute({
                   }}
                 >
                   <div className="grid min-w-0 gap-1.5">
-                    <Label htmlFor="workspace-name" className="text-xs text-fg-muted">
+                    <Label htmlFor="workspace-name" className="text-fg-muted">
                       Workspace name
                     </Label>
                     <Input
                       id="workspace-name"
+                      suppressAutofill
                       value={nameDraft}
                       onChange={(event) => setNameDraft(event.target.value)}
                       onKeyDown={(event) => {
@@ -410,36 +427,28 @@ export function WorkspaceSettingsRoute({
               ) : null}
             </section>
 
-            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
-              <div>
-                <h2 className="text-sm font-medium">Workspace runtime</h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  {activeWorkspace?.inferenceControl.state === "paused"
-                    ? "New agent work is paused for this workspace."
-                    : "Agents can start and continue work in this workspace."}
-                </p>
-              </div>
-              {canRename ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={controlBusy}
-                  onClick={() => void toggleWorkspaceControl()}
-                >
-                  {controlBusy ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : activeWorkspace?.inferenceControl.state === "paused" ? (
-                    <PlayIcon className="size-3.5" />
-                  ) : (
-                    <PauseIcon className="size-3.5" />
-                  )}
-                  {activeWorkspace?.inferenceControl.state === "paused"
-                    ? "Resume workspace"
-                    : "Pause workspace"}
-                </Button>
-              ) : null}
-            </section>
+            {activeWorkspace ? (
+              <WorkspaceRuntimeControl
+                key={workspaceId}
+                control={activeWorkspace.inferenceControl}
+                canManage={canManageSettings}
+                onControl={async (action) => {
+                  await context.setWorkspaceInferenceControl(workspaceId, action);
+                }}
+                onRefresh={() => context.refreshWorkspace(workspaceId)}
+                onTimer={async (request, expectedRevision) => {
+                  const accepted = context.captureWorkspaceInvocation(workspaceId);
+                  if (!accepted) return;
+                  await context.client.setWorkspacePauseTimer(workspaceId, {
+                    ...request,
+                    expectedRevision,
+                    clientEventId: crypto.randomUUID(),
+                  });
+                  if (context.ownsWorkspaceInvocation(workspaceId, accepted))
+                    await context.refreshWorkspace(workspaceId);
+                }}
+              />
+            ) : null}
 
             {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
 
@@ -453,18 +462,22 @@ export function WorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
                 <VideoGenerationPreferenceRow
                   workspaceId={workspaceId}
-                  canManage={canDeleteWorkspace}
+                  canManage={canManageSettings}
                   refreshKey={gatewayRevision}
                 />
-                <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <CodexCompactionPreferenceRow
+                  workspaceId={workspaceId}
+                  canManage={canManageSettings}
+                />
               </div>
             </section>
 
             <WorkspaceLearningAdministration workspaceId={workspaceId} />
+            <NativeIdentityLinkAccounts workspaceId={workspaceId} />
           </>
         ) : null}
 
@@ -481,7 +494,7 @@ export function WorkspaceSettingsRoute({
         {section === "tools" ? (
           <WorkspaceCapabilityDefaults
             workspaceId={workspaceId}
-            canManage={canRename}
+            canManage={canManageSettings}
             kind="permissions"
           />
         ) : null}
@@ -504,7 +517,7 @@ export function WorkspaceSettingsRoute({
             </section>
             <WorkspaceCapabilityDefaults
               workspaceId={workspaceId}
-              canManage={canRename}
+              canManage={canManageSettings}
               kind="plugins"
             />
           </>
@@ -520,29 +533,62 @@ export function WorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="rounded-lg border border-border px-3">
-                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <DefaultSessionModelPreferenceRow
+                  key={`default-model:${workspaceId}:${gatewayRevision}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageSettings}
+                />
+              </div>
+            </section>
+            <section className="grid gap-2" aria-labelledby="model-connections-heading">
+              <div>
+                <h2 id="model-connections-heading" className="text-sm font-medium">
+                  Connections
+                </h2>
+                <p className="mt-1 text-xs leading-5 text-fg-muted">
+                  Connect subscriptions or provider accounts for this workspace. Your organization
+                  can also make connections available here. Choose model access on each connected
+                  account.
+                </p>
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "models" }}
+                  className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+                >
+                  Manage organization connections <ArrowUpRightIcon className="size-3.5" />
+                </Link>
+              </div>
+              <div className="min-w-0">
+                {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
+                <CodexSubscriptionsCard
+                  key={`codex-subscriptions:${workspaceId}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageConnections}
+                />
+                <SuperGrokSubscriptionsCard
+                  key={`supergrok:${workspaceId}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageConnections}
+                />
+                <AiGatewayConnectionCard
+                  workspaceId={workspaceId}
+                  canManageConnection={canManageConnections}
+                  canManageCustomModels={canManageSettings}
+                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+                />
+                <OpenRouterConnectionCard
+                  workspaceId={workspaceId}
+                  canManageConnection={canManageConnections}
+                  canManageCustomModels={canManageSettings}
+                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+                />
               </div>
             </section>
             <ModelAccessPolicySection
-              key={`model-access:${workspaceId}`}
+              key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
-              canManage={canDeleteWorkspace}
-            />
-            {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-            <CodexSubscriptionsCard
-              key={`codex-subscriptions:${workspaceId}`}
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-            />
-            <SuperGrokSubscriptionsCard
-              key={`supergrok:${workspaceId}`}
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-            />
-            <AiGatewayConnectionCard
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+              canManage={canManageSettings}
             />
           </>
         ) : null}
@@ -675,6 +721,7 @@ export function WorkspaceSettingsRoute({
                       <Label htmlFor="api-key-name">Name</Label>
                       <Input
                         id="api-key-name"
+                        suppressAutofill
                         autoFocus
                         value={apiKeyName}
                         onChange={(event) => setApiKeyName(event.target.value)}
@@ -767,6 +814,397 @@ export function WorkspaceSettingsRoute({
   );
 }
 
+function managedWorkspaceMemberLabel(member: OrganizationWorkspaceAccessMember): string {
+  return member.name ?? member.email ?? member.subjectLabel ?? "Workspace member";
+}
+
+function OrganizationManagedWorkspaceSettings({
+  section,
+  administration,
+}: {
+  section: WorkspaceSettingsSection;
+  administration: OrganizationWorkspaceAdministration;
+}) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  const { organizationId, overview, workspace, refresh } = administration;
+  const [name, setName] = useState(workspace.name);
+  const [busy, setBusy] = useState(false);
+  const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [membersLoading, setMembersLoading] = useState(section === "members");
+  const [selectedMembershipId, setSelectedMembershipId] = useState("");
+  const [selectedRole, setSelectedRole] = useState<"viewer" | "member" | "admin">("member");
+  const [removing, setRemoving] = useState<OrganizationWorkspaceAccessMember | null>(null);
+
+  useEffect(() => setName(workspace.name), [workspace.name]);
+  useEffect(() => {
+    if (section !== "members") return;
+    let disposed = false;
+    setMembersLoading(true);
+    void context.client
+      .listOrganizationAdministrationMembers(organizationId)
+      .then((response) => {
+        if (!disposed) setMembers(response.members.filter((member) => member.status === "active"));
+      })
+      .catch((error) => {
+        if (!disposed) {
+          toast.error("Couldn't load organization members", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+      .finally(() => {
+        if (!disposed) setMembersLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [context.client, organizationId, section, overview]);
+
+  const assignedSubjects = new Set(workspace.members.map((member) => member.subjectId));
+  const candidates = members.filter((member) => !assignedSubjects.has(member.subjectId));
+
+  async function rename() {
+    const nextName = name.trim();
+    if (!nextName || nextName === workspace.name || busy) return;
+    setBusy(true);
+    try {
+      await context.client.updateOrganizationWorkspace(organizationId, workspace.id, {
+        name: nextName,
+        expectedUpdatedAt: workspace.updatedAt,
+        operationId: crypto.randomUUID(),
+      });
+      toast.success("Workspace renamed");
+      refresh();
+    } catch (error) {
+      toast.error("Couldn't rename workspace", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addMember() {
+    if (!selectedMembershipId || busy) return;
+    setBusy(true);
+    try {
+      await context.client.putOrganizationWorkspaceMember(
+        organizationId,
+        workspace.id,
+        selectedMembershipId,
+        {
+          role: selectedRole,
+          expectedUpdatedAt: null,
+          operationId: crypto.randomUUID(),
+        },
+      );
+      setSelectedMembershipId("");
+      toast.success("Workspace access added");
+      await context.revalidatePrincipalAccess();
+      refresh();
+    } catch (error) {
+      toast.error("Couldn't add workspace access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setMemberRole(
+    member: OrganizationWorkspaceAccessMember,
+    role: "viewer" | "member" | "admin",
+  ) {
+    if (!member.organizationMembershipId || busy) return;
+    setBusy(true);
+    try {
+      await context.client.putOrganizationWorkspaceMember(
+        organizationId,
+        workspace.id,
+        member.organizationMembershipId,
+        {
+          role,
+          expectedUpdatedAt: member.updatedAt,
+          operationId: crypto.randomUUID(),
+        },
+      );
+      toast.success("Workspace access updated");
+      await context.revalidatePrincipalAccess();
+      refresh();
+    } catch (error) {
+      toast.error("Couldn't update workspace access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeMember(): Promise<boolean> {
+    if (!removing?.organizationMembershipId || busy) return false;
+    setBusy(true);
+    try {
+      await context.client.revokeOrganizationWorkspaceMember(
+        organizationId,
+        workspace.id,
+        removing.organizationMembershipId,
+        {
+          expectedUpdatedAt: removing.updatedAt,
+          operationId: crypto.randomUUID(),
+        },
+      );
+      setRemoving(null);
+      toast.success("Workspace access removed");
+      await context.revalidatePrincipalAccess();
+      refresh();
+      return true;
+    } catch (error) {
+      toast.error("Couldn't remove workspace access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteWorkspace(): Promise<boolean> {
+    setBusy(true);
+    try {
+      const currentOverview = await deleteOrganizationWorkspaceWithReconciliation({
+        client: context.client,
+        organizationId,
+        workspaceId: workspace.id,
+      });
+      const next =
+        currentOverview?.workspaces.find((candidate) => candidate.id !== workspace.id) ?? null;
+      const followUp = await completeWorkspaceDeletionFollowUp({
+        refreshAccess: async () => await context.revalidatePrincipalAccess(),
+        navigate: async () => {
+          if (next) {
+            await navigate({
+              to: "/workspaces/$workspaceId/organization",
+              params: { workspaceId: next.id },
+              search: { section: "overview" },
+              replace: true,
+            });
+          } else {
+            await navigate({ to: "/", replace: true });
+          }
+        },
+      });
+      if (followUp.status === "failed") {
+        toast.warning("Workspace deleted, but the page may be out of date", {
+          description: `${
+            followUp.error instanceof Error ? followUp.error.message : String(followUp.error)
+          }. Reload to refresh your workspace access.`,
+        });
+      }
+      return true;
+    } catch (error) {
+      toast.error("Couldn't delete workspace", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (section !== "general" && section !== "members" && section !== "danger") {
+    return (
+      <WorkspaceSettingsContent section={section}>
+        <Notice tone="muted" title="Workspace access required">
+          Organization administrators can manage identity, members, and deletion here without
+          receiving access to workspace content.
+        </Notice>
+      </WorkspaceSettingsContent>
+    );
+  }
+
+  return (
+    <WorkspaceSettingsContent section={section}>
+      <section className="grid min-w-0 gap-6 text-left">
+        <Notice tone="muted" title="Organization management mode">
+          You can manage this shared workspace, but this does not give you access to its chats,
+          files, credentials, or integrations.
+        </Notice>
+
+        {section === "general" ? (
+          <section className="grid gap-3 rounded-lg border border-border p-4">
+            <div>
+              <h2 className="text-sm font-medium">Workspace name</h2>
+              <p className="mt-1 text-xs text-fg-muted">Shown to everyone with workspace access.</p>
+            </div>
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void rename();
+              }}
+            >
+              <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
+                Name
+                <Input
+                  value={name}
+                  suppressAutofill
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={120}
+                />
+              </label>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={busy || !name.trim() || name.trim() === workspace.name}
+              >
+                {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                Save name
+              </Button>
+            </form>
+          </section>
+        ) : null}
+
+        {section === "members" ? (
+          <section className="grid gap-4">
+            <div>
+              <h2 className="text-sm font-medium">People with access</h2>
+              <p className="mt-1 text-xs text-fg-muted">
+                Workspace access is separate from organization administration.
+              </p>
+            </div>
+            {candidates.length > 0 ? (
+              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border p-3">
+                <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
+                  Organization member
+                  <Select
+                    value={selectedMembershipId}
+                    onChange={(event) => setSelectedMembershipId(event.target.value)}
+                    disabled={busy}
+                  >
+                    <option value="">Choose a person…</option>
+                    {candidates.map((member) => (
+                      <option key={member.id} value={member.id}>
+                        {member.name ?? member.email ?? "Member"}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <label className="grid min-w-40 gap-1 text-xs text-fg-muted">
+                  Access
+                  <Select
+                    value={selectedRole}
+                    onChange={(event) => setSelectedRole(event.target.value as typeof selectedRole)}
+                    disabled={busy}
+                  >
+                    {overview.roles.map((role) => (
+                      <option key={role.role} value={role.role}>
+                        {role.label}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={busy || !selectedMembershipId}
+                  onClick={() => void addMember()}
+                >
+                  Add access
+                </Button>
+              </div>
+            ) : null}
+            {membersLoading ? (
+              <p role="status" className="text-xs text-fg-muted">
+                Loading organization members…
+              </p>
+            ) : workspace.members.length === 0 ? (
+              <EmptyState
+                title="No one has access"
+                description="Add an organization member to this workspace."
+              />
+            ) : (
+              <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
+                {workspace.members.map((member) => (
+                  <div
+                    key={member.membershipId}
+                    className="flex flex-wrap items-center gap-3 px-3 py-3"
+                  >
+                    <div className="min-w-48 flex-1">
+                      <p className="truncate text-sm font-medium">
+                        {managedWorkspaceMemberLabel(member)}
+                      </p>
+                      <p className="text-2xs capitalize text-fg-subtle">{member.principalKind}</p>
+                    </div>
+                    {member.organizationMembershipId && member.principalKind === "human" ? (
+                      <Select
+                        className="w-44"
+                        value={member.role}
+                        disabled={busy}
+                        onChange={(event) =>
+                          void setMemberRole(
+                            member,
+                            event.target.value as "viewer" | "member" | "admin",
+                          )
+                        }
+                      >
+                        {member.role === "custom" ? (
+                          <option value="custom" disabled>
+                            Custom access
+                          </option>
+                        ) : null}
+                        {overview.roles.map((role) => (
+                          <option key={role.role} value={role.role}>
+                            {role.label}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <span className="text-xs capitalize text-fg-muted">{member.role}</span>
+                    )}
+                    {member.organizationMembershipId &&
+                    member.subjectId !== context.accessContext.subjectId ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => setRemoving(member)}
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        {section === "danger" ? (
+          <DangerZone
+            workspaceName={workspace.name}
+            canDelete
+            isOnlyWorkspaceInAccount={false}
+            onDelete={deleteWorkspace}
+          />
+        ) : null}
+
+        <ConfirmDialog
+          open={removing !== null}
+          onOpenChange={(open) => {
+            if (!open) setRemoving(null);
+          }}
+          title={`Remove ${removing ? managedWorkspaceMemberLabel(removing) : "member"}?`}
+          description="Their workspace access stops immediately. Their organization membership and Personal workspace are unchanged."
+          confirmLabel="Remove access"
+          onConfirm={removeMember}
+        />
+      </section>
+    </WorkspaceSettingsContent>
+  );
+}
+
 function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: string }) {
   return (
     <section
@@ -809,7 +1247,7 @@ function MemoryPreferenceRow({
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const enabled = workspace?.settings?.memoryEnabled === true;
+  const enabled = workspace ? resolveWorkspaceMemoryEnabled(workspace.settings) : false;
   const [saving, setSaving] = useState(false);
 
   async function toggle(next: boolean) {
@@ -891,7 +1329,7 @@ function CodexCompactionPreferenceRow({
 }
 
 /** Danger zone: delete the workspace behind a typed-name confirmation. */
-function DangerZone(props: {
+export function DangerZone(props: {
   workspaceName: string;
   canDelete: boolean;
   isOnlyWorkspaceInAccount: boolean;
@@ -900,6 +1338,7 @@ function DangerZone(props: {
   const [open, setOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [busy, setBusy] = useState(false);
+  const deleteInFlight = useRef(false);
   const nameMatches =
     confirmName.trim() === props.workspaceName.trim() && props.workspaceName.trim().length > 0;
 
@@ -910,16 +1349,31 @@ function DangerZone(props: {
       : null;
 
   async function confirmDelete() {
-    if (!nameMatches) {
+    if (!nameMatches || deleteInFlight.current) {
       return;
     }
+    deleteInFlight.current = true;
     setBusy(true);
-    // onDelete (context.deleteWorkspace) surfaces its own error toast; on
-    // success it navigates away, unmounting this dialog.
-    const ok = await props.onDelete();
-    if (ok) {
-      toast.success("Workspace deleted");
-    } else {
+    // onDelete surfaces expected mutation errors. Close explicitly on success
+    // because a best-effort post-delete navigation can leave this route mounted.
+    try {
+      const ok = await props.onDelete();
+      if (ok) {
+        toast.success("Workspace deleted");
+        deleteInFlight.current = false;
+        setBusy(false);
+        setOpen(false);
+        setConfirmName("");
+      }
+      if (!ok) {
+        deleteInFlight.current = false;
+        setBusy(false);
+      }
+    } catch (error) {
+      toast.error("Couldn't finish workspace deletion", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      deleteInFlight.current = false;
       setBusy(false);
     }
   }
@@ -985,6 +1439,7 @@ function DangerZone(props: {
               </Label>
               <Input
                 id="confirm-workspace-name"
+                suppressAutofill
                 value={confirmName}
                 onChange={(event) => setConfirmName(event.target.value)}
                 placeholder={props.workspaceName}

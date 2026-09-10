@@ -10,7 +10,7 @@ Every session picks where it runs. A **managed sandbox** (a fresh cloud box Open
 
 If you want to try the managed version, go to [app.opengeni.ai](https://app.opengeni.ai).
 
-To see how a SaaS product embeds the React timeline, proxies sessions through its backend, exposes authenticated MCP tools, and reflects agent mutations live, run the [Northstar support example](examples/northstar-support).
+To put OpenGeni behind an existing chat in one server handler and one component, run the [chat quickstart](examples/chat-quickstart). To see how a SaaS product embeds the React timeline, proxies sessions through its backend, exposes authenticated MCP tools, and reflects agent mutations live, run the [Northstar support example](examples/northstar-support).
 
 ## Why OpenGeni
 
@@ -127,7 +127,11 @@ Pair this README with the [CloudGeni Infrastructure Agents Guide](https://github
 
 The capability catalog lets operators see and enable packs, MCP tools, APIs, skills, and plugins for the same runtime. See [docs/capabilities.md](docs/capabilities.md) for the unified catalog and [docs/packs.md](docs/packs.md) for the marketing social daily analysis pack.
 
-For product integration, keep OpenGeni as a standalone service by default. Start
+For product integration, keep OpenGeni as a standalone service by default. The
+fastest path is `@opengeni/sdk/chat`: one organization API key on your server,
+`createChatHandler` behind your chat endpoint (or the Vercel AI SDK and OpenAI
+adapters), a custom or compatible frontend, and per-chat `agentAccess` and
+`memory` options that keep every customer's chats in one workspace. Start
 with the canonical [product integration guide](docs/product-integration.md): an
 external backend holds one organization API key, maps each product tenant to an
 organization workspace (wire `kind: "shared"`), excludes Personal workspaces,
@@ -221,6 +225,8 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_DEV_BACKEND` when automatic Docker/native selection is not desired
 - `OPENGENI_OPENAI_PROVIDER`
 - OpenAI or Azure OpenAI credentials
+- Extra OpenAI-compatible servers, AI Gateway, OpenRouter, Codex, and SuperGrok: see
+  [Configuring inference](docs/model-providers.md#configuring-inference)
 - `OPENGENI_SANDBOX_BACKEND`
 - `OPENGENI_SANDBOX_PREPARATION_PROFILES` when sandbox credentials or lifecycle hooks are needed
 
@@ -259,7 +265,10 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 `OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
-for every Rig. A verified Rig provider image may accelerate physical cold create,
+image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
+`OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
+memory for every new box and remain stable through resume and replacement.
+A verified Rig provider image may accelerate physical cold create,
 but never replaces that logical lease identity. V2 capability Packs select a Rig
 for setup/check composition and cannot require an explicit sandbox image while
 Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
@@ -422,6 +431,7 @@ Core endpoints:
 - `GET /v1/config/client`
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
+- `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
 - bounded/keyset `GET /v1/organization-invitations` and exact subject-bound
   `POST /v1/organization-invitations/:id/accept`
 - `GET|POST /v1/organizations/:id/invitations` for bounded admin listing and

@@ -8,6 +8,7 @@
  */
 export type OlderHistoryLoadReceipt = Promise<boolean> & {
   readonly committed: boolean;
+  readonly tailPreserved?: boolean;
 };
 
 /**
@@ -22,23 +23,29 @@ export type OlderHistoryLoader = () => unknown;
 
 type MutableOlderHistoryLoadReceipt = Promise<boolean> & {
   committed: boolean;
+  tailPreserved: boolean;
 };
 
 type OlderHistoryReceiptCapture = (receipt: OlderHistoryLoadReceipt) => void;
 
 let activeReceiptCapture: OlderHistoryReceiptCapture | undefined;
+let preserveTailForAutomaticLoad = false;
 
 /** Bind a receipt before a synchronous forwarding stack can publish state. */
 export function invokeOlderHistoryLoaderWithReceiptCapture(
   load: OlderHistoryLoader,
   capture: OlderHistoryReceiptCapture,
+  preserveTail = false,
 ): unknown {
   const previousCapture = activeReceiptCapture;
+  const previousPreserveTail = preserveTailForAutomaticLoad;
   activeReceiptCapture = capture;
+  preserveTailForAutomaticLoad = preserveTail;
   try {
     return load();
   } finally {
     activeReceiptCapture = previousCapture;
+    preserveTailForAutomaticLoad = previousPreserveTail;
   }
 }
 
@@ -47,7 +54,11 @@ export function invokeOlderHistoryLoaderWithReceiptCapture(
  * Call `markCommitted` immediately before publishing an accepted older window.
  */
 export function createOlderHistoryLoadReceipt(
-  load: (markCommitted: () => void) => boolean | Promise<boolean>,
+  load: (
+    markCommitted: () => void,
+    preserveTail: boolean,
+    markTailPreserved: () => void,
+  ) => boolean | Promise<boolean>,
 ): OlderHistoryLoadReceipt {
   let resolveResult!: (value: boolean | PromiseLike<boolean>) => void;
   let rejectResult!: (reason?: unknown) => void;
@@ -56,11 +67,18 @@ export function createOlderHistoryLoadReceipt(
     rejectResult = reject;
   }) as MutableOlderHistoryLoadReceipt;
   result.committed = false;
+  result.tailPreserved = false;
   activeReceiptCapture?.(result);
   try {
-    const loaded = load(() => {
-      result.committed = true;
-    });
+    const loaded = load(
+      () => {
+        result.committed = true;
+      },
+      preserveTailForAutomaticLoad,
+      () => {
+        result.tailPreserved = true;
+      },
+    );
     Promise.resolve(loaded).then(resolveResult, rejectResult);
   } catch (error) {
     rejectResult(error);

@@ -4,6 +4,7 @@ import {
   approvalIdentifier,
   RequestHumanInteractionToolInput,
   RequestHumanInputToolInput,
+  canonicalSkillReviewQuestion,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   type SessionEventMediaPreview,
@@ -274,7 +275,13 @@ export function normalizeSdkEvent(
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "output_text_delta" && typeof data.delta === "string") {
-      out.push({ type: "agent.message.delta", payload: { text: data.delta } });
+      out.push({
+        type: "agent.message.delta",
+        payload: {
+          text: data.delta,
+          ...(typeof data.itemId === "string" && data.itemId ? { messageId: data.itemId } : {}),
+        },
+      });
       return out;
     }
     if (data?.type === "response_done") {
@@ -382,6 +389,9 @@ export function normalizeSdkEvent(
         type: "agent.message.completed",
         payload: {
           text,
+          ...(typeof item.rawItem?.id === "string" && item.rawItem.id
+            ? { messageId: item.rawItem.id }
+            : {}),
           ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}),
         },
       });
@@ -681,12 +691,34 @@ export function serializeHumanInputRequests(
         throw new Error("Human-input interruption is missing a stable tool-call identity");
       }
       const input = RequestHumanInputToolInput.parse(interruptionArguments(item));
+      const reviews = input.questions.filter((question) => question.skillReview);
+      if (reviews.length > 0) {
+        if (input.questions.length !== 1) {
+          throw new Error("Skill review requires one dedicated human-input question");
+        }
+        const question = reviews[0]!;
+        const canonical = canonicalSkillReviewQuestion(question);
+        // Normalize only known wire differences, never turn misleading text
+        // into a trusted review based solely on a model-supplied reference.
+        // The DB still binds that reference to the receipt and live human.
+        if (!canonical) {
+          throw new Error("Skill review must use the exact host-owned confirmation presentation");
+        }
+        return {
+          toolCallId,
+          input: {
+            ...input,
+            questions: [canonical],
+            allowSkip: false,
+          },
+        };
+      }
       return {
         toolCallId,
         input: {
           ...input,
           questions: input.questions.map((question) =>
-            question.kind === "text" || question.allowOther
+            question.kind === "text" || question.allowOther || question.skillReview
               ? question
               : { ...question, allowOther: true },
           ),

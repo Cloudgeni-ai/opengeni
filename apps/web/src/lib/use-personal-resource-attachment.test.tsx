@@ -294,8 +294,32 @@ describe("usePersonalResourceAttachment", () => {
     );
     await flush();
     expect(hook.result.current.selected.resourceCount).toBe(1);
-    await actRun(() => hook.result.current.setMode("session"));
-    await actRun(() => hook.result.current.setAcknowledged(true));
+    expect(hook.result.current.intent?.mode).toBe("session");
+    expect(hook.result.current.requiresDecision).toBe(false);
+    const acceptedIntent = hook.result.current.intent!;
+    const acceptedCallback = hook.result.current.onAccepted;
+    await actRun(() => acceptedCallback({ personalResourceAttachment: acceptedIntent }));
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("session");
+    expect(hook.result.current.notice).toBeNull();
+    expect(acceptedIntent.mode).toBe("session");
+    await actRun(() =>
+      hook.result.current.onAccepted({ personalResourceAttachment: acceptedIntent }),
+    );
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("session");
+    const delayedIntent = hook.result.current.intent!;
+    await actRun(() =>
+      hook.result.current.onAccepted({ personalResourceAttachment: delayedIntent }),
+    );
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("session");
+    await actRun(() =>
+      hook.result.current.onAccepted({
+        personalResourceAttachment: structuredClone(hook.result.current.intent!),
+      }),
+    );
+    await flush();
     expect(hook.result.current.intent?.mode).toBe("session");
 
     active = false;
@@ -343,11 +367,170 @@ describe("usePersonalResourceAttachment", () => {
       variableSetId,
     ]);
     expect(hook.result.current.selected.resourceCount).toBe(1);
-    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.requiresDecision).toBe(false);
+    expect(hook.result.current.intent?.mode).toBe("session");
     await hook.unmount();
   });
 
-  test("a definitive stale-authority denial reloads the session and requires reconfirmation", async () => {
+  test("a stale-authority denial stays fenced until the reloaded session projection arrives", async () => {
+    let sessionReloads = 0;
+    let resolveSessionReload!: () => void;
+    const sessionReload = new Promise<void>((resolve) => {
+      resolveSessionReload = resolve;
+    });
+    let variableSetLoads = 0;
+    let resolveUpdatedCatalog!: (resources: ReturnType<typeof variableSet>[]) => void;
+    const updatedCatalog = new Promise<ReturnType<typeof variableSet>[]>((resolve) => {
+      resolveUpdatedCatalog = resolve;
+    });
+    const client = {
+      listVariableSets: async () => {
+        variableSetLoads += 1;
+        return variableSetLoads >= 3 ? await updatedCatalog : [variableSet()];
+      },
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _workspaceId: string,
+        options: { resourceKind: string },
+      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+    } as unknown as OpenGeniBrowserClient;
+    const current = identity("owner");
+    const hook = await renderHook(
+      ({ authorityEpoch }: { authorityEpoch: number }) =>
+        usePersonalResourceAttachment({
+          client,
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          session: {
+            id: "66666666-6666-4666-8666-666666666666",
+            tenancy: {
+              visibility: "workspace",
+              authorityEpoch,
+              ownedByCurrentUser: true,
+              fork: null,
+            },
+          },
+          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          personalWorkspaceTarget: false,
+          onReloadSession: async () => {
+            sessionReloads += 1;
+            await sessionReload;
+          },
+        }),
+      { authorityEpoch: 3 },
+    );
+    await flush();
+    const attempted = {
+      text: "Deploy",
+      personalResourceAttachment: hook.result.current.intent,
+    };
+    expect(attempted.personalResourceAttachment?.expectedAuthorityEpoch).toBe(3);
+
+    await actRun(() =>
+      hook.result.current.onDeliveryError(
+        new OpenGeniApiError(403, "forbidden", { mutation: true }),
+        attempted,
+        "send",
+      ),
+    );
+    await flush();
+    expect(sessionReloads).toBe(1);
+    expect(hook.result.current.mode).toBe("session");
+    expect(hook.result.current.intent).toBeUndefined();
+    expect(hook.result.current.refreshing).toBe(true);
+    expect(hook.result.current.requiresDecision).toBe(true);
+
+    await actRun(() => resolveSessionReload());
+    await hook.rerender({ authorityEpoch: 4 });
+    await flush();
+    expect(hook.result.current.intent).toBeUndefined();
+    expect(hook.result.current.refreshing).toBe(true);
+    expect(hook.result.current.requiresDecision).toBe(true);
+
+    await actRun(() => resolveUpdatedCatalog([variableSet()]));
+    await flush();
+    expect(hook.result.current.mode).toBe("session");
+    expect(hook.result.current.intent).toMatchObject({
+      mode: "session",
+      expectedAuthorityEpoch: 4,
+    });
+    expect(hook.result.current.refreshing).toBe(false);
+    expect(hook.result.current.requiresDecision).toBe(false);
+    expect(hook.result.current.notice).toBe("reloaded");
+    await hook.unmount();
+  });
+
+  test("an authority-epoch reload fences a personal resource missing from the replacement catalog", async () => {
+    let resolveSessionReload!: () => void;
+    const sessionReload = new Promise<void>((resolve) => {
+      resolveSessionReload = resolve;
+    });
+    let variableSetLoads = 0;
+    const client = {
+      listVariableSets: async () => {
+        variableSetLoads += 1;
+        return variableSetLoads >= 3 ? [] : [variableSet()];
+      },
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _workspaceId: string,
+        options: { resourceKind: string },
+      ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
+    } as unknown as OpenGeniBrowserClient;
+    const current = identity("owner");
+    const hook = await renderHook(
+      ({ authorityEpoch }: { authorityEpoch: number }) =>
+        usePersonalResourceAttachment({
+          client,
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          session: {
+            id: "66666666-6666-4666-8666-666666666666",
+            tenancy: {
+              visibility: "workspace",
+              authorityEpoch,
+              ownedByCurrentUser: true,
+              fork: null,
+            },
+          },
+          fixed: { variableSetId, rigId: null, connectedMachine: null },
+          personalWorkspaceTarget: false,
+          onReloadSession: async () => await sessionReload,
+        }),
+      { authorityEpoch: 3 },
+    );
+    await flush();
+    const attempted = {
+      text: "Deploy",
+      personalResourceAttachment: hook.result.current.intent,
+    };
+
+    await actRun(() =>
+      hook.result.current.onDeliveryError(
+        new OpenGeniApiError(403, "forbidden", { mutation: true }),
+        attempted,
+        "send",
+      ),
+    );
+    await actRun(() => resolveSessionReload());
+    await hook.rerender({ authorityEpoch: 4 });
+    await flush();
+
+    expect(hook.result.current.selected.resourceCount).toBe(0);
+    expect(hook.result.current.sourceLost).toBe(true);
+    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.intent).toBeUndefined();
+    expect(hook.result.current.notice).toBe("source_changed");
+    await hook.unmount();
+  });
+
+  test("a stale-authority reload that does not advance the projection stays retryable", async () => {
     let sessionReloads = 0;
     const client = {
       listVariableSets: async () => [variableSet()],
@@ -385,31 +568,34 @@ describe("usePersonalResourceAttachment", () => {
       undefined,
     );
     await flush();
-    await actRun(() => hook.result.current.setMode("always"));
-    await actRun(() => hook.result.current.setAcknowledged(true));
     const attempted = {
       text: "Deploy",
       personalResourceAttachment: hook.result.current.intent,
     };
-    expect(attempted.personalResourceAttachment?.expectedAuthorityEpoch).toBe(3);
 
     await actRun(() =>
       hook.result.current.onDeliveryError(
-        new OpenGeniApiError(403, "forbidden", { mutation: true }),
+        new OpenGeniApiError(409, "conflict", { mutation: true }),
         attempted,
         "send",
       ),
     );
     await flush();
     expect(sessionReloads).toBe(1);
-    expect(hook.result.current.mode).toBeNull();
-    expect(hook.result.current.intent).toBeUndefined();
+    expect(hook.result.current.error?.message).toContain("could not be refreshed");
+    expect(hook.result.current.notice).toBe("reload_failed");
+    expect(hook.result.current.refreshing).toBe(false);
     expect(hook.result.current.requiresDecision).toBe(true);
-    expect(hook.result.current.notice).toContain("Session authority changed");
+    expect(hook.result.current.intent).toBeUndefined();
+
+    await actRun(() => hook.result.current.refresh());
+    await flush();
+    expect(sessionReloads).toBe(2);
+    expect(hook.result.current.requiresDecision).toBe(true);
     await hook.unmount();
   });
 
-  test("a selected personal Connected Machine requires and produces an attachment decision", async () => {
+  test("a selected personal Connected Machine automatically authorizes ongoing work", async () => {
     const enrollmentId = "99999999-9999-4999-8999-999999999999";
     const client = {
       listVariableSets: async () => [],
@@ -460,15 +646,9 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.selected.connectedMachines).toEqual([
       { enrollmentId, name: "Owner Mac" },
     ]);
-    expect(hook.result.current.requiresDecision).toBe(true);
-    expect(hook.result.current.intent).toBeUndefined();
-
-    await actRun(() => hook.result.current.setMode("once"));
-    expect(hook.result.current.requiresDecision).toBe(true);
-    await actRun(() => hook.result.current.setAcknowledged(true));
     expect(hook.result.current.requiresDecision).toBe(false);
     expect(hook.result.current.intent).toMatchObject({
-      mode: "once",
+      mode: "session",
       workspaceSharedAcknowledged: true,
     });
     await hook.unmount();
@@ -507,7 +687,7 @@ describe("usePersonalResourceAttachment", () => {
       });
     }
 
-    test(`personal ${label} positively identifies the selection and requires a decision`, async () => {
+    test(`personal ${label} positively identifies the selection and applies the visibility rule`, async () => {
       const client = personalClient();
       const current = identity("owner");
       const hook = await renderHook(
@@ -528,7 +708,8 @@ describe("usePersonalResourceAttachment", () => {
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.selected.resourceCount).toBe(1);
       expect(hook.result.current.selected.personalResourceCount).toBe(1);
-      expect(hook.result.current.requiresDecision).toBe(true);
+      expect(hook.result.current.requiresDecision).toBe(false);
+      expect(hook.result.current.intent?.mode).toBe("session");
       await hook.unmount();
     });
 
@@ -710,7 +891,8 @@ describe("usePersonalResourceAttachment", () => {
       await flush();
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.selected.resourceCount).toBe(1);
-      expect(hook.result.current.requiresDecision).toBe(true);
+      expect(hook.result.current.requiresDecision).toBe(false);
+      expect(hook.result.current.intent?.mode).toBe("session");
       await hook.unmount();
     });
   }
@@ -741,8 +923,6 @@ describe("usePersonalResourceAttachment", () => {
       { enabled: true },
     );
     await flush();
-    await actRun(() => hook.result.current.setMode("session"));
-    await actRun(() => hook.result.current.setAcknowledged(true));
     expect(hook.result.current.intent).toBeDefined();
 
     await hook.rerender({ enabled: false });
@@ -753,8 +933,8 @@ describe("usePersonalResourceAttachment", () => {
 
     await hook.rerender({ enabled: true });
     await flush();
-    expect(hook.result.current.mode).toBeNull();
-    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.mode).toBe("session");
+    expect(hook.result.current.requiresDecision).toBe(false);
     await hook.unmount();
   });
 });

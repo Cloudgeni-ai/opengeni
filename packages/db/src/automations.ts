@@ -1,8 +1,9 @@
 import {
   AutomationAcceptedExecution,
+  StoredAutomationAcceptedExecution,
   AutomationNormalizedEvent,
-  AutomationSessionTemplate,
-  CapabilityPack,
+  StoredAutomationSessionTemplate,
+  StoredCapabilityPack,
   stableJson,
   type AutomationRun,
   type AutomationSource,
@@ -223,6 +224,8 @@ export async function createAutomationTrigger(
     createdBySubjectId: string;
     request: CreateAutomationTriggerRequest;
     adapterId: string;
+    /** Trusted database-only admission seam. Throwing rolls creation back. */
+    beforeCreateCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<AutomationTrigger> {
   return await withWorkspaceRls(
@@ -269,7 +272,7 @@ export async function createAutomationTrigger(
             )
             .limit(1);
           const manifest = installation?.manifestSnapshot
-            ? CapabilityPack.safeParse(installation.manifestSnapshot)
+            ? StoredCapabilityPack.safeParse(installation.manifestSnapshot)
             : null;
           if (!installation || installation.status !== "active" || !manifest?.success) {
             throw new Error("Automation Pack installation is not active");
@@ -289,6 +292,7 @@ export async function createAutomationTrigger(
             throw new Error("Automation Pack trigger must use its frozen manifest template");
           }
         }
+        await input.beforeCreateCommit?.(tx);
         const [head] = await tx
           .insert(schema.automationTriggers)
           .values({
@@ -438,6 +442,8 @@ export async function updateAutomationTrigger(
     triggerId: string;
     subjectId: string;
     request: UpdateAutomationTriggerRequest;
+    /** Trusted database-only admission seam. Throwing rolls the revision back. */
+    beforeUpdateCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<AutomationTrigger | null> {
   return await withWorkspaceRls(
@@ -478,6 +484,7 @@ export async function updateAutomationTrigger(
             "Pack-owned automation triggers must be managed through their Pack setup API",
           );
         }
+        await input.beforeUpdateCommit?.(tx);
         const revisionNumber = existing.head.currentRevision + 1;
         const [head] = await tx
           .update(schema.automationTriggers)
@@ -696,7 +703,9 @@ export async function claimAutomationRun(
           .for("update")
           .limit(1);
         if (!row) return null;
-        if (row.status === "dispatched" || row.status === "skipped") return mapRunExecution(row);
+        if (row.status === "dispatched" || row.status === "skipped" || row.status === "failed") {
+          return mapRunExecution(row);
+        }
         const [updated] = await tx
           .update(schema.automationRuns)
           .set({
@@ -854,7 +863,7 @@ function mapTrigger(
     eventTypes: revision.eventTypes,
     configuration: revision.configuration,
     parameters: revision.parameters,
-    sessionTemplate: AutomationSessionTemplate.parse(revision.sessionTemplate),
+    sessionTemplate: StoredAutomationSessionTemplate.parse(revision.sessionTemplate),
     status: head.status as AutomationTrigger["status"],
     revision: revisionNumber,
     packInstallationId: head.packInstallationId,
@@ -906,6 +915,6 @@ function mapRun(row: RunRow): AutomationRun {
 function mapRunExecution(row: RunRow): AutomationRunExecution {
   return {
     ...mapRun(row),
-    acceptedExecution: AutomationAcceptedExecution.parse(row.acceptedExecution),
+    acceptedExecution: StoredAutomationAcceptedExecution.parse(row.acceptedExecution),
   };
 }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
@@ -12,6 +12,7 @@ import {
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type Database,
 } from "@opengeni/db";
+import * as opengeniDb from "@opengeni/db";
 import {
   createOpenGeniWorker,
   createOpenGeniWorkerService,
@@ -121,6 +122,24 @@ describe("embedded worker lifecycle contract", () => {
         },
       } as never),
     ).rejects.toThrow("sessionEventDurableFanout v1");
+  });
+
+  test("embedded worker startup fails closed when database catalog mode has no singleton row", async () => {
+    const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue(null);
+    try {
+      await expect(
+        createOpenGeniWorkerService({
+          role: "control",
+          settings: testSettings({ modelCatalogSource: "database" }),
+          activityDependencies: {
+            db: {} as Database,
+            bus: new MemoryEventBus(),
+          },
+        } as never),
+      ).rejects.toThrow("singleton row is missing");
+    } finally {
+      getCatalog.mockRestore();
+    }
   });
 
   test("worker readiness requires the durable subscriber-recovery capability", () => {
@@ -413,11 +432,15 @@ describe("embedded worker lifecycle contract", () => {
       [
         ...[
           "company_profile_activation_events",
+          "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
           "company_profile_agent_proposal_receipts",
           "company_profile_heads",
           "company_profile_revisions",
           "connections",
+          "external_identities",
+          "external_identity_links",
+          "workspace_inference_controls",
           "files",
           "google_drive_object_acl_evidence",
           "google_drive_object_acl_principals",
@@ -428,6 +451,8 @@ describe("embedded worker lifecycle contract", () => {
           "knowledge_source_sync_states",
           "knowledge_sources",
           "managed_accounts",
+          "organization_company_profile_agent_policies",
+          "organization_company_profile_agent_policy_events",
           "organization_invitation_binding_events",
           "organization_membership_invitations",
           "organization_membership_lifecycle_events",
@@ -447,6 +472,9 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_policies",
           "organization_workspace_lifecycle_events",
           "organization_workspace_operation_receipts",
+          "preference_registry_preferences",
+          "preference_registry_revisions",
+          "preference_registry_events",
           "self_service_organization_setup_receipts",
           "session_human_input_requests",
           "session_tenancy_activations",
@@ -473,6 +501,7 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
         ...[
+          "additional_organization_creation_receipts",
           "canonical_human_identities",
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
@@ -481,6 +510,7 @@ describe("embedded worker lifecycle contract", () => {
           ...organizationRecoveryTables,
           "organization_user_setup_deliveries",
           "organization_user_setup_delivery_attempts",
+          "session_tenancy_additional_organization_activation_evidence",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -626,6 +656,7 @@ describe("embedded worker lifecycle contract", () => {
       expectedRole: "opengeni_app",
       targetSchema: "public",
       protectedTables: [
+        "additional_organization_creation_receipts",
         "canonical_human_identities",
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
@@ -634,9 +665,11 @@ describe("embedded worker lifecycle contract", () => {
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
+        "session_tenancy_additional_organization_activation_evidence",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
+        "additional_organization_creation_receipts",
         "canonical_human_identities",
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
@@ -645,6 +678,7 @@ describe("embedded worker lifecycle contract", () => {
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
+        "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
     expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([

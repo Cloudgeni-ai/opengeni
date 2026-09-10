@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { directRetainedProcessMatchesBackend } from "../src/sandbox/routing";
+import {
+  directRetainedProcessMatchesBackend,
+  retainedProcessBackgroundSettlement,
+} from "../src/sandbox/routing";
 import { managedSessionGroupBackend, managedSessionGroupOs } from "../src/sandbox/runtime-settings";
 
 describe("managed session-group backend", () => {
@@ -58,5 +61,39 @@ describe("API-direct retained-process route identity", () => {
         backend,
       ),
     ).toBe(false);
+  });
+
+  test("propagates the first durable terminal reason to background-command settlement", () => {
+    expect(
+      retainedProcessBackgroundSettlement(
+        {
+          state: "lost",
+          exitCode: null,
+          settlementReason: "provider_instance_not_found",
+        },
+        {
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_session_lost_banner",
+        },
+      ),
+    ).toEqual({
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_instance_not_found",
+    });
+  });
+
+  test("rejects an impossible active process returned from terminal settlement", () => {
+    expect(() =>
+      retainedProcessBackgroundSettlement(
+        { state: "active", exitCode: null, settlementReason: null },
+        {
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_session_lost_banner",
+        },
+      ),
+    ).toThrow("active durable process");
   });
 });

@@ -101,12 +101,14 @@ export const reconcileSessionAttemptQuiescence =
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
+export const settleSessionInputWait = defaultControlActivities.settleSessionInputWait;
 export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
 export const expireSessionInteractionIntervention =
   defaultControlActivities.expireSessionInteractionIntervention;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const dispatchAutomationRun = defaultControlActivities.dispatchAutomationRun;
+export const settleAutomationRunFailure = defaultControlActivities.settleAutomationRunFailure;
 export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;

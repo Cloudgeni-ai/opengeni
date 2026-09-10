@@ -318,6 +318,8 @@ export async function createPrReviewRepositoryBinding(
     eventTypes: string[];
     configuration: Record<string, unknown>;
     sessionTemplate: AutomationSessionTemplate;
+    /** Trusted database-only admission seam. Throwing rolls the binding and trigger back. */
+    beforeCreateCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<PrReviewRepositoryBinding> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -345,6 +347,7 @@ export async function createPrReviewRepositoryBinding(
           "PR Review repository provider does not match its app",
         );
       }
+      await input.beforeCreateCommit?.(tx);
       const bindingId = randomUUID();
       const [trigger] = await tx
         .insert(schema.automationTriggers)
@@ -842,6 +845,16 @@ export async function updatePrReviewRepositoryBinding(
     model?: string | null;
     additionalInstructions?: string | null;
     status?: "active" | "disabled";
+    /** Trusted database-only admission seam. Throwing rolls the binding revision back. */
+    beforeUpdateCommit?: (
+      tx: Database,
+      context: {
+        currentModel: string | null;
+        currentStatus: "active" | "disabled";
+        nextModel: string | null;
+        nextStatus: "active" | "disabled";
+      },
+    ) => Promise<void>;
   },
 ): Promise<PrReviewRepositoryBinding | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -891,6 +904,12 @@ export async function updatePrReviewRepositoryBinding(
             : input.additionalInstructions,
         status: input.status ?? (current.binding.status as "active" | "disabled"),
       };
+      await input.beforeUpdateCommit?.(tx, {
+        currentModel: current.binding.model,
+        currentStatus: current.binding.status as "active" | "disabled",
+        nextModel: next.model,
+        nextStatus: next.status,
+      });
       const nextRevision = current.trigger.currentRevision + 1;
       await tx.insert(schema.automationTriggerRevisions).values({
         triggerId: current.trigger.id,

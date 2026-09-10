@@ -205,6 +205,7 @@ async function databasePosture(
   appRoleSuperuser: boolean;
   appRoleBypassRls: boolean;
   sessionsForceRls: boolean;
+  sessionEventCursorsForceRls: boolean;
   sessionEventsForceRls: boolean;
 }> {
   const [role] = await appSql<
@@ -214,7 +215,7 @@ async function databasePosture(
   const relations = await admin<
     { relation: string; forceRls: boolean }[]
   >`select relname as relation, relforcerowsecurity as "forceRls"
-    from pg_class where relname in ('sessions', 'session_events')`;
+    from pg_class where relname in ('sessions', 'session_event_cursors', 'session_events')`;
   const [server] = await admin<
     {
       postgresVersion: string;
@@ -239,6 +240,7 @@ async function databasePosture(
     role.superuser ||
     role.bypassRls ||
     !forceRls.get("sessions") ||
+    !forceRls.get("session_event_cursors") ||
     !forceRls.get("session_events")
   ) {
     throw new Error(
@@ -255,6 +257,7 @@ async function databasePosture(
     appRoleSuperuser: role.superuser,
     appRoleBypassRls: role.bypassRls,
     sessionsForceRls: forceRls.get("sessions") ?? false,
+    sessionEventCursorsForceRls: forceRls.get("session_event_cursors") ?? false,
     sessionEventsForceRls: forceRls.get("session_events") ?? false,
   };
 }
@@ -433,12 +436,15 @@ async function durableInvariantAudit(
   duplicateSequenceSessions: number;
   rejectedLateEvents: number;
   missingSessionRows: number;
+  missingCursorRows: number;
+  projectionAheadSessions: number;
 }> {
   const ids = sessions.map((session) => session.sessionId);
   const rows = await admin<
     {
       sessionId: string;
-      lastSequence: number;
+      sessionSequence: number;
+      cursorSequence: number | null;
       eventCount: number;
       distinctSequenceCount: number;
       minimumSequence: number;
@@ -446,21 +452,27 @@ async function durableInvariantAudit(
     }[]
   >`select
       session.id as "sessionId",
-      session.last_sequence as "lastSequence",
+      session.last_sequence as "sessionSequence",
+      cursor.last_sequence as "cursorSequence",
       count(event.id)::integer as "eventCount",
       count(distinct event.sequence)::integer as "distinctSequenceCount",
       coalesce(min(event.sequence), 0)::integer as "minimumSequence",
       coalesce(max(event.sequence), 0)::integer as "maximumSequence"
     from sessions session
+    left join session_event_cursors cursor
+      on cursor.account_id = session.account_id
+     and cursor.workspace_id = session.workspace_id
+     and cursor.session_id = session.id
     left join session_events event
       on event.workspace_id = session.workspace_id and event.session_id = session.id
     where session.id = any(${ids}::uuid[])
-    group by session.id, session.last_sequence`;
+    group by session.id, session.last_sequence, cursor.last_sequence`;
   const sequenceGapSessions = rows.filter(
     (row) =>
+      row.cursorSequence === null ||
       row.minimumSequence !== 1 ||
-      row.maximumSequence !== row.lastSequence ||
-      row.eventCount !== row.lastSequence,
+      row.maximumSequence !== row.cursorSequence ||
+      row.eventCount !== row.cursorSequence,
   ).length;
   const duplicateSequenceSessions = rows.filter(
     (row) => row.eventCount !== row.distinctSequenceCount,
@@ -475,6 +487,10 @@ async function durableInvariantAudit(
     duplicateSequenceSessions,
     rejectedLateEvents: late?.count ?? 0,
     missingSessionRows: Math.max(0, sessions.length - rows.length),
+    missingCursorRows: rows.filter((row) => row.cursorSequence === null).length,
+    projectionAheadSessions: rows.filter(
+      (row) => row.cursorSequence !== null && row.sessionSequence > row.cursorSequence,
+    ).length,
   };
 }
 
@@ -560,6 +576,10 @@ function evaluateFailures(
   if (audit.duplicateSequenceSessions > 0) failures.push("duplicate durable sequences detected");
   if (audit.rejectedLateEvents > 0) failures.push("ordinary benchmark appends were rejected late");
   if (audit.missingSessionRows > 0) failures.push("benchmark session rows were not durable");
+  if (audit.missingCursorRows > 0) failures.push("benchmark session cursor rows were not durable");
+  if (audit.projectionAheadSessions > 0) {
+    failures.push("session compatibility projection led the authoritative cursor");
+  }
   return failures;
 }
 

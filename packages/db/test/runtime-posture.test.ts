@@ -206,11 +206,14 @@ function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
 function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
   return [
     "company_profile_activation_events",
+    "company_profile_agent_automatic_activation_receipts",
     "company_profile_agent_confirmation_receipts",
     "company_profile_agent_proposal_receipts",
     "company_profile_heads",
     "company_profile_revisions",
     "managed_accounts",
+    "organization_company_profile_agent_policies",
+    "organization_company_profile_agent_policy_events",
     "session_human_input_requests",
   ].map((name) => ({
     name,
@@ -233,11 +236,15 @@ function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
 
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
+    "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
     "organization_membership_lifecycle_events",
     "organization_membership_operation_receipts",
     "organization_memberships",
+    "external_identities",
+    "external_identity_links",
+    "workspace_inference_controls",
     "organization_profile_events",
     "organization_shared_workspace_administration_capabilities",
     "organization_user_setup_deliveries",
@@ -554,42 +561,65 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 304],
-            [NON_RLS_RUNTIME_TABLES, 13],
-            [RUNTIME_FULL_DML_TABLES, 151],
-            [RUNTIME_READ_ONLY_TABLES, 21],
+            [FORCE_RLS_TABLES, 322],
+            [NON_RLS_RUNTIME_TABLES, 19],
+            [RUNTIME_FULL_DML_TABLES, 164],
+            [RUNTIME_READ_ONLY_TABLES, 24],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 46],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 66],
-            [RUNTIME_DML_TABLES, 251],
+            [RUNTIME_READ_INSERT_TABLES, 47],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 72],
+            [RUNTIME_DML_TABLES, 269],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 205],
-            [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 119],
-            [RUNTIME_READ_ONLY_TABLES, 17],
+            [FORCE_RLS_TABLES, 206],
+            [NON_RLS_RUNTIME_TABLES, 12],
+            [RUNTIME_FULL_DML_TABLES, 120],
+            [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
-            [RUNTIME_DML_TABLES, 186],
+            [RUNTIME_DML_TABLES, 188],
           ] as const);
       for (const [tables, length] of contracts) {
+        // Nine additive embedding tables: three full-DML, four append-only,
+        // one link lifecycle journal and one protected identity table.
+        const embeddingTableCount =
+          tables === FORCE_RLS_TABLES
+            ? 9
+            : tables === RUNTIME_FULL_DML_TABLES
+              ? 3
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 4
+                : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+                  ? 1
+                  : tables === PROTECTED_NO_DIRECT_DML_TABLES
+                    ? 1
+                    : tables === RUNTIME_DML_TABLES
+                      ? 8
+                      : 0;
         const expectedLength =
-          tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
+          embeddingTableCount +
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount
-            : length;
+            : length);
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
         expect([...tables].sort()).toEqual([...tables]);
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 317 : 216;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9;
+      expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
+      expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
+      for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
+        expect(FORCE_RLS_TABLES).toContain(table);
+        expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
+      }
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -602,6 +632,7 @@ describe("runtime database posture evaluator", () => {
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,
       );
+      expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
         "INSERT",
@@ -656,15 +687,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 221],
-      [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 135],
-      [RUNTIME_READ_ONLY_TABLES, 15],
+      [FORCE_RLS_TABLES, 222],
+      [NON_RLS_RUNTIME_TABLES, 12],
+      [RUNTIME_FULL_DML_TABLES, 136],
+      [RUNTIME_READ_ONLY_TABLES, 16],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
       [PROTECTED_NO_DIRECT_DML_TABLES, 27],
-      [RUNTIME_DML_TABLES, 210],
+      [RUNTIME_DML_TABLES, 212],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -673,8 +704,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(237);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(232);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(239);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(234);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -704,6 +735,26 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("external provisioner requires all authority tables owned by its definer", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "external_identities");
+    expect(
+      evaluateRuntimeDatabasePosture(missing, options).some(
+        (message) => message.includes("ensure_external_identity") && message.includes("missing"),
+      ),
+    ).toBe(true);
+    const split = safePosture();
+    split.tables = split.tables.map((table) =>
+      table.name === "external_identities" ? { ...table, owner: "unrelated_owner" } : table,
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(split, options).some(
+        (message) =>
+          message.includes("ensure_external_identity") && message.includes("owners do not match"),
+      ),
+    ).toBe(true);
   });
 
   test("enforces the automatic session title fanout capability boundary", () => {
@@ -1197,6 +1248,22 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
   });
 
+  test("classifies MCP OAuth exact-key state and tool approvals explicitly", () => {
+    for (const table of [
+      "mcp_oauth_access_tokens",
+      "mcp_oauth_authorization_codes",
+      "mcp_oauth_authorization_requests",
+      "mcp_oauth_clients",
+      "mcp_oauth_refresh_tokens",
+    ] as const) {
+      expect(NON_RLS_RUNTIME_TABLES).toContain(table);
+      expect(RUNTIME_FULL_DML_TABLES).toContain(table);
+      expect(FORCE_RLS_TABLES).not.toContain(table);
+    }
+    expect(FORCE_RLS_TABLES).toContain("tool_gateway_approval_capabilities");
+    expect(RUNTIME_FULL_DML_TABLES).toContain("tool_gateway_approval_capabilities");
+  });
+
   test("classifies advisory work claims as readable heads with capability-only history", () => {
     expect(FORCE_RLS_TABLES).toEqual(
       expect.arrayContaining([
@@ -1232,7 +1299,9 @@ describe("runtime database posture evaluator", () => {
     }
     for (const routine of [
       "claim_organization_user_setup_delivery(jsonb)",
+      "claim_organization_user_setup_delivery_v2(jsonb)",
       "prepare_organization_user_setup_delivery(jsonb)",
+      "prepare_organization_user_setup_delivery_v2(jsonb)",
       "settle_organization_user_setup_delivery(jsonb)",
       "preview_organization_user_setup(text)",
       "get_organization_invitation_for_administration(uuid, text, uuid)",
@@ -1339,6 +1408,9 @@ describe("runtime database posture evaluator", () => {
     for (const table of [
       "company_profile_agent_proposal_receipts",
       "company_profile_agent_confirmation_receipts",
+      "company_profile_agent_automatic_activation_receipts",
+      "organization_company_profile_agent_policies",
+      "organization_company_profile_agent_policy_events",
     ] as const) {
       expect(FORCE_RLS_TABLES).toContain(table);
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
@@ -1346,7 +1418,10 @@ describe("runtime database posture evaluator", () => {
     }
     for (const routine of [
       "propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text)",
+      "propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text)",
       "confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
+      "get_company_profile_agent_policy(uuid, uuid, text)",
+      "update_company_profile_agent_policy(uuid, uuid, text, text, bigint, uuid)",
     ] as const) {
       expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
     }

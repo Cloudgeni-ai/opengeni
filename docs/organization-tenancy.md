@@ -108,13 +108,18 @@ same-turn recovery reuses once while goal/machine successors do not inherit it.
 The managed web console exposes that exact command for a new session and its
 existing-session Send/Steer composer. It discovers only the current managed
 human's active Variable Set/Rig/Connected Machine authorities through the bounded owner list,
-joins names from the server-issued personal workspace's metadata-only catalogs,
-and never lets an established session switch its fixed resource ids. Shared
-sessions require the version-1 output warning acknowledgement; authority-epoch,
-principal, organization, workspace, session, or source-access changes clear the
-local decision and require an authoritative reload plus reconfirmation. The UI
-does not project an attachment as accepted before the create/Send/Steer command
-commits. Cross-workspace grant/fork UX, standalone management of `once`,
+joins names from target-workspace metadata-only catalogs, and preserves the
+explicit selected-resource boundary. Explicit attachment is consent for the
+owner's work in this session: private and shared sessions submit session-scoped
+authorization without a duration selector or a second approval prompt. Shared
+resource pickers explain that results are visible to people with chat access and
+include the version-1 shared-output acknowledgement. Authority-epoch, principal,
+organization, workspace, session, or selected-source changes still require the
+current authority closure to settle before submission. The browser never requests
+`always`; existing public API `once`/`session`/`always` semantics are unchanged.
+Healthy attachments add no composer-top status or acceptance notice. The UI does not project an
+attachment as accepted before the Create/Send/Steer command commits. Continue
+uses that same human Send path. Cross-workspace grant/fork UX, standalone management of `once`,
 Documents/Connections without an exact runtime adapter, and
 MCP/agent administration remain outside this slice.
 
@@ -249,6 +254,18 @@ remain legitimately ownerless. Rows already durable before 0302 remain the
 existing `bun run db:backfill-session-ownership` seam's job.
 
 ### `getWorkspaceGrant` is not an authority answer
+
+Personal owners may administer their own workspace configuration through
+`requireWorkspaceSettingsGrant` (`packages/core/src/access/index.ts`). This
+request boundary preserves ordinary workspace-admin behavior and otherwise
+requires a verified canonical managed cookie, exact authenticated subject, and
+a live active-organization membership pointing to the requested Personal
+workspace. It covers preferences, custom models/model policy, runtime control,
+and instruction/Skill autonomy, including its revision lifecycle. The returned
+grant is unchanged: no `workspace:admin`, `members:manage`, or `api_keys:manage`
+is added. Workspace deletion and access-management routes do not use this
+exception. The web's matching owner affordance uses the current server-issued
+membership tuple; it is not API authorization.
 
 `getWorkspaceGrant` (`packages/db/src/index.ts`) is a bare
 `workspace_memberships` join. Because a managed personal workspace deliberately
@@ -493,8 +510,13 @@ The managed-human API surface is:
   organization-name-only setup. It creates exactly the owning human's active
   organization membership and canonical Personal workspace/control row—no
   shared workspace and no Personal `workspace_memberships` row;
+- `POST /v1/organizations/additional` lets an already-onboarded verified human
+  create another independent organization. It atomically creates that
+  organization's owner membership, canonical Personal workspace, and a named
+  first shared workspace with an explicit administrator grant for the creator;
 - `POST /v1/organizations/:organizationId/workspaces` idempotently creates a
-  shared workspace without implicitly granting the organization administrator
+  shared workspace and atomically gives that exact creator an explicit named
+  workspace-admin grant; unrelated organization administrators receive no
   operational access;
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
@@ -502,11 +524,20 @@ The managed-human API surface is:
   `/settings` route, `PUT
 /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
   for an idempotent named or custom grant, and the explicit `/revoke` command
-  below that member route for the shared-workspace control plane; and
+  below that member route for the shared-workspace control plane;
+- `DELETE /v1/organizations/:organizationId/workspaces/:workspaceId` for the
+  same quiescence-fenced deletion used by a direct workspace administrator,
+  after a transaction-scoped organization owner/admin check that excludes
+  Personal workspaces; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
-These routes require a direct managed-human cookie session; API keys and
-delegated bearer requests are rejected.
+The organization overview, organization/shared-workspace metadata, member
+inventory, retention, and organization Codex routes require either a direct
+managed-human cookie session or the exact provenance-stamped single-user local
+administrator for `opengeni:local/default`. Invitation and member lifecycle,
+private-session, and recovery operations remain managed-human-only. API keys,
+configured access, delegated bearers, services, and agents are rejected from
+the local exception.
 
 ### Pre-registration invitations and signup convergence (0314)
 
@@ -594,6 +625,46 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
+The stock web console may then show a skippable product step to connect a
+model or buy OpenGeni credits. Connecting selects the model in the human’s
+actor-private new-session draft with its expected revision, preserving the
+other draft fields. It never writes workspace settings or requires
+`workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
+accept still complete immediately. The step does not widen
+`POST /v1/auth/organization-onboarding`, invitation accept, or any worker
+surface. Empty OpenGeni-credit create and failed-session paths prompt the
+owner to buy credits or connect a model instead of a dead-end toast.
+
+### Additional organization creation (0399)
+
+Migration `0399_additional_managed_organization_creation.sql` adds a separate
+managed-cookie-only lifecycle for a verified human who already has at least one
+active organization membership. It does not weaken or reuse first-sign-in
+setup: a human with no active membership must still pass through the 0348
+onboarding or invitation path, so invitation precedence and legacy-account
+adoption remain unchanged during a rolling deployment.
+
+One authentication account still represents one canonical human. Creating an
+additional organization does **not** create another Better Auth user or another
+canonical identity. It creates a distinct active owner membership for the same
+`user:<auth-user-id>`, with a new Personal workspace scoped to that membership.
+The organization also starts with one named shared workspace, where the creator
+receives an explicit `admin` workspace membership. No settings, sessions,
+credentials, connections, files, or other data are copied from the current
+organization.
+
+The database function creates the complete graph and an immutable,
+input-bound operation receipt in one transaction. Exact concurrent retries
+converge; changed operation-id reuse fails closed. A subject-scoped transaction
+lock atomically enforces a lifetime allowance of ten organizations created
+through this self-service lifecycle. Organizations joined by invitation do not
+consume that allowance, and exact retries still replay after it is full. Once
+the deployment has a session-tenancy activation witness, the same transaction
+validates the exact fresh graph and writes its activation, enabled
+private-session setting, event, and immutable evidence. The application role
+can execute only the public creation capability and has no direct DML on either
+receipt table or access to the owner-only activation helper.
+
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
 the shared managed-auth email transport. The delivery freezes the invited
@@ -656,6 +727,42 @@ setup link. Provider availability is deliberately not part of that
 configuration precondition; the durable journal records the resulting delivery
 outcome.
 
+Email links support a bounded `token` query parameter because mail security and
+click-tracking gateways may discard URL fragments, but generation remains on
+the rolling-safe `fragment` default until an operator completes the web-first
+cutover in `docs/deployment.md`. The production web handler serves the exact
+`/setup-account` shell directly with no-store/no-referrer/noindex protections;
+it emits no scheme- or Host-derived redirect, so TLS termination cannot create
+an HTTPS downgrade. HTTP servers never receive URL fragments, so the first
+executable inline script in the HTML head reads query and fragment together,
+requires one canonical base64url HMAC-SHA256 bearer, rejects cross-source or
+same-source duplicates, and scrubs both locations with `history.replaceState`
+before the favicon, module graph, API work, or durable browser storage. It then
+hands the token to the SPA once through non-enumerable process memory. Malformed
+and oversized values are removed without reflection. A deployment CSP must
+authorize this exact bootstrap with its normal nonce/hash mechanism; query
+transport must remain disabled if the bootstrap is blocked.
+
+The chosen `fragment|query` transport is frozen durably on the delivery's first
+preparation beside its bearer and payload digests. Retries reuse that transport
+even after a configuration cutover or on a differently configured API replica.
+Rolling rows prepared by an older binary have a nullable transport; the new API
+recovers it by rendering both supported forms and matching the already-frozen
+payload digest before persisting the result. It never guesses or changes the
+provider payload.
+
+The managed chart emits the dedicated setup Ingress only for configured hosts
+with a web route and disables both ingress-nginx access logs and OpenTelemetry
+tracing for that exact location. Those annotations do not alter ingress-nginx's
+controller-wide `error_log`, whose upstream failure records can include the
+full request line. Query mode therefore also requires the explicit
+`OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true` gate,
+set only after every controller and external load balancer, CDN, WAF, service
+mesh, APM/analytics system, non-NGINX ingress, and other edge has been proven not
+to retain the query URI or Referer in access, trace, or error sinks. The chart
+route alone is not sufficient. The database still stores only the bearer digest
+and the completion path remains single-use and expiry-bounded.
+
 `POST /v1/auth/organization-setup/preview` accepts the same signed-out bearer
 under the setup abuse limiter and returns only its frozen safe invitation
 projection. Pending previews include organization, invited name/email, role,
@@ -702,9 +809,9 @@ Better Auth handler and Hono API, migrates PostgreSQL through a dedicated
 `opengeni_app`, drives public operations through the SDK, and completes the
 human paths in a production-built web bundle under Chromium. Its process-local
 mail capture is count- and TTL-bounded, one-time readable, and never persists a
-bearer or rendered body. The lane proves ordinary named signup, the exact
-Personal-only owner graph, immediate private-session creation, unregistered
-setup, registered invitation choice, shared grant/revoke, stale and
+bearer or rendered body. The lane proves ordinary named signup, the skippable post-create model-access
+step, the exact Personal-only owner graph, immediate private-session creation,
+unregistered setup, registered invitation choice, shared grant/revoke, stale and
 cross-organization rejection, password reset, delivery refusal/ambiguity, RLS
 posture, accessibility, responsive layout, and browser-error cleanliness.
 
@@ -724,9 +831,23 @@ a skipped green result.
 
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
-and Billing sections. Overview projects the canonical organization name plus
-every shared workspace and its direct human/service access roster; the database
-excludes all Personal workspaces before JSON projection. Owners and
+and Billing sections. An invitation email opens the signed-out setup page. An
+existing user can choose **Sign in as &lt;invited email&gt;** there; the browser retains only
+the invitation's non-secret organization, target-email, and expiry metadata in
+same-tab session storage, never the setup bearer. After authentication, the
+console lists the signed-in account's pending invitations, matches the exact
+organization and normalized target email, and opens that invitation directly in
+a focused acceptance dialog. If another account is active, the dialog names the
+active and invited emails separately and preserves the non-secret continuation
+metadata while the user explicitly switches accounts. The global account menu
+at the bottom of the sidebar remains a fallback that lists all incoming
+Organization invitations with a pending count. That fallback reads durable
+invitation state rather than email delivery state, so an existing user can still
+discover and accept an invitation when a self-hosted deployment has no email
+provider configured or delivery fails. Overview projects the canonical
+organization name plus every shared workspace and its direct human/service
+access roster; the database excludes all Personal workspaces before JSON
+projection. Owners and
 administrators can rename the organization through a revision- and
 operation-fenced lifecycle function, and managed-access bootstrap never
 overwrites that deliberate name from the user's profile. It lists the
@@ -774,14 +895,23 @@ path to `pg_catalog`, the selected data schema, then `pg_temp`.
 
 Migration `0332_organization_shared_workspace_control_plane.sql` makes the
 organization control plane authoritative rather than depending on an
-administrator also holding an operational workspace grant. The managed-cookie-
-only organization routes can create or update shared-workspace metadata/settings
-and add, update, or remove an active organization member's direct workspace access. Each
+administrator also holding an operational workspace grant. The direct
+organization routes can create or update shared-workspace metadata/settings
+and, in managed mode, add, update, or remove an active organization member's
+direct workspace access. Each
 mutation runs under an exact active owner/administrator organization membership
 and an organization-scoped transaction advisory fence. Missing,
 cross-organization, and Personal workspace ids are rejected through one
 non-enumerating result before mutation. The capability never creates an
-operational workspace grant for the organization administrator. The exception
+operational workspace grant merely because a person is an organization
+administrator. Migration 0398 adds the narrow exception for the exact person
+who creates a shared workspace: the create transaction materializes a named
+workspace-admin membership through a stable idempotent child operation. It
+also adds a content-blind, transaction-scoped authorization routine for shared
+workspace deletion. The browser uses the same
+`/workspaces/:workspaceId/settings` URL for ordinary and organization-only
+management; the latter exposes only General, Members, and Danger zone and does
+not mount operational workspace context. The exception
 to the durable last-workspace-admin removal guard requires a transaction-local
 capability opened by the direct organization route; merely holding an
 organization role through an ordinary or delegated workspace route does not
@@ -1249,6 +1379,30 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
+## Forking at a message
+
+The managed-human fork request accepts an optional `sourceEventId`. The stock
+message action row supplies the selected durable user message or completed
+assistant message. Omission keeps the whole-session fork contract. The event id
+is included in the idempotency hash and resolved under the existing quiescent
+source locks to a unique canonical history boundary. Only history through that
+boundary is copied; events are never converted into model input. Runtime setup
+replacement cannot be combined with a message boundary.
+
+The first boundary implementation rejects compacted histories, ambiguous or
+missing message/history matches, and boundaries splitting a tool exchange.
+Those cases remain eligible for the ordinary whole-session fork; there is no
+silent fallback. A committed message fork still replays after compaction or a
+source authorization change. The same actor, visibility, acknowledgement,
+workspace, and grant rules apply to both fork forms.
+
+Migration `0429_message_boundary_session_forks.sql` adds an overload to the exact
+runtime routine contract. Drain API/control/turn workers, migrate, provision the
+runtime role, and start the message-boundary-aware binary. Do not restart an
+older binary after activation. The SQL overload clones the current lifecycle
+body with checked anchors, preserving its authority, locks, receipt ordering,
+and fresh-session configuration while narrowing the history spool.
+
 ## Session-visibility and fork public activation
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
@@ -1424,6 +1578,14 @@ principal transitions make delayed browser outcomes inert.
 `test/session-visibility-contract-surface.test.ts` pins the server caller
 boundary; the web component and Chromium acceptance tests pin the browser
 boundary.
+
+The stock new-session composer reads the server's create capabilities for
+Personal workspaces as well as shared workspaces. When private-session tenancy
+is unavailable, a Personal session uses workspace visibility inside the existing
+owner-only workspace boundary. It does not require the organization Only-me
+setting or claim that session-tenancy activation has happened. When supported,
+it retains the private-session create path.
+
 
 ## Referential integrity
 

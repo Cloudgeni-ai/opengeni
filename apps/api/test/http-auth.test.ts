@@ -109,6 +109,58 @@ describe("configured deployment perimeter authentication", () => {
     expect(response.status).toBe(200);
   });
 
+  test("opens only the enabled OAuth protocol and exact MCP bearer resources", async () => {
+    const oauthToken = `ogmcp_at_${"a".repeat(43)}`;
+    const enabled = new Hono();
+    enabled.use(
+      "*",
+      requireAccessKey(
+        testSettings({
+          productAccessMode: "configured",
+          authRequired: true,
+          accessKey,
+          mcpOauthEnabled: true,
+          publicBaseUrl: "https://api.example.test",
+        }),
+      ),
+    );
+    enabled.all("*", (context) => context.json({ ok: true }));
+
+    for (const path of [
+      "/.well-known/oauth-authorization-server",
+      `/.well-known/oauth-protected-resource/v1/workspaces/${workspaceId}/mcp`,
+      "/oauth/register",
+      "/oauth/authorize",
+      "/oauth/token",
+    ]) {
+      expect((await enabled.request(path)).status).toBe(200);
+    }
+    expect(
+      (
+        await enabled.request(`/v1/workspaces/${workspaceId}/mcp/docs`, {
+          headers: { authorization: `Bearer ${oauthToken}` },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await enabled.request(`/v1/workspaces/${workspaceId}/tools/catalog`, {
+          headers: { authorization: `Bearer ${oauthToken}` },
+        })
+      ).status,
+    ).toBe(401);
+
+    const disabled = protectedApp({ delegationSecret });
+    expect((await disabled.request("/oauth/token")).status).toBe(401);
+    expect(
+      (
+        await disabled.request(`/v1/workspaces/${workspaceId}/mcp`, {
+          headers: { authorization: `Bearer ${oauthToken}` },
+        })
+      ).status,
+    ).toBe(401);
+  });
+
   test("admits only the signed Lens browser handoff and authenticated shared webhook paths", async () => {
     const app = new Hono();
     app.use(

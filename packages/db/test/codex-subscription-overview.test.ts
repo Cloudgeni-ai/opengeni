@@ -718,6 +718,7 @@ describe("Codex quota Codex overview and irreversible reset state", () => {
       ws.workspaceId,
       credentialId,
       new Date(Date.now() + 60_000),
+      "quota",
     );
     const id = crypto.randomUUID();
     const common = {
@@ -831,7 +832,7 @@ describe("Codex quota Codex overview and irreversible reset state", () => {
       const ws = await freshWorkspace(`outcome-${outcome}`);
       const credentialId = await connectCredential(ws, `outcome-provider-${outcome}`);
       const exhaustedUntil = new Date(Date.now() + 60_000);
-      await setCodexCredentialExhausted(dbA, ws.workspaceId, credentialId, exhaustedUntil);
+      await setCodexCredentialExhausted(dbA, ws.workspaceId, credentialId, exhaustedUntil, "quota");
       const id = crypto.randomUUID();
       const claim = await claimCodexResetRedemption(dbA, {
         id,

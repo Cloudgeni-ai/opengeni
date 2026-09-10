@@ -6,7 +6,10 @@ export {
 export {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
+  openGeniSiteBridgePortFromBootstrap,
+  publishedHtmlArtifactDocument,
   type PublishedHtmlArtifactFrameProps,
+  type PublishedHtmlArtifactToolBridge,
 } from "./published-html-artifact-frame";
 export {
   SpreadsheetArtifactSurface,

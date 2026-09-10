@@ -296,6 +296,8 @@ describe("Documents scope-first UX", () => {
       });
       await settleRoute();
 
+      expect(container.textContent).toContain("Organization documents");
+      expect(container.textContent).toContain("Back to organization knowledge");
       expect(container.textContent).toContain("Company knowledge");
       expect(container.textContent).toContain("Organization knowledge");
       expect(container.textContent).toContain("Company strategy");

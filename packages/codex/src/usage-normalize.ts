@@ -296,3 +296,17 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
     ...(credits ? { credits } : {}),
   };
 }
+
+/**
+ * Whether one live /wham/usage response authoritatively contradicts an older
+ * quota refusal. `ok` proves the base allowance is open; every surfaced
+ * feature-specific window must also remain below exhaustion because the older
+ * model refusal may have belonged to one of those limits. Missing/no-data and
+ * malformed/error responses never repair cooldown state.
+ */
+export function codexUsageConfirmsQuotaAvailable(payload: CodexUsagePayload): boolean {
+  if (payload.status !== "ok" || payload.limitReached) return false;
+  return !payload.additionalLimits?.some(
+    (limit) => (limit.fiveHour?.percent ?? 0) >= 100 || (limit.weekly?.percent ?? 0) >= 100,
+  );
+}

@@ -39,13 +39,47 @@ Then open the smallest source files that answer the question:
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
 - Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
+- External host identities and credential authority: `packages/core/src/access/`,
+  `packages/contracts/src/external-identities.ts`, and `packages/db/src/host-mcp-bindings.ts`.
+  Verified external owning-user authority is distinct from a managed login cookie.
+  The host binding registry is credential-free; registration is not a worker or
+  scheduled execution grant. Check live caller wiring before claiming durability.
+  Verified owner host delegation issuance shares the binding API's commit-time
+  proof. Its persisted grants remain separate from production accepted-work
+  capture; no grant alone authorizes execution. Direct external-user creates may
+  explicitly select matching configured server grants for the initial turn.
+  `withDirectHostMcpAdmission` prepares a locked direct-turn snapshot only; its
+  callback must persist within canonical accepted-work transaction boundaries.
+  Never call it for scheduled/inherited work or treat it as caller authentication.
+  `captureDirectHostMcpAuthority` persists that snapshot in the 0445 append-only
+  ledger with an independent canonical insert guard. Production capture callers
+  now capture atomically for explicit direct initial-turn and follow-up send/steer selection. Worker `authorizeDirectHostMcpUse` validates captured direct
+  work and exact same-session causal resumptions. Migration 0446 separately
+  proves delivered goal/child-result lineage before copying authority. Revoked
+  selections are omitted, not broadened. Migration 0447 freezes host selections
+  on native task revisions and captures exact scheduled runs; retain promotion
+  during reusable-session materialization and restore source revisions on rollback.
+  Migration 0448 admits only the spawning turn's selected `always` grants to a
+  child's initial turn. Scheduled origin survives successors. Agent-created
+  schedules use the live accepted attempt, never a creator account lookup.
+  Preserve frozen initiatingHumanSubjectId independently of service audit identity.
+  Missing snapshots and unrelated-owner references remain denied.
+  Request-time external/service gateway credentials use the separate opt-in
+  `mcpGatewayCredentials` port with non-turn authority; do not fabricate sessions
+  or treat this callback as durable execution delegation.
+  Worker host execution separately rechecks canonical active-attempt liveness
+  before resolution and physical use; this is not binding/owner delegation.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
 - Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
+  `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
+  layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
+  exposes on-demand filesystem copies. Repository Skill discovery is independent.
   `packages/runtime/src/model-provider.ts` is the package-private model-provider facade over
   cohesive client, error, request-policy, routing, and transport leaves beside it;
   `packages/runtime/src/model-input.ts` owns final model-wire shaping and context guards;
@@ -114,6 +148,7 @@ Keep these concepts straight while working:
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
+- **Sandbox rotation wait**: a recovering turn fenced by an active managed-sandbox rotation parks on its exact sandbox group and lease epoch. Every authoritative rotation-ending or epoch-advancing transaction durably wakes that waiter; the workflow does not repeatedly reserve turn-worker slots while the same transition remains pending.
 - **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
 - **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task/pack and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
@@ -254,11 +289,24 @@ For sandbox configuration work, read `references/sandbox-configuration.md`. Use 
 
 ## Tools And MCP Discovery
 
+For unified Skills work, start with `docs/design/skills-system.md`. Server-side
+file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
+`skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under
+`apps/worker/src/activities/agent-turn/skill-*.ts`. Distinguish a tested adapter
+from its live registration and persisted lifecycle. Native packaged guidance can
+be read without sandbox staging via `loadNativeToolSkillArtifacts`; do not infer
+embedding selection controls or Connected Machine visibility from that helper.
+`packages/contracts/src/skill-metadata.ts` owns the shared YAML interpretation.
+Every active Skill's name and description come from `SKILL.md` frontmatter;
+database/catalog metadata is a derived projection, never a second edit surface.
+Preserve valid YAML bytes and historical revisions. Legacy conversion and
+activation guards belong to the maintenance cutover, not a permanent fallback.
+
 For tools and MCP work, distinguish:
 
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
-- Built-in SDK sandbox capabilities such as shell/files/skills.
+- Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
 Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.

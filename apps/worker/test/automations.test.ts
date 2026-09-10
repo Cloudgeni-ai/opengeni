@@ -3,6 +3,7 @@ import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { AutomationAuthorityRevokedError, type AutomationRunExecution } from "@opengeni/db";
 import { createAutomationActivities } from "../src/activities/automations";
 import type { ActivityServices } from "../src/activities/types";
+import { runAutomationRunWorkflow } from "../src/workflows/automations";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -66,7 +67,10 @@ function services(): () => Promise<ActivityServices> {
       bus: new MemoryEventBus(),
       wakeSessionWorkflow: null,
       entitlements: null,
-      observability: { info: mock(() => undefined), warn: mock(() => undefined) } as never,
+      observability: {
+        info: mock(() => undefined),
+        warn: mock(() => undefined),
+      } as never,
     }) as ActivityServices;
 }
 
@@ -127,6 +131,82 @@ describe("automation dispatch activity", () => {
     expect(recordUsage).toHaveBeenCalledTimes(1);
   });
 
+  test("preserves an explicit Codex subscription model through admission and session creation", async () => {
+    const codexRun: AutomationRunExecution = {
+      ...run,
+      acceptedExecution: {
+        ...run.acceptedExecution,
+        sessionTemplate: {
+          ...run.acceptedExecution.sessionTemplate,
+          model: "codex/gpt-5.6-sol",
+        },
+      },
+    };
+    const admit = mock(async () => null);
+    let createInput: Record<string, unknown> | null = null;
+    const activity = createAutomationActivities(
+      async () => {
+        const service = await services()();
+        return {
+          ...service,
+          settings: testSettings({
+            sandboxBackend: "none",
+            codexSubscriptionEnabled: true,
+          }),
+        };
+      },
+      {
+        claim: async () => codexRun,
+        settle: async () => undefined,
+        admit,
+        assertModelPolicy: async () => undefined,
+        assertAuthority: async () => undefined,
+        recordUsage: async () => undefined,
+        createSession: (async (input) => {
+          createInput = input as unknown as Record<string, unknown>;
+          return {
+            session: {
+              id: sessionId,
+              createdBy: {
+                kind: "service",
+                subjectId: codexRun.acceptedExecution.serviceSubjectId,
+                label: codexRun.acceptedExecution.serviceLabel,
+              },
+              createdByContext: codexRun.acceptedExecution.provenance,
+            },
+            outcome: "created",
+            replay: false,
+            changed: true,
+          } as never;
+        }) as never,
+      },
+    );
+
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "started",
+      sessionId,
+    });
+    expect(admit).toHaveBeenCalledWith(expect.anything(), {
+      accountId,
+      workspaceId,
+      model: "codex/gpt-5.6-sol",
+      requestedAgentRuns: 1,
+    });
+    expect(createInput).toMatchObject({
+      model: "codex/gpt-5.6-sol",
+      turnExecutionPolicy: {
+        productModelId: "codex/gpt-5.6-sol",
+        requestedModelId: "codex/gpt-5.6-sol",
+        modelSource: "explicit",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+        },
+      },
+    });
+  });
+
   test("settles a run as skipped when live authority is revoked before session commit", async () => {
     const settle = mock(async () => undefined);
     const activity = createAutomationActivities(services(), {
@@ -154,5 +234,101 @@ describe("automation dispatch activity", () => {
       status: "skipped",
       errorCode: "authority_revoked",
     });
+  });
+
+  test("terminally settles deterministic model failures after claim", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), {
+      claim: async () => ({
+        ...run,
+        acceptedExecution: {
+          ...run.acceptedExecution,
+          sessionTemplate: {
+            ...run.acceptedExecution.sessionTemplate,
+            model: "missing/provider-model",
+          },
+        },
+      }),
+      settle,
+    });
+
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "failed",
+      reason: "dispatch_failed",
+    });
+    expect(settle).toHaveBeenCalledWith(expect.anything(), {
+      workspaceId,
+      runId,
+      status: "failed",
+      errorCode: "dispatch_failed",
+    });
+  });
+
+  test("rethrows transient model-policy failures so Temporal can retry the accepted run", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), {
+      claim: async () => run,
+      settle,
+      assertModelPolicy: async () => {
+        throw new Error("temporary database outage");
+      },
+    });
+
+    await expect(activity.dispatchAutomationRun({ accountId, workspaceId, runId })).rejects.toThrow(
+      "temporary database outage",
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test("terminally settles a run after the bounded dispatch retry window exhausts", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), { settle });
+
+    await expect(
+      activity.settleAutomationRunFailure({ accountId, workspaceId, runId }),
+    ).resolves.toBeUndefined();
+    expect(settle).toHaveBeenCalledWith(expect.anything(), {
+      workspaceId,
+      runId,
+      status: "failed",
+      errorCode: "dispatch_failed",
+    });
+  });
+
+  test("replays a durably failed run without reclaiming it", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), {
+      claim: async () => ({
+        ...run,
+        status: "failed",
+        errorCode: "dispatch_failed",
+      }),
+      settle,
+    });
+
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "failed",
+      reason: "dispatch_failed",
+    });
+    expect(settle).not.toHaveBeenCalled();
+  });
+});
+
+describe("automation run workflow", () => {
+  test("invokes durable failure settlement after dispatch retries exhaust", async () => {
+    const dispatchAutomationRun = mock(async () => {
+      throw new Error("dispatch retries exhausted");
+    });
+    const settleAutomationRunFailure = mock(async () => undefined);
+    const input = { accountId, workspaceId, runId };
+
+    await expect(
+      runAutomationRunWorkflow(input, {
+        dispatchAutomationRun,
+        settleAutomationRunFailure,
+      }),
+    ).resolves.toBeUndefined();
+    expect(dispatchAutomationRun).toHaveBeenCalledWith(input);
+    expect(settleAutomationRunFailure).toHaveBeenCalledWith(input);
   });
 });

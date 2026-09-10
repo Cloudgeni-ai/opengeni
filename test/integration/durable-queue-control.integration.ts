@@ -147,7 +147,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           Array.from({ length: 100 }, (_, index) =>
             addSessionSystemUpdate(
               dbClient.db,
-              systemUpdateInput(grant, session.id, "children:integration", index),
+              neutralSystemUpdateInput(grant, session.id, "notices:integration", index),
             ),
           ),
         );
@@ -547,7 +547,12 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(repair.failed).toBe(0);
         expect(repair.exhaustedBatchLimit).toBe(false);
         expect(repair.claimed).toBeGreaterThanOrEqual(1);
-        expect(repair.delivered).toBe(repair.claimed);
+        expect(repair.signaled).toBe(repair.claimed);
+        expect(repair.unconfirmed).toBe(0);
+        // Signal acceptance can race the actual claim. Every receipt must be
+        // either acknowledged or truthfully pending; the model/turn checks
+        // below establish that this specific session actually executed.
+        expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
         await waitFor(
           async () => {
@@ -606,6 +611,126 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         unsubscribe();
         secondWorker.shutdown();
         await secondRun;
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
+    "an accepted human Steer wake survives transport acceptance until its queued turn is claimed",
+    async () => {
+      const grant = await testGrant(dbClient.db, "human-steer-admission");
+      const target = await createDurableSession(
+        dbClient.db,
+        grant,
+        "idle target must retain accepted human direction",
+      );
+      const promptText = `accepted human steer ${crypto.randomUUID()}`;
+      const steered = await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        subjectId: grant.subjectId,
+        text: promptText,
+        resources: [],
+        tools: [],
+        operationKey: `human-steer-${crypto.randomUUID()}`,
+        delivery: "steer",
+        reasoningEffortFallback: "low",
+      });
+      const wakeRevision = steered.command.wakeRevision;
+      const taskQueue = `durable-human-steer-${crypto.randomUUID()}`;
+      const model = new ScriptedModel("accepted human Steer consumed once");
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const temporal = new Client({ connection });
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
+      const activities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+        wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+      });
+      const scope = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        maxTurnsPerRun: 1,
+      };
+
+      // Temporal may accept both the first signal and a lost-response retry
+      // before any worker polls this queue. Transport acceptance cannot consume
+      // the durable wake while the human/API turn remains physically queued.
+      const handle = await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: steered.turn.temporalWorkflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: steered.turn.temporalWorkflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      expect(
+        await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: steered.turn.temporalWorkflowId,
+          wakeRevision,
+        }),
+      ).toEqual({ action: "pending_admission", blocker: "pending_prompt_turn" });
+      expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+        wakeRevision,
+        deliveredRevision: 0,
+      });
+
+      const beforeAdmissionRepair = await activities.dispatchSessionWorkflowWakes();
+      expect(beforeAdmissionRepair.failed).toBe(0);
+      expect(beforeAdmissionRepair.claimed).toBeGreaterThanOrEqual(1);
+      expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+        wakeRevision,
+        deliveredRevision: 0,
+      });
+
+      const worker = await integrationWorker(nativeConnection, taskQueue, activities);
+      const workerRun = worker.run();
+      try {
+        await handle.result();
+        expect(model.calls).toBe(1);
+        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, target.id);
+        expect(turns).toHaveLength(1);
+        expect(turns[0]).toMatchObject({
+          source: "user",
+          status: "completed",
+          prompt: promptText,
+        });
+
+        await waitFor(
+          async () => {
+            await activities.dispatchSessionWorkflowWakes();
+            const row = await workflowWakeRow(admin, grant.workspaceId, target.id);
+            return row?.deliveredRevision === wakeRevision;
+          },
+          {
+            timeoutMs: 5_000,
+            intervalMs: 100,
+            describe: () => "admitted human Steer wake revision was not acknowledged",
+          },
+        );
+        expect(model.calls).toBe(1);
+      } finally {
+        worker.shutdown();
+        await workerRun;
       }
     },
     integrationTimeoutMs,
@@ -1259,6 +1384,30 @@ function systemUpdateInput(
   };
 }
 
+function neutralSystemUpdateInput(
+  grant: AccessGrant,
+  sessionId: string,
+  groupingKey: string,
+  index: number,
+) {
+  const operationId = crypto.randomUUID();
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    kind: "agent_message" as const,
+    classification: "info" as const,
+    sourceId: `notice-${index}`,
+    dedupeKey: `${groupingKey}:notice-${index}`,
+    summary: `Ordinary notice ${index}`,
+    payload: {
+      type: "agent_message" as const,
+      text: `Ordinary notice ${index}`,
+      operationId,
+    },
+  };
+}
+
 function sessionWorkflowClient(
   temporal: Client,
   taskQueue: string,
@@ -1286,7 +1435,7 @@ function sessionWorkflowClient(
         ],
         signal: input.interruptionRequested ? "sessionControl" : "queueChanged",
       });
-      await markSessionWorkflowWakeDelivered(db, {
+      return await markSessionWorkflowWakeDelivered(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

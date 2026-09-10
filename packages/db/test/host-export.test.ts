@@ -292,6 +292,69 @@ describe("durable host export (real PostgreSQL)", () => {
       leaseToken: futureBatch!.leaseToken,
     });
 
+    const largeOutput = `large-output:${"x".repeat(160_000)}`;
+    const [largeEvent] = await appendSessionEvents(
+      app.db,
+      active.grant.workspaceId!,
+      active.session.id,
+      [
+        {
+          type: "agent.toolCall.output",
+          payload: { id: "large-call", output: largeOutput, isError: false },
+          turnId: active.turn.id,
+        },
+      ],
+    );
+    const [storedLargeEvent] = await shared.admin<
+      Array<{ payloadBytes: number; output: string; payloadCodecVersion: number | null }>
+    >`
+      select octet_length(payload::text)::integer as "payloadBytes",
+        payload ->> 'output' as output,
+        payload_codec_version as "payloadCodecVersion"
+      from session_events where id = ${largeEvent!.id}::uuid`;
+    expect(storedLargeEvent?.payloadBytes).toBeGreaterThan(150_000);
+    expect(storedLargeEvent?.output).toBe(largeOutput);
+    expect(storedLargeEvent?.payloadCodecVersion).toBe(1);
+
+    const [boundedOutbox] = await shared.admin<
+      Array<{
+        envelopeBytes: number;
+        payloadBytes: number;
+        payloadCodecVersion: number | null;
+        truncated: boolean;
+        originalBytes: number;
+      }>
+    >`
+      select envelope_bytes as "envelopeBytes",
+        pg_column_size(payload)::integer as "payloadBytes",
+        payload_codec_version as "payloadCodecVersion",
+        (payload #>> '{_hostExport,payloadTruncated}')::boolean as truncated,
+        (payload #>> '{_hostExport,originalBytes}')::integer as "originalBytes"
+      from host_export_outbox
+      where export_kind = 'session_event' and source_id = ${largeEvent!.id}::uuid`;
+    expect(boundedOutbox?.envelopeBytes).toBeLessThanOrEqual(98_304);
+    expect(boundedOutbox?.payloadBytes).toBeLessThanOrEqual(73_728);
+    expect(boundedOutbox?.payloadCodecVersion).toBeNull();
+    expect(boundedOutbox?.truncated).toBe(true);
+    expect(boundedOutbox?.originalBytes).toBe(storedLargeEvent?.payloadBytes);
+
+    const largeBatch = await claim("session_event", "host-test-events");
+    const largeExport = largeBatch?.events.find((item) => item.event.id === largeEvent!.id);
+    expect(largeExport?.event.payload).toMatchObject({
+      _hostExport: {
+        payloadMode: "summary",
+        payloadTruncated: true,
+        sourceEventId: largeEvent!.id,
+        fullPayload: "retained in canonical session event",
+      },
+    });
+    expect(JSON.stringify(largeExport?.event.payload)).not.toContain("large-output:");
+    await acknowledgeHostExportBatch(exporter.db, {
+      kind: "session_event",
+      consumerId: "host-test-events",
+      leaseToken: largeBatch!.leaseToken,
+    });
+
     const foreignSession = await createSession(app.db, {
       accountId: active.grant.accountId,
       workspaceId: active.grant.workspaceId!,
@@ -352,16 +415,20 @@ describe("durable host export (real PostgreSQL)", () => {
       await tx`select pg_advisory_xact_lock_shared(
         hashtextextended(${`session-tenancy:${delayed.grant.workspaceId!}`}, 0)
       )`;
-      const [sequence] = await tx<Array<{ value: number }>>`
-        update sessions set last_sequence = last_sequence + 1
-        where workspace_id = ${delayed.grant.workspaceId!} and id = ${delayed.session.id}
-        returning last_sequence as value`;
+      const [cursor] = await tx<Array<{ value: number }>>`
+        select last_sequence as value
+        from session_event_cursors
+        where workspace_id = ${delayed.grant.workspaceId!}
+          and session_id = ${delayed.session.id}
+        for update`;
+      if (!cursor) throw new Error("Delayed host-export session cursor is missing");
+      const sequence = cursor.value + 1;
       await tx`
         insert into session_events (
           id, account_id, workspace_id, session_id, sequence, type, payload
         ) values (
           ${delayedEventId}, ${delayed.grant.accountId}, ${delayed.grant.workspaceId!},
-          ${delayed.session.id}, ${sequence!.value}, 'agent.message.completed',
+          ${delayed.session.id}, ${sequence}, 'agent.message.completed',
           ${tx.json({ text: "delayed commit" })}
         )`;
       markDelayedReady();

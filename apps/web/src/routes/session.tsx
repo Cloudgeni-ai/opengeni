@@ -1,8 +1,20 @@
+import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
+import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
+import {
+  attachSessionCapability,
+  completeSessionCapabilityOAuth,
+} from "@/components/capabilities/attach-session-capability";
+import { loadSessionFeedback } from "../lib/session-feedback";
+import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
+import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
+import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
-import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -38,6 +50,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -47,16 +60,11 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
 import { LoadingPanel } from "@/components/common";
-import {
-  FollowUpRepositoryMenuBody,
-  FollowUpRepositoryPicker,
-} from "@/components/follow-up-repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
-import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
+import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
-  FailedSessionBanner,
   TerminalSessionArchive,
   TerminalSessionBanner,
   UserMessageBody,
@@ -64,12 +72,15 @@ import {
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
-import { SubagentTree } from "@/components/session/subagents";
+import { SessionCommands } from "@/components/session/commands";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
+import {
+  SessionVariableSetPicker,
+  type SessionVariableSetPickerSharedState,
+} from "@/components/session/session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
-import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
@@ -82,7 +93,7 @@ import {
   oauthConnectionRef,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -113,7 +124,6 @@ import {
   updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
-  restoreUnreadSessionAttentionProjection,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
 } from "@/lib/session-attention";
@@ -143,6 +153,42 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const SessionCapabilityCard = lazy(async () => ({
+  default: (await import("@/components/capabilities/session-capability-card"))
+    .SessionCapabilityCard,
+}));
+
+const FAILURE_CONTINUATION_MESSAGE =
+  "Continue from the last failure. Check current progress before repeating work.";
+const NativeConnectSetup = lazy(() =>
+  import("@/components/capabilities/native-connect-setup").then((module) => ({
+    default: module.NativeConnectSetup,
+  })),
+);
+const LazySessionWaitStatus = lazy(() =>
+  import("@/components/session/session-wait-status").then((module) => ({
+    default: module.SessionWaitStatus,
+  })),
+);
+
+const MessageForkDialog = lazy(() =>
+  import("@/components/session/session-tenancy-control").then((module) => ({
+    default: module.SessionTenancyRouteControl,
+  })),
+);
+
+const MessageActions = lazy(() => import("@/components/session/message-actions"));
+
+const SubagentTree = lazy(() =>
+  import("@/components/session/subagents").then((module) => ({ default: module.SubagentTree })),
+);
+
+const LazyFailedSessionBanner = lazy(() =>
+  import("@/components/session/failed-session-banner").then((module) => ({
+    default: module.FailedSessionBanner,
+  })),
+);
 
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
@@ -196,6 +242,7 @@ export function SessionRoute({
   const {
     events,
     sessionStatus,
+    sessionStatusSequence,
     connectionState,
     initialLoading,
     hasOlder,
@@ -206,7 +253,6 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
-    loadingLatest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
@@ -255,11 +301,15 @@ export function SessionRoute({
       sessionSeed
         ? {
             ...sessionSeed,
-            status: sessionStatus ?? sessionSeed.status,
+            // Old idle events must not overwrite a fresh queued/claimed detail read.
+            status:
+              (sessionStatusSequence ?? 0) > sessionSeed.lastSequence
+                ? (sessionStatus ?? sessionSeed.status)
+                : sessionSeed.status,
             effectiveControl: queue.effectiveControl ?? sessionSeed.effectiveControl,
           }
         : null,
-    [queue.effectiveControl, sessionSeed, sessionStatus],
+    [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
@@ -333,14 +383,16 @@ export function SessionRoute({
   } = context;
   const acknowledgedProjectionRef = useRef<string | null>(null);
   const confirmedProjectionRef = useRef<string | null>(null);
-  const failedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
   const [foreground, setForeground] = useState(() => ({
     documentVisible: document.visibilityState === "visible",
     windowFocused: document.hasFocus(),
   }));
   const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
-  const reconciledSessionRead = useRef<{ sessionId: string; revision: number } | null>(null);
+  const reconciledSessionRead = useRef<{
+    sessionId: string;
+    revision: number;
+  } | null>(null);
   useEffect(() => {
     if (!fetchedSession || sessionReadRevision === 0) return;
     if (
@@ -349,7 +401,10 @@ export function SessionRoute({
     ) {
       return;
     }
-    reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    reconciledSessionRead.current = {
+      sessionId,
+      revision: sessionReadRevision,
+    };
     const accepted = context.sessionChannelProjectionAuthority.recordRead(
       fetchedSession,
       sessionReadGeneration,
@@ -424,11 +479,10 @@ export function SessionRoute({
         : null,
     [readThroughSequence, session],
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!session || !activeReadProjectionKey) return;
     if (
       confirmedProjectionRef.current === activeReadProjectionKey ||
-      failedProjectionRef.current === activeReadProjectionKey ||
       !shouldProjectActiveSessionRead({
         activeSessionId: sessionId,
         workspaceId,
@@ -447,15 +501,6 @@ export function SessionRoute({
       lastSequence: readThroughSequence,
     };
     projectSessionAttention(optimisticProjection);
-    return () => {
-      if (
-        confirmedProjectionRef.current === activeReadProjectionKey ||
-        failedProjectionRef.current === activeReadProjectionKey
-      ) {
-        return;
-      }
-      projectSessionAttention({ ...optimisticProjection, unread: true });
-    };
   }, [
     activeReadProjectionKey,
     foreground,
@@ -466,97 +511,77 @@ export function SessionRoute({
     sessionId,
     workspaceId,
   ]);
+  const acknowledgementSessionId = session?.id ?? null;
+  const acknowledgementEligible = shouldAcknowledgeActiveSession({
+    activeSessionId: sessionId,
+    workspaceId,
+    session: routeUnreadProjection,
+    ...foreground,
+  });
+  // Same-value list/focus projections must not invalidate an in-flight retry.
   useEffect(() => {
     const projectionKey = activeReadProjectionKey;
-    const liveTipLoaded =
-      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
     if (
-      !session ||
+      !acknowledgementSessionId ||
       !projectionKey ||
       acknowledgedProjectionRef.current === projectionKey ||
-      !shouldAcknowledgeActiveSession({
-        activeSessionId: sessionId,
-        workspaceId,
-        session: routeUnreadProjection,
-        liveTipLoaded,
-        ...foreground,
-      })
+      !acknowledgementEligible
     ) {
       return;
     }
-    const targetSession = session;
     let active = true;
-    const timer = window.setTimeout(() => {
-      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
-      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-      if (!acceptedTransition) {
-        failedProjectionRef.current = projectionKey;
-        projectSessionAttention(
-          restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
-        );
-        return;
-      }
-      acknowledgedProjectionRef.current = projectionKey;
-      void client
-        .updateSessionAttention(workspaceId, targetSession.id, {
-          unread: false,
-          acknowledgedThroughSequence: readThroughSequence,
-        })
-        .then((updated) => {
-          if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-          confirmedProjectionRef.current = projectionKey;
-          if (failedProjectionRef.current === projectionKey) {
-            failedProjectionRef.current = null;
-          }
-          // The rail owns separately polled page objects. Keep this exact
-          // frontier result there so a stale list poll cannot resurrect or
-          // prematurely clear the unread dot.
-          projectSessionAttention(updated);
-        })
-        .catch(() => {
-          // Retry one transient failure for this exact frontier. Keeping the
-          // receipt after the second failure prevents a permanent 4xx/5xx from
-          // becoming an unbounded request and log loop.
-          if (
-            active &&
-            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
-            acknowledgedProjectionRef.current === projectionKey &&
-            retriedProjectionRef.current !== projectionKey
-          ) {
-            retriedProjectionRef.current = projectionKey;
-            acknowledgedProjectionRef.current = null;
-            setAttentionRetryRevision((revision) => revision + 1);
-            return;
-          }
-          if (active && ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-            failedProjectionRef.current = projectionKey;
-            projectSessionAttention(
-              restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
-            );
-          }
-        });
-    }, 750);
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    acknowledgedProjectionRef.current = projectionKey;
+    void client
+      .updateSessionAttention(workspaceId, acknowledgementSessionId, {
+        unread: false,
+        acknowledgedThroughSequence: readThroughSequence,
+      })
+      .then((updated) => {
+        if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+        confirmedProjectionRef.current = projectionKey;
+        // The rail owns separately polled page objects. Keep this exact
+        // frontier result there so a stale list poll cannot resurrect or
+        // prematurely clear the unread dot.
+        projectSessionAttention(updated);
+      })
+      .catch(() => {
+        // Retry one transient failure for this exact frontier. Keeping the
+        // receipt after the second failure prevents a permanent 4xx/5xx from
+        // becoming an unbounded request and log loop.
+        if (
+          active &&
+          ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+          acknowledgedProjectionRef.current === projectionKey &&
+          retriedProjectionRef.current !== projectionKey
+        ) {
+          retriedProjectionRef.current = projectionKey;
+          acknowledgedProjectionRef.current = null;
+          setAttentionRetryRevision((revision) => revision + 1);
+          return;
+        }
+        // A transient failure must never resurrect a dot the user already
+        // cleared. Release the attempt receipt so a later focus/navigation
+        // can retry this exact frontier; a reload still reads durable truth
+        // if both attempts failed.
+        if (acknowledgedProjectionRef.current === projectionKey) {
+          acknowledgedProjectionRef.current = null;
+        }
+      });
     return () => {
       active = false;
-      window.clearTimeout(timer);
     };
   }, [
+    acknowledgementEligible,
+    acknowledgementSessionId,
     attentionRetryRevision,
     activeReadProjectionKey,
     captureWorkspaceInvocation,
     client,
-    foreground,
-    hasNewer,
-    initialLoading,
-    loadingLatest,
-    loadingNewer,
-    loadingOldest,
     ownsWorkspaceInvocation,
     projectSessionAttention,
     readThroughSequence,
-    routeUnreadProjection,
-    session,
-    sessionId,
     workspaceId,
   ]);
   useEffect(() => {
@@ -632,6 +657,21 @@ export function SessionRoute({
         connectionRef: oauthConnectionRef(ownership, connectionId, providerDomain),
       });
       await refreshCapabilityCatalog(workspaceId);
+      const connected = (await capabilityClient.listCapabilities(workspaceId)).items.find(
+        (candidate) => candidate.id === item.id,
+      );
+      if (!connected?.enabled)
+        throw new Error(
+          "The connection was authorized, but enabling its tools could not be verified.",
+        );
+      if (connected.connectionRef?.subjectScope === "subject") {
+        toast.success(`${item.name} connected`, {
+          description:
+            "Review its connection card to allow your personal account in this conversation.",
+        });
+        return;
+      }
+      await attachSessionCapability(capabilityClient, workspaceId, sessionId, connected);
       toast.success(`${item.name} connected`, {
         description: "It is available to new tool calls in this session.",
       });
@@ -646,7 +686,42 @@ export function SessionRoute({
     capabilityClient,
     refreshCapabilityCatalog,
     workspaceId,
+    sessionId,
   ]);
+
+  const nativeReturnHandled = useRef(false);
+  useEffect(() => {
+    if (nativeReturnHandled.current || !capabilityCatalogReady) return;
+    const params = new URLSearchParams(window.location.search);
+    const social = params.get("social_oauth");
+    const fiken = params.get("fiken");
+    if (!social && !fiken) return;
+    nativeReturnHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (social === "success" || fiken === "connected") {
+      const capabilityId = params.get("capability_auth");
+      void (async () => {
+        await refreshCapabilityCatalog(workspaceId);
+        await completeSessionCapabilityOAuth(
+          capabilityClient,
+          workspaceId,
+          sessionId,
+          capabilityId,
+        );
+        toast.success("Connection setup completed", {
+          description: "It is available to new tool calls in this session.",
+        });
+      })().catch((error) =>
+        toast.error("Connection authorized, but setup needs attention", {
+          description: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    } else {
+      toast.error("Connection wasn't completed", {
+        description: "You can retry from the connection card.",
+      });
+    }
+  }, [capabilityCatalogReady, capabilityClient, refreshCapabilityCatalog, workspaceId, sessionId]);
 
   const githubReturnHandled = useRef(false);
   useEffect(() => {
@@ -665,8 +740,38 @@ export function SessionRoute({
   // return to this session; api-key ones can't OAuth, so hand off to credential
   // re-entry on the capabilities sheet for that provider. Throwing bubbles a
   // calm inline error on the reconnect card.
+  const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
+  const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
+      if (item.authoritySource === "host") {
+        if (!item.authorizationUrl) {
+          throw new Error(
+            "This connection is managed by the embedding host and has no recovery link.",
+          );
+        }
+        window.location.assign(item.authorizationUrl);
+        return;
+      }
+      if (item.connectionId) {
+        const { findConnectRecoveryAccount } = await import("@opengeni/connect");
+        const account = findConnectRecoveryAccount(
+          await reconnectTransport.accounts(workspaceId),
+          item.connectionId,
+        );
+        if (account) {
+          setReconnectRequest({
+            scope: { workspaceId, transport: reconnectTransport },
+            providerId: account.providerId,
+            ownership: account.ownership,
+            reconnectAccountId: account.id,
+            displayName: account.label,
+            returnUrl: window.location.href,
+            idempotencyKey: crypto.randomUUID(),
+          });
+          return;
+        }
+      }
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
         if (item.capability.id === "api:github-app") {
@@ -753,7 +858,13 @@ export function SessionRoute({
       }
       window.location.assign(response.authorizationUrl);
     },
-    [context.accessContext, context.client, context.workspaceCapabilityCatalog, workspaceId],
+    [
+      context.accessContext,
+      context.client,
+      context.workspaceCapabilityCatalog,
+      workspaceId,
+      reconnectTransport,
+    ],
   );
 
   // The workspace shell already needs the capability catalog for session tool
@@ -898,6 +1009,22 @@ export function SessionRoute({
 
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      {reconnectRequest && (
+        <Suspense fallback={<LoadingPanel label="Opening connection setup" />}>
+          <NativeConnectSetup
+            transport={reconnectTransport}
+            workspaceId={workspaceId}
+            request={reconnectRequest}
+            onClose={() => setReconnectRequest(null)}
+            onComplete={() => {
+              setReconnectRequest(null);
+              toast.success("Connection updated", {
+                description: "New tool calls can use the updated connection.",
+              });
+            }}
+          />
+        </Suspense>
+      )}
       <SessionDock
         workspaceId={workspaceId}
         sessionId={sessionId}
@@ -1080,7 +1207,7 @@ function useSessionEditableArtifactSummaries(input: {
   const [loaded, setLoaded] = useState<{
     key: string;
     status: SessionEditableArtifactsStatus;
-    artifacts: readonly EditableArtifactResource[];
+    artifacts: readonly SessionEditableArtifactSummary[];
   } | null>(null);
 
   useEffect(() => {
@@ -1094,24 +1221,18 @@ function useSessionEditableArtifactSummaries(input: {
             artifacts: previous?.key === authorityKey ? previous.artifacts : [],
           },
     );
-    void Promise.all([
-      import("@/lib/editable-artifact-client"),
-      import("@/lib/editable-artifact-browser"),
-    ])
-      .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
-        const result = await editableArtifactClient.listSessionEditableArtifacts(
+    void import("@/lib/session-artifact-discovery")
+      .then(async ({ discoverSessionArtifacts }) => {
+        const reconcile = await discoverSessionArtifacts(
           input.workspaceId,
           input.sessionId,
-          {
-            replicaId: createConsoleEditableArtifactReplicaId(),
-          },
+          () => current,
         );
         if (current) {
-          setLoaded({
+          setLoaded((previous) => ({
             key: authorityKey,
-            status: "ready",
-            artifacts: result.artifacts,
-          });
+            ...reconcile(previous?.key === authorityKey ? previous.artifacts : []),
+          }));
         }
       })
       .catch(() => {
@@ -1177,7 +1298,7 @@ function SessionChatPane(props: {
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
-  const fleet = useMachines({
+  const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
@@ -1200,9 +1321,28 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
+  const failureFallback = props.failure ? (
+    <div
+      role="alert"
+      className="mx-auto my-2 w-full max-w-3xl rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-sm text-status-failed"
+    >
+      <p>
+        {props.creditExhausted
+          ? "This workspace is out of OpenGeni credits."
+          : "This session failed."}{" "}
+        {props.failure.reason ?? "No failure detail was recorded."}
+      </p>
+      <p className="mt-1 text-xs text-fg-muted">
+        {props.creditExhausted
+          ? "The conversation is preserved. Add organization credits or choose another available model below."
+          : "The conversation is preserved. You can keep working in the composer below."}
+      </p>
+    </div>
+  ) : null;
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -1293,6 +1433,14 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
+  const [variableSetPickerState, setVariableSetPickerState] =
+    useState<SessionVariableSetPickerSharedState>({
+      saving: false,
+      committedSelection: null,
+    });
+  const variableSetComposerBlocked =
+    variableSetPickerState.saving ||
+    variableSetPickerState.committedSelection?.sessionId === props.session.id;
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -1344,6 +1492,48 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
+  const connectionAuthorities = useSessionConnectionAuthorities(
+    context.client,
+    props.session,
+    context.workspaceCapabilityCatalog,
+  );
+  const reloadSessionAfterSetup = props.onReloadSession;
+  const refreshConnectionAuthorities = connectionAuthorities.refresh;
+  const afterConnectionSetup = useCallback(async () => {
+    await reloadSessionAfterSetup();
+    await refreshConnectionAuthorities();
+  }, [reloadSessionAfterSetup, refreshConnectionAuthorities]);
+  const renderAuthNeeded = useCallback(
+    (item: AuthNeededItem) => {
+      const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+      return recommendation ? (
+        <Suspense
+          fallback={
+            <p role="status" className="text-sm text-fg-muted">
+              Loading connection card…
+            </p>
+          }
+        >
+          <SessionCapabilityCard
+            key={`${props.session.id}:${props.session.tenancy?.authorityEpoch}:${item.id}`}
+            item={recommendation}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            visibility={props.session.tenancy?.visibility ?? "workspace"}
+            onConfigured={afterConnectionSetup}
+          />
+        </Suspense>
+      ) : undefined;
+    },
+    [
+      context.workspaceCapabilityCatalog,
+      props.session.id,
+      props.session.workspaceId,
+      props.session.tenancy?.visibility,
+      props.session.tenancy?.authorityEpoch,
+      afterConnectionSetup,
+    ],
+  );
   const policyToolIds = useMemo(
     () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
     [context.workspaceDefaultToolIds, props.session, selectableToolIds],
@@ -1379,7 +1569,10 @@ function SessionChatPane(props: {
       }
       return;
     }
-    if (durableToolsHydrated) {
+    if (
+      durableToolsSaving ||
+      (durableToolsHydrated && props.session.toolPolicyVersion <= durableToolPolicyVersion)
+    ) {
       return;
     }
     setDurableToolSelection({
@@ -1391,6 +1584,8 @@ function SessionChatPane(props: {
   }, [
     context.workspaceMcpCatalogReady,
     durableToolsHydrated,
+    durableToolsSaving,
+    durableToolPolicyVersion,
     policyToolIds,
     props.session.id,
     props.session.firstPartyMcpTools,
@@ -1469,6 +1664,18 @@ function SessionChatPane(props: {
   const composerPolicyValidRef = useRef(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const loadSkillReview = useCallback(
+    (reference: NonNullable<import("@opengeni/sdk").HumanInputQuestion["skillReview"]>) =>
+      context.client.readWorkspaceSkill(
+        props.session.workspaceId,
+        reference.skillId,
+        reference.revisionId,
+      ),
+    // A browser-account switch must discard the previous actor's loaded preview
+    // even when the SDK client instance and workspace remain unchanged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [context.client, props.session.workspaceId, context.accessContext.subjectId],
+  );
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
   const sessionVariableSetIds =
     props.session.variableSetIds ??
@@ -1502,27 +1709,37 @@ function SessionChatPane(props: {
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,
   });
+  const composerSendBlocker = () =>
+    getComposerSendBlocker({
+      uploadPending: attachments.hasUnresolved,
+      repositoryError: repositories.error,
+      policyValid: composerPolicyValidRef.current,
+      variableSetBlocked: variableSetComposerBlocked,
+      personalDecision: personalAttachment.requiresDecision,
+      personalLoading:
+        personalAttachment.loading ||
+        personalAttachment.refreshing ||
+        connectionAuthorities.loading ||
+        connectionAuthorities.error !== null,
+    });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
-      ...(repositories.pendingResources.some(
-        (resource) =>
-          resource.kind === "repository" && resource.connectionType === "github_personal",
-      ) && context.personalGitHubAuthority
-        ? { connectionAuthorities: [context.personalGitHubAuthority] }
-        : {}),
+      connectionAuthorities: [
+        ...connectionAuthorities.selections,
+        ...(repositories.pendingResources.some(
+          (resource) =>
+            resource.kind === "repository" && resource.connectionType === "github_personal",
+        ) && context.personalGitHubAuthority
+          ? [context.personalGitHubAuthority]
+          : []),
+      ],
       ...(personalAttachment.intent
         ? { personalResourceAttachment: personalAttachment.intent }
         : {}),
     }),
-    sendBlocked: () =>
-      attachments.hasUnresolved ||
-      repositories.error !== null ||
-      !composerPolicyValidRef.current ||
-      personalAttachment.requiresDecision ||
-      personalAttachment.loading ||
-      personalAttachment.refreshing,
+    sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
@@ -1537,7 +1754,18 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
-    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    // Steer and recovered sends do not pass through onSubmitted. Keep the
+    // host-owned upload/repository queue in sync once those inputs are
+    // accepted too; the immutable input snapshot preserves later additions.
+    onSent: (_text, input) => {
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      );
+      repositories.commitSent(input.resources ?? []);
+      personalAttachment.onAccepted(input);
+    },
     onDeliveryError: personalAttachment.onDeliveryError,
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
@@ -1768,6 +1996,9 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -1782,6 +2013,74 @@ function SessionChatPane(props: {
       props.session.id,
       props.session.status,
       workspacePermissions,
+    ],
+  );
+
+  const [forkEventId, setForkEventId] = useState<string | null>(null);
+  const [turnRatings, setTurnRatings] = useState<Record<string, "positive" | "negative">>({});
+  const mayRate = hasWorkspacePermission(
+    context.accessContext,
+    props.session.workspaceId,
+    "sessions:create",
+  );
+  useEffect(() => {
+    setTurnRatings({});
+    setForkEventId(null);
+    if (!mayRate) return;
+    return loadSessionFeedback(
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      ({ feedback }) => {
+        const ratings: Record<string, "positive" | "negative"> = {};
+        for (const entry of feedback) {
+          if (entry.turnId && entry.sentiment && !ratings[entry.turnId])
+            ratings[entry.turnId] = entry.sentiment;
+        }
+        setTurnRatings((saved) => ({ ...ratings, ...saved }));
+      },
+    );
+  }, [
+    context.client,
+    props.session.workspaceId,
+    props.session.id,
+    mayRate,
+    context.accessContext.subjectId,
+  ]);
+  const mayForkMessage =
+    context.clientConfig.auth.mode === "managedSession" &&
+    context.authSession !== null &&
+    Boolean(props.session.tenancy) &&
+    mayRate;
+  const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
+    setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
+  }, []);
+  const renderMessageActions = useCallback(
+    (item: AgentMessageItem | UserMessageItem) => (
+      <Suspense fallback={null}>
+        <MessageActions
+          item={item}
+          client={context.client}
+          workspaceId={props.session.workspaceId}
+          sessionId={props.session.id}
+          mayRate={mayRate}
+          mayFork={mayForkMessage}
+          savedSentiment={
+            item.kind === "agent-message" && item.turnId ? (turnRatings[item.turnId] ?? null) : null
+          }
+          onRated={onMessageRated}
+          onFork={setForkEventId}
+        />
+      </Suspense>
+    ),
+    [
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      mayRate,
+      mayForkMessage,
+      turnRatings,
+      onMessageRated,
     ],
   );
 
@@ -1826,23 +2125,72 @@ function SessionChatPane(props: {
           {props.failure &&
           (props.session.status === "failed" ||
             (props.creditExhausted && props.session.status === "idle")) ? (
-            <FailedSessionBanner
-              failure={props.failure}
-              creditExhausted={props.creditExhausted}
-              workspaceId={props.session.workspaceId}
-            />
+            <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
+              <Suspense fallback={failureFallback}>
+                <LazyFailedSessionBanner
+                  key={props.session.id}
+                  failure={props.failure}
+                  creditExhausted={props.creditExhausted}
+                  workspaceId={props.session.workspaceId}
+                  canBuyCredits={
+                    context.clientConfig.billingMode === "stripe" &&
+                    Boolean(workspaceAccountId) &&
+                    hasAccountPermission(
+                      context.accessContext,
+                      workspaceAccountId ?? "",
+                      "billing:manage",
+                    )
+                  }
+                  canConnectModel={hasWorkspacePermission(
+                    context.accessContext,
+                    props.session.workspaceId,
+                    "connections:write",
+                  )}
+                  actions={{
+                    failureId: props.failure.failureEventId,
+                    composerBlocker: composerSendBlocker(),
+                    repositoryError: repositories.error,
+                    onContinue: () =>
+                      composer.hasDraftContent()
+                        ? Promise.resolve(false)
+                        : composer.send(FAILURE_CONTINUATION_MESSAGE),
+                    continuationBlocker: composer.hasDraftContent()
+                      ? "draft"
+                      : failedOptimisticMessageCount > 0
+                        ? "unsent"
+                        : (optimisticMessages ?? []).some(
+                              (message) => !acceptedClientEventIds.has(message.clientEventId),
+                            )
+                          ? "delivery"
+                          : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                            ? "queued"
+                            : composer.sending || composer.draftLoading || !hasComposerPolicy
+                              ? "loading"
+                              : null,
+                    onChooseModel: () => setModelPickerSession(props.session.id),
+                    modelDisabled: composer.sending || composer.draftLoading || !hasComposerPolicy,
+                  }}
+                />
+              </Suspense>
+            </FailureRecoveryBoundary>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
+              key={props.session.id}
               className="h-full"
               items={timelineWithOptimisticSends}
+              events={props.events}
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
+              renderMessageActions={renderMessageActions}
               onAnnotate={composer.addAnnotation}
+              draftAnnotations={composer.annotations}
+              onDraftAnnotationSelect={composer.requestAnnotationReview}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
+              renderAuthNeeded={renderAuthNeeded}
               resolveProviderLogo={props.resolveProviderLogo}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}
@@ -1863,6 +2211,7 @@ function SessionChatPane(props: {
                 props.session.status === "requires_action" ? (
                   <div className="pb-1" data-human-input-timeline-surface="">
                     <HumanInputSurface
+                      loadSkillReview={loadSkillReview}
                       requests={props.humanInput.requests}
                       respondingRequestId={props.humanInput.respondingRequestId}
                       error={props.humanInput.mutationError?.message}
@@ -1918,6 +2267,18 @@ function SessionChatPane(props: {
         </>
       )}
 
+      {forkEventId ? (
+        <Suspense fallback={null}>
+          <MessageForkDialog
+            key={forkEventId}
+            session={props.session}
+            events={props.events}
+            sourceEventId={forkEventId}
+            onForkClose={() => setForkEventId(null)}
+          />
+        </Suspense>
+      ) : null}
+
       {/* Live decision strip: only while the session is actually paused on
           an approval — a replayed log or a stale stream must never render
           actionable Approve/Reject buttons for an already-resumed turn. */}
@@ -1968,19 +2329,40 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
+      {props.session.inputWait &&
+      props.session.status === "idle" &&
+      props.session.effectiveControl.state === "active" ? (
+        <Suspense fallback={null}>
+          <LazySessionWaitStatus session={props.session} />
+        </Suspense>
+      ) : null}
+
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
+            sessionStatus={props.session.status}
+            compact
+            onOpenSession={props.onOpenSession}
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}
             readOnly={terminal}
+            commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
+            commandsPanel={
+              <SessionCommands
+                key={props.session.id}
+                sessionId={props.session.id}
+                readOnly={terminal}
+              />
+            }
             agentsSignal={agentsSignal}
             agentsPanel={
               props.agentNodes.length > 0 ? (
-                <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+                <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                  <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+                </Suspense>
               ) : null
             }
           />
@@ -1989,7 +2371,19 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          <PersonalResourceAttachmentControl
+          {connectionAuthorities.error ? (
+            <p role="alert" className="mb-2 text-xs text-fg-muted">
+              Personal connection access could not be checked.{" "}
+              <button
+                type="button"
+                className="text-brand underline"
+                onClick={() => void connectionAuthorities.refresh()}
+              >
+                Retry
+              </button>
+            </p>
+          ) : null}
+          <PersonalResourceAttachmentSurface
             controller={personalAttachment}
             disabled={terminal || composer.sending}
             compact
@@ -2012,22 +2406,54 @@ function SessionChatPane(props: {
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             transcriptionSuppressed={voiceActive}
             controlsLeading={
-              <ComposerMobilePlus
-                disabled={terminal || composer.sending}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={selectableSessionMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={durableToolSelection}
-                toolsDisabled={
-                  composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                }
-                onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
-                repositories={{
-                  selectedCount: repositories.selectionCount,
-                  disabled: terminal || composer.sending,
-                  panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
-                }}
-              />
+              <>
+                <ComposerMobilePlus
+                  disabled={terminal || composer.sending}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={selectableSessionMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={durableToolSelection}
+                  toolsSaving={durableToolsSaving}
+                  toolsDisabled={
+                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                  }
+                  onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                  variableSets={{
+                    selectedCount:
+                      props.session.variableSetIds?.length ?? (props.session.variableSetId ? 1 : 0),
+                    panel: (
+                      <SessionVariableSetPicker
+                        session={props.session}
+                        canControl={workspacePermissions.includes("sessions:control")}
+                        canAttach={workspacePermissions.includes("variable-sets:attach")}
+                        canUse={workspacePermissions.includes("variable-sets:use")}
+                        canList={
+                          workspacePermissions.includes("variable-sets:list") &&
+                          workspacePermissions.includes("secrets:list")
+                        }
+                        disabled={terminal}
+                        busy={
+                          voiceActive ||
+                          composer.sending ||
+                          props.session.activeTurnId !== null ||
+                          props.queue.queue.length > 0
+                        }
+                        goalActive={props.goal.isActive}
+                        voiceActive={voiceActive}
+                        sharedState={variableSetPickerState}
+                        setSharedState={setVariableSetPickerState}
+                        embedded
+                        onReloadSession={props.onReloadSession}
+                      />
+                    ),
+                  }}
+                  repositories={{
+                    selectedCount: repositories.selectionCount,
+                    disabled: terminal || composer.sending,
+                    panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                  }}
+                />
+              </>
             }
             actions={
               !terminal ? (
@@ -2059,12 +2485,19 @@ function SessionChatPane(props: {
                     // the reply turn dies the same budget death.
                     "Out of OpenGeni credits — add credits to continue."
                   : props.session.status === "failed"
-                    ? "This session failed — send a message to revive it."
+                    ? props.failure?.safetyRefusal
+                      ? "The model provider blocked the previous request."
+                      : "This session failed — send a message to revive it."
                     : "Send a follow-up…"
             }
             controls={
-              <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
+              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                 <ModelPicker
+                  hasImageAttachments={attachments.attachments.some(
+                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                  )}
+                  open={modelPickerSession === props.session.id}
+                  onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}
@@ -2078,22 +2511,6 @@ function SessionChatPane(props: {
                   onModelChange={composer.setModel}
                   onEffortChange={composer.setReasoningEffort}
                   onLatencyModeChange={composer.setLatencyMode}
-                />
-                <SessionToolPicker
-                  menuSide="top"
-                  servers={selectableSessionMcpServers}
-                  firstPartyTools={firstPartyToolOptions}
-                  selection={durableToolSelection}
-                  triggerClassName="max-sm:hidden"
-                  disabled={
-                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                  }
-                  saving={durableToolsSaving}
-                  onChange={(next) => void saveDurableToolPolicy(next)}
-                />
-                <FollowUpRepositoryPicker
-                  {...repositoryPickerProps}
-                  triggerClassName="max-sm:hidden"
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">

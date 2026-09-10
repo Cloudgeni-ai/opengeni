@@ -275,6 +275,67 @@ export function isMemoryScopeApplicable(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Session memory scope (migration 0427). A session freezes which typed Memory
+// layer its agent reads and writes. `user` and `session` are ADDITIVE to the
+// shared workspace layer: the agent still reads workspace facts and saves into
+// its narrowest configured layer. `off` registers no Memory tools at all.
+// ---------------------------------------------------------------------------
+
+export type MemoryAgentScopeMode = "workspace" | "user" | "off";
+
+/**
+ * The agent-side Memory selector resolved from one session row. The end-user
+ * subject id is the opaque hash of the exact `[source, id]` tuple (never a human
+ * subject); the root session id is the session's lineage root so one tree
+ * shares one private session layer.
+ */
+export type MemoryAgentScope = {
+  mode: MemoryAgentScopeMode;
+  userSubjectId: string | null;
+  rootSessionId: string | null;
+};
+
+export const END_USER_MEMORY_SUBJECT_PREFIX = "end_user:v1:";
+
+/** The typed `user` selector for an opaque session end-user label. */
+export function endUserMemorySubjectId(scopeSubjectId: { source: string; id: string }): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([scopeSubjectId.source, scopeSubjectId.id]), "utf8")
+    .digest("hex");
+  return `${END_USER_MEMORY_SUBJECT_PREFIX}${digest}`;
+}
+
+/**
+ * The typed scope an agent in this memory mode writes to (its narrowest
+ * layer), or null when Memory is off. Throws when the mode requires a
+ * selector the session does not carry, so a misconfigured caller cannot fall
+ * back to a wider layer.
+ */
+export function memoryWriteScopeForAgentScope(scope: MemoryAgentScope): MemoryScopeSpec | null {
+  switch (scope.mode) {
+    case "off":
+      return null;
+    case "workspace":
+      return { type: "workspace" };
+    case "user":
+      if (!scope.userSubjectId) {
+        throw new Error("memory scope user requires an end-user subject id");
+      }
+      return { type: "user", subjectId: scope.userSubjectId };
+  }
+}
+
+/**
+ * The typed selectors visible to an agent in this memory mode: the workspace
+ * layer plus at most one private layer. `off` sees nothing.
+ */
+export function memoryReadScopesForAgentScope(scope: MemoryAgentScope): MemoryScopeSpec[] {
+  if (scope.mode === "off") return [];
+  const own = memoryWriteScopeForAgentScope(scope);
+  return own && own.type !== "workspace" ? [{ type: "workspace" }, own] : [{ type: "workspace" }];
+}
+
 export function canonicalMemoryRelationship(input: {
   sourceMemoryId: string;
   targetMemoryId: string;

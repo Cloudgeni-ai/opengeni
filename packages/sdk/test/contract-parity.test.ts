@@ -20,6 +20,14 @@ import {
   CodexRealtimeVoice as ContractCodexRealtimeVoice,
   EndSessionRealtimeRequest as ContractEndSessionRealtimeRequest,
   WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
+  CreateWorkspaceGatewayCustomModelRequest as ContractCreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest as ContractDeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceGatewayCustomModel as ContractWorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse as ContractWorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest as ContractCreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest as ContractDeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpenRouterCustomModel as ContractWorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse as ContractWorkspaceOpenRouterCustomModelsResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   CreateSessionResponse as ContractCreateSessionResponse,
@@ -110,6 +118,8 @@ import {
   SyncSessionRealtimeLedgerResponse as ContractSyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest as ContractRenewSessionRealtimeRequest,
   SessionStatus as ContractSessionStatus,
+  SessionSystemUpdateKind as ContractSessionSystemUpdateKind,
+  SessionSystemUpdatePayload as ContractSessionSystemUpdatePayload,
   SessionTurn as ContractSessionTurn,
   SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
@@ -170,6 +180,14 @@ import type {
   CodexRealtimeVoice,
   EndSessionRealtimeRequest,
   WorkspaceModelCatalogResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -255,6 +273,8 @@ import type {
   SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
   SessionStatus,
+  SessionSystemUpdateKind,
+  SessionSystemUpdatePayload,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
@@ -441,6 +461,25 @@ describe("SDK / contracts parity", () => {
     );
   });
 
+  test("session system-update kinds and payloads accept every contract value", () => {
+    type ContractSessionSystemUpdateKind = z.infer<typeof ContractSessionSystemUpdateKind>;
+    type ContractSessionSystemUpdatePayload = z.infer<typeof ContractSessionSystemUpdatePayload>;
+    const sdkAcceptsContractKind = (
+      value: ContractSessionSystemUpdateKind,
+    ): SessionSystemUpdateKind => value;
+    const contractAcceptsSdkKind = (
+      value: SessionSystemUpdateKind,
+    ): ContractSessionSystemUpdateKind => value;
+    const sdkAcceptsContractPayload = (
+      value: ContractSessionSystemUpdatePayload,
+    ): SessionSystemUpdatePayload => value;
+    expect(
+      [sdkAcceptsContractKind, contractAcceptsSdkKind, sdkAcceptsContractPayload].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
+  });
+
   test("Codex realtime V3 wire shapes and voices match", () => {
     const voices: readonly CodexRealtimeVoice[] = ContractCodexRealtimeVoice.options;
     expect(voices).toEqual(ContractCodexRealtimeVoice.options);
@@ -608,13 +647,22 @@ describe("SDK / contracts parity", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: {
         sandboxBackend: "modal",
         goal: { text: "finish", maxAutoContinuations: 8 },
         firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
       },
     };
-    expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
+    const parsed = ContractSaveNewSessionDraftRequest.parse(save);
+    expect(parsed.selectedProjectChannelId).toBeNull();
+    const { selectedProjectChannelId: _selectedProjectChannelId, ...legacySave } = save;
+    expect(
+      Object.hasOwn(
+        ContractSaveNewSessionDraftRequest.parse(legacySave),
+        "selectedProjectChannelId",
+      ),
+    ).toBe(false);
   });
 
   test("established-session submit requires one exact policy snapshot", () => {
@@ -1336,4 +1384,73 @@ describe("SDK / contracts parity", () => {
     const sdkOs: readonly SandboxOs[] = ["linux", "macos", "windows"];
     expect([...sdkOs].sort()).toEqual([...ContractSandboxOs.options].sort());
   });
+
+  test("workspace Gateway custom-model requests and projections match contracts", () => {
+    const acceptModel = (
+      value: z.infer<typeof ContractWorkspaceGatewayCustomModel>,
+    ): WorkspaceGatewayCustomModel => value;
+    const acceptModels = (
+      value: z.infer<typeof ContractWorkspaceGatewayCustomModelsResponse>,
+    ): WorkspaceGatewayCustomModelsResponse => value;
+    const acceptCreateRequest = (
+      value: CreateWorkspaceGatewayCustomModelRequest,
+    ): z.input<typeof ContractCreateWorkspaceGatewayCustomModelRequest> => value;
+    const acceptDeleteRequest = (
+      value: DeleteWorkspaceGatewayCustomModelRequest,
+    ): z.input<typeof ContractDeleteWorkspaceGatewayCustomModelRequest> => value;
+    const acceptOpenRouterModel = (
+      value: z.infer<typeof ContractWorkspaceOpenRouterCustomModel>,
+    ): WorkspaceOpenRouterCustomModel => value;
+    const acceptOpenRouterModels = (
+      value: z.infer<typeof ContractWorkspaceOpenRouterCustomModelsResponse>,
+    ): WorkspaceOpenRouterCustomModelsResponse => value;
+    const acceptOpenRouterCreateRequest = (
+      value: CreateWorkspaceOpenRouterCustomModelRequest,
+    ): z.input<typeof ContractCreateWorkspaceOpenRouterCustomModelRequest> => value;
+    const acceptOpenRouterDeleteRequest = (
+      value: DeleteWorkspaceOpenRouterCustomModelRequest,
+    ): z.input<typeof ContractDeleteWorkspaceOpenRouterCustomModelRequest> => value;
+
+    expect(
+      [
+        acceptModel,
+        acceptModels,
+        acceptCreateRequest,
+        acceptDeleteRequest,
+        acceptOpenRouterModel,
+        acceptOpenRouterModels,
+        acceptOpenRouterCreateRequest,
+        acceptOpenRouterDeleteRequest,
+      ].every((value) => typeof value === "function"),
+    ).toBe(true);
+  });
+});
+
+test("workspace timer wire types match contracts", async () => {
+  const { WorkspacePauseTimer, WorkspacePauseTimerRequest } = await import("@opengeni/contracts");
+  const request: import("../src/types").WorkspacePauseTimerRequest = {
+    action: "set",
+    pauseInSeconds: 1800,
+    pauseForSeconds: 7200,
+    expectedRevision: 4,
+    clientEventId: "timer-parity",
+  };
+  const contractRequest: import("@opengeni/contracts").WorkspacePauseTimerRequest = request;
+  const sdkRequest: import("../src/types").WorkspacePauseTimerRequest =
+    WorkspacePauseTimerRequest.parse(contractRequest);
+  expect(sdkRequest).toEqual(request);
+  const contractTimer = WorkspacePauseTimer.parse({
+    id: crypto.randomUUID(),
+    action: "pause",
+    dueAt: new Date().toISOString(),
+    pauseForSeconds: 7200,
+  });
+  const sdkTimer: import("../src/types").WorkspacePauseTimer = contractTimer;
+  const timer: import("@opengeni/contracts").WorkspacePauseTimer = sdkTimer;
+  expect(timer).toEqual(contractTimer);
+  for (const seconds of [-1, 1, 59, 2592001, 1.5]) {
+    expect(
+      WorkspacePauseTimerRequest.safeParse({ ...request, pauseInSeconds: seconds }).success,
+    ).toBe(false);
+  }
 });

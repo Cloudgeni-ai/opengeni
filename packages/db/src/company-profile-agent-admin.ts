@@ -28,6 +28,7 @@ export class CompanyProfileAgentAdminError extends Error {
   constructor(
     readonly code:
       | "authority_unavailable"
+      | "policy_disabled"
       | "confirmation_unavailable"
       | "profile_conflict"
       | "operation_reused"
@@ -62,6 +63,13 @@ function translate(error: unknown, stage: "propose" | "confirm"): never {
       { cause: error },
     );
   }
+  if (state === "P1852") {
+    throw new CompanyProfileAgentAdminError(
+      "policy_disabled",
+      "Agent-authored company-profile changes are disabled by organization policy.",
+      { cause: error },
+    );
+  }
   if (state === "40001") {
     throw new CompanyProfileAgentAdminError(
       "profile_conflict",
@@ -84,6 +92,18 @@ function translate(error: unknown, stage: "propose" | "confirm"): never {
     );
   }
   throw error;
+}
+
+/** Deterministic UUID-shaped id for the activation stage of one proposal operation. */
+export function derivedCompanyProfileAutomaticActivationOperationId(operationId: string): string {
+  const bytes = createHash("sha256")
+    .update(`company-profile-agent-admin:v1:${operationId}:automatic-activation`, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 async function withAgentAttemptContext<T>(
@@ -119,10 +139,13 @@ export async function proposeCompanyProfileForAgent(
         receipt_id: string;
         revision_id: string;
         human_input: unknown;
+        policy_mode: "suggest" | "automatic";
+        automatic_activation_receipt_id: string | null;
+        activation_event_id: string | null;
         replayed: boolean;
       }>(
         scoped,
-        sql`select * from propose_company_profile_for_attempt(
+        sql`select * from propose_company_profile_for_attempt_v2(
           ${attempt.accountId}::uuid,
           ${attempt.workspaceId}::uuid,
           ${attempt.sessionId}::uuid,
@@ -130,6 +153,7 @@ export async function proposeCompanyProfileForAgent(
           ${attempt.attemptId}::uuid,
           ${attempt.executionGeneration},
           ${request.operationId}::uuid,
+          ${derivedCompanyProfileAutomaticActivationOperationId(request.operationId)}::uuid,
           ${contentJson},
           ${contentHash},
           ${request.reason}
@@ -138,6 +162,48 @@ export async function proposeCompanyProfileForAgent(
       if (!row) throw new Error("Company-profile proposal returned no receipt");
       return row;
     });
+    if (
+      result.policy_mode === "automatic" &&
+      result.automatic_activation_receipt_id &&
+      result.activation_event_id
+    ) {
+      const [inventory, event] = await Promise.all([
+        listCompanyProfile(db, {
+          accountId: attempt.accountId,
+          workspaceId: attempt.workspaceId,
+          limit: 1,
+        }),
+        getCompanyProfileActivationEvent(db, {
+          accountId: attempt.accountId,
+          workspaceId: attempt.workspaceId,
+          eventId: result.activation_event_id,
+        }),
+      ]);
+      if (!event?.newRevision) {
+        throw new Error("Company-profile automatic activation event is unavailable");
+      }
+      const revision = await getCompanyProfileRevision(db, {
+        accountId: attempt.accountId,
+        workspaceId: attempt.workspaceId,
+        revisionId: event.newRevision.id,
+      });
+      return CompanyProfileAgentProposalReceipt.parse({
+        status: "activated",
+        operationId: request.operationId,
+        proposalReceiptId: result.receipt_id,
+        automaticActivationReceiptId: result.automatic_activation_receipt_id,
+        policyMode: "automatic",
+        mutation: {
+          revision,
+          head: inventory.current?.revisionId === revision.id ? inventory.current : null,
+          event,
+        },
+        replayed: result.replayed,
+      });
+    }
+    if (result.policy_mode !== "suggest") {
+      throw new Error("Company-profile proposal returned an incomplete automatic activation");
+    }
     const revision = await getCompanyProfileRevision(db, {
       accountId: attempt.accountId,
       workspaceId: attempt.workspaceId,
@@ -148,6 +214,7 @@ export async function proposeCompanyProfileForAgent(
       operationId: request.operationId,
       proposalReceiptId: result.receipt_id,
       revision,
+      policyMode: "suggest",
       humanInput: CompanyProfileAgentHumanInputPrompt.parse(result.human_input),
       confirmWith: "company_profile_confirm",
       replayed: result.replayed,

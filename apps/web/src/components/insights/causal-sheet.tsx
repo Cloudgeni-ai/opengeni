@@ -26,6 +26,7 @@ export function CausalSheet(props: {
   const snap = props.snapshot;
   const modelCreditPrice = snap.models.reduce((n, m) => n + m.creditUsd, 0);
   const estimatedProviderUsd = snap.models.reduce((n, m) => n + m.estimatedProviderUsd, 0);
+  const equivalentCreditUsd = snap.models.reduce((n, m) => n + m.equivalentCreditUsd, 0);
   const totalTokens = snap.models.reduce((n, m) => n + m.totalTokens, 0);
   const cachedTokens = snap.models.reduce((n, m) => n + m.cachedTokens, 0);
   const cacheInputTokens = snap.models.reduce((n, m) => n + m.cacheInputTokens, 0);
@@ -99,6 +100,7 @@ export function CausalSheet(props: {
                     <Fact label="Total tokens" value={formatTokens(totalTokens)} />
                     <Fact label="cache hit" value={`${cachePct}%`} />
                     <Fact label="Estimated provider USD" value={formatUsd(estimatedProviderUsd)} />
+                    <Fact label="Equivalent credit price" value={formatUsd(equivalentCreditUsd)} />
                     <Fact label="Model credit price" value={formatUsd(modelCreditPrice)} />
                     <Fact
                       label="Workspace credit price"
@@ -124,6 +126,10 @@ export function CausalSheet(props: {
                         {driver.estimatedProviderCostKnownCalls > 0
                           ? `${formatUsd(driver.estimatedProviderUsd)} estimated provider USD`
                           : "provider price unknown"}
+                        {" · "}
+                        {driver.equivalentCreditCostKnownCalls > 0
+                          ? `${formatUsd(driver.equivalentCreditUsd)} equivalent credits`
+                          : "equivalent price unknown"}
                         {" · "}
                         {formatUsd(driver.creditUsd)} OpenGeni credits
                       </p>

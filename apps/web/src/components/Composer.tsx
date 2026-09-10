@@ -3,6 +3,7 @@
 import {
   ChatComposer,
   useFileAttachments,
+  type ChatComposerMessages,
   type ComposerState,
   type SlashCommandContext,
   type UseFileAttachmentsResult,
@@ -39,6 +40,8 @@ export function ConsoleComposer(props: {
   actions?: ReactNode;
   commandContext?: SlashCommandContext;
   onClearView?: () => void;
+  /** Route-specific composer copy, including an exact disabled-send explanation. */
+  messages?: Partial<ChatComposerMessages>;
   /** Soft-hide dictate while realtime voice is active. */
   transcriptionSuppressed?: boolean;
 }) {
@@ -47,6 +50,7 @@ export function ConsoleComposer(props: {
   const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
   return (
     <ChatComposer
+      responsiveBasis="container"
       composer={props.composer}
       effectiveControl={props.effectiveControl}
       queuedAheadCount={props.queuedAheadCount}
@@ -55,13 +59,14 @@ export function ConsoleComposer(props: {
       placeholder={props.placeholder}
       autoFocus={props.autoFocus}
       disabled={props.disabled}
+      messages={props.messages}
       {...(props.fileUploadsEnabled ? { attachments: props.attachments } : {})}
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
       {...(props.header ? { header: props.header } : {})}
-      // Desktop keeps the paperclip; mobile reaches attach via the “+” menu.
-      attachButtonClassName="max-sm:hidden"
+      // The actions menu owns attachments when supplied.
+      attachButtonClassName={props.controlsLeading ? "hidden" : undefined}
       controlsStart={props.controls}
       actionsStart={props.actions}
       transcriptionSuppressed={props.transcriptionSuppressed === true}

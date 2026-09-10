@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createAgentEventIngestionScheduler,
   handleAgentEventPayload,
   parseAgentEventSubject,
   wireAttachedBrowserInventoryToContract,
@@ -82,6 +83,140 @@ describe("handleAgentEventPayload — GoingOffline machine-plane recording", () 
       "not.an.events.subject",
     );
     expect(counters).toHaveLength(0);
+  });
+});
+
+describe("Connected Machine event ingestion scheduling", () => {
+  const subjectA =
+    "agent.11111111-1111-4111-8111-111111111111.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.connection.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.events";
+  const subjectB =
+    "agent.22222222-2222-4222-8222-222222222222.cccccccc-cccc-4ccc-8ccc-cccccccccccc.connection.dddddddd-dddd-4ddd-8ddd-dddddddddddd.events";
+
+  function heartbeat(seq: number): Uint8Array {
+    return AgentEvent.encode({
+      event: {
+        $case: "heartbeat",
+        heartbeat: {
+          seq: String(seq),
+          uptimeMs: String(seq * 5_000),
+          activeSessions: 0,
+          draining: false,
+        },
+      },
+    }).finish();
+  }
+
+  function goingOffline(): Uint8Array {
+    return AgentEvent.encode({
+      event: {
+        $case: "goingOffline",
+        goingOffline: { reason: GoingOfflineReason.GOING_OFFLINE_REASON_HOST_SHUTDOWN },
+      },
+    }).finish();
+  }
+
+  test("drains separate runners concurrently and bounds a busy runner to the latest consecutive heartbeat", async () => {
+    const handledA: string[] = [];
+    const handledB: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    let runnerBHandled!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStartedPromise = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const runnerBHandledPromise = new Promise<void>((resolve) => {
+      runnerBHandled = resolve;
+    });
+    let coalesced = 0;
+
+    const scheduler = createAgentEventIngestionScheduler(
+      async (payload, subject) => {
+        const event = AgentEvent.decode(payload).event;
+        const label =
+          event?.$case === "heartbeat" ? `heartbeat:${event.heartbeat.seq}` : "goingOffline";
+        if (subject === subjectA) {
+          handledA.push(label);
+          if (label === "heartbeat:1") {
+            firstStarted();
+            await firstGate;
+          }
+        } else {
+          handledB.push(label);
+          runnerBHandled();
+        }
+      },
+      { onHeartbeatCoalesced: () => (coalesced += 1) },
+    );
+
+    scheduler.enqueue(heartbeat(1), subjectA);
+    await firstStartedPromise;
+    for (let seq = 2; seq <= 100; seq += 1) scheduler.enqueue(heartbeat(seq), subjectA);
+    scheduler.enqueue(goingOffline(), subjectA);
+    for (let seq = 101; seq <= 200; seq += 1) scheduler.enqueue(heartbeat(seq), subjectA);
+
+    scheduler.enqueue(heartbeat(7), subjectB);
+    await runnerBHandledPromise;
+    expect(handledB).toEqual(["heartbeat:7"]);
+
+    releaseFirst();
+    await scheduler.whenIdle();
+    expect(handledA).toEqual(["heartbeat:1", "heartbeat:100", "goingOffline", "heartbeat:200"]);
+    expect(coalesced).toBe(197);
+  });
+
+  test("a rejected event does not strand later liveness for the same runner", async () => {
+    const handled: string[] = [];
+    const scheduler = createAgentEventIngestionScheduler(async (payload) => {
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "heartbeat") handled.push(event.heartbeat.seq);
+    });
+
+    scheduler.enqueue(Uint8Array.from([0xff]), subjectA);
+    scheduler.enqueue(heartbeat(2), subjectA);
+    await scheduler.whenIdle();
+    expect(handled).toEqual(["2"]);
+  });
+
+  test("bounds cross-runner database concurrency without serializing every runner", async () => {
+    let releaseHandlers!: () => void;
+    let fourHandlersStarted!: () => void;
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandlers = resolve;
+    });
+    const fourHandlersStartedPromise = new Promise<void>((resolve) => {
+      fourHandlersStarted = resolve;
+    });
+    let active = 0;
+    let peak = 0;
+    let handled = 0;
+
+    const scheduler = createAgentEventIngestionScheduler(
+      async () => {
+        active += 1;
+        handled += 1;
+        peak = Math.max(peak, active);
+        if (handled === 4) fourHandlersStarted();
+        await handlerGate;
+        active -= 1;
+      },
+      { maxConcurrentSubjects: 4 },
+    );
+
+    for (let index = 0; index < 12; index += 1) {
+      scheduler.enqueue(heartbeat(index + 1), `runner-${index}`);
+    }
+
+    await fourHandlersStartedPromise;
+    expect(peak).toBe(4);
+    expect(handled).toBe(4);
+
+    releaseHandlers();
+    await scheduler.whenIdle();
+    expect(handled).toBe(12);
+    expect(peak).toBe(4);
   });
 });
 

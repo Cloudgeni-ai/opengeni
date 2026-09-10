@@ -8,6 +8,7 @@
    everything renders identically.
    -------------------------------------------------------------------------- */
 
+import { CapabilityPackSkill as CapabilityPackSkillSchema } from "@opengeni/contracts";
 import type {
   AcknowledgeStreamResponse,
   AuthRun,
@@ -4258,10 +4259,7 @@ function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack 
     role: manifest.role,
     category: manifest.category,
     version: manifest.version,
-    skills: (manifest.skills ?? []).map((skill) => ({
-      name: skill.name,
-      files: skill.files,
-    })),
+    skills: (manifest.skills ?? []).map((skill) => CapabilityPackSkillSchema.parse(skill)),
     components: (manifest.components ?? []).map((component) => ({
       ...component,
       required: component.required ?? true,
@@ -4303,7 +4301,13 @@ const DEVOPS_PACK: CapabilityPack = fabricatePack({
   skills: [
     {
       name: "drift-checks",
-      files: [{ path: "SKILL.md", content: "# Drift checks" }],
+      files: [
+        {
+          path: "SKILL.md",
+          content:
+            "---\nname: drift-checks\ndescription: Check infrastructure for drift\n---\n# Drift checks",
+        },
+      ],
     },
   ],
 });

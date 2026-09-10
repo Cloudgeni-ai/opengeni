@@ -525,7 +525,13 @@ export function DocumentsRoute({
       <section className="flex min-h-0 flex-1 flex-col text-left">
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
-          title={personalWorkspace ? "Your Documents" : "Documents"}
+          title={
+            authorityKind === "organization"
+              ? "Organization documents"
+              : personalWorkspace
+                ? "Your Documents"
+                : "Documents"
+          }
           description={
             authorityKind === "organization"
               ? canWriteOrganizationKnowledge
@@ -536,6 +542,15 @@ export function DocumentsRoute({
                 : "Add information agents can find when it is relevant."
           }
         />
+        {authorityKind === "organization" ? (
+          <a
+            href={`/workspaces/${encodeURIComponent(workspaceId)}/organization?section=knowledge`}
+            className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+          >
+            <ArrowLeftIcon className="size-3" />
+            Back to organization knowledge
+          </a>
+        ) : null}
         {returnToBrain ? (
           <Link
             to="/workspaces/$workspaceId/state"

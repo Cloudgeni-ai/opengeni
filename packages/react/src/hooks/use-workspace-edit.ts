@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import type { FileSystemRouteIdentity } from "@opengeni/sdk";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
@@ -39,6 +40,9 @@ export type UseWorkspaceEditOptions = ClientOverride & {
   path?: string | null | undefined;
   /** The capture-served content loaded into the editor — the flush base (C2). */
   baseContent?: string | null | undefined;
+  /** Exact capability identity for the selected filesystem route. A route/root
+   * change discards the buffered edit and makes stale flushes fail retryably. */
+  route?: FileSystemRouteIdentity | undefined;
   /** `capabilities.liveness` — "warm" | "draining" | "cold". Drives the flush. */
   liveness?: string | undefined;
   /** True while the host is actively warming the box (attach in flight, not warm
@@ -95,9 +99,18 @@ export function useWorkspaceEdit(
   const { client, workspaceId } = useOpenGeni(options);
   const path = options.path ?? null;
   const baseContent = options.baseContent ?? null;
+  const routeEpoch = options.route?.epoch;
+  const routeRoot = options.route?.root;
+  const route = useMemo<FileSystemRouteIdentity | undefined>(
+    () =>
+      routeEpoch !== undefined && routeRoot !== undefined
+        ? { epoch: routeEpoch, root: routeRoot }
+        : undefined,
+    [routeEpoch, routeRoot],
+  );
   const live = isLive(options.liveness);
   const offline = options.offline === true;
-  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${path ?? ""}`;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${path ?? ""}\u0000${routeEpoch ?? ""}\u0000${routeRoot ?? ""}`;
 
   const [buffer, setBuffer] = useState<string | null>(null);
   const [wantsWarm, setWantsWarm] = useState(false);
@@ -178,7 +191,7 @@ export function useWorkspaceEdit(
           const liveRead = await client.fsRead(
             workspaceId,
             sessionId,
-            { path },
+            { path, ...(route ? { route } : {}) },
             { signal: readAbort.signal },
           );
           if (readAbortRef.current === readAbort) readAbortRef.current = null;
@@ -190,7 +203,12 @@ export function useWorkspaceEdit(
             return;
           }
         }
-        await client.fsWrite(workspaceId, sessionId, { path, content, overwrite: true });
+        await client.fsWrite(workspaceId, sessionId, {
+          path,
+          content,
+          overwrite: true,
+          ...(route ? { route } : {}),
+        });
         if (identityGenerationRef.current !== identityGeneration) return;
         setConflict(null);
         setFlush("flushed");
@@ -207,7 +225,7 @@ export function useWorkspaceEdit(
         }
       }
     },
-    [client, workspaceId, sessionId, path, baseContent, stateIdentity, identityKey],
+    [client, workspaceId, sessionId, path, baseContent, route, stateIdentity, identityKey],
   );
 
   // Auto-flush once the box is warm and a buffer is pending (the wake completed).

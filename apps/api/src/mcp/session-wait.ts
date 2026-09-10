@@ -66,7 +66,10 @@ export const SESSION_WAIT_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.control.paused",
   "session.control.resumed",
+  "session.wait.started",
+  "session.wait.finished",
   "tool.auth_needed",
+  "session.command.finished",
   "credential.auth_needed",
   "rig.setup.failed",
   "goal.set",
@@ -81,7 +84,51 @@ export const SESSION_WAIT_EVENT_TYPES = [
   "goal.continuation",
 ] as const satisfies readonly SessionEventType[];
 
-const SESSION_WAIT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(SESSION_WAIT_EVENT_TYPES);
+/**
+ * Settlement and blocking events that make a child result usable.
+ * Goal facts are deliberately absent: an agent can complete its durable goal
+ * before it emits the final assistant message and settles the turn. Completed
+ * agent messages are also absent because commentary messages use the same
+ * event type; an ordinary result-bearing `turn.completed` carries the
+ * authoritative final output.
+ */
+export const SESSION_WAIT_COMPLETION_EVENT_TYPES = [
+  "turn.completed",
+  "turn.failed",
+  "turn.cancelled",
+  "turn.superseded",
+  "turn.capacity_waiting",
+  "session.requiresAction",
+  "session.humanInput.requested",
+  "session.control.paused",
+  "tool.auth_needed",
+  "credential.auth_needed",
+  "rig.setup.failed",
+  "goal.paused",
+] as const satisfies readonly SessionEventType[];
+
+const SESSION_WAIT_COMPLETION_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  SESSION_WAIT_COMPLETION_EVENT_TYPES,
+);
+
+/**
+ * A completed turn is result-bearing only when it carries the ordinary final
+ * output. Segment-limit and maintenance turns settle one execution segment
+ * while the session still has work to do, so they must not release a parent.
+ */
+export function sessionWaitCompletionEventMatches(event: SessionEvent): boolean {
+  if (!SESSION_WAIT_COMPLETION_EVENT_TYPE_SET.has(event.type)) return false;
+  if (event.type !== "turn.completed") return true;
+  if (event.payload === null || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+    return false;
+  }
+  const payload = event.payload as Record<string, unknown>;
+  return (
+    Object.prototype.hasOwnProperty.call(payload, "output") &&
+    !Object.prototype.hasOwnProperty.call(payload, "segmentLimit") &&
+    !Object.prototype.hasOwnProperty.call(payload, "maintenance")
+  );
+}
 
 /** The self-session event that announces a newly pending machine input. */
 export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
@@ -188,6 +235,10 @@ export type SessionWaitInput = {
   targets: readonly SessionWaitTarget[];
   ownSessionId: string | null;
   maxWaitMs: number;
+  /** Target events that end the wait. Defaults to the ordinary activity set. */
+  targetEventTypes?: readonly SessionEventType[] | undefined;
+  /** Optional payload-aware refinement applied after the event-type filter. */
+  targetEventMatches?: ((event: SessionEvent) => boolean) | undefined;
   source: SessionWaitSource;
   signal?: AbortSignal | undefined;
   now?: (() => number) | undefined;
@@ -206,6 +257,11 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
   let liveFanout = true;
   let waited = false;
   const ownSessionId = input.source.readOwnPendingUpdateKinds ? input.ownSessionId : null;
+  const targetEventTypeSet: ReadonlySet<string> = new Set(
+    input.targetEventTypes ?? SESSION_WAIT_EVENT_TYPES,
+  );
+  const targetEventMatches = (event: SessionEvent): boolean =>
+    targetEventTypeSet.has(event.type) && (input.targetEventMatches?.(event) ?? true);
 
   // One subscription per distinct session; a session may be both a target and
   // the caller's own session, in which case either condition wakes the wait.
@@ -230,11 +286,7 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     const after = targetAfter.get(sessionId);
     for (const event of events) {
       if (event.sessionId !== sessionId) continue;
-      if (
-        after !== undefined &&
-        event.sequence > after &&
-        SESSION_WAIT_EVENT_TYPE_SET.has(event.type)
-      ) {
+      if (after !== undefined && event.sequence > after && targetEventMatches(event)) {
         return true;
       }
       if (sessionId === ownSessionId && event.type === SESSION_WAIT_OWN_PENDING_EVENT_TYPE) {
@@ -274,8 +326,7 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     const changed: SessionWaitTargetResult[] = [];
     for (const { target, read } of targetReads) {
       const events = read.events.filter(
-        (event) =>
-          event.sequence > target.afterSequence && SESSION_WAIT_EVENT_TYPE_SET.has(event.type),
+        (event) => event.sequence > target.afterSequence && targetEventMatches(event),
       );
       if (events.length === 0) continue;
       changed.push({
@@ -412,7 +463,7 @@ const SUMMARY_FAILURE_CHARS = 500;
 const SUMMARY_RESULT_CHARS = 1_000;
 
 function truncationMarker(droppedChars: number): string {
-  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events for the exact event]`;
+  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events view=debug payloadMode=full for the exact event]`;
 }
 
 function clampSummaryString(value: string, maxChars: number): string {

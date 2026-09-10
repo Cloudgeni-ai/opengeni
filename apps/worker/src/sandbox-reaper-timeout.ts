@@ -1,6 +1,7 @@
 import {
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
   SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS,
+  effectiveSandboxDrainSnapshotTimeoutMs,
   sandboxArchiveCaptureTimeoutMs,
   type Settings,
 } from "@opengeni/config";
@@ -13,16 +14,21 @@ import {
 
 const STRICT_TIMEOUT_FENCE_MS = 1;
 
-export function sandboxDrainTiming(settings: Pick<Settings, "sandboxSnapshotTimeoutMs">): {
+export function sandboxDrainTiming(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
+): {
   snapshotTimeoutMs: number;
   captureTimeoutMs: number;
   timeoutClass: SandboxDrainTimeoutClass;
   activityTimeoutMs: number;
 } {
-  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  const snapshotTimeoutMs = effectiveSandboxDrainSnapshotTimeoutMs(settings);
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs({
+    sandboxSnapshotTimeoutMs: snapshotTimeoutMs,
+  });
   const timeoutClass = sandboxDrainTimeoutClass(captureTimeoutMs);
   return {
-    snapshotTimeoutMs: settings.sandboxSnapshotTimeoutMs,
+    snapshotTimeoutMs,
     captureTimeoutMs,
     timeoutClass,
     activityTimeoutMs: sandboxDrainActivityTimeoutMs(timeoutClass),
@@ -30,7 +36,7 @@ export function sandboxDrainTiming(settings: Pick<Settings, "sandboxSnapshotTime
 }
 
 export function assertSandboxReaperActivityTimeout(
-  settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): void {
   const timing = sandboxDrainTiming(settings);
   if (timing.snapshotTimeoutMs >= timing.captureTimeoutMs) {

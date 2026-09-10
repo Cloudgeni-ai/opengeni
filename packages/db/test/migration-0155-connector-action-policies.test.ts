@@ -5,8 +5,10 @@ import postgres from "postgres";
 import {
   createDb,
   ensureConnectorActionPolicyDefault,
+  listConnectorActionPolicies,
   migrate,
   provisionRoles,
+  upsertConnectorActionPolicies,
   upsertConnectorActionPolicy,
   type DbClient,
 } from "../src/index";
@@ -240,5 +242,41 @@ describe("0155 connector action policy migration contract", () => {
       policy: "ask",
     });
     expect(preserved).toMatchObject({ changed: false, policy: { policy: "block", version: 2 } });
+  }, 180_000);
+
+  test("updates one connector action group atomically and lists its exact policies", async () => {
+    if (!available) return;
+    const tenant = await freshWorkspace(`batch-${crypto.randomUUID()}`);
+    const connectionId = `connection-${crypto.randomUUID()}`;
+    const common = {
+      accountId: tenant.accountId,
+      workspaceId: tenant.workspaceId,
+      subjectId: "policy-owner",
+      connectionId,
+      serverId: "github_app",
+      policy: "allow" as const,
+    };
+    const results = await upsertConnectorActionPolicies(client.db, [
+      { ...common, toolName: "pull_request_create", actionName: "pull_request_create" },
+      { ...common, toolName: "pull_request_update", actionName: "pull_request_update" },
+      { ...common, toolName: "pull_request_comment", actionName: "pull_request_comment" },
+    ]);
+    expect(results).toHaveLength(3);
+    expect(results.every((result) => result.changed && result.policy.policy === "allow")).toBe(
+      true,
+    );
+    expect(
+      await listConnectorActionPolicies(client.db, {
+        accountId: tenant.accountId,
+        workspaceId: tenant.workspaceId,
+        connectionIds: [connectionId],
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ toolName: "pull_request_create", policy: "allow" }),
+        expect.objectContaining({ toolName: "pull_request_update", policy: "allow" }),
+        expect.objectContaining({ toolName: "pull_request_comment", policy: "allow" }),
+      ]),
+    );
   }, 180_000);
 });

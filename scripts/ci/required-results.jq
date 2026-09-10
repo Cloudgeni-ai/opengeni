@@ -11,7 +11,7 @@
    .deployment.result == "skipped" and
    .images.result == "skipped"
  else
-   ."test-suite".result == "success" and
+   (if $mode == "docs" then ."test-suite".result == "skipped" else ."test-suite".result == "success" end) and
    (if $browser == 0 then ."browser-acceptance".result == "skipped" else ."browser-acceptance".result == "success" end) and
    .deployment.result == "success" and
    (if $bakeImages then .images.result == "success" else .images.result == "skipped" end)

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
-import { createDb, listSessionEventPage } from "../src";
+import { createDb, listSessionEventPage, SESSION_EVENT_DB_PAGE_MAX_BYTES } from "../src";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,6 +108,26 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         name: "sessions_list",
         output: `HEAD-${"h".repeat(180_000)}-TAIL`,
       };
+      const cursorStrandingPayload = {
+        id: "cursor-stranding-legacy-output",
+        name: "exec_command",
+        output: `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`,
+      };
+      const projectionMarkerPayload = {
+        message: "ordinary retained payload with producer-controlled metadata",
+        truncation: {
+          truncated: true,
+          surface: "database_read_projection",
+          reason: "payload_bytes_exceeded",
+          originalBytes: 12_345,
+          deliveredBytes: 7,
+          omittedBytes: 12_338,
+          estimatedOriginalTokens: 3_087,
+          estimatedDeliveredTokens: 2,
+          fullEvidence: { available: false, reason: "not_retained" },
+          details: [],
+        },
+      };
       const insertPayload = {
         id: "insert-guard",
         name: "sessions_list",
@@ -143,6 +164,16 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         ), (
           ${account!.id}, ${workspace!.id}, ${sessionId}, 2,
           'agent.tool_call.completed', ${admin.json({ id: "update-target", output: "small" })}
+        ), (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 10,
+          'agent.message.completed', ${admin.json(projectionMarkerPayload)}
+        )`;
+      await admin`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 9,
+          'agent.toolCall.output', ${admin.json(cursorStrandingPayload)}
         )`;
       await admin`
         insert into session_events (
@@ -243,8 +274,94 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
           Buffer.byteLength(JSON.stringify(projectedPayloadPage.events), "utf8"),
         );
         expect(projectedPayloadPage.events[0]?.payload).toEqual(historicalPayload);
+        expect(projectedPayloadPage.fullPayloadsExact).toBeTrue();
         expect(JSON.stringify(projectedPayloadPage.events)).toContain("HEAD-");
         expect(JSON.stringify(projectedPayloadPage.events)).toContain("-TAIL");
+
+        const exactMarkerPage = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { after: 9, limit: 1 },
+        );
+        expect(exactMarkerPage.fullPayloadsExact).toBeTrue();
+        expect(exactMarkerPage.events[0]?.payload).toEqual(projectionMarkerPayload);
+
+        // Exercise both the interactive CTE and metadata-batched read paths.
+        for (const batchOptions of [{}, { batchSize: 1 }]) {
+          for (const direction of ["after", "before"] as const) {
+            let after = 6;
+            let before = 11;
+            const expectedSequences = direction === "after" ? [7, 9, 10] : [10, 9, 7];
+            for (const [index, sequence] of expectedSequences.entries()) {
+              const page = await listSessionEventPage(
+                projectionClient.db,
+                workspace!.id,
+                sessionId,
+                { after, before, direction, limit: 3, ...batchOptions },
+              );
+              expect(page.events.map((event) => event.sequence)).toEqual([sequence]);
+              expect(page.fullPayloadsExact).toBeTrue();
+              expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+              expect(page.coveredSequence).toEqual({ first: sequence, last: sequence });
+              expect(page.hasMore).toBe(index < expectedSequences.length - 1);
+              expect(page.truncatedBy).toBe(index < expectedSequences.length - 1 ? "bytes" : null);
+              if (sequence === 9) {
+                expect(page.events[0]?.payload).toEqual(cursorStrandingPayload);
+                expect(page.bytes).toBeGreaterThan(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+              } else {
+                expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+              }
+              if (sequence === 10) {
+                // Producer-controlled truncation-like metadata remains untouched.
+                expect(page.events[0]?.payload).toEqual(projectionMarkerPayload);
+              }
+              if (direction === "after") {
+                expect(page.nextAfter).toBe(sequence);
+                expect(page.nextBefore).toBeNull();
+                after = page.nextAfter!;
+              } else {
+                expect(page.nextBefore).toBe(sequence);
+                expect(page.nextAfter).toBeNull();
+                before = page.nextBefore!;
+              }
+            }
+          }
+
+          // A lone oversized event terminates without a phantom continuation,
+          // including the one-row limit used for exact event inspection.
+          for (const direction of ["after", "before"] as const) {
+            const page = await listSessionEventPage(projectionClient.db, workspace!.id, sessionId, {
+              after: 8,
+              before: 10,
+              direction,
+              limit: 1,
+              ...batchOptions,
+            });
+            expect(page.events.map((event) => event.sequence)).toEqual([9]);
+            expect(page.events[0]?.payload).toEqual(cursorStrandingPayload);
+            expect(page.fullPayloadsExact).toBeTrue();
+            expect(page.hasMore).toBeFalse();
+            expect(page.truncatedBy).toBeNull();
+            expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+            expect(page.bytes).toBeGreaterThan(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+          }
+        }
+
+        for (const payloadMode of ["summary", "none"] as const) {
+          const page = await listSessionEventPage(projectionClient.db, workspace!.id, sessionId, {
+            after: 8,
+            before: 10,
+            limit: 1,
+            payloadMode,
+          });
+          expect(page.events.map((event) => event.sequence)).toEqual([9]);
+          expect(page.fullPayloadsExact).toBeFalse();
+          expect(page.events[0]?.payload).not.toEqual(cursorStrandingPayload);
+          expect(page.hasMore).toBeFalse();
+          expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_DB_PAGE_MAX_BYTES);
+          expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events), "utf8"));
+        }
 
         const projectedEnvelopePage = await listSessionEventPage(
           projectionClient.db,

@@ -28,6 +28,9 @@ import {
   commitSessionAttemptQuiescence,
   clearDurablePendingSessionToolCalls,
   completeConnectorActionExecution,
+  confirmDrainCold,
+  claimWorkspaceArchiveCapture,
+  releaseWorkspaceArchiveCapture,
   createDb,
   createSession,
   createSessionGoal,
@@ -53,6 +56,7 @@ import {
   listUsageEvents,
   listWorkspaceControlEvents,
   isSessionCompactionRequested,
+  markWarmLeaseInstanceLost,
   markSessionAttemptQuiesced,
   markSessionWorkflowWakeDelivered,
   insertRecording,
@@ -184,6 +188,7 @@ async function controlSession(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   action: "pause" | "resume" | "cancel",
+  operationKey = crypto.randomUUID(),
 ) {
   return await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
@@ -192,7 +197,7 @@ async function controlSession(
         workspaceId: grant.workspaceId,
         sessionId,
         actor: { type: "human", subjectId: grant.subjectId },
-        operationKey: crypto.randomUUID(),
+        operationKey,
         action,
       }),
     ),
@@ -565,6 +570,174 @@ describe("clean session control plane", () => {
         ?.providerArtifactInvalidatedAt,
     ).toBeInstanceOf(Date);
   });
+
+  test.each(["draining", "warm", "teardown"] as const)(
+    "rotation recovery parks until the %s lease transition wakes it",
+    async (liveness) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "wait for the rotating sandbox");
+      const attemptId = crypto.randomUUID();
+      const workflowId = `session-${session.id}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = `dispatch-${crypto.randomUUID()}`;
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        workflowId,
+        {
+          attemptId,
+          workflowRunId,
+          dispatchId,
+        },
+      );
+      expect(turn).not.toBeNull();
+
+      const leaseEpoch = 7;
+      await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${grant.workspaceId!}, ${session.sandboxGroupId},
+        ${liveness === "warm" ? "warm" : "draining"}, 0, 'sb-rotation-wait', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-rotation-wait')
+          )
+        ),
+        ${liveness === "teardown" ? null : new Date()}, ${liveness === "teardown" ? null : "provider_deadline"}, now() - interval '1 second'
+      )`;
+
+      const captureId = crypto.randomUUID();
+      if (liveness === "teardown") {
+        expect(
+          await claimWorkspaceArchiveCapture(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            captureId,
+            expectedEpoch: leaseEpoch,
+            expectedInstanceId: "sb-rotation-wait",
+            liveness: "draining",
+            captureTimeoutMs: 60_000,
+            minIntervalMs: 0,
+          }),
+        ).toMatchObject({ status: "claimed" });
+      }
+
+      expect(
+        await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          turnId: turn!.id,
+          triggerEventId: turn!.triggerEventId,
+          attemptId,
+          reason: "sandbox_deadline_rotation",
+          detail: {
+            sandboxGroupId: session.sandboxGroupId,
+            leaseEpoch,
+          },
+          sandboxLifecycleWait: {
+            version: 1,
+            sandboxGroupId: session.sandboxGroupId,
+            leaseEpoch,
+            reason: "rotation_in_progress",
+          },
+        }),
+      ).toMatchObject({ action: "recovering" });
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+      });
+
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "sandbox-lifecycle-wait",
+        ref: {
+          version: 1,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+          reason: "rotation_in_progress",
+        },
+      });
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+      ).toBeNull();
+
+      const wakeBeforeCold = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        const [row] = await db
+          .select()
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+          .limit(1);
+        return row!;
+      });
+      if (liveness === "warm") {
+        expect(
+          await markWarmLeaseInstanceLost(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            expectedEpoch: leaseEpoch,
+            expectedInstanceId: "sb-rotation-wait",
+          }),
+        ).toMatchObject({ status: "marked" });
+      } else if (liveness === "teardown") {
+        expect(
+          await releaseWorkspaceArchiveCapture(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            captureId,
+            expectedEpoch: leaseEpoch,
+            expectedInstanceId: "sb-rotation-wait",
+          }),
+        ).toBe(true);
+      } else {
+        expect(
+          await confirmDrainCold(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sandboxGroupId: session.sandboxGroupId,
+            expectedEpoch: leaseEpoch,
+          }),
+        ).toEqual({ wentCold: true });
+      }
+
+      const wakeAfterCold = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+        const [row] = await db
+          .select()
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+          .limit(1);
+        return row!;
+      });
+      expect(wakeAfterCold.reason).toBe("sandbox_lifecycle_advanced");
+      expect(wakeAfterCold.wakeRevision).toBeGreaterThan(wakeBeforeCold.wakeRevision);
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "runnable",
+      });
+
+      const resumed = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        workflowId,
+      );
+      expect(resumed).toMatchObject({
+        id: turn!.id,
+        status: "running",
+        executionGeneration: turn!.executionGeneration + 1,
+      });
+      expect(resumed?.metadata).not.toHaveProperty("sandboxLifecycleWait");
+    },
+  );
 
   test("an accepted Steer outranks retryable recovery for the exact live attempt", async () => {
     const { grant, session } = await fixture();
@@ -1519,24 +1692,67 @@ describe("clean session control plane", () => {
     expect(turn).not.toBeNull();
     await setBaseline(attempt.grant.workspaceId!, attempt.session.id);
     const attemptBefore = await activity(attempt.grant.workspaceId!, attempt.session.id);
-    expect(
-      (
-        await appendSessionEventsForTurnAttempt(
-          client.db,
-          attempt.grant.workspaceId!,
-          attempt.session.id,
-          turn!.id,
-          turn!.executionGeneration,
-          attemptId,
-          rawDeltas(),
-        )
-      ).accepted,
-    ).toBeTrue();
+    const [cursorBefore] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${attempt.grant.workspaceId!}
+        and session_id = ${attempt.session.id}`;
+    expect(cursorBefore?.lastSequence).toBe(attemptBefore.lastSequence);
+
+    let releaseSessionRow!: () => void;
+    let sessionRowLocked!: () => void;
+    const sessionRowLockReleased = new Promise<void>((resolve) => {
+      releaseSessionRow = resolve;
+    });
+    const sessionRowLockAcquired = new Promise<void>((resolve) => {
+      sessionRowLocked = resolve;
+    });
+    const sessionRowHolder = shared.admin.begin(async (tx) => {
+      await tx`
+        select id from sessions
+        where workspace_id = ${attempt.grant.workspaceId!}
+          and id = ${attempt.session.id}
+        for no key update`;
+      sessionRowLocked();
+      await sessionRowLockReleased;
+    });
+    await sessionRowLockAcquired;
+    const rawAppend = appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      rawDeltas(),
+    );
+    let rawResult: Awaited<typeof rawAppend> | null = null;
+    try {
+      rawResult = await Promise.race([rawAppend, Bun.sleep(1_500).then(() => null)]);
+      expect(rawResult).not.toBeNull();
+    } finally {
+      releaseSessionRow();
+      await sessionRowHolder;
+      await rawAppend;
+    }
+    if (!rawResult) throw new Error("raw append waited on sessions FOR NO KEY UPDATE");
+    expect(rawResult.accepted).toBeTrue();
     expect(await activity(attempt.grant.workspaceId!, attempt.session.id)).toEqual({
-      lastSequence: attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      lastSequence: attemptBefore.lastSequence,
       updatedAt: baseline,
       activityRevision: attemptBefore.activityRevision,
     });
+    const [cursorAfterRaw] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${attempt.grant.workspaceId!}
+        and session_id = ${attempt.session.id}`;
+    expect(cursorAfterRaw?.lastSequence).toBe(
+      attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+    );
+    expect(
+      (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
+    ).toBe(cursorAfterRaw?.lastSequence);
     await appendSessionEventsForTurnAttempt(
       client.db,
       attempt.grant.workspaceId!,
@@ -1547,9 +1763,73 @@ describe("clean session control plane", () => {
       [{ type: "agent.message.completed", payload: { text: "semantic" } }],
     );
     const attemptSemantic = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(attemptSemantic.lastSequence).toBe((cursorAfterRaw?.lastSequence ?? 0) + 1);
     expect(attemptSemantic.updatedAt).not.toBe(baseline);
     expect(BigInt(attemptSemantic.activityRevision)).toBeGreaterThan(
       BigInt(attemptBefore.activityRevision),
+    );
+    const rawAfterSemantic = await appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      [rawDeltas()[0]!],
+    );
+    expect(rawAfterSemantic.accepted).toBeTrue();
+    expect((await activity(attempt.grant.workspaceId!, attempt.session.id)).lastSequence).toBe(
+      attemptSemantic.lastSequence,
+    );
+    expect(
+      (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
+    ).toBe(attemptSemantic.lastSequence + 1);
+
+    const rollback = await fixture();
+    await send(rollback.grant, rollback.session.id, "rollback activity");
+    const rollbackAttemptId = crypto.randomUUID();
+    const rollbackTurn = await claimTestSessionWork(
+      client.db,
+      rollback.grant.workspaceId!,
+      rollback.session.id,
+      `session-${rollback.session.id}`,
+      { attemptId: rollbackAttemptId },
+    );
+    expect(rollbackTurn).not.toBeNull();
+    await setBaseline(rollback.grant.workspaceId!, rollback.session.id);
+    const rollbackBefore = await activity(rollback.grant.workspaceId!, rollback.session.id);
+    const previousRawLaneSetting = process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED;
+    process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED = "false";
+    try {
+      const rollbackResult = await appendSessionEventsForTurnAttempt(
+        client.db,
+        rollback.grant.workspaceId!,
+        rollback.session.id,
+        rollbackTurn!.id,
+        rollbackTurn!.executionGeneration,
+        rollbackAttemptId,
+        rawDeltas(),
+      );
+      expect(rollbackResult.accepted).toBeTrue();
+    } finally {
+      if (previousRawLaneSetting === undefined) {
+        delete process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED;
+      } else {
+        process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED = previousRawLaneSetting;
+      }
+    }
+    expect(await activity(rollback.grant.workspaceId!, rollback.session.id)).toEqual({
+      lastSequence: rollbackBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+      activityRevision: rollbackBefore.activityRevision,
+    });
+    const [rollbackCursor] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${rollback.grant.workspaceId!}
+        and session_id = ${rollback.session.id}`;
+    expect(rollbackCursor?.lastSequence).toBe(
+      rollbackBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
     );
 
     const grouped = await fixture();
@@ -1566,6 +1846,23 @@ describe("clean session control plane", () => {
       updatedAt: baseline,
       activityRevision: groupedBefore.activityRevision,
     });
+    await appendSessionEventToSandboxGroup(
+      client.db,
+      grouped.grant.workspaceId!,
+      grouped.session.sandboxGroupId,
+      { type: "session.title_set", payload: { title: "semantic group event" } },
+    );
+    const groupedSemantic = await activity(grouped.grant.workspaceId!, grouped.session.id);
+    const [groupedCursor] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${grouped.grant.workspaceId!}
+        and session_id = ${grouped.session.id}`;
+    expect(groupedSemantic.lastSequence).toBe(groupedBefore.lastSequence + 2);
+    expect(groupedCursor?.lastSequence).toBe(groupedSemantic.lastSequence);
+    expect(
+      (await getSession(client.db, grouped.grant.workspaceId!, grouped.session.id))?.lastSequence,
+    ).toBe(groupedSemantic.lastSequence);
 
     const updated = await fixture();
     await setBaseline(updated.grant.workspaceId!, updated.session.id);
@@ -1672,6 +1969,9 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId },
     );
+    const historyStart =
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).at(-1)!
+        .position + 1;
     const huge = "x".repeat(500_000);
     const structuredOutput: Record<string, unknown> = {
       type: "界😀".repeat(100_000),
@@ -1719,7 +2019,7 @@ describe("clean session control plane", () => {
         modelToolOutputTruncationTokens: 100,
         items: [
           {
-            position: 0,
+            position: historyStart + 0,
             item: {
               type: "function_call",
               callId: "canonical-call",
@@ -1728,14 +2028,14 @@ describe("clean session control plane", () => {
             },
           },
           {
-            position: 1,
+            position: historyStart + 1,
             item: {
               type: "function_call_result",
               callId: "canonical-call",
               output: { type: "text", text: huge },
             },
           },
-          { position: 2, item: structuredItem },
+          { position: historyStart + 2, item: structuredItem },
         ],
       }),
     ).toBe(true);
@@ -1749,7 +2049,7 @@ describe("clean session control plane", () => {
         expectedAttemptId: attemptId,
         items: [
           {
-            position: 3,
+            position: historyStart + 3,
             item: {
               type: "function_call",
               callId: "canonical-mixed-call",
@@ -1758,11 +2058,13 @@ describe("clean session control plane", () => {
               status: "completed",
             },
           },
-          { position: 4, item: canonicalMixedItem },
+          { position: historyStart + 4, item: canonicalMixedItem },
         ],
       }),
     ).toBe(true);
-    const canonical = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const canonical = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).filter((row) => row.position >= historyStart);
     const canonicalText = (canonical[1]!.item.output as { text: string }).text;
     expect(canonicalText).toContain("tokens truncated");
     expect(canonicalText.length).toBeLessThan(1_000);
@@ -2528,6 +2830,92 @@ describe("clean session control plane", () => {
         reason: "worker_shutdown",
       }),
     ).toMatchObject({ action: "stale", events: [] });
+  });
+
+  test("a completed current model request resets only the consecutive provider recovery budget", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "continue through intermittent provider overloads");
+    const firstAttemptId = crypto.randomUUID();
+    const first = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: firstAttemptId },
+    );
+    if (!first) throw new Error("provider recovery reset test turn was not claimed");
+
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "provider_unavailable",
+        providerRecoveryCount: 4,
+        detail: {
+          code: "provider_unavailable",
+          retryable: true,
+          continueDelayMs: 30_000,
+          providerRecoveryCount: 4,
+        },
+      }),
+    ).toMatchObject({ action: "recovering" });
+
+    const secondAttemptId = crypto.randomUUID();
+    const second = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: secondAttemptId },
+    );
+    if (!second) throw new Error("provider recovery reset test turn was not reclaimed");
+    expect(await getSessionTurn(client.db, grant.workspaceId!, second.id)).toMatchObject({
+      metadata: { providerRecoveryCount: 4 },
+    });
+
+    const rejectedLateCompletion = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      first.id,
+      first.executionGeneration,
+      firstAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "completed" } }],
+    );
+    expect(rejectedLateCompletion.accepted).toBe(false);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, second.id)).toMatchObject({
+      metadata: { providerRecoveryCount: 4 },
+    });
+
+    const failedCurrentRequest = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      second.id,
+      second.executionGeneration,
+      secondAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "failed" } }],
+    );
+    expect(failedCurrentRequest.accepted).toBe(true);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, second.id)).toMatchObject({
+      metadata: { providerRecoveryCount: 4 },
+    });
+
+    const completedCurrentRequest = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      second.id,
+      second.executionGeneration,
+      secondAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "completed" } }],
+    );
+    expect(completedCurrentRequest.accepted).toBe(true);
+    expect(
+      (await getSessionTurn(client.db, grant.workspaceId!, second.id))?.metadata,
+    ).not.toHaveProperty("providerRecoveryCount");
   });
 
   test("recovery preserves reverse-completed parallel results and interrupts only their unresolved sibling", async () => {
@@ -4593,6 +4981,45 @@ describe("clean session control plane", () => {
       kind: "cancellation-wait",
       attemptId,
     });
+    const beforeNudge = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return {
+        wake: wake!,
+        control: await evaluateSessionControl(db, grant.workspaceId!, session.id),
+      };
+    });
+    const nudgeKey = crypto.randomUUID();
+    const nudge = await controlSession(grant, session.id, "pause", nudgeKey);
+    expect(nudge.outcome).toBe("unchanged");
+    expect(nudge.interruptionCount).toBe(0);
+    expect(nudge.wakeCount).toBe(1);
+    expect(nudge.control.controlVersion).toBe(beforeNudge.control.controlVersion);
+    expect(nudge.control.state).toBe("paused");
+    const afterNudge = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return wake!;
+    });
+    expect(afterNudge.wakeRevision).toBeGreaterThan(beforeNudge.wake.wakeRevision);
+    const replay = await controlSession(grant, session.id, "pause", nudgeKey);
+    expect(replay.outcome).toBe("replayed");
+    const replayWake = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return wake!;
+    });
+    expect(replayWake.wakeRevision).toBe(afterNudge.wakeRevision);
+
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
     expect(
       await reconcileSessionAttemptQuiescence(client.db, {
         accountId: grant.accountId,
@@ -5858,8 +6285,8 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: firstAttemptId },
     );
-    expect(
-      await appendSessionHistoryItems(client.db, {
+    await expect(
+      appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
@@ -5873,7 +6300,7 @@ describe("clean session control plane", () => {
           },
         ],
       }),
-    ).toBe(true);
+    ).rejects.toThrow("Conversation history persistence conflict at position 0");
     await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: first!.id,
@@ -6526,13 +6953,32 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    const capabilityWrite = {
+      ...call("connector-capability-write", "unmanaged"),
+      approvalMode: "connector_write" as const,
+    };
     expect(
-      await prepareConnectorActionApproval(client.db, firstIdentity, {
-        ...call("connector-write-default", "unmanaged_write"),
-        approvalMode: "connector_write",
-      }),
-    ).toMatchObject({ managed: true, decision: "ask" });
-
+      await prepareConnectorActionApproval(client.db, firstIdentity, capabilityWrite),
+    ).toMatchObject({ managed: true, decision: "allow" });
+    const capabilityWriteAdmission = await beginConnectorActionExecution(
+      client.db,
+      firstIdentity,
+      capabilityWrite,
+    );
+    expect(capabilityWriteAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!capabilityWriteAdmission.allowed || !capabilityWriteAdmission.managed) {
+      throw new Error("capability-authorized write was denied");
+    }
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: capabilityWriteAdmission.requestId,
+      attemptId: firstAttemptId,
+      outcome: "completed",
+    });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, capabilityWrite),
+    ).toMatchObject({ allowed: false, reason: "already_executed" });
     const allowCall = call("connector-allow", "read");
     expect(await prepareConnectorActionApproval(client.db, firstIdentity, allowCall)).toMatchObject(
       {

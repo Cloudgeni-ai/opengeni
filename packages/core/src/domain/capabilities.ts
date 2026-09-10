@@ -57,6 +57,7 @@ import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
+import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -230,7 +231,7 @@ export async function createCatalogItem(input: {
   });
 }
 
-export async function enableCapability(input: {
+type EnableCapabilityInput = {
   db: Database;
   grant: AccessGrant;
   accountId: string;
@@ -239,13 +240,28 @@ export async function enableCapability(input: {
   capabilityId: string;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
-}): Promise<CapabilityInstallation> {
+};
+
+export async function enableCapability(
+  input: EnableCapabilityInput,
+): Promise<CapabilityInstallation> {
+  const prepared = await prepareCapabilityEnable(input);
+  return prepared.commit(input.db);
+}
+
+/** Probe outside a durable Connect commit; persist the exact prepared settings
+ * inside the caller's authorized receipt transaction. Native enable uses this too. */
+export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   const item = await requireCatalogItem(
     input.db,
     input.workspaceId,
     input.settings,
     input.capabilityId,
   );
+  if (isReservedCodexAppsCatalogItem(item))
+    throw new HTTPException(422, {
+      message: "Codex Apps use the dedicated account designation flow",
+    });
   if (item.kind === "skill") {
     throw new HTTPException(409, {
       message: "Install Skills through the Skill library or source import flow",
@@ -302,14 +318,15 @@ export async function enableCapability(input: {
       );
     }
   }
-  return await enableCapabilityInstallation(input.db, {
+  const installation = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     capabilityId: item.id,
     kind: item.kind,
     config: installationConfig,
     metadata: installationMetadata,
-  });
+  };
+  return { commit: (db: Database) => enableCapabilityInstallation(db, installation) };
 }
 
 /**
@@ -403,7 +420,7 @@ function normalizedMcpCredentialHeaders(
 }
 
 async function validateMcpCapabilityConnectionRef(
-  input: { db: Database; grant: AccessGrant; workspaceId: string },
+  input: { db: Database; grant: AccessGrant; workspaceId: string; settings: Settings },
   item: CapabilityCatalogItem,
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
@@ -426,6 +443,7 @@ async function validateMcpCapabilityConnectionRef(
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    ...(ref.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
@@ -448,6 +466,10 @@ async function validateMcpCapabilityConnectionRef(
       message:
         "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef",
     });
+  }
+  if (normalized.authoritySource === "host") {
+    assertHostMcpAuthoritySourceAdmissionEnabled(input.settings, normalized);
+    return normalized;
   }
 
   let connection = normalized.connectionId
@@ -1680,12 +1702,22 @@ function installationConnectionRef(
   if (!ref || typeof ref !== "object") {
     return null;
   }
-  const { connectionId, providerDomain, kind, subjectScope } = ref as Record<string, unknown>;
+  const { authoritySource, connectionId, providerDomain, kind, subjectScope } = ref as Record<
+    string,
+    unknown
+  >;
   if (typeof providerDomain !== "string" || typeof kind !== "string") {
     return null;
   }
+  if (authoritySource === "host") {
+    // The internal installation/runtime ref retains the exact host binding.
+    // Public capability catalogs use the existing null representation for an
+    // enabled capability without a native OpenGeni connection, so indefinitely
+    // open old browser bundles cannot treat a host UUID as native OAuth state.
+    return null;
+  }
   if (subjectScope === "subject") {
-    // Never project a personal connection UUID through workspace-visible
+    // Never project a native personal connection UUID through workspace-visible
     // capability configuration, including legacy rows that still contain one.
     return { providerDomain, kind, subjectScope: "subject" };
   }

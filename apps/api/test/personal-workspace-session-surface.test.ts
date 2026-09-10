@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type {
   AccessContext,
   SessionAuthorizationOperation,
@@ -9,6 +10,10 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   acceptOrganizationInvitation,
   createApiKey,
+  createOrganizationApiKey,
+  revokeOrganizationApiKey,
+  ensureExternalIdentity,
+  getExternalLinkTurnAuthorization,
   createDb,
   createOrganizationInvitation,
   createSession,
@@ -43,6 +48,10 @@ import { createApp } from "../src/app";
 import { registerApiKeyRoutes } from "../src/routes/api-keys";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { registerExternalIdentityLinkRoutes } from "../src/routes/external-identity-links";
+import { registerConnectRoutes } from "../src/routes/connect";
+import { registerHostMcpBindingRoutes } from "../src/routes/host-mcp-bindings";
+import { requireConnectOwnerAuthority } from "../src/integrations/connect-authority";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const delegationSecret = `personal-ws-session-surface-${crypto.randomUUID()}`;
@@ -65,7 +74,11 @@ const authSessionBySessionCookie = new Map<
   { authSessionId: string; userId: string; email: string }
 >();
 
-function buildApp(sessionAuthorization?: SessionAuthorizationPort, full = false): Hono {
+function buildApp(
+  sessionAuthorization?: SessionAuthorizationPort,
+  full = false,
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
+): Hono {
   if (!client) throw new Error("test database unavailable");
   const noop = async () => undefined;
   const hono = new Hono();
@@ -76,6 +89,10 @@ function buildApp(sessionAuthorization?: SessionAuthorizationPort, full = false)
       productAccessMode: "managed",
       delegationSecret,
       sandboxBackend: "none",
+      integrationsEnabled: true,
+      integrationsStateSecret: "native-connect-test-state",
+      environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+      ...settingsOverrides,
     }),
     workflowClient: {
       signalUserMessage: noop,
@@ -116,6 +133,9 @@ function buildApp(sessionAuthorization?: SessionAuthorizationPort, full = false)
   registerWorkspaceRoutes(hono, deps);
   registerSessionRoutes(hono, deps);
   registerApiKeyRoutes(hono, deps);
+  registerExternalIdentityLinkRoutes(hono, deps);
+  registerConnectRoutes(hono, deps);
+  registerHostMcpBindingRoutes(hono, deps);
   return hono;
 }
 
@@ -218,6 +238,7 @@ async function provisionManagedHuman(): Promise<ManagedHuman> {
 async function expectAllPersonalSessionSurfacesDenied(
   owner: ManagedHuman,
   headers: Record<string, string>,
+  expectedStatus = 403,
 ): Promise<void> {
   const sessionId = await seedSession(owner, owner.personalWorkspaceId);
   const json = { ...headers, "content-type": "application/json" };
@@ -226,13 +247,13 @@ async function expectAllPersonalSessionSurfacesDenied(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
     { headers },
   );
-  expect(list.status).toBe(403);
+  expect(list.status).toBe(expectedStatus);
 
   const pin = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/pin`,
     { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
   );
-  expect(pin.status).toBe(403);
+  expect(pin.status).toBe(expectedStatus);
 
   const attention = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/attention`,
@@ -242,19 +263,19 @@ async function expectAllPersonalSessionSurfacesDenied(
       body: JSON.stringify({ unread: false, acknowledgedThroughSequence: 0 }),
     },
   );
-  expect(attention.status).toBe(403);
+  expect(attention.status).toBe(expectedStatus);
 
   const archive = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/archive`,
     { method: "PUT", headers: json, body: JSON.stringify({ archived: true }) },
   );
-  expect(archive.status).toBe(403);
+  expect(archive.status).toBe(expectedStatus);
 
   const draft = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
     { method: "PUT", headers: json, body: JSON.stringify(draftBody) },
   );
-  expect(draft.status).toBe(403);
+  expect(draft.status).toBe(expectedStatus);
 }
 
 /**
@@ -453,6 +474,441 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session surface inside their own personal workspace", () => {
+  test("native owners manage independent host bindings while service keys cannot become their owner", async () => {
+    if (!shared || !client) throw new Error("real database required");
+    const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const base = `/v1/workspaces/${human.personalWorkspaceId}/host-mcp-bindings`;
+    const body = JSON.stringify({
+      operationId: crypto.randomUUID(),
+      definition: {
+        serverId: "product",
+        destinationUrl: "https://product.example/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "product-user-account",
+          providerDomain: "product.example",
+        },
+      },
+    });
+    const created = await human.app.request(base, { method: "POST", headers, body });
+    expect(created.status).toBe(201);
+    const binding = (await created.json()) as {
+      id: string;
+      ownerSubjectId: string;
+      generation: number;
+    };
+    expect(binding.ownerSubjectId).toBe(human.subjectId);
+    expect((await human.app.request(`${base}/${binding.id}`, { headers })).status).toBe(200);
+    const delegationResponse = await human.app.request(
+      `/v1/workspaces/${human.personalWorkspaceId}/host-mcp-delegations`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          bindingId: binding.id,
+          expectedBindingGeneration: 1,
+          grant: { scope: "user", mode: "always", context: "user_private" },
+        }),
+      },
+    );
+    expect(delegationResponse.status).toBe(201);
+    const delegation = (await delegationResponse.json()) as { id: string };
+    const sessionApp = buildApp(undefined, false, {
+      hostMcpAuthoritySourceAdmissionEnabled: true,
+      mcpServers: [
+        {
+          id: "product",
+          url: "https://product.example/mcp",
+          transport: "streamable_http",
+          connectionRef: {
+            authoritySource: "host",
+            connectionId: "product-user-account",
+            providerDomain: "product.example",
+            hostBinding: { bindingId: binding.id, generation: 1 },
+          },
+        },
+      ],
+    });
+    const started = await sessionApp.request(
+      `/v1/workspaces/${human.personalWorkspaceId}/sessions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          initialMessage: "Native host authority",
+          visibility: "private",
+          idempotencyKey: crypto.randomUUID(),
+          sandboxBackend: "none",
+          tools: [{ kind: "mcp", id: "product" }],
+          selectedHostMcpDelegations: [
+            { serverId: "product", delegationId: delegation.id, generation: 1 },
+          ],
+        }),
+      },
+    );
+    expect({ status: started.status, body: await started.clone().text() }).toMatchObject({
+      status: 202,
+    });
+    const captured =
+      await shared.admin`select canonical_snapshot from host_mcp_turn_authorities where delegation_id = ${delegation.id}`;
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.canonical_snapshot.ownerSubjectId).toBe(human.subjectId);
+    const token = crypto.randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: human.accountId,
+      name: "Not a human owner",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:write"],
+    });
+    expect(
+      (
+        await human.app.request(`/v1/workspaces/${human.legacyWorkspaceId}/host-mcp-bindings`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body,
+        })
+      ).status,
+    ).toBe(403);
+    const revoked = await human.app.request(`${base}/${binding.id}/revoke`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ expectedGeneration: binding.generation }),
+    });
+    expect(revoked.status).toBe(200);
+    expect(await revoked.json()).toMatchObject({
+      ownerSubjectId: human.subjectId,
+      status: "revoked",
+      generation: binding.generation + 1,
+    });
+  });
+  test("a replacement external key cannot bypass a saved Connect origin revocation", async () => {
+    if (!shared || !client) throw new Error("real database required");
+    const human = await provisionManagedHuman();
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: human.accountId,
+      externalId: `connect-origin-${crypto.randomUUID()}`,
+    });
+    const tokens = [crypto.randomUUID(), crypto.randomUUID()];
+    const keys = await Promise.all(
+      tokens.map((token) =>
+        createOrganizationApiKey(client!.db, {
+          accountId: human.accountId,
+          name: "Connect origin fixture",
+          prefix: "test",
+          keyHash: createHash("sha256").update(token).digest("hex"),
+          permissions: ["workspace:read", "connections:read", "connections:write"],
+        }),
+      ),
+    );
+    const headers = (index: number) => ({
+      authorization: `Bearer ${tokens[index]}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    });
+    const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+    const started = await human.app.request(base, {
+      method: "POST",
+      headers: headers(0),
+      body: JSON.stringify({
+        providerId: "mcp-bearer",
+        ownership: "personal",
+        returnUrl: "https://host.example/complete",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(started.status).toBe(200);
+    const attempt = (await started.json()) as { id: string; revision: number };
+    const [origin] =
+      await shared.admin`select external_continuation from connect_attempts where id = ${attempt.id}`;
+    expect(origin!.external_continuation.actor.authenticatingApiKeyId).toBe(keys[0]!.id);
+    expect(JSON.stringify(attempt)).not.toContain(keys[0]!.id);
+    await revokeOrganizationApiKey(client.db, human.accountId, keys[0]!.id);
+    expect((await human.app.request(`${base}/${attempt.id}`, { headers: headers(1) })).status).toBe(
+      200,
+    );
+    const advance = await human.app.request(`${base}/${attempt.id}/advance`, {
+      method: "POST",
+      headers: headers(1),
+      body: JSON.stringify({
+        expectedRevision: attempt.revision,
+        idempotencyKey: crypto.randomUUID(),
+        action: {
+          type: "credentials",
+          values: { mcpUrl: "https://mcp.example/tools", token: "fixture-token" },
+        },
+      }),
+    });
+    expect(advance.status).toBe(403);
+    const [after] =
+      await shared.admin`select operation_id, projection from connect_attempts where id = ${attempt.id}`;
+    expect(after!.operation_id).toBeNull();
+    expect(after!.projection.credentialsCommitted).toBe(false);
+  });
+  test("organization service Connect remains workspace-owned and callbacks recheck key revocation", async () => {
+    if (!shared || !client) throw new Error("real database required");
+    const human = await provisionManagedHuman();
+    const token = crypto.randomUUID();
+    const key = await createOrganizationApiKey(client.db, {
+      accountId: human.accountId,
+      name: "Connect service",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const base = `/v1/workspaces/${human.legacyWorkspaceId}/connect`;
+    const begin = await human.app.request(`${base}/attempts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "mcp-bearer",
+        ownership: "workspace",
+        returnUrl: "https://product.example/settings",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const attempt = (await begin.json()) as { id: string; revision: number };
+    const scope = {
+      accountId: human.accountId,
+      workspaceId: human.legacyWorkspaceId,
+      subjectId: `api_key:${key.id}`,
+    };
+    await client.db.transaction((tx) => requireConnectOwnerAuthority(tx, scope));
+    const personal = await human.app.request(`${base}/attempts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "mcp-bearer",
+        ownership: "personal",
+        returnUrl: "https://product.example/settings",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(personal.status).toBe(403);
+    await revokeOrganizationApiKey(client.db, human.accountId, key.id);
+    await expect(
+      client.db.transaction((tx) => requireConnectOwnerAuthority(tx, scope)),
+    ).rejects.toThrow("Connection API key authority changed");
+    expect((await human.app.request(`${base}/attempts/${attempt.id}`, { headers })).status).toBe(
+      401,
+    );
+  });
+  test("native Connect uses durable personal credential setup and exact receipt replay", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    const base = `/v1/workspaces/${human.personalWorkspaceId}/connect`;
+    const catalog = await human.app.request(`${base}/catalog`, { headers });
+    expect(catalog.status).toBe(200);
+    expect(await catalog.json()).toContainEqual(
+      expect.objectContaining({
+        id: "mcp-bearer",
+        readiness: "available",
+        ownership: ["workspace", "personal"],
+      }),
+    );
+    const returnUrl = "https://HOST.example:443/settings?x=%2f#Exact";
+    const input = {
+      providerId: "mcp-bearer",
+      ownership: "personal",
+      returnUrl,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const begin = await human.app.request(`${base}/attempts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(input),
+    });
+    expect(begin.status).toBe(200);
+    const attempt = (await begin.json()) as { id: string; revision: number; state: string };
+    expect(attempt.state).toBe("credential_input");
+    const operation = {
+      expectedRevision: attempt.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "credentials",
+        values: { mcpUrl: "https://mcp.example/tools", token: "fixture-short-lived" },
+      },
+    };
+    const advance = () =>
+      human.app.request(`${base}/attempts/${attempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(operation),
+      });
+    const completed = await advance();
+    expect(completed.status).toBe(200);
+    const result = await completed.json();
+    expect(result).toMatchObject({
+      state: "complete",
+      credentialsCommitted: true,
+      account: { ownership: "personal" },
+    });
+    expect(await (await advance()).json()).toEqual(result);
+    const [stored] =
+      await shared.admin`select return_url from connect_attempts where id = ${attempt.id}`;
+    expect(stored!.return_url).toBe(returnUrl);
+    expect(JSON.stringify(result)).not.toContain("fixture-short-lived");
+    const stranger = await provisionManagedHuman();
+    expect(
+      (
+        await human.app.request(`${base}/attempts/${attempt.id}`, {
+          headers: { cookie: stranger.cookie },
+        })
+      ).status,
+    ).toBe(403);
+  });
+  test("identity link confirmation requires the real native cookie as well as the host challenge", async () => {
+    if (!client || !shared) throw new Error("real database required");
+    const human = await provisionManagedHuman();
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: human.accountId,
+      externalId: `link-http-${crypto.randomUUID()}`,
+    });
+    const token = crypto.randomUUID();
+    await createOrganizationApiKey(client.db, {
+      accountId: human.accountId,
+      name: "Native link HTTP fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "sessions:read", "sessions:create"],
+    });
+    const hostHeaders = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const nativeHeaders = { cookie: human.cookie, "content-type": "application/json" };
+    const hostPath = `/v1/workspaces/${identity.personalWorkspaceId}/identity-links`;
+    const begin = await human.app.request(hostPath, {
+      method: "POST",
+      headers: hostHeaders,
+      body: JSON.stringify({ permissions: ["workspace:read", "sessions:read", "sessions:create"] }),
+    });
+    expect(begin.status).toBe(201);
+    const pending = (await begin.json()) as {
+      link: { id: string; revision: number };
+      challenge: string;
+    };
+    const nativePath = `/v1/workspaces/${human.personalWorkspaceId}/identity-links/${pending.link.id}`;
+    const payload = {
+      challenge: pending.challenge,
+      expectedRevision: pending.link.revision,
+      permissions: ["workspace:read", "sessions:read", "sessions:create"],
+    };
+    const forgedNative = await human.app.request(`${hostPath}/${pending.link.id}/confirm`, {
+      method: "POST",
+      headers: hostHeaders,
+      body: JSON.stringify(payload),
+    });
+    expect(forgedNative.status).toBe(403);
+    const preview = await human.app.request(`${nativePath}/preview`, {
+      method: "POST",
+      headers: nativeHeaders,
+      body: JSON.stringify({ challenge: pending.challenge }),
+    });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({
+      link: { status: "pending", nativeSubjectId: null },
+      nativeSubjectId: human.subjectId,
+      organizationId: human.accountId,
+      externalIdentity: { externalId: identity.externalId, source: "default" },
+    });
+    const confirm = await human.app.request(`${nativePath}/confirm`, {
+      method: "POST",
+      headers: nativeHeaders,
+      body: JSON.stringify(payload),
+    });
+    expect(confirm.status).toBe(200);
+    expect(await confirm.json()).toMatchObject({
+      status: "active",
+      nativeSubjectId: human.subjectId,
+      revision: 2,
+    });
+    const inventoryPath = `/v1/workspaces/${human.personalWorkspaceId}/identity-links`;
+    const inventory = await human.app.request(inventoryPath, { headers: nativeHeaders });
+    expect(inventory.status).toBe(200);
+    const inventoryBody = (await inventory.json()) as {
+      links: { id: string }[];
+      nextCursor: string | null;
+    };
+    expect(inventoryBody.links.map((link) => link.id)).toEqual([pending.link.id]);
+    expect(inventoryBody.links[0]).toMatchObject({
+      externalIdentity: { externalId: identity.externalId, source: identity.source },
+    });
+    expect(inventoryBody.nextCursor).toBeNull();
+    expect(JSON.stringify(inventoryBody)).not.toContain(pending.challenge);
+    expect(
+      (await human.app.request(`${inventoryPath}?cursor=invalid`, { headers: nativeHeaders }))
+        .status,
+    ).toBe(400);
+    const poll = await human.app.request(`${hostPath}/${pending.link.id}`, {
+      headers: hostHeaders,
+    });
+    expect(poll.status).toBe(200);
+    expect(await poll.json()).toMatchObject({ status: "active", revision: 2 });
+    const linkedHeaders = {
+      ...hostHeaders,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({
+          mode: "linked_native",
+          identity: { externalId: identity.externalId },
+          linkId: pending.link.id,
+          expectedLinkRevision: 2,
+        }),
+      ),
+    };
+    const sessionsPath = `/v1/workspaces/${human.personalWorkspaceId}/sessions`;
+    expect((await human.app.request(sessionsPath, { headers: hostHeaders })).status).toBe(403);
+    expect((await human.app.request(sessionsPath, { headers: linkedHeaders })).status).toBe(200);
+    const start = await human.app.request(sessionsPath, {
+      method: "POST",
+      headers: linkedHeaders,
+      body: JSON.stringify({
+        initialMessage: "Linked native fixture",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(start.status).toBe(202);
+    const session = (await start.json()) as { id: string };
+    const [accepted] =
+      await shared.admin`select turn_id from external_link_turn_authorities where session_id = ${session.id}`;
+    expect(accepted).toBeDefined();
+    expect(
+      await getExternalLinkTurnAuthorization(
+        client.db,
+        { accountId: human.accountId, workspaceId: human.personalWorkspaceId },
+        accepted!.turn_id,
+      ),
+    ).toMatchObject({ authorized: true });
+    const revoke = await human.app.request(`${nativePath}/revoke`, {
+      method: "POST",
+      headers: nativeHeaders,
+      body: JSON.stringify({ expectedRevision: 2 }),
+    });
+    expect(revoke.status).toBe(200);
+    expect(await revoke.json()).toMatchObject({ status: "revoked", revision: 3 });
+    expect(
+      await getExternalLinkTurnAuthorization(
+        client.db,
+        { accountId: human.accountId, workspaceId: human.personalWorkspaceId },
+        accepted!.turn_id,
+      ),
+    ).toMatchObject({ authorized: false });
+    expect((await human.app.request(sessionsPath, { headers: linkedHeaders })).status).toBe(403);
+    expect(
+      (await human.app.request(`${sessionsPath}/${session.id}`, { headers: nativeHeaders })).status,
+    ).toBe(200);
+  });
   test("shared-workspace Only me requires the organization setting; a committed key still replays after disable", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
@@ -1304,11 +1760,11 @@ describe("the personal-workspace exception stays owner-only", () => {
     expect((await owner.app.request(listUrl, { headers })).status).toBe(200);
   }, 180_000);
 
-  test("an account-admin API key never reaches a personal workspace's session surface", async () => {
+  test("a revoked legacy account-admin API key never reaches a personal workspace's session surface", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    await createApiKey(client.db, {
+    const apiKey = await createApiKey(client.db, {
       accountId: owner.accountId,
       workspaceId: null,
       name: "account admin",
@@ -1316,8 +1772,9 @@ describe("the personal-workspace exception stays owner-only", () => {
       keyHash: await sha256Hex(token),
       permissions: ["account:read", "account:admin"],
     });
+    expect(apiKey.revokedAt).not.toBeNull();
 
-    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` });
+    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` }, 401);
   }, 180_000);
 
   test("a delegated service initiator never reaches the personal workspace", async () => {

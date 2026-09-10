@@ -411,6 +411,7 @@ export function OrganizationOverviewSection(props: {
   identity: OrganizationAdminIdentity;
   actorRole: OrganizationMembershipRole | null;
   managedSession: boolean;
+  singleUser?: boolean;
   accessibleWorkspaceIds: ReadonlySet<string>;
   onOrganizationChanged: () => void | Promise<void>;
   onCreateWorkspace: (name: string, operationId: string) => Promise<void>;
@@ -524,7 +525,9 @@ export function OrganizationOverviewSection(props: {
     try {
       const [overview, memberPage] = await Promise.all([
         props.client.getOrganizationAdministrationOverview(props.identity.organizationId),
-        props.client.listOrganizationAdministrationMembers(props.identity.organizationId),
+        props.singleUser
+          ? Promise.resolve({ members: [] })
+          : props.client.listOrganizationAdministrationMembers(props.identity.organizationId),
       ]);
       if (!owns(operation)) return;
       const pendingRename = pendingRenameRef.current;
@@ -566,7 +569,16 @@ export function OrganizationOverviewSection(props: {
       });
       setOrganizationMembers([]);
     }
-  }, [canAdminister, claim, identityKey, owns, props.client, props.identity, props.managedSession]);
+  }, [
+    canAdminister,
+    claim,
+    identityKey,
+    owns,
+    props.client,
+    props.identity,
+    props.managedSession,
+    props.singleUser,
+  ]);
 
   useEffect(() => {
     void load();
@@ -951,6 +963,7 @@ export function OrganizationOverviewSection(props: {
                 <Input
                   aria-label="Organization name"
                   name="organization-name"
+                  suppressAutofill
                   autoComplete="off"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
@@ -989,7 +1002,9 @@ export function OrganizationOverviewSection(props: {
               </h2>
             )}
             <p className="mt-1 text-xs text-fg-muted">
-              Manage the shared workspaces and access that make up your company.
+              {props.singleUser
+                ? "Manage the shared workspaces in this single-user installation."
+                : "Manage the shared workspaces and access that make up your company."}
             </p>
           </div>
           {!editing ? (
@@ -1013,8 +1028,9 @@ export function OrganizationOverviewSection(props: {
           <div>
             <h2 className="text-sm font-medium">Workspaces &amp; access</h2>
             <p className="mt-1 text-xs text-fg-muted">
-              Create shared workspaces, then choose which organization members can use each one.
-              Personal workspaces stay private.
+              {props.singleUser
+                ? "Every workspace you create here is available to the local administrator."
+                : "Create shared workspaces, then choose which organization members can use each one. Personal workspaces stay private."}
             </p>
           </div>
           <Button type="button" size="sm" onClick={() => setCreateWorkspaceOpen(true)}>
@@ -1056,18 +1072,16 @@ export function OrganizationOverviewSection(props: {
                     </span>
                   </summary>
                   <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
-                      <div className="flex justify-end">
-                        <a
-                          href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
-                          aria-label={`Open ${workspace.name} workspace settings`}
-                          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-                        >
-                          Open settings
-                          <ArrowUpRightIcon className="size-3.5" />
-                        </a>
-                      </div>
-                    ) : null}
+                    <div className="flex justify-end">
+                      <a
+                        href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
+                        aria-label={`Manage ${workspace.name} workspace settings`}
+                        className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+                      >
+                        Manage settings
+                        <ArrowUpRightIcon className="size-3.5" />
+                      </a>
+                    </div>
                     <form
                       className="flex flex-wrap items-end gap-2"
                       onSubmit={(event) => {
@@ -1080,6 +1094,7 @@ export function OrganizationOverviewSection(props: {
                         <Input
                           aria-label={`Workspace name for ${workspace.name}`}
                           name={`workspace-name-${workspace.id}`}
+                          suppressAutofill
                           autoComplete="off"
                           value={workspaceNameDrafts[workspace.id] ?? workspace.name}
                           disabled={accessBusyWorkspaceId === workspace.id}
@@ -1104,7 +1119,7 @@ export function OrganizationOverviewSection(props: {
                         Save name
                       </Button>
                     </form>
-                    {assignableMembers.length > 0 ? (
+                    {!props.singleUser && assignableMembers.length > 0 ? (
                       <div className="flex flex-wrap items-end gap-2 rounded-md border border-border/70 bg-surface/60 p-2">
                         <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
                           Add organization member
@@ -1163,7 +1178,11 @@ export function OrganizationOverviewSection(props: {
                         </Button>
                       </div>
                     ) : null}
-                    {workspace.members.length === 0 ? (
+                    {props.singleUser ? (
+                      <p className="py-2 text-xs text-fg-muted">
+                        Access is managed automatically for the local administrator.
+                      </p>
+                    ) : workspace.members.length === 0 ? (
                       <p className="py-2 text-xs text-fg-subtle">No direct workspace access.</p>
                     ) : (
                       <div className="grid gap-2">
@@ -1306,6 +1325,7 @@ export function OrganizationOverviewSection(props: {
               <Label htmlFor="new-workspace-name">Workspace name</Label>
               <Input
                 id="new-workspace-name"
+                suppressAutofill
                 aria-label="New workspace name"
                 name="workspace-name"
                 autoComplete="off"
@@ -1316,7 +1336,8 @@ export function OrganizationOverviewSection(props: {
                 autoFocus
               />
               <p className="text-xs text-fg-muted">
-                You can invite organization members after it is created.
+                You will be added as a workspace administrator. You can add other organization
+                members after it is created.
               </p>
             </div>
             <DialogFooter>
@@ -2691,6 +2712,7 @@ export function OrganizationPeopleSection(props: {
                   <Label htmlFor="organization-invite-name">Name</Label>
                   <Input
                     id="organization-invite-name"
+                    suppressAutofill
                     name="name"
                     autoComplete="name"
                     value={inviteName}

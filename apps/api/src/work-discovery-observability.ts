@@ -19,7 +19,7 @@ export type WorkDiscoveryObservation = {
 };
 
 type WorkDiscoveryObservedRow = {
-  relatedWork: {
+  relatedWork?: {
     match: { class: WorkDiscoveryMatchClass } | null;
     possibleOverlap: boolean;
   };
@@ -35,8 +35,8 @@ export function summarizeWorkDiscoveryRows(
   const matchCounts: WorkDiscoveryObservation["matchCounts"] = {};
   let overlapCount = 0;
   for (const row of rows) {
-    if (row.relatedWork.possibleOverlap) overlapCount += 1;
-    const matchClass = row.relatedWork.match?.class;
+    if (row.relatedWork?.possibleOverlap) overlapCount += 1;
+    const matchClass = row.relatedWork?.match?.class;
     if (matchClass) matchCounts[matchClass] = (matchCounts[matchClass] ?? 0) + 1;
   }
   return { resultCount: rows.length, overlapCount, matchCounts };

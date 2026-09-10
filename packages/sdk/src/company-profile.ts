@@ -82,6 +82,19 @@ export type CompanyProfileMutationResponse = {
   head: CompanyProfileHead | null;
   event: CompanyProfileActivationEvent | null;
 };
+export type CompanyProfileAgentPolicyMode = "off" | "suggest" | "automatic";
+export type CompanyProfileAgentPolicy = {
+  organizationId: string;
+  mode: CompanyProfileAgentPolicyMode;
+  version: number;
+  updatedAt: string;
+  changed?: boolean;
+};
+export type UpdateCompanyProfileAgentPolicyRequest = {
+  mode: CompanyProfileAgentPolicyMode;
+  expectedVersion: number;
+  operationId: string;
+};
 export type CompanyProfileDiffRequest = { fromRevisionId: string; toRevisionId: string };
 export type CompanyProfileDiffResponse = {
   from: CompanyProfileRevision;

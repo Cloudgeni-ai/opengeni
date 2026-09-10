@@ -13,6 +13,28 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+### Skill reading in direct runtime hosts
+
+For direct `buildOpenGeniAgent` use, pass `skillActivations` to provide immutable
+Skill files. The runtime derives a bounded descriptor catalog and an eager
+in-memory `skill_read` from those same files, independently of compute backend.
+The reader supports default `SKILL.md`, explicit multiple `paths`, and
+`listFiles: true` inventory. It does not start a sandbox or install a Skill.
+
+Alternatively, a host that owns its catalog and reader supplies `skillCatalog`
+and its authorized `skill_read` through the tool gateway, as the stock worker
+does. An explicit catalog, including `[]`, prevents implicit runtime bundles or
+a duplicate reader. Do not combine that host-owned mode with `skillActivations`.
+The descriptor layer is rendered when the agent is constructed, not appended as
+a history message or rewritten by lazy tool discovery. See
+[turn-attempt catalog timing](run-lifecycle.md).
+
+The stock worker also supplies lazy management and filesystem checkout tools;
+direct runtime construction alone does not provision those workspace services.
+Repository Skill discovery remains a separate index of files already on disk.
+
+### Product UI
+
 **Host-rendered product UI.** A host that keeps its own visual shell can consume
 `@opengeni/react/session`. The subpath exposes the session event, composer,
 queue and control hooks plus pure timeline projection, without importing the
@@ -24,11 +46,29 @@ terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
 **OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
+a complete existing-session chat: `<SessionConversation sessionId={id} />`
+under `OpenGeniProvider`. It wires queue actions, composer drafts, model policy,
+pause/resume, human-input forms, optimistic delivery, and paged timeline history.
+`ChatComposer` alone is only the input surface. Hosts with deliberately custom
+flows can still compose the individual hooks and components.
+
+The host owns available space; `SessionConversation` fills its container by
+default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
+children. The SDK scrolls the timeline internally and keeps the composer at
+the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
+
+A host that mounts the styled React surfaces
 can import `@opengeni/react/compiled.css` once. That package-owned artifact is
 already compiled from the component source with Tailwind v4, contains no global
 Preflight or `--tw-*` property registrations, and scopes rules to the `.og-root`
 roots applied by the components. The host therefore needs no Tailwind compiler
-or source scan. Tailwind runtime variables are initialized only within those
+or source scan. SDK form controls include a scoped baseline reset before their
+utilities, so they do not depend on the host loading Preflight. Generic host
+button styles do not replace those defaults; avoid targeting SDK descendants
+with higher-specificity host selectors. `packages/react/demo/standalone-controls.html`
+exercises this standalone path with deliberately conflicting host button CSS.
+Tailwind runtime variables are initialized only within those
 roots; independent defaults inherit without replacing host `--og-*` values,
 while scoped effective values keep derived tokens live. The additive
 `@opengeni/react/styles.css` bridge remains available when a Tailwind v4 host
@@ -239,6 +279,78 @@ Codemode bearer carries that same attempt fence and can invoke every tool in the
 frozen catalog—including admitted first-party tools—through the same executor.
 It cannot widen the catalog, attach servers, mint authority, or survive a
 successor attempt.
+
+### Unified workspace tool gateway
+
+Canonical sources: `@opengeni/tool-gateway`,
+`prepareWorkspaceToolGatewayTools` in `@opengeni/runtime/workspace-tool-gateway`,
+and the current-human adapters in `apps/api/src/workspace-tool-gateway.ts`.
+
+Runtime preparation is the one provider-assembly seam for enabled first-party
+and integration tools. Model MCP, Codemode, current-human MCP, HTTP/SDK, and
+Site adapters project protocol-specific names from the same canonical catalog
+and dispatch the same executor closures. Model names and generated JavaScript
+paths are presentation only; authority is always the exact
+`{ serverId, toolName }` identity plus the active catalog digest.
+
+Attempt-frozen connector Allow/Ask/Block policy and connector-action request
+rows belong to model/Codemode execution. Direct current-human HTTP/SDK and
+workspace MCP calls use `requireApproval`; Sites use their separately verified
+active-version bypass. Direct calls keep operation ids for provider-specific
+handling but do not create a second generalized execution journal.
+
+The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
+`/tools/declarations`. Approval-required HTTP calls cannot trust a caller
+boolean: the authenticated parent first creates a five-minute, hash-only,
+single-use approval capability bound to the current human, operation, catalog,
+identity, and arguments, then presents that token on the exact matching call.
+After consumption, its hash-only row remains as an operation tombstone so the
+same operation id cannot be approved again after an ambiguous provider outcome.
+Live approval issuance and expiry queries use a subject-scoped partial index
+that excludes consumed tombstones.
+Sites use a different host-owned boundary: an active immutable Site version may
+call its retained tool identities directly without per-call approval, while the
+parent intersects that allowlist with the viewer's live catalog and the API
+revalidates the active version on every call. The opaque-origin Site iframe
+never receives a token. External MCP clients use the aggregate workspace MCP route;
+deployments may opt into its resource-bound OAuth authorization server as
+documented in `docs/deployment.md`. Because that MCP adapter has no
+server-verifiable one-shot approval exchange, it omits tools classified for
+human approval and rejects direct calls to their projected names. OAuth consent
+does not satisfy that separate per-call approval requirement.
+
+Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
+and requested tool identities per immutable version. The parent renders the
+runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact
+`contentWindow`. It intersects the retained identities with the viewer's live
+gateway, dispatches allowed calls directly, and aborts pending calls when the
+Site reloads, stops, navigates, replaces its bridge port, or unmounts. Duplicate
+live request ids are rejected, archived Sites receive no bridge, and no
+credential, cookie, API URL, or parent DOM authority crosses into
+publisher-controlled code. API response data may contain resource/workspace ids;
+the Site cannot choose a different routing workspace.
+
+### Session SDK inside a Site
+
+`createOpenGeniSiteClient()` exposes `client` (the ordinary `OpenGeniClient`)
+and `workspaceId` (the host-resolved `site-host` alias), alongside the existing
+`tools` facade. Pass these directly to `OpenGeniProvider`. The shared session
+HTTP surface includes sessions, durable drafts, and read-only provider context
+(client config, workspace/model catalog and live event streams). Unrelated
+administration endpoints are not exposed by this adapter.
+
+Published frames forward requests through a response-specific MessagePort,
+with pull-based chunks for SSE and cancellation on abort/unmount. The web host
+supplies its current viewer authentication. Top-level sandbox previews use the
+same `createCodemodeSiteRequestHandler()` mount: `/__opengeni/site-tools/sdk/*`
+forwards to `/codemode/sdk/*`. That API validates the live attempt and frozen
+catalog, then dispatches the ordinary REST handlers with an internal exact-
+attempt credential limited to the session's existing session/workspace-read
+permissions. It never changes the sandbox bearer or gives an agent human
+approval authority. Normal resource authorization and command receipts apply.
+
+See `examples/site-session-embed` for a standard React provider, timeline and
+durable composer using this transport without knowing its execution location.
 
 ### Session Authorization
 
@@ -581,6 +693,36 @@ accounts for one provider or different providers in the same session. The
 singular `resource` field remains the OAuth resource indicator; it is not a
 repository selector.
 
+OpenGeni-owned Connection refs omit `authoritySource` and remain subject to the
+accepted-use snapshot and per-provider-request audit fence. An embedding host
+that does not mirror its provider connection into OpenGeni sets
+`authoritySource: "host"` beside its opaque `connectionId`; the id may use any
+non-empty shape, including a UUID. With `mcpCredentials` bound, that explicit
+provenance routes directly to the host resolver with the immutable turn lineage.
+Without the host credential port, a host-owned ref fails closed as
+`unsupported_auth` rather than falling through to OpenGeni's connection store.
+For rolling upgrade compatibility, a bound host resolver also accepts legacy
+refs that omit `authoritySource` only when their connection id is unambiguously
+non-UUID. New host refs must set the marker, and UUID-shaped host ids require it.
+
+Admission of explicit host authority is also behind
+`OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED` (default `false`). Roll it out
+in two phases: first deploy the supporting API, control worker, turn worker, and
+web bundle everywhere with the flag false; after proving the old generation is
+gone, set the flag true in a second rollout and only then admit or configure
+`authoritySource: "host"` refs. The API rejects new explicit session/capability
+refs while the flag is false and configured refs fail startup validation. Every
+upgraded reader, inheritance path, and worker continues to preserve and execute
+an already-stored marked ref regardless of its local flag value; the flag is not
+an execution kill switch. The markerless non-UUID compatibility lane remains
+available for pre-existing embedded sessions during phase one.
+
+Once a marked ref has been persisted, do not restart an image from before this
+contract. Setting the flag false stops new external marked writes but does not
+rewrite, drain, or disable durable session/capability refs that already exist.
+Remove those refs through ordinary forward operations before attempting any
+pre-contract image rollback.
+
 Successful results must echo account/workspace/immediate-session plus the exact
 provider, provider domain, requested connection id, OAuth scopes/resource, and
 selected-resource set. OpenGeni rejects a mismatched echo before any returned
@@ -591,6 +733,16 @@ that cannot enforce the selected repository set returns
 `resource_scope_unavailable`. These reasons render as unavailable, not as a
 duplicate OpenGeni reconnect flow, and a connection-backed optional MCP server
 still degrades without breaking unrelated session tools.
+
+Host-owned `tool.auth_needed` events use a rolling-safe public representation:
+the legacy `reason` is pinned to `unsupported_auth`, while `hostReason`
+retains the exact host result and `authorizationUrl` remains the host-minted
+recovery target. A pre-contract browser therefore renders the notice as
+unavailable and cannot send the opaque id into OpenGeni OAuth; an upgraded
+browser reads `hostReason` and offers only the host URL. Successful host
+credential results retain `authoritySource: "host"` through later provider 401,
+403 `insufficient_scope`, and accepted-use revalidation failures so those
+synthesized notices cannot lose provenance.
 
 The standalone generic connection broker intentionally rejects a
 `selectedResources` binding with `resource_scope_unavailable`: it can refresh a
@@ -645,7 +797,7 @@ disable it for embedded products that require a narrower model-visible surface.
 An agent-created child normally needs the same working context as its manager,
 even when the two conversations are separate. When the creating grant carries
 the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
-`resources`, `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+`resources` (repositories only), `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
 parent. The snapshot preserves inline session skills, mixed GitHub, GitLab, and Azure DevOps repository
 resources, multiple credential bindings for one provider, selected MCP tool
 refs, full per-session MCP policy, connection refs, and static credential
@@ -852,6 +1004,9 @@ deduplicate those keys. Session ordering is authoritative by `event.sequence`; c
 stable across sessions but deliberately not claimed to be causal. High-volume raw delta event types
 are excluded from the host stream; their completed semantic events remain. Event types are bounded
 but forward-tolerant so an older consumer can carry a newer writer's event during a rolling upgrade.
+Canonical session events remain lossless. When one payload exceeds the bounded host wire, the
+outbox carries a content-free truncation receipt keyed to the canonical event instead of blocking
+the source transaction or copying an unbounded payload into the host stream.
 Each session-bound event and usage fact also carries the immutable lineage `rootSessionId` captured
 with the outbox row in the source transaction. A host can therefore retain the immediate child id
 for audit while attributing usage or host-owned business signals to one root binding. Only a

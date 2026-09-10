@@ -1,9 +1,10 @@
 # Durable agent inputs
 
 Agent-to-agent messages, Agent Steer instructions, child results, scheduled
-occurrences, and goal continuations share one durable lifecycle. They are not
-human prompts, but they are real model input and therefore cannot exist only in
-an activity-local system message.
+occurrences, goal continuations, session-wait timeouts, and terminal background
+commands share one durable lifecycle. They are not human prompts, but they are
+real model input and therefore cannot exist only in an activity-local system
+message.
 
 ## Canonical lifecycle
 
@@ -35,25 +36,43 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
-Pending machine input also wakes a held orchestrator. An active goal whose
-latest turn declared a `goal_wait` hold (see [`goals.md`](goals.md)) does not
-materialize a goal continuation at idle, but a pending `session_system_updates`
-row of an `immediate` wake class (a child result, agent message, schedule, or
-`child_requires_action`) still makes the session runnable: the idle evaluation
-returns `queue` instead of `held`, the next claim delivers the batch, and that
-delivering turn retires the hold because it is a newer finished turn. The hold
-only suppresses the synthesized continuation between real inputs and the hold
-deadline. `deferred` rows (see below) do not end a current hold; they are
-delivered when it ends or an immediate input arrives. Without a current hold any
-pending row makes the session runnable.
+Pending machine input also wakes a session-level `wait_for_input` declaration.
+The wait belongs to the session, not its goal: it persists the exact declaring
+turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update
+(a child terminal/action notice, Agent message or Steer, schedule, media result,
+or background-command result) makes the session runnable. The next claim
+delivers the batch, and the newer finished turn retires the wait with
+`session.wait.finished{outcome:"input"}`. `deferred` child notices remain
+pending without ending a current wait; they are delivered when the wait times
+out, is superseded, or immediate input arrives. When the database deadline
+passes unchanged, settlement clears the wait and atomically queues one typed
+`session_wait_timeout` input plus its workflow wake.
+
+A successful Temporal signal is transport delivery, not input admission. The
+current workflow-wake revision stays retryable while an eligible immediate input
+remains pending, or an idle session still owns an expired input wait. Future holds acknowledge
+the early signal so settlement can re-arm their deadline without retaining an
+earlier retry time. A closing
+workflow cannot acknowledge away that obligation. Claim, supersession, and
+explicit control remain authoritative; deferred notices and late child results
+without ongoing intent do not create new work.
+
+Public session reads expose `inputWait` only for an idle, active-control session
+whose newest finished turn is the declaring turn. Queued/running, paused,
+terminal, or superseded waits project as null. The deadline stays visible after
+it passes until settlement: the web header and rail say “recheck due”, not
+“running”. Waiting descendants contribute to working aggregates independently
+of personal unread state. SSE wait, status, and pending-input events refresh the
+detail projection; an older status event cannot override a newer detail read.
 
 ## Wake classes and child lifecycle notices
 
 Every kind has one wake class in `SESSION_SYSTEM_UPDATE_WAKE_CLASS`
 (`@opengeni/contracts`). `immediate` kinds (every pre-existing kind plus
-`child_requires_action`) register a workflow wake in the same commit as the
-pending row, may resume a goal paused only by its continuation ceiling, and end a
-`goal_wait` hold at the next idle evaluation. `deferred` kinds insert only the
+`child_requires_action`, `session_wait_timeout`, and
+`background_command_result`) register a workflow wake in the same commit as the
+pending row, may resume a goal paused only by its continuation ceiling, and end
+a `wait_for_input` declaration through the next durable turn. `deferred` kinds insert only the
 durable pending row and its `system.update.pending` event; the next claim
 delivers them coalesced, `session_wait` reports them without ending the wait
 (`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
@@ -83,8 +102,28 @@ marks the still-pending `child_requires_action` of that boundary `superseded`
 generation and a new notice), a newer `child_progress` supersedes the older
 pending one, and the parent timeline records `system.update.cancelled` with
 `reason: superseded_by_resolution | superseded_by_newer_progress`. Like child
-results, no child notice may autonomously wake a parent whose goal is not
-active or that has already failed.
+results, an immediate child notice may autonomously wake a parent with either
+an active goal or a current session-level wait. Without either durable
+obligation, child lifecycle notices remain pending until new intent arrives.
+
+Terminal background-command settlement follows the same proof-first rule as
+the command lifecycle. The transaction that changes the exact command row from
+`running|stopping` to `exited|lost` also appends
+`session.command.finished` and, for a nonterminal session, inserts one
+dedupe-keyed `background_command_result` input with an output locator, appends
+`system.update.pending`, and registers the workflow wake when idle and
+runnable. A failed or cancelled session cannot claim another turn: its terminal
+control transition already drained pending input, so command settlement keeps
+the exact event but does not reopen model work. A duplicate or stale proof
+changes nothing and cannot create a second input. NATS publication happens only
+after commit and is a replaceable short-wait hint; PostgreSQL remains
+authoritative.
+
+Managed retained-process settlement includes this command/input boundary in
+the same transaction as the process row, parent admission, non-TTL holder, and
+lease-count transition. If event/input/wake persistence fails, none of those
+terminal state changes commit; the already-checkpointed provider proof remains
+eligible for a settlement-only retry and provider execution is never replayed.
 
 The five new kinds are produced only while
 `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default off): a worker from
@@ -139,18 +178,22 @@ orchestrator-, goal-, or depth-specific rule, and every level of a nested chain
 behaves identically. It applies to all six child lifecycle kinds, which share
 the `childSessionId` field; several notices for one child in a single batch
 produce one acknowledgment. A turn whose frozen principal is purely a service
-(an ordinary machine-input turn with no goal continuation, schedule, xAI-user,
-or private-owner authority behind it) has no human to acknowledge for and
-writes nothing.
+(an ordinary machine-input turn with no causal child parent-turn, goal
+continuation, schedule, xAI-user, or private-owner authority behind it) has no
+human to acknowledge for and writes nothing.
 
 Read state is per viewer, so this only ever changes the rail for that one
 human; another member still sees the child unread. It only ever removes noise:
 `unread` is nothing but `sessions.last_sequence > acknowledged_sequence`, so a
-child that emits one more event goes unread again with no special handling, and
-the `failed` and `requires_action` rail indicators are derived from
-`sessions.status`, rank above unread, and are untouched. The fence is monotone:
-a human who has already read further, or a racing claim that observed a later
-sequence, is never regressed.
+child that emits one more event goes unread again with no special handling.
+`requires_action` remains a live lifecycle indicator until the input is
+resolved. A failed lifecycle remains visible inside the session, while the
+rail's red failure-attention marker is viewer-specific and appears only while
+that failed session's latest event is unread. Parent tree projections expose a
+separate `unreadFailedDescendants` count so an acknowledged historical failure
+does not color every ancestor forever. The fence is monotone: a human who has
+already read further, or a racing claim that observed a later sequence, is
+never regressed.
 
 Monotonicity has one consequence worth stating plainly: an explicit mark-unread
 is **not** sticky against a later consumption. Marking a child unread, then
@@ -235,3 +278,33 @@ Compact/Clear transition is reconstructed as inactive audit evidence, so the
 migration never resurrects context that the user already replaced. Deliveries
 after that boundary are inserted into active history at their causal turn
 position. There is no runtime compatibility path for ephemeral update injection.
+
+### Showing incoming work in the session
+
+The session dock separates pending inbox inputs from active background commands.
+Its Commands panel lists only `running` and `stopping` records for the selected
+session. The HTTP list filters at the database; settled records are never loaded
+for this panel. Session detail carries the existing active-count projection, and
+the command list mounts and polls only while its panel is open. Closing it aborts
+an outstanding read and prevents a late Stop response from starting another read.
+
+Delivery remains the timeline landmark: `system.update.delivered` renders through
+the existing input row for every supported kind, including command results and
+wait timeouts. Those rows stay outside collapsed steps, including an input received
+partway through the same turn. A delivered input does not necessarily start a new
+turn. Command-result summaries include the bounded command preview; an unavailable
+exit result is described as unavailable rather than asserting that execution failed.
+
+The Goal segment keeps pause/resume and clear visible beside its label. The
+Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation
+controls.
+
+For deterministic local review, run `bun run dev` and open
+`/dev/composer-chrome`. The gallery uses the production controls and timeline
+projection with synthetic events, covers command loading/empty/error/stopping
+states, crowded and read-only layouts, and supports local goal/queue actions.
+Its command-result simulator changes fixture state only; no model calls or real
+processes are needed. Actual command filtering and settlement are covered by the
+real-PostgreSQL session-control algebra tests.
+
+The web session uses compact chrome: queue and goal actions remain visible, while inbox, agents, and active commands share an Activity disclosure. Goal state stays visible; goal age is labelled as time since creation, not execution time. The development gallery includes a synthetic high-volume activity scenario.

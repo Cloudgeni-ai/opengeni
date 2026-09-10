@@ -2677,6 +2677,39 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("accepted Steer reports host-owned resources through onSent", async () => {
+    let submitted: SendMessageInput | undefined;
+    let accepted: SendMessageInput | undefined;
+    const client = fakeClient({
+      steerMessage: async (_ws, _session, input) => {
+        if (typeof input !== "string") submitted = input;
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: {
+            resources: [{ kind: "file", fileId: "steered-file" }],
+          },
+          onSent: (_text, input) => {
+            accepted = input;
+          },
+        }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.steer("do this immediately")).toBe(true);
+    });
+
+    expect(submitted?.resources).toEqual([{ kind: "file", fileId: "steered-file" }]);
+    expect(accepted?.resources).toEqual([{ kind: "file", fileId: "steered-file" }]);
+    await hook.unmount();
+  });
+
   test("projects Steer immediately, keeps it accepted, then settles when execution starts", async () => {
     let resolveSteer!: (value: SteerMessageResult) => void;
     const pendingSteer = new Promise<SteerMessageResult>((resolve) => {

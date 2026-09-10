@@ -17,6 +17,7 @@ import {
   isCodexTransportError,
   opaqueProviderArtifactFingerprint,
   parseCodexUsageHeaders,
+  withCodexRequestOverrides,
 } from "../src";
 
 type Capture = { url: string; init?: RequestInit | undefined };
@@ -1527,6 +1528,79 @@ describe("codexSubscriptionFetch", () => {
 
     expect(response.status).toBe(200);
     expect(phases).toEqual(["transport_entry", "credential_ready", "wire_request_ready"]);
+  });
+
+  test("runs the durable dispatch fence after audit on every authentication attempt", async () => {
+    const { base, captures } = baseRecorder([401, 200]);
+    const order: string[] = [];
+    let fences = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestEvent: (event) => {
+          if (event.phase === "started") order.push("audit");
+        },
+        beforeProviderDispatch: () => {
+          fences += 1;
+          order.push(`fence:${fences}`);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+        }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(captures).toHaveLength(2);
+    expect(order).toEqual(["audit", "fence:1", "audit", "fence:2"]);
+  });
+
+  test("preserves a dispatch-fence error and prevents the provider call", async () => {
+    class LeaseFenceError extends Error {}
+    const fenceError = new LeaseFenceError("Codex credential lease lost");
+    let calls = 0;
+    await expect(
+      codexRequestStorage.run(
+        ctx({ beforeProviderDispatch: () => Promise.reject(fenceError) }),
+        () =>
+          codexSubscriptionFetch(async () => {
+            calls += 1;
+            return new Response(null, { status: 200 });
+          })("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+          }),
+      ),
+    ).rejects.toBe(fenceError);
+    expect(calls).toBe(0);
+  });
+
+  test("compaction-style request overrides retain the durable dispatch fence", async () => {
+    const { base } = baseRecorder();
+    let fences = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        beforeProviderDispatch: () => {
+          fences += 1;
+        },
+      }),
+      () =>
+        withCodexRequestOverrides(
+          {
+            betaFeatures: ["remote_compaction_v2"],
+            turnMetadata: { request_kind: "compaction" },
+          },
+          () =>
+            codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+              method: "POST",
+              body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+            }),
+        ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(fences).toBe(1);
   });
 
   test("streaming caller: successful bytes pass through for model-level reconstruction", async () => {

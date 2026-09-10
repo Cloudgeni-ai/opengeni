@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CompanyBrainLearningPolicyRouteReceipt } from "@opengeni/contracts";
-import { PreferenceRegistryStableKeyConflictError, type Database } from "@opengeni/db";
+import type { Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerCompanyBrainGovernedWriteTools } from "../src/mcp/company-brain-governed-writes";
 
@@ -28,7 +28,7 @@ function receipt(operationId: string): CompanyBrainLearningPolicyRouteReceipt {
       policyRevision: null,
       activationVersion: 0,
       snapshotId: "00000000-0000-4000-8000-000000000108",
-      revisionId: "workspace-learning-policy:default-off:v1",
+      revisionId: "workspace-learning-policy:default-suggest:v1",
       snapshotHash: "a".repeat(64),
     },
     decision: "proposal_created",
@@ -81,7 +81,7 @@ describe("Company Brain governed write tools", () => {
       reason: "Propose this evidence-backed fact.",
     });
     const taskNoteOperationId = "00000000-0000-4000-8000-000000000112";
-    await handlers.get("task_note_promote_preference")!({
+    const promotion = await handlers.get("task_note_promote_preference")!({
       operationId: taskNoteOperationId,
       noteId: "00000000-0000-4000-8000-000000000113",
       expectedNoteVersion: 1,
@@ -111,29 +111,13 @@ describe("Company Brain governed write tools", () => {
           reason: "Propose this evidence-backed fact.",
         },
       },
-      {
-        attempt: ATTEMPT,
-        request: {
-          kind: "promote_task_note_preference",
-          operationId: taskNoteOperationId,
-          noteId: "00000000-0000-4000-8000-000000000113",
-          expectedNoteVersion: 1,
-          entityType: "working_method",
-          normalizedKey: "support-tone",
-          displayName: "Support tone",
-          predicateKey: "ways.preference",
-          confidenceBps: 8_000,
-          stableKey: "support.tone",
-          title: "Support tone",
-          description: "Suggested tone for support replies.",
-          precedenceRank: 0,
-          conflictStrategy: "override",
-          conflictsWith: [],
-          expiresAt: null,
-          reason: "Promote the exact note into an inactive preference.",
-        },
-      },
     ]);
+    expect(
+      JSON.parse((promotion as { content: Array<{ text: string }> }).content[0]!.text),
+    ).toMatchObject({
+      status: "not_saved",
+      code: "use_skill_save",
+    });
   });
 
   test("authorization runs before any router write", async () => {
@@ -170,7 +154,7 @@ describe("Company Brain governed write tools", () => {
     expect(writes).toBe(0);
   });
 
-  test("returns a bounded stable-key conflict instead of throwing persistence details", async () => {
+  test("legacy preference proposals redirect without invoking the Knowledge router", async () => {
     const handlers = new Map<string, Handler>();
     registerCompanyBrainGovernedWriteTools({
       server: {
@@ -184,9 +168,7 @@ describe("Company Brain governed write tools", () => {
       json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
       router: {
         async write() {
-          throw new PreferenceRegistryStableKeyConflictError(
-            "A preference with this stable key already exists for the workspace",
-          );
+          throw new Error("The legacy router must not be invoked");
         },
       },
     });
@@ -205,10 +187,11 @@ describe("Company Brain governed write tools", () => {
       expiresAt: null,
       reason: "Propose an evidence-backed working method.",
     });
-    expect(JSON.parse((result as { content: Array<{ text: string }> }).content[0]!.text)).toEqual({
-      status: "not_proposed",
-      code: "preference_stable_key_conflict",
-      message: "A preference with this stable key already exists for the workspace",
+    expect(
+      JSON.parse((result as { content: Array<{ text: string }> }).content[0]!.text),
+    ).toMatchObject({
+      status: "not_saved",
+      code: "use_skill_save",
     });
   });
 });

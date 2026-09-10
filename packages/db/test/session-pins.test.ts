@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  appendSessionEvents,
+  createChannel,
   createDb,
   createSession,
   decodeSessionListCursor,
@@ -9,6 +11,7 @@ import {
   getWorkspaceGrant,
   grantWorkspaceAccess,
   listSessionsForSubject,
+  listSessionDiscoverySummaries,
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
   sessionAuthorizationScopeFilter,
@@ -22,6 +25,7 @@ import {
   SessionArchiveVersionConflictError,
   setSessionArchive,
   setSessionAttention,
+  setSessionChannel,
   setSessionPin,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -56,18 +60,23 @@ async function session(input: {
   workspaceId: string;
   message: string;
   parentSessionId?: string;
+  channelId?: string | null;
+  createdBy?: { kind: "subject" | "service"; subjectId: string; label?: string };
+  metadata?: Record<string, unknown>;
 }) {
   return await createSession(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: input.message,
     resources: [],
-    metadata: {},
+    metadata: input.metadata ?? {},
     model: "test-model",
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
     ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+    ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
   });
 }
 
@@ -176,6 +185,162 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("keeps filtered row content from the same statement as page selection", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:filtered-selection-race";
+    await grantMember(workspace, subjectId);
+    const channel = await createChannel(db, { ...workspace, name: "Before move" });
+    const target = await session({ ...workspace, message: "moving row", channelId: channel.id });
+    let changed = false;
+    const wrap = (value: any): any =>
+      new Proxy(value, {
+        get(proxiedQuery, property) {
+          if (property === "transaction")
+            return (callback: any, config: any) =>
+              proxiedQuery.transaction((tx: any) => callback(wrap(tx)), config);
+          if (property === "then" && typeof proxiedQuery.toSQL === "function") {
+            return (resolve: any, reject: any) =>
+              Promise.resolve(proxiedQuery)
+                .then(async (rows: any) => {
+                  const query = proxiedQuery.toSQL().sql;
+                  if (
+                    !changed &&
+                    query.includes('order by "sessions"."updated_at"') &&
+                    query.includes(" limit ")
+                  ) {
+                    changed = true;
+                    await setSessionChannel(db, {
+                      workspaceId: workspace.workspaceId,
+                      sessionId: targetId,
+                      channelId: null,
+                    });
+                  }
+                  return rows;
+                })
+                .then(resolve, reject);
+          }
+          const member = Reflect.get(proxiedQuery, property, proxiedQuery);
+          if (typeof member !== "function") return member;
+          return (...args: any[]) => {
+            const result = member.apply(proxiedQuery, args);
+            return result &&
+              typeof result === "object" &&
+              (typeof result.toSQL === "function" ||
+                typeof result.select === "function" ||
+                typeof result.from === "function")
+              ? wrap(result)
+              : result;
+          };
+        },
+      });
+    const targetId = target.id;
+    const page = await listSessionsForSubject(wrap(db), workspace.workspaceId, {
+      subjectId,
+      channelId: channel.id,
+      limit: 10,
+    });
+    expect(changed).toBe(true);
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]!.channelId).toBe(channel.id);
+    const fresh = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: channel.id,
+    });
+    expect(fresh.sessions).toHaveLength(0);
+  }, 60_000);
+
+  test("FK channel detachment advances activity even for rows outside an earlier scan", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const channel = await createChannel(db, { ...workspace, name: "Deleted concurrently" });
+    const target = await session({
+      ...workspace,
+      message: "late channel attachment",
+      channelId: channel.id,
+    });
+    const [before] =
+      await admin`select activity_revision::text as revision from sessions where id = ${target.id}`;
+    // The channel FK runs the same UPDATE channel_id = NULL for a row attached
+    // after deleteChannel's preliminary scan. Only the FK statement sees it.
+    await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`delete from channels where id = ${channel.id} and workspace_id = ${workspace.workspaceId}`,
+      );
+    });
+    const [after] =
+      await admin`select activity_revision::text as revision, channel_id from sessions where id = ${target.id}`;
+    expect(after!.channel_id).toBeNull();
+    expect(BigInt(after!.revision)).toBeGreaterThan(BigInt(before!.revision));
+  }, 60_000);
+
+  test("rejects an old ungated channel delete after activity trigger activation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const channel = await createChannel(db, { ...workspace, name: "Old caller rollback" });
+    const target = await session({
+      ...workspace,
+      message: "retained filing",
+      channelId: channel.id,
+    });
+    let failure: unknown;
+    try {
+      await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
+        await tx.execute(sql`delete from channels where id = ${channel.id}`);
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeDefined();
+    const [row] = await admin`select channel_id from sessions where id = ${target.id}`;
+    expect(row!.channel_id).toBe(channel.id);
+  }, 60_000);
+
+  test("uses a bounded creator-prefix index for sparse creator pages", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const target = await session({
+      ...workspace,
+      message: "older sparse creator",
+      createdBy: { kind: "subject", subjectId: "user:sparse" },
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      insert into sessions (id, account_id, workspace_id, initial_message, model, reasoning_effort,
+        latency_mode, sandbox_backend, sandbox_group_id, tool_policy, created_by_kind, created_by_subject_id)
+      select generated.id, ${workspace.accountId}, ${workspace.workspaceId}, 'newer other creator',
+        'test-model', 'medium', 'standard', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), 'subject', 'user:other'
+      from (select gen_random_uuid() as id from generate_series(1, 5000)) generated
+    `,
+    );
+    await admin`analyze sessions`;
+    const plan = await withWorkspaceSubjectRls(
+      db,
+      workspace.workspaceId,
+      "user:sparse",
+      async (tx) =>
+        await tx.execute(sql`explain (analyze, format json) select id from sessions
+        where workspace_id = ${workspace.workspaceId} and created_by_kind = 'subject'
+          and created_by_subject_id = 'user:sparse'
+        order by updated_at desc, id desc limit 20`),
+    );
+    expect(JSON.stringify(plan)).toContain("sessions_workspace_creator_updated_id_idx");
+    const rows: Array<{ id: string }> = await withWorkspaceSubjectRls(
+      db,
+      workspace.workspaceId,
+      "user:sparse",
+      async (tx) =>
+        await tx.execute<{
+          id: string;
+        }>(sql`select id from sessions where workspace_id = ${workspace.workspaceId}
+        and created_by_kind = 'subject' and created_by_subject_id = 'user:sparse'
+        order by updated_at desc, id desc limit 20`),
+    );
+    expect(rows.map((row) => row.id)).toEqual([target.id]);
+  }, 60_000);
+
   test("rejects an unbounded host authorization scope before issuing SQL", () => {
     expect(() =>
       sessionAuthorizationScopeFilter({
@@ -254,9 +419,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 2,
       runningDescendants: 1,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: waitingSince.toISOString(),
@@ -276,9 +443,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 1,
       runningDescendants: 0,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: waitingSince.toISOString(),
@@ -293,6 +462,67 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(grandchildren.sessions[0]?.requiresActionSince).toBe(waitingSince.toISOString());
     expect(children.sessions[0]?.requiresActionSince).toBeNull();
+  });
+
+  test("counts only unacknowledged failed descendants as failure attention per viewer", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const viewer = "user:failure-viewer";
+    const otherViewer = "user:other-failure-viewer";
+    await grantMember(workspace, viewer);
+    await grantMember(workspace, otherViewer);
+    const root = await session({ ...workspace, message: "failure root" });
+    const child = await session({
+      ...workspace,
+      message: "failed child",
+      parentSessionId: root.id,
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set status = 'failed', updated_at = now() where id = ${child.id}`,
+    );
+    await appendSessionEvents(db, workspace.workspaceId, child.id, [
+      { type: "session.title_set", payload: { title: "Failed child" } },
+    ]);
+
+    const before = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: viewer,
+      parentSessionId: null,
+    });
+    expect(before.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+    });
+
+    const childForViewer = await getSessionForSubject(db, workspace.workspaceId, child.id, viewer);
+    await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: viewer,
+      sessionId: child.id,
+      unread: false,
+      acknowledgedThroughSequence: childForViewer!.lastSequence,
+      expectedVersion: childForViewer!.attentionVersion,
+    });
+
+    const after = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: viewer,
+      parentSessionId: null,
+    });
+    expect(after.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      unreadDescendants: 0,
+    });
+    const other = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: otherViewer,
+      parentSessionId: null,
+    });
+    expect(other.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+    });
   });
 
   test("counts effective pauses and excludes paused descendants from active totals", async () => {
@@ -358,6 +588,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 3,
       runningDescendants: 0,
       queuedDescendants: 1,
+      waitingDescendants: 0,
       pausedDescendants: 2,
     });
 
@@ -372,6 +603,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 3,
       runningDescendants: 0,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       pausedDescendants: 3,
     });
 
@@ -390,6 +622,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 3,
       runningDescendants: 0,
       queuedDescendants: 1,
+      waitingDescendants: 0,
       pausedDescendants: 2,
     });
   });
@@ -470,9 +703,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 32,
       runningDescendants: 32,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -483,9 +718,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 32,
       runningDescendants: 32,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -496,9 +733,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 1_000,
       runningDescendants: 0,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -593,9 +832,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 2,
       runningDescendants: 0,
       queuedDescendants: 2,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -903,6 +1144,219 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(count?.count).toBe(0);
   }, 60_000);
 
+  test("Site origin filters before pagination, survives project moves and binds cursors", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = `user:site-${crypto.randomUUID()}`;
+    await grantMember(workspace, subjectId);
+    const siteId = crypto.randomUUID();
+    const otherSiteId = crypto.randomUUID();
+    const metadata = { _opengeniSiteOrigin: { siteId, title: "Analytics" } };
+    const a = await session({ ...workspace, message: "Site A", metadata });
+    const b = await session({ ...workspace, message: "Site B", metadata });
+    await session({ ...workspace, message: "Newest unrelated" });
+    const project = await createChannel(db, { ...workspace, name: "Explicit project" });
+    await setSessionChannel(db, {
+      workspaceId: workspace.workspaceId,
+      sessionId: a.id,
+      channelId: project.id,
+    });
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      originSiteId: siteId,
+      limit: 1,
+    });
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]!.metadata._opengeniSiteOrigin).toEqual(metadata._opengeniSiteOrigin);
+    expect(page.nextCursor).not.toBeNull();
+    const cursor = decodeSessionListCursor(page.nextCursor!)!;
+    const next = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      originSiteId: siteId,
+      limit: 1,
+      cursor,
+    });
+    expect([...page.sessions, ...next.sessions].map((s) => s.id).sort()).toEqual(
+      [a.id, b.id].sort(),
+    );
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        originSiteId: otherSiteId,
+        limit: 1,
+        cursor,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    const filed = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      originSiteId: siteId,
+      channelId: project.id,
+    });
+    expect(filed.sessions.map((s) => s.id)).toEqual([a.id]);
+    const discovery = await listSessionDiscoverySummaries(db, workspace.workspaceId, {
+      subjectId,
+      originSiteId: siteId,
+      limit: 1,
+    });
+    expect(discovery.sessions).toHaveLength(1);
+    expect([a.id, b.id]).toContain(discovery.sessions[0]!.id);
+    expect(discovery.nextCursor).not.toBeNull();
+    await expect(
+      listSessionDiscoverySummaries(db, workspace.workspaceId, {
+        subjectId,
+        originSiteId: otherSiteId,
+        limit: 1,
+        cursor: discovery.nextCursor!,
+      }),
+    ).rejects.toThrow("cursor Site filter does not match");
+    await expect(
+      listSessionDiscoverySummaries(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: discovery.nextCursor!,
+      }),
+    ).rejects.toThrow("cursor Site filter does not match");
+    const remaining = await listSessionDiscoverySummaries(db, workspace.workspaceId, {
+      subjectId,
+      originSiteId: siteId,
+      limit: 1,
+      cursor: discovery.nextCursor!,
+    });
+    expect([...discovery.sessions, ...remaining.sessions].map((s) => s.id).sort()).toEqual(
+      [a.id, b.id].sort(),
+    );
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId: "user:not-a-member",
+        originSiteId: siteId,
+      }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+  }, 60_000);
+
+  test("keeps project, creator, and date filters bound to their continuation cursor", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:filtered-pages";
+    await grantMember(workspace, subjectId);
+    const projectA = await createChannel(db, { ...workspace, name: "Filtered project A" });
+    const projectB = await createChannel(db, { ...workspace, name: "Filtered project B" });
+    const ada = { kind: "subject" as const, subjectId: "user:ada" };
+    const newerA = await session({
+      ...workspace,
+      message: "filtered newer A",
+      channelId: projectA.id,
+      createdBy: ada,
+    });
+    const olderA = await session({
+      ...workspace,
+      message: "filtered older A",
+      channelId: projectA.id,
+      createdBy: ada,
+    });
+    const projectBRow = await session({
+      ...workspace,
+      message: "filtered project B",
+      channelId: projectB.id,
+      createdBy: { kind: "service", subjectId: "service:scheduler" },
+    });
+    const unfiled = await session({
+      ...workspace,
+      message: "filtered unfiled",
+      channelId: null,
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set created_at = case id
+              when ${newerA.id} then '2026-09-04T08:00:00.000Z'::timestamptz
+              when ${olderA.id} then '2026-09-03T08:00:00.000Z'::timestamptz
+              when ${projectBRow.id} then '2026-09-04T07:00:00.000Z'::timestamptz
+              when ${unfiled.id} then '2026-09-02T08:00:00.000Z'::timestamptz
+              else created_at
+            end,
+            updated_at = case id
+              when ${newerA.id} then '2026-09-04T10:00:00.000Z'::timestamptz
+              when ${olderA.id} then '2026-09-03T10:00:00.000Z'::timestamptz
+              when ${projectBRow.id} then '2026-09-04T11:00:00.000Z'::timestamptz
+              when ${unfiled.id} then '2026-09-02T10:00:00.000Z'::timestamptz
+              else updated_at
+            end
+        where id in (${newerA.id}, ${olderA.id}, ${projectBRow.id}, ${unfiled.id})
+      `,
+    );
+
+    const firstProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: projectA.id,
+      limit: 1,
+    });
+    expect(firstProjectPage.sessions.map((row) => row.id)).toEqual([newerA.id]);
+    const projectCursor = decodeSessionListCursor(firstProjectPage.nextCursor!);
+    expect(projectCursor).toMatchObject({ kind: "keyset" });
+    const [beforeMove] = await admin<
+      { updated_at: Date; activity_revision: string }[]
+    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+    expect(
+      await setSessionChannel(db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: projectBRow.id,
+        channelId: projectA.id,
+      }),
+    ).toBe(true);
+    const [afterMove] = await admin<
+      { updated_at: Date; activity_revision: string }[]
+    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+    expect(afterMove!.updated_at.getTime()).toBe(beforeMove!.updated_at.getTime());
+    expect(BigInt(afterMove!.activity_revision)).toBeGreaterThan(
+      BigInt(projectCursor!.kind === "keyset" ? projectCursor!.snapshotRevision : "0"),
+    );
+    const secondProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: projectA.id,
+      cursor: projectCursor!,
+      limit: 1,
+    });
+    expect(secondProjectPage.sessions.map((row) => row.id)).toEqual([olderA.id]);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        channelId: projectB.id,
+        cursor: projectCursor!,
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    const creatorPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdBy: ada,
+    });
+    expect(creatorPage.sessions.map((row) => row.id)).toEqual([newerA.id, olderA.id]);
+
+    const currentDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      updatedFrom: new Date("2026-09-04T00:00:00.000Z"),
+      updatedBefore: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    expect(currentDatePage.sessions.map((row) => row.id)).toEqual([projectBRow.id, newerA.id]);
+
+    const createdCurrentDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdFrom: new Date("2026-09-04T00:00:00.000Z"),
+      createdBefore: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    expect(createdCurrentDatePage.sessions.map((row) => row.id)).toEqual([
+      projectBRow.id,
+      newerA.id,
+    ]);
+
+    const unfiledPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: null,
+    });
+    expect(unfiledPage.sessions.map((row) => row.id)).toEqual([unfiled.id]);
+  }, 60_000);
+
   test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1143,9 +1597,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         totalDescendants: 0,
         runningDescendants: 0,
         queuedDescendants: 0,
+        waitingDescendants: 0,
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 0,
+        unreadFailedDescendants: 0,
         unreadDescendants: 0,
         activelyWorkingDescendants: 0,
         truncated: false,
@@ -1607,9 +2063,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(cleared).toMatchObject({ unread: false, attentionVersion: 2 });
 
-    await executeSessionActivity(
+    await appendSessionEvents(
+      db,
       workspace.workspaceId,
-      sql`update sessions set last_sequence = 5 where id = ${target.id}`,
+      target.id,
+      Array.from({ length: 5 }, (_, index) => ({
+        type: "session.title_set" as const,
+        payload: { title: `Attention event ${index + 1}` },
+      })),
     );
 
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
@@ -1652,10 +2113,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 5 });
 
-    await executeSessionActivity(
-      workspace.workspaceId,
-      sql`update sessions set last_sequence = 6 where id = ${target.id}`,
-    );
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "session.title_set", payload: { title: "Attention event 6" } },
+    ]);
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
       { unread: true, activelyWorking: true, attentionVersion: 5 },
     );
@@ -1770,6 +2230,189 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       ).sessions.map((row) => row.id),
     ).toContain(root.id);
   });
+
+  test("pages archives by personal root archive time with exact ties and live re-archiving", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:archive-order";
+    const otherSubject = "user:archive-order-other";
+    await grantMember(workspace, subjectId);
+    await grantMember(workspace, otherSubject);
+    const roots = await Promise.all(
+      [0, 1, 2].map((index) => session({ ...workspace, message: `archive order ${index}` })),
+    );
+    for (const root of roots) {
+      await setSessionArchive(db, { ...workspace, subjectId, sessionId: root.id, archived: true });
+    }
+    await admin`update session_pins set archived_at = case session_id
+      when ${roots[0]!.id} then '2026-01-01T00:00:00.123455Z'::timestamptz
+      else '2026-01-01T00:00:00.123456Z'::timestamptz end
+      where workspace_id = ${workspace.workspaceId} and subject_id = ${subjectId}`;
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set updated_at = case id
+      when ${roots[0]!.id} then '2026-02-03'::timestamptz
+      when ${roots[1]!.id} then '2026-02-02'::timestamptz
+      else '2026-02-01'::timestamptz end where workspace_id = ${workspace.workspaceId}`,
+    );
+    const expected = [roots[1]!.id, roots[2]!.id].sort().reverse().concat(roots[0]!.id);
+    const options = { subjectId, archivedOnly: true, parentSessionId: null, limit: 1 };
+    const first = await listSessionsForSubject(db, workspace.workspaceId, options);
+    expect(first.sessions.map((row) => row.id)).toEqual(expected.slice(0, 1));
+    const cursor = decodeSessionListCursor(first.nextCursor!);
+    expect(cursor).toMatchObject({ sortBy: "archivedAt", sortAt: "2026-01-01T00:00:00.123456Z" });
+    const second = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: cursor!,
+    });
+    const third = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: decodeSessionListCursor(second.nextCursor!)!,
+    });
+    expect([...first.sessions, ...second.sessions, ...third.sessions].map((row) => row.id)).toEqual(
+      expected,
+    );
+    expect(third.nextCursor).toBeNull();
+    expect(
+      [...first.sessions, ...second.sessions, ...third.sessions].map((row) => row.archivedAt),
+    ).toEqual([
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123455Z",
+    ]);
+    const unpaged = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      limit: 3,
+      materializeSnapshot: false,
+    });
+    expect(unpaged.sessions.map((row) => row.id)).toEqual(expected);
+    expect(unpaged.sessions.map((row) => row.archivedAt)).toEqual([
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123455Z",
+    ]);
+    // A narrowed continuation grant must filter out the tied middle row before
+    // applying the page limit, without leaking it or returning a short page.
+    const narrowed = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: cursor!,
+      authorizationScope: { kind: "scoped", rootSessionIds: [roots[0]!.id], sessionIds: [] },
+    });
+    expect(narrowed.sessions.map((row) => row.id)).toEqual([roots[0]!.id]);
+    expect(narrowed.nextCursor).toBeNull();
+    const active = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: otherSubject,
+      parentSessionId: null,
+      limit: 3,
+    });
+    expect(active.sessions.map((row) => row.id)).toEqual(roots.map((row) => row.id));
+    expect(
+      (
+        await listSessionsForSubject(db, workspace.workspaceId, {
+          ...options,
+          subjectId: otherSubject,
+        })
+      ).sessions,
+    ).toEqual([]);
+
+    const envelope = JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8"));
+    expect(envelope.version).toBe(3);
+    for (const version of [undefined, 2]) {
+      const legacy = decodeSessionListCursor(
+        Buffer.from(JSON.stringify({ ...envelope, version })).toString("base64url"),
+      );
+      expect(legacy).not.toBeNull();
+      await expect(
+        listSessionsForSubject(db, workspace.workspaceId, { ...options, cursor: legacy! }),
+      ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+    }
+    // A v2 replica treats the unknown v3 version as this reserved snapshot.
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        ...options,
+        cursor: {
+          kind: "snapshot",
+          snapshotId: envelope.snapshotId,
+          offset: 0,
+          parentSessionFilter: "null",
+          search: null,
+          archiveMode: "archived",
+        },
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+    expect(
+      decodeSessionListCursor(
+        Buffer.from(JSON.stringify({ ...envelope, archiveMode: "active" })).toString("base64url"),
+      ),
+    ).toBeNull();
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        ...options,
+        search: "different",
+        cursor: cursor!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    await setSessionArchive(db, {
+      ...workspace,
+      subjectId,
+      sessionId: roots[0]!.id,
+      archived: false,
+    });
+    await setSessionArchive(db, {
+      ...workspace,
+      subjectId,
+      sessionId: roots[0]!.id,
+      archived: true,
+    });
+    expect((await listSessionsForSubject(db, workspace.workspaceId, options)).sessions[0]!.id).toBe(
+      roots[0]!.id,
+    );
+  }, 60_000);
+
+  test("archived child pages inherit root timestamps without child personal state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:archive-child-order";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "archived root" });
+    const children = await Promise.all(
+      [0, 1].map((index) =>
+        session({
+          ...workspace,
+          parentSessionId: root.id,
+          message: `archived child ${index}`,
+        }),
+      ),
+    );
+    const expected = children
+      .map((row) => row.id)
+      .sort()
+      .reverse();
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set updated_at = case id
+      when ${expected[0]} then '2026-01-01'::timestamptz else '2026-02-01'::timestamptz end
+      where parent_session_id = ${root.id}`,
+    );
+    await setSessionArchive(db, { ...workspace, subjectId, sessionId: root.id, archived: true });
+    const options = { subjectId, archivedOnly: true, parentSessionId: root.id, limit: 1 };
+    const first = await listSessionsForSubject(db, workspace.workspaceId, options);
+    const second = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: decodeSessionListCursor(first.nextCursor!)!,
+    });
+    expect([...first.sessions, ...second.sessions].map((row) => row.id)).toEqual(expected);
+    expect(second.nextCursor).toBeNull();
+    expect(
+      (
+        await listSessionsForSubject(db, workspace.workspaceId, {
+          ...options,
+          archivedOnly: false,
+        })
+      ).sessions,
+    ).toEqual([]);
+  }, 60_000);
 
   test("serves concurrent first pages from the same bounded revision keyset", async () => {
     if (!available) return;

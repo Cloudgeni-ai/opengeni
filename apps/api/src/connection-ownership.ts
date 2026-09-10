@@ -1,6 +1,19 @@
 import type { ConnectionOwnership } from "@opengeni/contracts";
-import type { AccessGrantAuthorization } from "@opengeni/core";
+import {
+  externalActorContinuationForAuthorization,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+
+/** A verified external actor must not enter a native callback that has no
+ * corresponding key/identity reauthorization proof. Remove at an entry point
+ * only when that provider's signed continuation and commit fence are wired. */
+export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void {
+  if (externalActorContinuationForAuthorization(access))
+    throw new HTTPException(422, {
+      message: "This provider does not yet support external-user OAuth continuation",
+    });
+}
 
 /**
  * Who may own a *personal* Connection.

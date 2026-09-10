@@ -16,7 +16,6 @@ import {
   listTaskNotes,
   listCompanyBrainKnowledgeProposals,
   nestedPostgresSqlState,
-  PreferenceRegistryStableKeyConflictError,
   replaceTaskNote,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
@@ -216,9 +215,26 @@ function claims(attempt: Awaited<ReturnType<typeof seedAttempt>>) {
 }
 
 describe("task-tree notes PostgreSQL authority", () => {
-  test("denies Task-note promotion under the exact default-off learning snapshot", async () => {
+  test("denies Task-note promotion under an explicit off learning snapshot", async () => {
     if (!shared || !client) return;
     const f = await fixture();
+    const offPolicy = await createWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      workspaceMode: "off",
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: offPolicy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Keep this fixture's learning policy off.",
+    });
     const attempt = await seedAttempt({
       accountId: f.grant.accountId,
       workspaceId: f.grant.workspaceId,
@@ -526,7 +542,7 @@ describe("task-tree notes PostgreSQL authority", () => {
     ).rejects.toThrow("different immutable input");
   });
 
-  test("atomically promotes exact Task-note bytes into inactive Ways proposals with archival replay", async () => {
+  test("retires preference promotion and preserves exact instruction proposals with archival replay", async () => {
     if (!shared || !client) return;
     const f = await fixture();
     const policy = await createWorkspaceLearningPolicyRevision(client.db, {
@@ -585,94 +601,12 @@ describe("task-tree notes PostgreSQL authority", () => {
         reason: "Promote the exact rooted decision for human review.",
       },
     };
-    const [preferenceFirst, preferenceConcurrent] = await Promise.all([
-      writeCompanyBrainGovernedProposal(client.db, preferenceInput),
-      writeCompanyBrainGovernedProposal(client.db, preferenceInput),
-    ]);
-    expect(preferenceConcurrent).toEqual(preferenceFirst);
-    expect(preferenceFirst).toMatchObject({
-      destination: "preference",
-      outcome: "proposed",
-      effectiveBoundary: "human_review_required",
-      taskNoteSource: {
-        noteId: preferenceNote.note.id,
-        rootSessionId: f.root.id,
-        noteVersion: 1,
-      },
-    });
-    const preferenceProposalId = preferenceFirst.destinationProposalId;
-    const preferenceRevisionId = preferenceFirst.destinationRevisionId;
-    if (!preferenceProposalId || !preferenceRevisionId) {
-      throw new Error("preference promotion did not return exact destination lineage");
-    }
-
-    const [preferenceReceipt] = await shared.admin<
-      Array<{ input_hash: string; knowledge_proposal_id: string }>
-    >`
-      select input_hash, knowledge_proposal_id
-      from company_brain_preference_proposal_receipts
-      where preference_id = ${preferenceProposalId}
-    `;
-    expect(preferenceReceipt).toBeDefined();
-    const app = postgres(shared.appUrl, { max: 1, prepare: false });
-    try {
-      const [shadowSafeReplay] = await app.begin(async (sql) => {
-        await sql`select set_config('opengeni.account_id', ${f.grant.accountId}, true)`;
-        await sql`select set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true)`;
-        await sql`select set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
-        await sql`select set_config('opengeni.initiating_human_subject_id', ${f.ownerSubjectId}, true)`;
-        await sql.unsafe("create temporary table workspaces (trap text) on commit drop");
-        return await sql<Array<{ preference_id: string; revision_id: string }>>`
-          select preference_id, revision_id
-          from preference_registry_create_knowledge_proposal_for_attempt(
-            ${attempt.accountId}::uuid,
-            ${attempt.workspaceId}::uuid,
-            ${attempt.sessionId}::uuid,
-            ${attempt.turnId}::uuid,
-            ${attempt.attemptId}::uuid,
-            ${attempt.executionGeneration}::integer,
-            ${preferenceInput.request.operationId}::uuid,
-            ${preferenceReceipt!.input_hash}::text,
-            ${preferenceReceipt!.knowledge_proposal_id}::uuid,
-            ${preferenceInput.request.stableKey}::text,
-            ${preferenceInput.request.title}::text,
-            ${preferenceInput.request.description}::text,
-            ${preferenceText}::text,
-            ${preferenceInput.request.precedenceRank}::integer,
-            ${preferenceInput.request.conflictStrategy}::text,
-            ${sql.json(preferenceInput.request.conflictsWith)}::jsonb,
-            ${preferenceInput.request.expiresAt}::timestamptz,
-            ${preferenceInput.request.reason}::text
-          )
-        `;
-      });
-      expect(shadowSafeReplay).toEqual({
-        preference_id: preferenceProposalId,
-        revision_id: preferenceRevisionId,
-      });
-    } finally {
-      await app.end();
-    }
-
-    const conflictingPreferenceNote = await createTaskNote(client.db, {
-      ...claims(attempt),
-      operationId: crypto.randomUUID(),
-      kind: "decision",
-      text: "Use the existing implementation tracking preference.",
-      expiresInDays: 7,
-    });
-    await expect(
-      writeCompanyBrainGovernedProposal(client.db, {
-        ...preferenceInput,
-        request: {
-          ...preferenceInput.request,
-          operationId: crypto.randomUUID(),
-          noteId: conflictingPreferenceNote.note.id,
-          normalizedKey: "implementation-linear-conflict",
-          stableKey: preferenceInput.request.stableKey,
-        },
-      }),
-    ).rejects.toBeInstanceOf(PreferenceRegistryStableKeyConflictError);
+    await expect(writeCompanyBrainGovernedProposal(client.db, preferenceInput)).rejects.toThrow(
+      "Knowledge-backed Skill proposals are retired",
+    );
+    const [retainedNote] =
+      await shared.admin`SELECT text FROM task_notes WHERE id=${preferenceNote.note.id}`;
+    expect(retainedNote!.text).toBe(preferenceText);
 
     const instructionText = "Never place secret values in public logs.";
     const instructionNote = await createTaskNote(client.db, {
@@ -748,7 +682,7 @@ describe("task-tree notes PostgreSQL authority", () => {
       operationId: crypto.randomUUID(),
       noteId: preferenceNote.note.id,
       expectedVersion: 1,
-      reason: "Preference proposal is durably recorded.",
+      reason: "Explicitly archive the note after the retired promotion was refused.",
     });
     await archiveTaskNote(client.db, {
       ...claims(attempt),
@@ -757,48 +691,22 @@ describe("task-tree notes PostgreSQL authority", () => {
       expectedVersion: 1,
       reason: "Instruction proposal is durably recorded.",
     });
-    expect(await writeCompanyBrainGovernedProposal(client.db, preferenceInput)).toEqual(
-      preferenceFirst,
+    await expect(writeCompanyBrainGovernedProposal(client.db, preferenceInput)).rejects.toThrow(
+      "Knowledge-backed Skill proposals are retired",
     );
     expect(await writeCompanyBrainGovernedProposal(client.db, instructionInput)).toEqual(
       instructionFirst,
     );
     await expect(
       writeCompanyBrainGovernedProposal(client.db, {
-        ...preferenceInput,
-        request: { ...preferenceInput.request, title: "Different immutable input" },
+        ...instructionInput,
+        request: { ...instructionInput.request, displayName: "Different immutable input" },
       }),
     ).rejects.toThrow("different immutable input");
 
-    const [preferenceStored] = await shared.admin<
-      {
-        status: string;
-        active_revision_id: string | null;
-        content: string;
-        knowledge_content: string;
-        event_count: number;
-      }[]
-    >`
-      select preference.status, preference.active_revision_id, revision.content,
-        change.content as knowledge_content,
-        (select count(*)::int from preference_registry_events event
-          where event.preference_id = preference.id) as event_count
-      from preference_registry_preferences preference
-      join preference_registry_revisions revision
-        on revision.id = ${preferenceFirst.destinationRevisionId}
-      join company_brain_preference_proposal_receipts receipt
-        on receipt.preference_id = preference.id
-      join knowledge_change_proposals change
-        on change.id = receipt.knowledge_proposal_id
-      where preference.id = ${preferenceFirst.destinationProposalId}
-    `;
-    expect(preferenceStored).toEqual({
-      status: "proposed",
-      active_revision_id: null,
-      content: preferenceText,
-      knowledge_content: expect.stringContaining(`"content":"${preferenceText}"`),
-      event_count: 1,
-    });
+    expect(
+      await shared.admin`SELECT id FROM preference_registry_preferences WHERE scope_workspace_id=${f.grant.workspaceId}`,
+    ).toHaveLength(0);
 
     const [instructionStored] = await shared.admin<
       {
@@ -839,10 +747,7 @@ describe("task-tree notes PostgreSQL authority", () => {
       limit: 20,
     });
     expect(review.proposals.map((proposal) => proposal.id)).toEqual(
-      expect.arrayContaining([
-        preferenceFirst.knowledgeChangeProposalId,
-        instructionFirst.knowledgeChangeProposalId,
-      ]),
+      expect.arrayContaining([instructionFirst.knowledgeChangeProposalId]),
     );
     expect(review.proposals.every((proposal) => proposal.status === "proposed")).toBe(true);
     expect(review.responseBytes).toBeLessThanOrEqual(64 * 1_024);

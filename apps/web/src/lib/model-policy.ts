@@ -7,6 +7,7 @@ export {
   groupPickerRowsByBillingClass,
   labelLatencyMode,
   payerSummaryForModel,
+  modelUsesCredits,
   projectPickerRows,
   runnableLatencyModesForModel,
   sortPickerRows,

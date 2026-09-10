@@ -1,6 +1,8 @@
+import type { SkillActor } from "@opengeni/contracts";
 import { and, eq, inArray, sql, type SQLWrapper } from "drizzle-orm";
 
 import type { Database } from "./database";
+import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
 import * as schema from "./schema";
 
 export type CapabilityComponentOwnerIdentity = {
@@ -112,9 +114,17 @@ export async function cleanupOrphanedCapabilityComponents(
   db: Database,
   workspaceId: string,
   facetInstallationIds: string[],
-): Promise<void> {
+  skillActor?: SkillActor,
+): Promise<SkillSourceReleaseReceipt[]> {
   const uniqueIds = [...new Set(facetInstallationIds)];
-  if (uniqueIds.length === 0) return;
+  if (uniqueIds.length === 0) return [];
+  // Source refresh locks the installation before the canonical Skill head.
+  // Use the same order here before taking any newly introduced head locks.
+  await db.execute(sql`SELECT p.id FROM capability_plugin_installations p
+    WHERE p.workspace_id=${workspaceId}::uuid AND p.id IN (
+      SELECT f.plugin_installation_id FROM capability_facet_installations f
+      WHERE f.workspace_id=${workspaceId}::uuid AND f.id=ANY(string_to_array(${uniqueIds.join(",")},',')::uuid[])
+    ) ORDER BY p.id FOR UPDATE`);
   const orphanRows = await db
     .select({
       facetInstallationId: schema.capabilityFacetInstallations.id,
@@ -123,14 +133,21 @@ export async function cleanupOrphanedCapabilityComponents(
     .from(schema.capabilityFacetInstallations)
     .where(
       and(
+        eq(schema.capabilityFacetInstallations.workspaceId, workspaceId),
         inArray(schema.capabilityFacetInstallations.id, uniqueIds),
         sql`not exists (
           select 1 from ${schema.capabilityComponentOwners} owner
           where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
         )`,
       ),
-    );
-  if (orphanRows.length === 0) return;
+    )
+    .for("update");
+  if (orphanRows.length === 0) return [];
+  const skillReleases = await releaseOrphanedSkillHeads(db, {
+    workspaceId,
+    facetInstallationIds: orphanRows.map((row) => row.facetInstallationId),
+    ...(skillActor ? { skillActor } : {}),
+  });
   await db.delete(schema.capabilityFacetInstallations).where(
     inArray(
       schema.capabilityFacetInstallations.id,
@@ -163,4 +180,5 @@ export async function cleanupOrphanedCapabilityComponents(
         ),
       );
   }
+  return skillReleases;
 }

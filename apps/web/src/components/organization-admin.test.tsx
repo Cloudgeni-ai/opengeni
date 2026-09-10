@@ -463,7 +463,7 @@ describe("organization administration component fences", () => {
     expect(button(container, "Create new workspace")).toBeInstanceOf(HTMLButtonElement);
     expect(container.querySelector('input[aria-label="New workspace name"]')).toBeNull();
     const workspaceSettingsLink = container.querySelector<HTMLAnchorElement>(
-      'a[aria-label="Open Company platform workspace settings"]',
+      'a[aria-label="Manage Company platform workspace settings"]',
     );
     expect(workspaceSettingsLink?.getAttribute("href")).toBe(
       "/workspaces/workspace-company/settings?section=general",
@@ -485,6 +485,46 @@ describe("organization administration component fences", () => {
     expect(container.textContent).toContain("Acme Research");
     expect(onOrganizationChanged).toHaveBeenCalledTimes(1);
     expect(toastSuccess).toHaveBeenCalledWith("Organization name updated");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("keeps local single-user workspace management free of managed member controls", async () => {
+    const listOrganizationAdministrationMembers = mock(async () => ({
+      members: [member(identityA, "overview")],
+    }));
+    const client = {
+      getOrganizationAdministrationOverview: mock(async () => overview(identityA)),
+      listOrganizationAdministrationMembers,
+    } as unknown as OpenGeniBrowserClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          singleUser
+          accessibleWorkspaceIds={new Set(["workspace-company"])}
+          onOrganizationChanged={() => undefined}
+          onCreateWorkspace={async () => undefined}
+        />,
+      );
+    });
+    await flush();
+
+    expect(listOrganizationAdministrationMembers).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      "Access is managed automatically for the local administrator.",
+    );
+    expect(container.textContent).not.toContain("Add organization member");
+    expect(container.textContent).not.toContain("Fine-tune");
+    expect(button(container, "Create new workspace")).toBeInstanceOf(HTMLButtonElement);
 
     await act(async () => root.unmount());
     container.remove();

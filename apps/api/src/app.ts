@@ -1,9 +1,15 @@
+import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
+import { registerFeedbackRoutes } from "./routes/feedback";
+import { codemodeSessionRequest } from "./codemode";
+import { SiteSessionPathError } from "@opengeni/contracts";
+import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
   resolveFirstPartyMcpToolPolicy,
+  resolveVoiceInputProviderRegistry,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
@@ -18,6 +24,8 @@ import {
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  ToolGatewayApprovalRequest,
+  ToolGatewayCallRequest,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
@@ -33,6 +41,8 @@ import {
   CodemodePayloadTooLargeError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
+  ConnectAttemptConflictError,
+  ConnectAttemptNotFoundError,
   configureChildLifecycleNotices,
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
@@ -40,8 +50,8 @@ import {
   getWorkspace,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
+  resolveSessionMemoryAgentScope,
   rlsContextForWorkspace,
-  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -63,9 +73,11 @@ import {
   ManagedAuthActorLeaseOutcomeUnknownError,
   hasPermission,
   requireAccessGrant,
-  requireLiveAgentAttemptAuthorization,
+  requireAccessGrantAuthorization,
   requirePermission,
   releaseManagedAuthRequestActorLease,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -94,13 +106,33 @@ import {
   runManagedAuthProvider,
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
-import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
+import {
+  assertManagedEmailTransportMetadata,
+  assertOrganizationUserSetupQueryTransportConfigured,
+} from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import {
+  buildWorkspaceToolGatewayMcpServer,
+  approveWorkspaceToolGatewayCall,
+  callWorkspaceToolGateway,
+  grantUsesAttemptScopedMcp,
+  prepareMcpOAuthWorkspaceToolGateway,
+  prepareWorkspaceToolGateway,
+  workspaceToolGatewayDeclarations,
+} from "./workspace-tool-gateway";
+import {
+  isMcpOAuthResourcePath,
+  mcpOAuthAuthenticateHeader,
+  mcpOAuthBearerToken,
+  registerMcpOAuthRoutes,
+  resolveMcpOAuthRouteAccess,
+} from "./mcp-oauth";
+import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
+  CodemodeCatalogStaleError,
   isCodemodeGrant,
   readCodemodeOperation,
   requireActiveCodemodeCatalog,
@@ -113,11 +145,16 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
 import { allowedCorsOrigin } from "./http/cors";
+import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerConnectRoutes } from "./routes/connect";
+import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
+import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
@@ -164,6 +201,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
@@ -222,10 +260,27 @@ export function createApp(deps: AppDependencies): Hono {
   return createAppComposition(deps).app;
 }
 
+export async function resolveWorkspaceMcpRouteDeps(
+  routeDeps: ApiRouteDeps,
+  grant: AccessGrant,
+): Promise<ApiRouteDeps> {
+  const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
+  const resolvedCatalog = await resolveWorkspaceCatalogSettings(
+    routeDeps.db,
+    catalogSourceSettings,
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    },
+  );
+  return { ...routeDeps, catalogSourceSettings, settings: resolvedCatalog.settings };
+}
+
 export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
 } {
+  assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
   // @opengeni/config at boot; install it for every request-scoped db command
   // (Send/Steer/control/queue/settings/delete) built by this app.
@@ -358,6 +413,7 @@ export function createAppComposition(deps: AppDependencies): {
       : deps.transcriptionSegmenter;
   const routeDeps: ApiRouteDeps = {
     ...deps,
+    resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
@@ -383,6 +439,18 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  app.use("*", async (c, next) => {
+    const oauthToken = mcpOAuthBearerToken(c.req.raw);
+    if (
+      oauthToken &&
+      (!deps.settings.mcpOauthEnabled || !isMcpOAuthResourcePath(new URL(c.req.url).pathname))
+    ) {
+      c.header("www-authenticate", 'Bearer error="invalid_token"');
+      return c.json({ error: "invalid_token" }, 401);
+    }
+    await next();
+  });
+
   const corsHeaders = {
     allowHeaders: [
       "Accept",
@@ -394,6 +462,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      "X-OpenGeni-Site-Id",
+      "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
     ],
     exposeHeaders: [
@@ -403,6 +473,21 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
       "X-OpenGeni-Correlation-Id",
+      "X-OpenGeni-Covered-First",
+      "X-OpenGeni-Covered-Last",
+      "X-OpenGeni-Event-Direction",
+      "X-OpenGeni-Event-Mode",
+      "X-OpenGeni-Event-Result",
+      "X-OpenGeni-Event-Result-Mode",
+      "X-OpenGeni-Forensic-Exact",
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Next-After",
+      "X-OpenGeni-Next-Before",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Page-Max-Bytes",
+      "X-OpenGeni-Page-Truncated",
+      "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Truncated-By",
     ],
   };
   const publicApiCors = cors({
@@ -764,12 +849,16 @@ export function createAppComposition(deps: AppDependencies): {
     }),
   );
 
+  registerMcpOAuthRoutes(app, routeDeps);
+
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
-    const codexCatalogSettings = deps.settings.codexSubscriptionEnabled
-      ? withCodexCatalogProvider(deps.settings)
-      : deps.settings;
-    const catalogSettings = deps.settings.supergrokSubscriptionEnabled
+    const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
+    const baseCatalogSettings = resolvedCatalog.settings;
+    const codexCatalogSettings = baseCatalogSettings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(baseCatalogSettings)
+      : baseCatalogSettings;
+    const catalogSettings = baseCatalogSettings.supergrokSubscriptionEnabled
       ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
       : codexCatalogSettings;
     return c.json(
@@ -797,6 +886,9 @@ export function createAppComposition(deps: AppDependencies): {
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
+          providers: resolveVoiceInputProviderRegistry(deps.settings).map(
+            (provider) => provider.id,
+          ),
           available: (await transcription?.available()) ?? false,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
@@ -821,6 +913,7 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
+        billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
@@ -861,7 +954,54 @@ export function createAppComposition(deps: AppDependencies): {
       }
       throw error;
     }
-    const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
+    let oauthAccess: Awaited<ReturnType<typeof resolveMcpOAuthRouteAccess>>;
+    try {
+      oauthAccess = await resolveMcpOAuthRouteAccess(routeDeps, c.req.raw, workspaceId);
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) {
+        c.header(
+          "www-authenticate",
+          mcpOAuthAuthenticateHeader(routeDeps, new URL(c.req.url).pathname),
+        );
+      }
+      throw error;
+    }
+    if (oauthAccess) {
+      return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
+        const prepared = await prepareMcpOAuthWorkspaceToolGateway(
+          routeDeps,
+          oauthAccess.grant,
+          oauthAccess.allowedToolIdentities,
+        );
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+        });
+        const mcp = buildWorkspaceToolGatewayMcpServer(
+          prepared,
+          oauthAccess.grant,
+          routeDeps.observability,
+        );
+        try {
+          await mcp.connect(transport);
+          return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+        } finally {
+          await Promise.allSettled([mcp.close(), prepared.close()]);
+        }
+      });
+    }
+    let authorization: Awaited<ReturnType<typeof requireMcpAccessGrantAuthorization>>;
+    try {
+      authorization = await requireMcpAccessGrantAuthorization(c, routeDeps, workspaceId);
+    } catch (error) {
+      if (deps.settings.mcpOauthEnabled && error instanceof HTTPException && error.status === 401) {
+        c.header(
+          "www-authenticate",
+          mcpOAuthAuthenticateHeader(routeDeps, new URL(c.req.url).pathname),
+        );
+      }
+      throw error;
+    }
+    const grant = authorization.grant;
     return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
       const boundSessionId = grant.metadata?.sessionId;
       if (typeof boundSessionId === "string") {
@@ -889,16 +1029,157 @@ export function createAppComposition(deps: AppDependencies): {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
-      const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
+      if (!grantUsesAttemptScopedMcp(grant)) {
+        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
+        try {
+          await mcp.connect(transport);
+          return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+        } finally {
+          await Promise.allSettled([mcp.close(), prepared.close()]);
+        }
+      }
+      const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+      // The bound session's frozen Memory selector (migration 0427) decides
+      // which Memory tools the attempt receives and which typed layers they
+      // read and write. A missing row resolves to no Memory tools.
+      const sessionMemory =
+        typeof boundSessionId === "string"
+          ? ((await resolveSessionMemoryAgentScope(
+              routeDeps.db,
+              workspaceId,
+              boundSessionId,
+              grant.metadata,
+            )) ?? {
+              mode: "off" as const,
+              userSubjectId: null,
+              rootSessionId: null,
+            })
+          : null;
+      const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
         workspaceMemoryPromptMode,
+        sessionMemory,
       });
       await mcp.connect(transport);
       // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
       // worker that drops the call (Steer/Pause) aborts a blocking tool here.
       return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
     });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      c.header("cache-control", "no-store");
+      return c.json(prepared.toolGatewayCatalog);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/tools/calls", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const grant = authorization.grant;
+    const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid tool gateway call" });
+    }
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      return c.json(
+        await callWorkspaceToolGateway(
+          prepared,
+          grant,
+          parsed.data,
+          routeDeps.db,
+          undefined,
+          routeDeps.observability,
+        ),
+      );
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/tools/approvals", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const parsed = ToolGatewayApprovalRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid tool gateway approval" });
+    }
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      return c.json(
+        await approveWorkspaceToolGatewayCall(
+          prepared,
+          authorization.grant,
+          routeDeps.db,
+          parsed.data,
+          undefined,
+          routeDeps.observability,
+        ),
+        201,
+      );
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/tools/declarations", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      c.header("cache-control", "no-store");
+      return c.json(workspaceToolGatewayDeclarations(prepared));
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.all("/v1/workspaces/:workspaceId/codemode/sdk/*", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    const url = new URL(c.req.url);
+    const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
+    let forwarded: Request;
+    try {
+      forwarded = await codemodeSessionRequest(
+        routeDeps,
+        grant,
+        c.req.raw,
+        url.pathname.slice(prefix.length) + url.search,
+      );
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
+    return app.fetch(forwarded);
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -954,6 +1235,7 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
+  registerConnectCallbackReturns(app, routeDeps);
   registerFileRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
@@ -979,6 +1261,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubRoutes(app, routeDeps);
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerConnectRoutes(app, routeDeps);
+  registerHostMcpBindingRoutes(app, routeDeps);
+  registerExternalIdentityLinkRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
   registerIntegrationFacetRoutes(app, routeDeps);
@@ -994,14 +1279,18 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerFeedbackRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerConnectionAuthorityRoutes(app, routeDeps);
@@ -1093,7 +1382,11 @@ const publicWorkspaceBrowserRoutePatterns = [
 ] as const;
 
 export function workspaceActorContextExempt(method: string, pathname: string): boolean {
-  if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
+  // The account-scoped provisioning route shares the workspace collection prefix.
+  // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
+  // the route performs its own organization API-key authorization.
+  if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
+  if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
@@ -1122,46 +1415,15 @@ async function validateCodexAccountTarget(request: Request): Promise<void> {
   }
 }
 
-async function withAccessGrantSessionRlsContext<T>(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (grant.principalKind !== "agent_attempt") {
-    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
-  }
-  const callerSessionId = grant.metadata?.sessionId;
-  if (typeof callerSessionId !== "string") {
-    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
-  }
-  try {
-    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
-    return await withSessionRlsActorContext(
-      {
-        subjectId: actor.subjectId,
-        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-      },
-      fn,
-    );
-  } catch (error) {
-    if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(403, {
-        message: "agent attempt authority is invalid",
-        cause: error,
-      });
-    }
-    throw error;
-  }
-}
-
-async function requireMcpAccessGrant(
+async function requireMcpAccessGrantAuthorization(
   c: Parameters<typeof requireAccessGrant>[0],
   deps: ApiRouteDeps,
   workspaceId: string,
-): Promise<AccessGrant> {
-  const grant = await requireAccessGrant(c, deps, workspaceId);
+): Promise<Awaited<ReturnType<typeof requireAccessGrantAuthorization>>> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = authorization.grant;
   if (hasPermission(grant.permissions, "workspace:read")) {
-    return grant;
+    return authorization;
   }
   if (isCodemodeGrant(grant)) {
     requirePermission(grant, "workspace:read");
@@ -1171,10 +1433,10 @@ async function requireMcpAccessGrant(
   // authorization seam runs immediately after this gate, and tool registration
   // still exposes only capabilities permitted by the delegated grant.
   if (grant.metadata?.delegated === true && typeof grant.metadata.sessionId === "string") {
-    return grant;
+    return authorization;
   }
   requirePermission(grant, "workspace:read");
-  return grant;
+  return authorization;
 }
 
 function clientAuthConfig(settings: AppDependencies["settings"]) {
@@ -1210,6 +1472,12 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
 }
 
 function codemodeHttpError(error: unknown): HTTPException {
+  if (error instanceof SiteSessionPathError) {
+    // The proxied Site/SDK surface is an explicit allowlist; a route outside
+    // it (tool policy, visibility, forks, Steer, control, ...) does not exist
+    // for this caller rather than being a server fault.
+    return new HTTPException(404, { message: error.message, cause: error });
+  }
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, {
       message: "session not found",
@@ -1223,6 +1491,15 @@ function codemodeHttpError(error: unknown): HTTPException {
     });
   }
   if (error instanceof CodemodeCatalogNotReadyError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  if (error instanceof CodemodeCatalogStaleError) {
     return new ApiHttpError(409, {
       code: "conflict",
       message: error.message,
@@ -1311,6 +1588,8 @@ function codexCompactionV2ProviderLockedError(
 }
 
 export function httpStatusForError(error: unknown): number {
+  if (error instanceof ConnectAttemptConflictError) return 409;
+  if (error instanceof ConnectAttemptNotFoundError) return 404;
   if (codexCompactionV2ProviderLockedError(error)) {
     return 422;
   }
@@ -1343,6 +1622,9 @@ function retryableHttpStatus(status: number): boolean {
 }
 
 function publicErrorMessage(error: unknown, status: number): string {
+  if (error instanceof ConnectAttemptConflictError)
+    return "Connection setup changed or is still in progress. Reload its current status before retrying.";
+  if (error instanceof ConnectAttemptNotFoundError) return "Connection setup not found.";
   if (status === 502 || status === 503 || status === 504) {
     return "OpenGeni is temporarily unavailable — retry.";
   }
@@ -1379,11 +1661,14 @@ type ReadinessCheckResult = { ok: boolean; error?: string };
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
   const configuredNatsCheck = deps.readinessChecks?.nats;
   return {
-    db:
-      deps.readinessChecks?.db ??
-      (async () => {
+    db: async () => {
+      if (deps.readinessChecks?.db) {
+        await deps.readinessChecks.db();
+      } else {
         await deps.db.execute(dbSql`select 1`);
-      }),
+      }
+      await resolveCatalogSettings(deps.db, deps.settings);
+    },
     nats: async () => {
       requireSessionEventDurableFanoutCapability(deps.bus);
       if (configuredNatsCheck) {
@@ -1458,6 +1743,20 @@ const routeLabelPatterns: Array<{
   pattern: RegExp;
   label: string | ((match: RegExpMatchArray) => string);
 }> = [
+  {
+    pattern: /^\/\.well-known\/oauth-authorization-server$/,
+    label: "/.well-known/oauth-authorization-server",
+  },
+  {
+    pattern:
+      /^\/\.well-known\/oauth-protected-resource\/v1\/workspaces\/[^/]+\/mcp(?:\/(docs|files))?$/,
+    label: (match) =>
+      `/.well-known/oauth-protected-resource/v1/workspaces/:workspaceId/mcp${match[1] ? `/${match[1]}` : ""}`,
+  },
+  {
+    pattern: /^\/oauth\/(register|authorize|token)$/,
+    label: (match) => `/oauth/${match[1]}`,
+  },
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
@@ -1472,6 +1771,22 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/status$/,
     label: "/v1/workspaces/:workspaceId/codex/status",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/codex\/source$/,
+    label: "/v1/workspaces/:workspaceId/codex/source",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/(accounts|settings)$/,
+    label: (match) => `/v1/organizations/:organizationId/codex/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/connect\/(start|poll)$/,
+    label: (match) => `/v1/organizations/:organizationId/codex/connect/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/accounts\/[^/]+(?:\/activate)?$/,
+    label: "/v1/organizations/:organizationId/codex/accounts/:accountId",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/connect\/(start|poll)$/,
@@ -1526,6 +1841,22 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
     label: "/v1/workspaces/:workspaceId/mcp/files",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/catalog$/,
+    label: "/v1/workspaces/:workspaceId/tools/catalog",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/calls$/,
+    label: "/v1/workspaces/:workspaceId/tools/calls",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/approvals$/,
+    label: "/v1/workspaces/:workspaceId/tools/approvals",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/declarations$/,
+    label: "/v1/workspaces/:workspaceId/tools/declarations",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
@@ -1699,6 +2030,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
     label: "/v1/workspaces/:workspaceId/inference-control",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pause-timer$/,
+    label: "/v1/workspaces/:workspaceId/pause-timer",
   },
   {
     pattern:
@@ -1888,6 +2223,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/app$/,
     label: "/v1/workspaces/:workspaceId/github/app",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/action-policies$/,
+    label: "/v1/workspaces/:workspaceId/github/action-policies",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories$/,
@@ -2249,6 +2588,20 @@ const routeLabelPatterns: Array<{
 ];
 
 export function routeLabel(pathname: string): string {
+  if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
+    return "/v1/workspaces/:workspaceId/transcriptions";
+  const transcription = pathname.match(
+    /^\/v1\/workspaces\/[^/]+\/transcription-recordings(?:\/[^/]+(\/(?:finalize|process-next)|\/chunks\/\d+)?)?$/,
+  );
+  if (transcription) {
+    const base = "/v1/workspaces/:workspaceId/transcription-recordings";
+    if (pathname.split("/").length === 5) return base;
+    return (
+      base +
+      "/:recordingId" +
+      (transcription[1]?.startsWith("/chunks/") ? "/chunks/:chunkNumber" : (transcription[1] ?? ""))
+    );
+  }
   for (const candidate of routeLabelPatterns) {
     const match = pathname.match(candidate.pattern);
     if (match) {
@@ -2291,5 +2644,6 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   ) {
     return false;
   }
-  return !pathname.split("/").includes("mcp");
+  const segments = pathname.split("/");
+  return !segments.includes("mcp") && !segments.includes("codemode");
 }

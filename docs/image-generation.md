@@ -76,9 +76,14 @@ but never receive pixel-bearing `view_image` or computer tools.
 Adapter-backed generation is a paid, side-effecting operation. Before calling
 the provider, the worker prepares one stable `image_generation_operations` row
 keyed by workspace, logical turn, and tool-call identity, then advances it to
-`provider_started`. A recovery may complete a deterministic object upload that
-already exists, but never repeats a provider call after that transition. An
-ambiguous provider outcome remains `outcome_unknown`.
+`provider_started`. If the exact Codex lease fence rejects before the first
+provider request, the operation returns to `prepared` and remains retryable;
+the retry may safely rebind that prepared row to the selected failover
+credential and its derived artifact identity. The request, provider, and model
+identity remain immutable, and no binding may change after provider admission.
+Once a provider request has been admitted, a crash or ambiguous error remains
+`outcome_unknown`; a recovery may complete a deterministic object upload that
+already exists, but never repeats an admitted provider call.
 
 Native hosted generation remains part of the provider model call and therefore
 inherits the existing single-in-flight-model-step crash boundary. Its provider

@@ -2,6 +2,10 @@ import { isAbortError, isRetryableStreamError, OpenGeniStreamError } from "./err
 import { parseSseStream } from "./sse";
 import type { SessionEvent } from "./types";
 
+const SESSION_EVENT_STREAM_COVERAGE = Symbol.for(
+  "@opengeni/sdk/session-event-stream-covered-through",
+);
+
 /**
  * Transport boundary for the streaming core. The client implements it with
  * `fetch`; unit tests script it directly.
@@ -111,7 +115,8 @@ export async function* streamSessionEvents(
         if (!event) {
           continue;
         }
-        const coveredSequence = eventResumeSequence(event);
+        const coveredSequence = trustedSseSequence(message.id, event.sequence);
+        markSessionEventStreamCoverage(event, coveredSequence);
         if (coveredSequence <= cursor) continue;
         if (event.sequence > cursor + 1) {
           for await (const missed of backfillEvents(transport, cursor, event.sequence - 1)) {
@@ -283,13 +288,29 @@ function parseSessionEvent(data: string): SessionEvent | null {
   return parsed as SessionEvent;
 }
 
-/** Raw durable cursor covered by a compact SSE event. */
-function eventResumeSequence(event: SessionEvent): number {
-  if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
-    return event.sequence;
-  }
-  const covered = Number((event.payload as Record<string, unknown>).coalescedUntil);
-  return Math.max(event.sequence, Number.isFinite(covered) ? Math.floor(covered) : event.sequence);
+/** Trusted SSE coverage attached non-enumerably to a streamed event. */
+export function sessionEventStreamCoveredThrough(event: SessionEvent): number | null {
+  const covered = (event as SessionEvent & { [SESSION_EVENT_STREAM_COVERAGE]?: unknown })[
+    SESSION_EVENT_STREAM_COVERAGE
+  ];
+  return typeof covered === "number" && Number.isSafeInteger(covered) && covered >= event.sequence
+    ? covered
+    : null;
+}
+
+function trustedSseSequence(id: string | undefined, sequence: number): number {
+  if (id === undefined || !/^\d+$/.test(id)) return sequence;
+  const covered = Number(id);
+  return Number.isSafeInteger(covered) && covered >= sequence ? covered : sequence;
+}
+
+function markSessionEventStreamCoverage(event: SessionEvent, covered: number): void {
+  Object.defineProperty(event, SESSION_EVENT_STREAM_COVERAGE, {
+    value: covered,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
 }
 
 async function sleep(delayMs: number, signal: AbortSignal | undefined): Promise<void> {

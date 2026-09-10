@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import {
   BROWSER_CONTROL_MAX_JSON_BYTES,
@@ -162,6 +162,34 @@ export type ComputerControlFrame = {
   data: Uint8Array;
   mediaType: "image/jpeg" | "image/png";
   metadataHeader: string;
+  metadata: ComputerControlFrameMetadata;
+};
+
+export type ComputerControlFrameMetadata = {
+  frameId: string;
+  computerSessionId: string;
+  controllerGeneration: string;
+  targetId: string;
+  targetGeneration: string;
+  sequence: number;
+  mediaType: "image/jpeg" | "image/png";
+  width: number;
+  height: number;
+  capturedAt: string;
+  sha256: string;
+};
+
+export type ComputerFrameEvidenceMismatchReason =
+  | "frame_session_mismatch"
+  | "frame_target_mismatch"
+  | "frame_controller_mismatch"
+  | "frame_media_mismatch"
+  | "frame_digest_mismatch";
+
+export type ExpectedComputerFrameEvidence = {
+  computerSessionId: string;
+  controllerGeneration: string;
+  targetId: string;
 };
 
 /** Controller I/O uses absolute private paths under /tmp, so its cwd carries
@@ -347,6 +375,12 @@ export class BrowserControlTransportError extends Error {
 export class BrowserControlProtocolError extends Error {
   readonly name = "BrowserControlProtocolError";
   readonly retryable = false;
+}
+
+export class ComputerFrameEvidenceMismatchError extends BrowserControlProtocolError {
+  constructor(readonly reason: ComputerFrameEvidenceMismatchReason) {
+    super("computer frame evidence does not match its request");
+  }
 }
 
 export class BrowserControlRequestError extends Error {
@@ -910,6 +944,7 @@ export class BrowserControlClient {
     method: "GET";
     path: string;
     token: string;
+    expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
   }): Promise<ComputerControlFrame> {
     return await this.requestBytes(input);
@@ -1093,6 +1128,7 @@ export class BrowserControlClient {
       method: "GET";
       path: string;
       token: string;
+      expectedFrameEvidence: ExpectedComputerFrameEvidence;
       timeoutMs?: number;
     },
     retryNativeEndpoint = true,
@@ -1214,7 +1250,7 @@ export class BrowserControlClient {
         COMPUTER_SCREENSHOT_MAX_BYTES,
         timeoutMs,
       );
-      return computerControlFrame(data, headers);
+      return computerControlFrame(data, headers, input.expectedFrameEvidence);
     } catch (error) {
       if (
         error instanceof BrowserControlRequestError ||
@@ -1613,6 +1649,11 @@ export class ComputerControlSessionClient {
       method: "GET",
       path: this.targetPath(targetId, suffix),
       token: this.viewToken,
+      expectedFrameEvidence: {
+        computerSessionId: this.reference.computerSessionId,
+        controllerGeneration: this.reference.controllerGeneration,
+        targetId: requireOpaqueId(targetId, "computer target id"),
+      },
     });
   }
 
@@ -1803,6 +1844,7 @@ async function requestExposedControllerBytes(
     method: "GET";
     path: string;
     token: string;
+    expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
   },
   defaultTimeoutMs: number,
@@ -1835,12 +1877,13 @@ async function requestExposedControllerBytes(
     throw new RangeError("computer frame exceeds its byte bound");
   }
   const data = new Uint8Array(await response.arrayBuffer());
-  return computerControlFrame(data, response.headers);
+  return computerControlFrame(data, response.headers, input.expectedFrameEvidence);
 }
 
 function computerControlFrame(
   data: Uint8Array,
   headers: { get(name: string): string | null | undefined },
+  expected: ExpectedComputerFrameEvidence,
 ): ComputerControlFrame {
   if (data.byteLength < 1 || data.byteLength > COMPUTER_SCREENSHOT_MAX_BYTES) {
     throw new RangeError("computer frame exceeds its byte bound");
@@ -1858,7 +1901,126 @@ function computerControlFrame(
   ) {
     throw new BrowserControlProtocolError("computer frame metadata is invalid");
   }
-  return { data, mediaType, metadataHeader };
+  return validateComputerControlFrameEvidence({ data, mediaType, metadataHeader }, expected);
+}
+
+export function validateComputerControlFrameEvidence(
+  frame: Pick<ComputerControlFrame, "data" | "mediaType" | "metadataHeader">,
+  expected: ExpectedComputerFrameEvidence,
+): ComputerControlFrame {
+  const metadata = decodeComputerControlFrameMetadataHeader(frame.metadataHeader);
+  if (metadata.computerSessionId !== expected.computerSessionId) {
+    throw new ComputerFrameEvidenceMismatchError("frame_session_mismatch");
+  }
+  if (metadata.targetId !== expected.targetId) {
+    throw new ComputerFrameEvidenceMismatchError("frame_target_mismatch");
+  }
+  if (metadata.controllerGeneration !== expected.controllerGeneration) {
+    throw new ComputerFrameEvidenceMismatchError("frame_controller_mismatch");
+  }
+  if (metadata.mediaType !== frame.mediaType) {
+    throw new ComputerFrameEvidenceMismatchError("frame_media_mismatch");
+  }
+  const digest = createHash("sha256").update(frame.data).digest("hex");
+  if (metadata.sha256 !== digest) {
+    throw new ComputerFrameEvidenceMismatchError("frame_digest_mismatch");
+  }
+  return { ...frame, metadata };
+}
+
+export function decodeComputerControlFrameMetadataHeader(
+  value: string,
+): ComputerControlFrameMetadata {
+  if (!value || value.length > 32 * 1024 || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  if (!isRecord(decoded)) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  const allowed = new Set([
+    "frameId",
+    "computerSessionId",
+    "controllerGeneration",
+    "targetId",
+    "targetGeneration",
+    "sequence",
+    "mediaType",
+    "width",
+    "height",
+    "capturedAt",
+    "sha256",
+  ]);
+  if (Object.keys(decoded).some((key) => !allowed.has(key))) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  for (const key of [
+    "frameId",
+    "computerSessionId",
+    "controllerGeneration",
+    "targetId",
+    "targetGeneration",
+    "mediaType",
+    "capturedAt",
+  ] as const) {
+    const item = decoded[key];
+    const maxBytes = key === "targetId" ? 512 : key === "capturedAt" ? 128 : 256;
+    if (typeof item !== "string" || item.length < 1 || Buffer.byteLength(item) > maxBytes) {
+      throw new BrowserControlProtocolError("computer frame metadata is invalid");
+    }
+  }
+  if (typeof decoded.sha256 !== "string" || !SHA256_PATTERN.test(decoded.sha256)) {
+    throw new ComputerFrameEvidenceMismatchError("frame_digest_mismatch");
+  }
+  if (
+    !Number.isSafeInteger(decoded.sequence) ||
+    Number(decoded.sequence) < 0 ||
+    !boundedComputerFrameDimension(decoded.width, decoded.height)
+  ) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  if (decoded.mediaType !== "image/jpeg" && decoded.mediaType !== "image/png") {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  if (!isUuidString(decoded.computerSessionId)) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  const controllerGeneration = decoded.controllerGeneration;
+  if (
+    typeof controllerGeneration !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(controllerGeneration)
+  ) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  const capturedAt = decoded.capturedAt;
+  if (typeof capturedAt !== "string" || !Number.isFinite(new Date(capturedAt).valueOf())) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  return decoded as ComputerControlFrameMetadata;
+}
+
+function boundedComputerFrameDimension(width: unknown, height: unknown): boolean {
+  return (
+    Number.isSafeInteger(width) &&
+    Number.isSafeInteger(height) &&
+    Number(width) > 0 &&
+    Number(height) > 0 &&
+    Number(width) <= 32_768 &&
+    Number(height) <= 32_768 &&
+    Number(width) * Number(height) <= 100_000_000
+  );
+}
+
+function isUuidString(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+  );
 }
 
 function exposedControllerUrl(endpoint: ExposedPortEndpoint, requestPath: string): URL {

@@ -114,8 +114,8 @@ describe("artifact runtime workflow contract", () => {
 
     const serverBuilds = [
       ["api-image", "api_image"],
-      ["worker-web-images", "worker_image"],
-      ["worker-web-images", "web_image"],
+      ["worker-image", "worker_image"],
+      ["web-image", "web_image"],
       ["artifact-materializer-image", "artifact_materializer_image"],
       ["artifact-outbox-dispatcher-image", "artifact_outbox_dispatcher_image"],
     ].map(([jobName, stepId]) =>
@@ -143,5 +143,61 @@ describe("artifact runtime workflow contract", () => {
       (step) => step.id === "sandbox_image",
     );
     expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+  });
+
+  test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {
+    const source = await readFile(
+      resolve(root, ".github/workflows/publish-desktop-image.yml"),
+      "utf8",
+    );
+    const parsed = Bun.YAML.parse(source) as {
+      jobs: Record<
+        string,
+        {
+          needs?: string | string[];
+          uses?: string;
+          with?: Readonly<Record<string, unknown>>;
+          steps?: readonly CiStep[];
+        }
+      >;
+    };
+
+    expect(parsed.jobs["artifact-runtime"]?.uses).toBe("./.github/workflows/artifact-runtime.yml");
+    expect(parsed.jobs["artifact-runtime"]?.with?.source_sha).toBe("${{ github.sha }}");
+    expect(parsed.jobs["desktop-image"]?.needs).toBe("artifact-runtime");
+    expect(
+      parsed.jobs["desktop-image"]?.steps?.find(
+        (step) => step.name === "Download exact artifact runtime inputs",
+      )?.with?.name,
+    ).toBe("${{ needs.artifact-runtime.outputs.artifact_name }}");
+    expect(
+      parsed.jobs["desktop-image"]?.steps?.find(
+        (step) => step.name === "Download exact artifact runtime inputs",
+      )?.with?.path,
+    ).toBe(".release/artifact-runtime");
+    expect(
+      parsed.jobs["desktop-image"]?.steps?.find((step) => step.id === "desktop_image")?.with?.[
+        "build-args"
+      ],
+    ).toBe("OPENGENI_SOURCE_SHA=${{ github.sha }}");
+    const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
+      (step) => step.id === "desktop_image",
+    );
+    expect(desktopBuild?.with?.labels).toContain(
+      "org.opencontainers.image.revision=${{ github.sha }}",
+    );
+    expect(desktopBuild?.with?.labels).toContain(
+      "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
+    );
+    for (const glob of [
+      "packages/artifact-tool/**",
+      "packages/artifact-kernel-wasm-document/**",
+      "packages/artifact-kernel-wasm-presentation/**",
+      "packages/artifact-kernel-wasm-spreadsheet/**",
+      "scripts/*artifact*.ts",
+      ".github/workflows/artifact-runtime.yml",
+    ]) {
+      expect(source).toContain(`- "${glob}"`);
+    }
   });
 });

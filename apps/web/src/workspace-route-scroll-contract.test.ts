@@ -108,6 +108,29 @@ describe("workspace route scroll ownership", () => {
     }
   });
 
+  test("settings shells consume the app canvas remainder instead of reclaiming the viewport", async () => {
+    const sharedSource = await source("components/settings/settings-sidebar.tsx");
+    const shellClasses = sharedSource.match(/export const SETTINGS_SHELL_CLASS =\s*"([^"]+)"/)?.[1];
+    expect(shellClasses, "shared settings layout must fit below persistent app chrome").toContain(
+      "h-full",
+    );
+    expect(shellClasses).toContain("min-h-0");
+    expect(shellClasses).not.toContain("h-dvh");
+    for (const path of [
+      "components/settings/workspace-settings-shell.tsx",
+      "components/settings/organization-settings-shell.tsx",
+    ]) {
+      const shellSource = await source(path);
+      expect(shellSource, `${path} must use the shared bounded settings layout`).toContain(
+        "className={SETTINGS_SHELL_CLASS}",
+      );
+      expect(
+        shellSource,
+        `${path} must not clip app chrome by reclaiming the viewport`,
+      ).not.toContain("h-dvh");
+    }
+  });
+
   test("legacy max-width wrappers cannot return as route scroll owners", async () => {
     const legacyWrapper =
       'className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8"';

@@ -203,7 +203,7 @@ workspace-Memory candidates and composition facts. It cannot change
 `knowledge_memories`, structured preferences, company profile, instruction
 policy, or prompt composition.
 
-The runtime's existing Skills capability already gives selected Skills an
-always-visible bounded name/description index and lazily materializes the full
-body only when `load_skill` is called. Knowledge retrieval does not duplicate
-that descriptor catalog.
+The runtime inserts a bounded Skill name/description index into agent instructions.
+The eager `skill_read` tool returns selected files without starting a sandbox;
+lazy `skill_checkout` copies files to disk only when needed. Knowledge retrieval
+does not duplicate that descriptor catalog.
