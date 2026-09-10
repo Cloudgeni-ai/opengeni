@@ -22607,6 +22607,17 @@ async function lockOrganizationCodexSubscriptionSources(
   `);
   const workspaceIds = rows.map((row: { workspace_id: string }) => row.workspace_id);
   for (const workspaceId of workspaceIds) {
+    // Credential deletion clears session pins/last-used references through FK
+    // SET NULL, including references in Personal or no-longer-inheriting
+    // workspaces. Fence the complete authorized inventory before any source,
+    // pool, or credential lock; the FK's session writes cannot acquire this
+    // prefix after taking their row locks. Keep the UUID order across both
+    // passes, matching ordinary workspace writers' tenancy -> source order.
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+    );
+  }
+  for (const workspaceId of workspaceIds) {
     // Organization credential mutations can change automatic routing in every
     // inheriting workspace. Acquire all workspace source locks before the
     // organization rotation row, matching normal acquisition's source -> pool
