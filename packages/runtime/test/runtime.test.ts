@@ -11316,7 +11316,9 @@ describe("runtime Skill activation", () => {
     expect(entry).toBeDefined();
     const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
     const composition = composeRuntimeSkills([installedActivation(loaded)]);
-    const artifact = composition.artifacts.find((candidate) => candidate.name === loaded.skill.name);
+    const artifact = composition.artifacts.find(
+      (candidate) => candidate.name === loaded.skill.name,
+    );
     expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toContain(
       "Azure Verified Modules",
     );
