@@ -864,6 +864,11 @@ workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
+Repository `.agents/skills` contains only maintainer (`opengeni`) and external
+integration (`opengeni-client`) guidance. Runtime skills are authored directly in
+`packages/runtime/src/bundled_*_skills`; these directories are authoritative and
+shipped as runtime assets, without repository-agent copies or a synchronization step.
+
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
 Before every follow-up provider request, the worker reconciles the SDK's
