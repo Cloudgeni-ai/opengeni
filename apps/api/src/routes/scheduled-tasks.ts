@@ -169,7 +169,13 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/resume", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "scheduled_tasks:manage",
+    );
+    const grant = authorization.grant;
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
     const catalogSettings = (
@@ -185,6 +191,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       grant,
       existing,
       payload: { status: "active" },
+      authorization,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
