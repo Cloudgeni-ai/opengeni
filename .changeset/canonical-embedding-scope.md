@@ -15,4 +15,4 @@ address the same session ID. Reopen legacy user-namespaced chats by session ID.
 Retire active session Memory in favor of task notes. Historical session Memory
 remains stored and old selectors hydrate as off, never workspace. User Memory
 uses the verified active-turn user. Preserve frozen scheduled agent-reach policy.
-Migration 0452 requires the documented maintenance cutover and matching writers.
+Migration 0457 requires the documented maintenance cutover and matching writers.

@@ -59,13 +59,13 @@ BEGIN
   definition := pg_get_functiondef('list_self_organization_memberships(text)'::regprocedure);
   anchor := 'OR p_subject_id NOT LIKE ''user:%''';
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-    RAISE EXCEPTION '0437 self membership guard drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0442 self membership guard drift' USING ERRCODE = '55000';
   END IF;
   definition := replace(definition, anchor,
     'OR (p_subject_id NOT LIKE ''user:%'' AND NOT opengeni_private.active_external_owning_subject(opengeni_private.current_account_id(), p_subject_id))');
   anchor := 'WHERE membership.subject_id = p_subject_id;';
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-    RAISE EXCEPTION '0437 self membership scope drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0442 self membership scope drift' USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, anchor,
     'WHERE membership.subject_id = p_subject_id AND (p_subject_id LIKE ''user:%'' OR membership.account_id = opengeni_private.current_account_id());');
@@ -73,7 +73,7 @@ BEGIN
   anchor := 'OR p_actor_subject_id NOT LIKE ''user:%''';
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1
     OR strpos(definition, 'organization_private_sessions_enabled') = 0 THEN
-    RAISE EXCEPTION '0437 private create policy drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0442 private create policy drift' USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, anchor,
     'OR (p_actor_subject_id NOT LIKE ''user:%'' AND NOT opengeni_private.active_external_owning_subject(p_account_id, p_actor_subject_id))');

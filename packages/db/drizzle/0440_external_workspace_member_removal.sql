@@ -14,7 +14,7 @@ BEGIN
     'opengeni_private.assert_workspace_membership_removal_actor(uuid,uuid,text,text)'::regprocedure);
   anchor := '  actor_can_administer boolean;';
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-    RAISE EXCEPTION '0435 removal declaration drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0440 removal declaration drift' USING ERRCODE = '55000';
   END IF;
   definition := replace(definition, anchor, anchor || E'\n  service_permissions jsonb;\n  service_can_administer boolean := false;');
   anchor := '  SELECT actor_is_organization_administrator OR EXISTS (';
@@ -43,7 +43,7 @@ BEGIN
   SELECT actor_is_organization_administrator OR service_can_administer OR EXISTS (
 $service$;
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-    RAISE EXCEPTION '0435 removal authority drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0440 removal authority drift' USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, anchor, replacement);
 
@@ -51,7 +51,7 @@ $service$;
   anchor := '''human'', actor_subject, ''workspace.membership.remove''';
   IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1
     OR strpos(definition, 'acquire_session_tenancy_fence') = 0 THEN
-    RAISE EXCEPTION '0435 removal receipt or fence drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0440 removal receipt or fence drift' USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, anchor,
     'CASE WHEN actor_subject LIKE ''api_key:%'' THEN ''service'' ELSE ''human'' END, actor_subject, ''workspace.membership.remove''');

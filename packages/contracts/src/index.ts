@@ -12331,7 +12331,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
     /** Agent-to-agent reach declared at create; see {@link SessionAgentAccess}. */
     agentAccess: SessionAgentAccess.default("workspace"),
-    /** Opaque product label; null when the create carried none. */
+    /** Canonical native/asUser scope identity; null for unscoped service work. */
     scopeSubjectId: SessionScopeSubjectId.nullable().default(null),
     /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
     memoryScope: SessionMemoryScope.default("workspace"),
@@ -12548,9 +12548,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
 /**
- * `GET /v1/organizations/:organizationId/sessions` query. `endUserSource` and
- * `endUserId` must be supplied together; `status` keeps only sessions in that
- * exact lifecycle state.
+ * Organization session queries may filter a canonical scope subject and lifecycle
+ * state. Legacy end-user label filters are rejected.
  */
 export const ListOrganizationSessionsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -14903,13 +14902,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * omission and may only narrow it (workspace > user > session); a wider
        * explicit child value is rejected. Never widens human or API-key access. */
       agentAccess: SessionAgentAccess.default("workspace"),
-      /** Opaque product label for the human this session serves. A child
-       * inherits its parent's label; naming a different pair is rejected. */
+      /** Identity comes from verified native/asUser authority, never request fields. */
       scopeSubjectId: z.never().optional(),
       endUser: z.never().optional(),
-      /** Typed Memory selector. `user` requires an end-user label (own or
-       * inherited; 422 otherwise). A child inherits its parent's value on
-       * omission and may only narrow it (workspace > user > session > off). */
+      /** Typed Memory selector. `user` requires canonical user authority. Children
+       * inherit omission and may only narrow (workspace > user > off). */
       memoryScope: SessionMemoryScope.default("workspace"),
       initialMessage: z.string().min(1).optional(),
       // Creates the durable session shell without fabricating a user message or
@@ -15106,9 +15103,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         message: "new-session attachment authority epoch is derived by the server",
       });
     }
-    // memoryScope "user" requires an end-user label, but an agent-created child
-    // inherits its parent's label on omission, so that rule is enforced by the
-    // core create resolver (422) after inheritance rather than at parse time.
+    // Canonical user authority and child inheritance are resolved by the core
+    // create resolver, which rejects user Memory without that authority.
   }),
 );
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;

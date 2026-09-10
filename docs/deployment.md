@@ -1,22 +1,22 @@
 # Deployment
 
-### Host MCP, native-link and Connect authority migrations (0438–0445)
+### Host MCP, native-link and Connect authority migrations (0443–0456)
 
-`0438_host_mcp_binding_registry.sql`, `0439_host_mcp_delegations.sql`, and
-`0440_host_mcp_turn_authorities.sql` introduce the registry and direct-turn contract.
-Migrations 0436–0438 extend it with exact causal continuation, immutable task
+`0443_host_mcp_binding_registry.sql`, `0444_host_mcp_delegations.sql`, and
+`0445_host_mcp_turn_authorities.sql` introduce the registry and direct-turn contract.
+Migrations 0446–0448 extend it with exact causal continuation, immutable task
 revision selections, and guarded child inheritance.
-Migrations 0439–0441 add optional native consent, immutable linked-work provenance,
-bounded consent identity previews and scheduled-origin checks. Migration 0442
+Migrations 0449–0452 add optional native consent, immutable linked-work provenance,
+bounded consent identity previews and scheduled-origin checks. Migration 0453
 allows separately owned native host bindings through organization membership;
 it never transfers an external binding or changes existing resource owners.
-Migration 0443 preserves immutable external Connect origin authority separately
+Migration 0454 preserves immutable external Connect origin authority separately
 from the effective owner. All setup mutations and callback receipts recheck that
 origin as well as current request authority; changing API keys cannot bypass
-revocation. Do not restart a pre-0443 Connect writer that omits this restriction.
-Migration 0444 adds bounded, participant-only identity labels for link inventory;
+revocation. Do not restart a pre-0454 Connect writer that omits this restriction.
+Migration 0455 adds bounded, participant-only identity labels for link inventory;
 it does not grant application roles direct access to external identity mappings.
-Migration 0445 versions social connections on every update, including refresh and
+Migration 0456 versions social connections on every update, including refresh and
 disconnect. Reconnect commits must match the observed version and upstream account;
 a concurrent change produces a conflict rather than overwriting another account.
 Stop old API and worker database sessions and provide the complete runtime login
@@ -32,7 +32,7 @@ API and SDK; direct human starts explicitly select grants for atomic
 initial-turn capture. Worker runtime
 validation requires an exact captured authority snapshot and denies missing records.
 Existing inline credentials remain unchanged; durable renewal is still opt-in.
-Migration 0440 adds direct-turn snapshot storage with a canonical insert guard
+Migration 0445 adds direct-turn snapshot storage with a canonical insert guard
 and SELECT/INSERT-only application privileges. Its binding/delegation foreign
 keys prevent deleting referenced metadata while accepted work remains. Internal
 capture is reached through verified direct-create admission, gated by the host
@@ -56,8 +56,8 @@ mutation.
 
 ## Organization-scoped external workspace cutover
 
-Migration `0432_organization_scoped_external_workspaces.sql` is maintenance-only.
-The combined embedding cutover includes `0452_canonical_session_scope_subject.sql`:
+Migration `0437_organization_scoped_external_workspaces.sql` is maintenance-only.
+The combined embedding cutover includes `0457_canonical_session_scope_subject.sql`:
 drain every old API/control-worker/turn-worker database login, provide the complete
 application-role list, and start only the matching release. Do not restart old
 label-authority writers. The new canonical scope column is nullable for old
@@ -74,7 +74,7 @@ Existing workspace IDs and rows are preserved. After commit, do not restart an
 old binary: its global `ON CONFLICT` target no longer matches the database.
 Rollback requires a reviewed database restore or forward repair, not an old image.
 
-Migration `0433_durable_connect_attempts.sql` adds actor-scoped setup state and
+Migration `0438_durable_connect_attempts.sql` adds actor-scoped setup state and
 changes the exact FORCE-RLS/runtime table contract. Drain the same complete
 API/worker role list, apply it, then run `db:provision-roles` for the matching
 runtime role. Do not restart an older binary after this cutover. Attempt state
@@ -84,10 +84,10 @@ requires reconciliation. Actor-local creation prunes at most 100 attempts older
 than 30 days after expiry, including their setup idempotency receipts, but never
 deletes the associated Connection.
 
-Migration `0434_external_identity_provisioning.sql` requires the same maintenance
+Migration `0439_external_identity_provisioning.sql` requires the same maintenance
 drain and matching role provisioning. Migrations
-`0435_external_workspace_member_removal.sql` and
-`0436_external_identity_membership_lifecycle.sql` are rolling extensions of the
+`0440_external_workspace_member_removal.sql` and
+`0441_external_identity_membership_lifecycle.sql` are rolling extensions of the
 existing lifecycle routines. The first adds live-key external-member removal;
 the second adds explicit service attribution to immutable organization lifecycle
 history and synchronizes external admission generations with member transitions.
@@ -97,7 +97,7 @@ transitions require explicit `account:admin`, and reactivation does not restore
 revoked memberships or durable grants. Include the nullable native actor and
 separate service subject when projecting lifecycle audit records.
 
-Migration `0437_external_owning_user_authority.sql` adds persisted external-owner
+Migration `0442_external_owning_user_authority.sql` adds persisted external-owner
 consistency checks to the existing self-membership and private-create routines.
 It does not activate private sessions: platform readiness and shared-workspace
 organization settings still apply. Pair it with the API's dedicated external

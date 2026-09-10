@@ -478,8 +478,12 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     await expectAllowed(callTool(shared0Server, "session_get", { sessionId: shared1.id }));
 
     expect(await listedIds(user1Server)).toEqual(new Set([user1.id, shared1.id]));
-    expect(await listedIds(shared1Server)).toEqual(new Set([user1.id, user2.id, shared1.id, shared0.id]));
-    expect(await listedIds(shared0Server)).toEqual(new Set([user1.id, user2.id, shared1.id, shared0.id]));
+    expect(await listedIds(shared1Server)).toEqual(
+      new Set([user1.id, user2.id, shared1.id, shared0.id]),
+    );
+    expect(await listedIds(shared0Server)).toEqual(
+      new Set([user1.id, user2.id, shared1.id, shared0.id]),
+    );
 
     // The human end-user filter is an exact pair.
     expect(

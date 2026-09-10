@@ -110,12 +110,12 @@ BEGIN
     anchor := '  input_hash_value text;';
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1
       OR strpos(definition, 'acquire_organization_session_tenancy_fences') = 0 THEN
-      RAISE EXCEPTION '0436 lifecycle declaration or fence drift: %', signature USING ERRCODE = '55000';
+      RAISE EXCEPTION '0441 lifecycle declaration or fence drift: %', signature USING ERRCODE = '55000';
     END IF;
     definition := replace(definition, anchor, anchor || E'\n  service_authorized boolean := false;');
     anchor := '  input_hash_value := pg_catalog.encode(';
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-      RAISE EXCEPTION '0436 lifecycle admission drift: %', signature USING ERRCODE = '55000';
+      RAISE EXCEPTION '0441 lifecycle admission drift: %', signature USING ERRCODE = '55000';
     END IF;
     definition := replace(definition, anchor,
       E'  service_authorized := opengeni_private.external_membership_service_authority(p_command);\n' || anchor);
@@ -127,7 +127,7 @@ BEGIN
       replacement := 'IF NOT service_authorized AND (NOT FOUND OR actor.status <> ''active'') THEN';
     END IF;
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-      RAISE EXCEPTION '0436 lifecycle actor guard drift: %', signature USING ERRCODE = '55000';
+      RAISE EXCEPTION '0441 lifecycle actor guard drift: %', signature USING ERRCODE = '55000';
     END IF;
     definition := replace(definition, anchor, replacement);
     IF signature = 'organization_membership_command_0263(jsonb)' THEN
@@ -135,24 +135,24 @@ BEGIN
       -- native administration checks stay byte-for-byte for native actors.
       anchor := 'IF actor.role NOT IN (''owner'', ''admin'') THEN';
       IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 3 THEN
-        RAISE EXCEPTION '0436 lifecycle role guard drift' USING ERRCODE = '55000';
+        RAISE EXCEPTION '0441 lifecycle role guard drift' USING ERRCODE = '55000';
       END IF;
       definition := replace(definition, anchor, 'IF NOT service_authorized AND actor.role NOT IN (''owner'', ''admin'') THEN');
       anchor := 'account_id, operation_id, actor_membership_id, target_membership_id, kind,';
       IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-        RAISE EXCEPTION '0436 lifecycle audit columns drift' USING ERRCODE = '55000';
+        RAISE EXCEPTION '0441 lifecycle audit columns drift' USING ERRCODE = '55000';
       END IF;
       definition := replace(definition, anchor,
         'account_id, operation_id, actor_membership_id, actor_service_subject, target_membership_id, kind,');
       anchor := 'account_id_value, operation_id_value, actor.id,';
       IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-        RAISE EXCEPTION '0436 lifecycle audit values drift' USING ERRCODE = '55000';
+        RAISE EXCEPTION '0441 lifecycle audit values drift' USING ERRCODE = '55000';
       END IF;
       definition := replace(definition, anchor,
         'account_id_value, operation_id_value, actor.id, CASE WHEN service_authorized THEN actor_subject ELSE NULL END,');
       anchor := '''human'', actor_subject, ''organization.membership.'' || action_name';
       IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-        RAISE EXCEPTION '0436 lifecycle interruption audit drift' USING ERRCODE = '55000';
+        RAISE EXCEPTION '0441 lifecycle interruption audit drift' USING ERRCODE = '55000';
       END IF;
       definition := replace(definition, anchor,
         'CASE WHEN service_authorized THEN ''service'' ELSE ''human'' END, actor_subject, ''organization.membership.'' || action_name');

@@ -37,7 +37,7 @@ pinned-version calls and pre-execution stale-catalog recovery. The console's
 Canonical Connect wire validation is in `packages/contracts/src/connect.ts`;
 `packages/db/src/connect-attempts.ts` owns scoped attempt creation, operation
 claims, atomic completion receipts, expiry, and bounded metadata retention.
-Migration 0449 freezes the credential-free external continuation privately on
+Migration 0454 freezes the credential-free external continuation privately on
 the attempt. Claim and commit recheck both current actor authority and saved
 origin, including on replay. The exact return destination and named installation
 targets cannot change during setup.
@@ -84,14 +84,14 @@ organization-service-key provenance from native-human and attempt claims.
 These new request-time lanes recheck live authority before provider invocation
 and approval issuance; existing catalog filtering and approval rules remain
 authoritative. This does not supply durable scheduled/binding delegation.
-Migration 0438 adds the credential-free `host_mcp_bindings` registry with
+Migration 0443 adds the credential-free `host_mcp_bindings` registry with
 FORCE-RLS external-owner scope, immutable destination/identity, idempotent
 registration, and terminal generation-advancing revocation. Its DB seam is
 `packages/db/src/host-mcp-bindings.ts`; the API adapter is
 `apps/api/src/routes/host-mcp-bindings.ts`. Registration/read/revoke use verified
 external authority, but registration is not an execution delegation. Do not infer authority
 from a registry row, historical creator, or a host credential response.
-Migration 0439 adds owner-scoped `host_mcp_delegations` alongside that registry.
+Migration 0444 adds owner-scoped `host_mcp_delegations` alongside that registry.
 Its internal DB API reuses session/always grant scopes, shared-output
 acknowledgement, binding generation and live owner/workspace checks. Neither
 these metadata rows nor `HostMcpAcceptedAuthority` schemas admit execution:
@@ -104,7 +104,7 @@ under live owner/grant/session/turn locks and passes it to a capture callback.
 It is not authentication or storage; production acceptance must invoke it within
 its canonical session-activity transaction and persist an immutable snapshot.
 Scheduled/inherited work is deliberately excluded from this direct-only seam.
-Migration 0440 adds `host_mcp_turn_authorities`, an owner-scoped FORCE-RLS
+Migration 0445 adds `host_mcp_turn_authorities`, an owner-scoped FORCE-RLS
 direct-turn ledger. `captureDirectHostMcpAuthority` persists the builder's
 snapshot; its insert trigger independently reconstructs and checks canonical
 authority. The runtime role has only SELECT/INSERT, and foreign keys retain
@@ -131,7 +131,7 @@ same selected-config admission helper, capturing atomically after fresh turn
 insertion in `submitHumanPromptInTransaction`. Prompt replay identity includes
 nonempty canonical selections; replay never invokes capture.
 `host-mcp-task-authority.ts` freezes explicit selections against native task
-revisions (0442), carries them through reusable-session promotion and rollback,
+revisions (0447), carries them through reusable-session promotion and rollback,
 and captures scheduled turns before attempt registration. All three native
 execution modes retain their existing scheduling rules. Agent-created tasks
 inherit only selected live grants from the exact signed calling attempt.
@@ -145,21 +145,21 @@ Turn authority ledgers also use the native restrictive session-reference policy;
 owning a host credential does not bypass private-session visibility. Private
 Connect origin triggers have no PUBLIC execution grant, including to artifact
 materializer roles.
-Child initialization (0443) copies only selected `always` grants from the exact
+Child initialization (0448) copies only selected `always` grants from the exact
 stored spawning turn; session-bound grants cannot cross that boundary.
 Scheduled origin survives descendants and is revalidated at physical use.
-Optional native links (0444–0447) retain distinct external/native identities.
+Optional native links (0449–0452) retain distinct external/native identities.
 `asLinkedUser` explicitly selects the live native delegation; immutable linked
 task/turn snapshots propagate through all scheduled modes, child sessions and
 causal continuations. Runtime execution and credential-use checks deny revoked
 links without tying durable work to the original API key. Native host binding
-ownership (0448) resolves the effective member's own revision, not the external
+ownership (0453) resolves the effective member's own revision, not the external
 authenticating member revision. Native-owned bindings do not expose or migrate
 external-owned bindings. Native consent and account inventory reuse the shared
 React link surfaces; inventory is participant-scoped and cursor-bounded.
 Same-session goal/child-result resumptions separately copy the exact causal
 turn's snapshot after canonical delivery and before attempt registration.
-`inheritCausalHostMcpTurnAuthorities` and the 0441 insert guard prove the
+`inheritCausalHostMcpTurnAuthorities` and the 0446 insert guard prove the
 consumed source, unchanged visibility/epoch and live delegation. Revoked
 selections are omitted; no creator/latest-turn fallback is permitted.
 The DB create/replay boundary now compares `selectedHostMcpDelegations` through
