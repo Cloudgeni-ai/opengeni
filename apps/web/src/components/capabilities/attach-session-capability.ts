@@ -44,3 +44,23 @@ export async function attachSessionCapability(
     expectedVersion: session.toolPolicyVersion,
   });
 }
+
+/** Native OAuth callbacks have already saved the provider connection. Finish
+ * the separate, version-fenced session tool selection before reporting success. */
+export async function completeSessionCapabilityOAuth(
+  client: OpenGeniBrowserClient,
+  workspaceId: string,
+  sessionId: string,
+  capabilityId: string | null,
+): Promise<void> {
+  if (!capabilityId)
+    throw new Error(
+      "The authorized integration could not be identified. Review its connection card to finish setup.",
+    );
+  const connected = (await client.listCapabilities(workspaceId)).items.find(
+    (item) => item.id === capabilityId,
+  );
+  if (!connected?.enabled)
+    throw new Error("The connection was authorized, but enabling its tools could not be verified.");
+  await attachSessionCapability(client, workspaceId, sessionId, connected);
+}

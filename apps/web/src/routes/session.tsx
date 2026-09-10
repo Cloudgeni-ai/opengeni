@@ -1,5 +1,9 @@
+import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
-import { attachSessionCapability } from "@/components/capabilities/attach-session-capability";
+import {
+  attachSessionCapability,
+  completeSessionCapabilityOAuth,
+} from "@/components/capabilities/attach-session-capability";
 import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -651,6 +655,13 @@ export function SessionRoute({
         throw new Error(
           "The connection was authorized, but enabling its tools could not be verified.",
         );
+      if (connected.connectionRef?.subjectScope === "subject") {
+        toast.success(`${item.name} connected`, {
+          description:
+            "Review its connection card to allow your personal account in this conversation.",
+        });
+        return;
+      }
       await attachSessionCapability(capabilityClient, workspaceId, sessionId, connected);
       toast.success(`${item.name} connected`, {
         description: "It is available to new tool calls in this session.",
@@ -679,19 +690,29 @@ export function SessionRoute({
     nativeReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     if (social === "success" || fiken === "connected") {
-      void refreshCapabilityCatalog(workspaceId)
-        .then(() =>
-          toast.success("Connection setup completed", {
-            description: "Send a new message to continue with this connection.",
-          }),
-        )
-        .catch(() => toast.error("Connection authorized, but its status could not be refreshed."));
+      const capabilityId = params.get("capability_auth");
+      void (async () => {
+        await refreshCapabilityCatalog(workspaceId);
+        await completeSessionCapabilityOAuth(
+          capabilityClient,
+          workspaceId,
+          sessionId,
+          capabilityId,
+        );
+        toast.success("Connection setup completed", {
+          description: "It is available to new tool calls in this session.",
+        });
+      })().catch((error) =>
+        toast.error("Connection authorized, but setup needs attention", {
+          description: error instanceof Error ? error.message : String(error),
+        }),
+      );
     } else {
       toast.error("Connection wasn't completed", {
         description: "You can retry from the connection card.",
       });
     }
-  }, [capabilityCatalogReady, refreshCapabilityCatalog, workspaceId]);
+  }, [capabilityCatalogReady, capabilityClient, refreshCapabilityCatalog, workspaceId, sessionId]);
 
   const githubReturnHandled = useRef(false);
   useEffect(() => {
@@ -1419,6 +1440,17 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
+  const connectionAuthorities = useSessionConnectionAuthorities(
+    context.client,
+    props.session,
+    context.workspaceCapabilityCatalog,
+  );
+  const reloadSessionAfterSetup = props.onReloadSession;
+  const refreshConnectionAuthorities = connectionAuthorities.refresh;
+  const afterConnectionSetup = useCallback(async () => {
+    await reloadSessionAfterSetup();
+    await refreshConnectionAuthorities();
+  }, [reloadSessionAfterSetup, refreshConnectionAuthorities]);
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
       const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
@@ -1431,15 +1463,24 @@ function SessionChatPane(props: {
           }
         >
           <SessionCapabilityCard
-            key={`${props.session.id}:${item.id}`}
+            key={`${props.session.id}:${props.session.tenancy?.authorityEpoch}:${item.id}`}
             item={recommendation}
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
+            visibility={props.session.tenancy?.visibility ?? "workspace"}
+            onConfigured={afterConnectionSetup}
           />
         </Suspense>
       ) : undefined;
     },
-    [context.workspaceCapabilityCatalog, props.session.id, props.session.workspaceId],
+    [
+      context.workspaceCapabilityCatalog,
+      props.session.id,
+      props.session.workspaceId,
+      props.session.tenancy?.visibility,
+      props.session.tenancy?.authorityEpoch,
+      afterConnectionSetup,
+    ],
   );
   const policyToolIds = useMemo(
     () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
@@ -1623,18 +1664,25 @@ function SessionChatPane(props: {
       policyValid: composerPolicyValidRef.current,
       variableSetBlocked: variableSetComposerBlocked,
       personalDecision: personalAttachment.requiresDecision,
-      personalLoading: personalAttachment.loading || personalAttachment.refreshing,
+      personalLoading:
+        personalAttachment.loading ||
+        personalAttachment.refreshing ||
+        connectionAuthorities.loading ||
+        connectionAuthorities.error !== null,
     });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
-      ...(repositories.pendingResources.some(
-        (resource) =>
-          resource.kind === "repository" && resource.connectionType === "github_personal",
-      ) && context.personalGitHubAuthority
-        ? { connectionAuthorities: [context.personalGitHubAuthority] }
-        : {}),
+      connectionAuthorities: [
+        ...connectionAuthorities.selections,
+        ...(repositories.pendingResources.some(
+          (resource) =>
+            resource.kind === "repository" && resource.connectionType === "github_personal",
+        ) && context.personalGitHubAuthority
+          ? [context.personalGitHubAuthority]
+          : []),
+      ],
       ...(personalAttachment.intent
         ? { personalResourceAttachment: personalAttachment.intent }
         : {}),
@@ -2269,6 +2317,18 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          {connectionAuthorities.error ? (
+            <p role="alert" className="mb-2 text-xs text-fg-muted">
+              Personal connection access could not be checked.{" "}
+              <button
+                type="button"
+                className="text-brand underline"
+                onClick={() => void connectionAuthorities.refresh()}
+              >
+                Retry
+              </button>
+            </p>
+          ) : null}
           <PersonalResourceAttachmentSurface
             controller={personalAttachment}
             disabled={terminal || composer.sending}

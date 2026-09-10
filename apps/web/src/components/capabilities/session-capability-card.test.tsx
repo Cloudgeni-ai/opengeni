@@ -13,9 +13,10 @@ const catalogItem = CapabilityCatalogItem.parse({
   providerDomain: "api.example.com",
   mcpUrl: "https://api.example.com/mcp",
   authKind: "api_key",
-  runtime: { available: true },
+  runtime: { available: true, mcpServerId: "example" },
   tools: [{ kind: "mcp", id: "example" }],
 });
+let personal = false;
 let enabled = false;
 let connections: unknown[] = [];
 const row = {
@@ -33,19 +34,42 @@ const updateConnection = mock(async () => row);
 const enableCapability = mock(async () => {
   enabled = true;
 });
+const issueUserResourceGrant = mock(async (..._args: unknown[]) => ({}));
 const context = {
   client: {
-    listCapabilities: async () => ({ items: [{ ...catalogItem, enabled }] }),
+    listCapabilities: async () => ({
+      items: [
+        {
+          ...catalogItem,
+          enabled,
+          ...(personal
+            ? {
+                connectionRef: {
+                  subjectScope: "subject",
+                  connectionId: "connection",
+                  providerDomain: "api.example.com",
+                  kind: "api_key",
+                },
+              }
+            : {}),
+        },
+      ],
+    }),
     listConnections: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
     listIntegrationDefinitions: async () => ({ definitions: [] }),
     listApiIntegrations: async () => ({ integrations: [] }),
     catalogAssetUrl: (path: string) => path,
+    listUserResourceAuthorities: async () => ({ authorities: [] }),
+    issueUserResourceGrant,
     createConnection,
     updateConnection,
     enableCapability,
     getSession: async () => ({
+      id: "session",
+      workspaceId: "workspace",
+      tenancy: { visibility: "workspace", authorityEpoch: 4 },
       tools: [{ kind: "mcp", id: "example" }],
       toolPolicy: { mode: "explicit" },
       firstPartyMcpTools: [],
@@ -83,9 +107,11 @@ afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
-async function render() {
-  enabled = false;
-  connections = [];
+async function render(personalAccount = false) {
+  personal = personalAccount;
+  enabled = personalAccount;
+  connections = personalAccount ? [{ ...row, subjectId: "owner", authorityId: "authority" }] : [];
+  issueUserResourceGrant.mockClear();
   updateConnection.mockClear();
   createConnection.mockClear();
   enableCapability.mockClear();
@@ -141,6 +167,28 @@ describe("conversation connection card", () => {
     expect(enableCapability).toHaveBeenCalledTimes(1);
     expect(h.container.textContent).toContain("Setup complete");
     expect(h.container.textContent).not.toContain("secret-for-provider-only");
+    await h.close();
+  });
+  test("a personal account requires explicit shared-results consent before completion", async () => {
+    const h = await render(true);
+    await act(async () => button(h.container, "Connect Example").click());
+    const use = button(h.container, "Use in this");
+    expect(use.disabled).toBe(true);
+    expect(issueUserResourceGrant).not.toHaveBeenCalled();
+    expect(h.container.textContent).not.toContain("Setup complete");
+    await act(async () =>
+      (h.container.querySelector('input[type="checkbox"]') as HTMLInputElement).click(),
+    );
+    expect(use.disabled).toBe(false);
+    await act(async () => use.click());
+    expect(issueUserResourceGrant).toHaveBeenCalledTimes(1);
+    expect(issueUserResourceGrant.mock.calls[0]?.[2]).toMatchObject({
+      mode: "session",
+      sessionId: "session",
+      expectedAuthorityEpoch: 4,
+      workspaceSharedAcknowledged: true,
+    });
+    expect(h.container.textContent).toContain("Setup complete");
     await h.close();
   });
   test("retry after a partial save reuses the persisted Connection", async () => {

@@ -1654,3 +1654,6 @@ conversation; connection completion never replays an earlier tool call.
 existing selection and tool-policy CAS. Catalog library Skill installs retain
 their existing workspace scope and exact reviewed version/hash; the card does
 not offer unsupported conversation/personal installation scopes.
+
+
+Personal MCP connections connected from conversation cards are explicitly admitted through an owner-issued, exact-session user-resource grant. Shared conversations require acknowledgement that results are shared. The web composer restores only active grants matching the session visibility and authority epoch and includes their opaque connection-authority selections in new messages; saving credentials or enabling tools alone grants no personal-account use.
