@@ -1,3 +1,5 @@
+import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
+import { attachSessionCapability } from "@/components/capabilities/attach-session-capability";
 import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -147,6 +149,11 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const SessionCapabilityCard = lazy(async () => ({
+  default: (await import("@/components/capabilities/session-capability-card"))
+    .SessionCapabilityCard,
+}));
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
@@ -637,6 +644,14 @@ export function SessionRoute({
         connectionRef: oauthConnectionRef(ownership, connectionId, providerDomain),
       });
       await refreshCapabilityCatalog(workspaceId);
+      const connected = (await capabilityClient.listCapabilities(workspaceId)).items.find(
+        (candidate) => candidate.id === item.id,
+      );
+      if (!connected?.enabled)
+        throw new Error(
+          "The connection was authorized, but enabling its tools could not be verified.",
+        );
+      await attachSessionCapability(capabilityClient, workspaceId, sessionId, connected);
       toast.success(`${item.name} connected`, {
         description: "It is available to new tool calls in this session.",
       });
@@ -651,7 +666,32 @@ export function SessionRoute({
     capabilityClient,
     refreshCapabilityCatalog,
     workspaceId,
+    sessionId,
   ]);
+
+  const nativeReturnHandled = useRef(false);
+  useEffect(() => {
+    if (nativeReturnHandled.current || !capabilityCatalogReady) return;
+    const params = new URLSearchParams(window.location.search);
+    const social = params.get("social_oauth");
+    const fiken = params.get("fiken");
+    if (!social && !fiken) return;
+    nativeReturnHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (social === "success" || fiken === "connected") {
+      void refreshCapabilityCatalog(workspaceId)
+        .then(() =>
+          toast.success("Connection setup completed", {
+            description: "Send a new message to continue with this connection.",
+          }),
+        )
+        .catch(() => toast.error("Connection authorized, but its status could not be refreshed."));
+    } else {
+      toast.error("Connection wasn't completed", {
+        description: "You can retry from the connection card.",
+      });
+    }
+  }, [capabilityCatalogReady, refreshCapabilityCatalog, workspaceId]);
 
   const githubReturnHandled = useRef(false);
   useEffect(() => {
@@ -1379,6 +1419,28 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
+  const renderAuthNeeded = useCallback(
+    (item: AuthNeededItem) => {
+      const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
+      return recommendation ? (
+        <Suspense
+          fallback={
+            <p role="status" className="text-sm text-fg-muted">
+              Loading connection card…
+            </p>
+          }
+        >
+          <SessionCapabilityCard
+            key={`${props.session.id}:${item.id}`}
+            item={recommendation}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+          />
+        </Suspense>
+      ) : undefined;
+    },
+    [context.workspaceCapabilityCatalog, props.session.id, props.session.workspaceId],
+  );
   const policyToolIds = useMemo(
     () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
     [context.workspaceDefaultToolIds, props.session, selectableToolIds],
@@ -1414,7 +1476,10 @@ function SessionChatPane(props: {
       }
       return;
     }
-    if (durableToolsHydrated) {
+    if (
+      durableToolsSaving ||
+      (durableToolsHydrated && props.session.toolPolicyVersion <= durableToolPolicyVersion)
+    ) {
       return;
     }
     setDurableToolSelection({
@@ -1426,6 +1491,8 @@ function SessionChatPane(props: {
   }, [
     context.workspaceMcpCatalogReady,
     durableToolsHydrated,
+    durableToolsSaving,
+    durableToolPolicyVersion,
     policyToolIds,
     props.session.id,
     props.session.firstPartyMcpTools,
@@ -2023,6 +2090,7 @@ function SessionChatPane(props: {
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
+              renderAuthNeeded={renderAuthNeeded}
               resolveProviderLogo={props.resolveProviderLogo}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}

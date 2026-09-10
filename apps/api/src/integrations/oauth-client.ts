@@ -1,3 +1,4 @@
+import { safeReturnPath } from "./oauth-return-path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -2083,23 +2084,6 @@ function oauthEndpointUrl(rawUrl: string, settings: Settings, label: string): st
     }
     throw error;
   }
-}
-
-function safeReturnPath(value: string): string {
-  if (!value.startsWith("/") || value.startsWith("//")) {
-    throw new HTTPException(400, {
-      message: "OAuth returnPath must be a relative path",
-    });
-  }
-  const parsed = new URL(value, "https://opengeni.local");
-  // `..` segments can normalize back into a `//host` prefix, which browsers
-  // resolve as a protocol-relative absolute URL. Reject the NORMALIZED path.
-  if (parsed.origin !== "https://opengeni.local" || parsed.pathname.startsWith("//")) {
-    throw new HTTPException(400, {
-      message: "OAuth returnPath must be a relative path",
-    });
-  }
-  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
 async function fetchOAuth(

@@ -879,6 +879,7 @@ export type FikenInstallRequest = {
 };
 
 export type FikenOAuthStartRequest = {
+  returnPath?: string | undefined;
   /** Existing Fiken connection to re-authorize in place (reconnect). */
   connectionId?: string | undefined;
 };

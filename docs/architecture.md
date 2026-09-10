@@ -1640,3 +1640,17 @@ Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause rea
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
 Workspace timers: [implementation and rollout](workspace-pause-timers.md).
+
+### In-conversation connection setup
+
+The stock web session renders catalog recommendations and exact server/Connection
+recovery notices through `SessionCapabilityCard`. Its optional
+`MessageTimeline.renderAuthNeeded` slot leaves host-owned authorization with the
+embedding host. Forms resolve live catalog configuration, share
+`performCapabilityAction` with the Capabilities page, and send credentials only
+to the existing human-authorized Connection API. OAuth returns to the same
+conversation; connection completion never replays an earlier tool call.
+`attachSessionCapability` adds the reviewed tools while preserving the session's
+existing selection and tool-policy CAS. Catalog library Skill installs retain
+their existing workspace scope and exact reviewed version/hash; the card does
+not offer unsupported conversation/personal installation scopes.
