@@ -3,12 +3,21 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   AgentPanelLoadBoundary,
   AgentPanelLoadError,
+  agentPanelContentWhilePresent,
   loadAgentPanelModule,
   shouldRestoreAgentPanel,
   type AgentPanelLoadEnvironment,
 } from "./agent-panel-load";
 
 describe("Northstar deferred agent panel recovery", () => {
+  test("removes provider content as soon as the animated panel begins exiting", () => {
+    const provider = <div data-provider>provider</div>;
+    expect(renderToStaticMarkup(agentPanelContentWhilePresent(true, provider))).toContain(
+      "data-provider",
+    );
+    expect(renderToStaticMarkup(agentPanelContentWhilePresent(false, provider))).toBe("");
+  });
+
   test("reloads once into the current build and clears the marker after recovery", async () => {
     const storage = memoryStorage();
     const reloads: string[] = [];

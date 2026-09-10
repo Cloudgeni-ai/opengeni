@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { useIsPresent } from "motion/react";
 
 const RELOAD_TARGET_STORAGE_KEY = "northstar-support:agent-panel-reload-target";
 const RELOAD_QUERY_PARAMETER = "__northstar_agent_panel_reload";
@@ -83,6 +84,14 @@ export async function loadAgentPanelModule<T>(
     }
     throw cause;
   }
+}
+
+export function agentPanelContentWhilePresent(present: boolean, children: ReactNode): ReactNode {
+  return present ? children : null;
+}
+
+export function AgentPanelPresenceGate({ children }: { children: ReactNode }) {
+  return agentPanelContentWhilePresent(useIsPresent(), children);
 }
 
 async function reloadForCurrentBuildOnce(environment: AgentPanelLoadEnvironment): Promise<boolean> {

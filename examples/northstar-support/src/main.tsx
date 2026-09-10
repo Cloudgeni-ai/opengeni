@@ -4,6 +4,7 @@ import { lazy, Suspense, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   AgentPanelLoadBoundary,
+  AgentPanelPresenceGate,
   createBrowserAgentPanelLoadEnvironment,
   loadAgentPanelModule,
   removeAgentPanelReloadParameter,
@@ -116,19 +117,21 @@ function NorthstarApp() {
             transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
             className="min-h-0 min-w-0 overflow-hidden"
           >
-            <AgentPanelLoadBoundary>
-              <Suspense fallback={<AgentPanelSkeleton />}>
-                <SupportAgentPanel
-                  health={demo.health}
-                  supportCase={selectedCase}
-                  sessionId={sessionId}
-                  expanded={agentPanelExpanded}
-                  onExpandedChange={setAgentPanelExpanded}
-                  onSessionCreated={setSessionId}
-                  onClearSession={() => setSessionId(null)}
-                />
-              </Suspense>
-            </AgentPanelLoadBoundary>
+            <AgentPanelPresenceGate>
+              <AgentPanelLoadBoundary>
+                <Suspense fallback={<AgentPanelSkeleton />}>
+                  <SupportAgentPanel
+                    health={demo.health}
+                    supportCase={selectedCase}
+                    sessionId={sessionId}
+                    expanded={agentPanelExpanded}
+                    onExpandedChange={setAgentPanelExpanded}
+                    onSessionCreated={setSessionId}
+                    onClearSession={() => setSessionId(null)}
+                  />
+                </Suspense>
+              </AgentPanelLoadBoundary>
+            </AgentPanelPresenceGate>
           </motion.div>
         ) : null}
       </AnimatePresence>
