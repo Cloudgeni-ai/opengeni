@@ -35,12 +35,13 @@ test("Site skill composition needs no writable application directory", () => {
       const composition = composeRuntimeSkills([], {
         sites: true, editableArtifacts: false, videoGeneration: false,
       });
-      const site = composition.lazySource.source.children["opengeni-sites"];
-      const index = composition.lazySource.getIndex({ extraPathGrants: [] }, ".agents");
+      const index = composition.index;
+      const site = composition.artifacts.find(entry => entry.name === "opengeni-sites");
       if (!index.some(entry => entry.name === "opengeni-sites")) throw new Error("missing skill index");
-      if (!site.children["SKILL.md"].content.includes("OpenGeni")) throw new Error("missing skill");
-      if (!site.children.agents.children["openai.yaml"].content) throw new Error("missing nested asset");
-      console.log(site.children["package-versions.json"].content);
+      const skillMd = site.files.find(entry => entry.path === "SKILL.md");
+      if (!skillMd.content.includes("OpenGeni")) throw new Error("missing skill");
+      if (!site.files.find(entry => entry.path === "agents/openai.yaml")?.content) throw new Error("missing nested asset");
+      console.log(site.files.find(entry => entry.path === "package-versions.json").content);
     `,
       ],
       {

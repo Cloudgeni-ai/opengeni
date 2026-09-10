@@ -21,7 +21,7 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   const composition = composeRuntimeSkills([]);
   expect(composition.nativeToolNames).not.toContain("opengeni-projects");
   expect(composition.selections).toEqual([]);
-  expect(composition.lazySource.getIndex!({ extraPathGrants: [] } as never, ".agents")).toEqual([]);
+  expect(composition.index).toEqual([]);
 });
 
 test("every compute backend inspects only selected Project descriptors with no eager loader", () => {
