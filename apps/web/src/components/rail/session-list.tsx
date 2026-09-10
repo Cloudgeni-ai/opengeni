@@ -6,6 +6,7 @@
 import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
+import { SessionBrowseOrderControls } from "./session-browse-order-controls";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -2622,19 +2623,15 @@ export function SessionList() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
-            <DropdownMenuLabel>Group sessions</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              value={browseGroupBy}
-              onValueChange={(value) => setBrowseGroupBy(value as SessionBrowseGroupBy)}
-            >
-              <DropdownMenuRadioItem value="activity">Last activity</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="created">Created date</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="creator">Creator</DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
+            <SessionBrowseOrderControls
+              groupBy={browseGroupBy}
+              onGroupByChange={setBrowseGroupBy}
+            />
             <DropdownMenuSeparator />
+            <DropdownMenuLabel>Filter by</DropdownMenuLabel>
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                Date field
+                Date filter field
                 <span className="ml-auto mr-1 text-2xs text-fg-subtle">
                   {browseDateField === "activity" ? "Activity" : "Created"}
                 </span>
@@ -2705,7 +2702,8 @@ export function SessionList() {
             ) : null}
             <DropdownMenuSeparator />
             <p className="px-2 py-1 text-2xs leading-4 text-fg-subtle">
-              Each group loads its own older sessions as you reach its end.
+              Active work stays first. Pins and Archived keep their own order. Each group loads more
+              sessions as you reach its end.
             </p>
           </DropdownMenuContent>
         </DropdownMenu>
