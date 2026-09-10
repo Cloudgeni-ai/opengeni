@@ -30,6 +30,70 @@ function fakeStorage() {
 }
 
 describe("workspace archive object storage", () => {
+  test("publishes disk-backed archive bytes without materializing inline payloads", async () => {
+    const bytes = new TextEncoder().encode("synthetic portable archive");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    let uploaded = false;
+    const storage = {
+      backend: "s3-compatible",
+      async headObject() {
+        return null;
+      },
+      async getObjectRange() {
+        return null;
+      },
+      async putObjectStreamIfAbsent(input: { chunks: AsyncIterable<Uint8Array> }) {
+        const chunks: Uint8Array[] = [];
+        for await (const chunk of input.chunks) chunks.push(chunk);
+        expect(Buffer.concat(chunks)).toEqual(Buffer.from(bytes));
+        uploaded = true;
+        return true;
+      },
+    } as unknown as ObjectStorage;
+    const archive = {
+      kind: "host_spool",
+      spool: {
+        path: "/unused-synthetic-spool",
+        byteSize: bytes.length,
+        sha256,
+        async *open() {
+          yield bytes;
+        },
+        async dispose() {},
+      },
+      descriptor: {
+        version: 1,
+        revision: `wa1:1900000000000:${sha256}`,
+        archiveSha256: sha256,
+        archiveBytes: bytes.length,
+        capturedAt: "2030-03-17T17:46:40.000Z",
+        workspace: {
+          algorithm: "sha256",
+          sha256,
+          entryCount: 1,
+          fileCount: 1,
+          totalFileBytes: bytes.length,
+        },
+      },
+      get bytes(): Uint8Array {
+        throw new Error("whole archive bytes must not be requested");
+      },
+      get base64(): string {
+        throw new Error("whole archive base64 must not be requested");
+      },
+    };
+    const result = await putVersion1TarArchiveOrInline({
+      backend: "local",
+      objectStorage: storage,
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+      archive: archive as Parameters<typeof putVersion1TarArchiveOrInline>[0]["archive"],
+    });
+    expect(uploaded).toBe(true);
+    expect(result.workspaceArchive).toBeUndefined();
+    expect(result.workspaceArchiveRef?.sha256).toBe(sha256);
+  });
   test("writes a tar object, collects current/prev keys, and deletes displaced keys", async () => {
     const { objects, storage } = fakeStorage();
     const accountId = "11111111-1111-4111-8111-111111111111";

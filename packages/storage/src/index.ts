@@ -44,6 +44,12 @@ export type ObjectHead = {
   VersionToken?: string;
 };
 
+export {
+  uploadWorkspaceArchiveSpool,
+  downloadWorkspaceArchiveSpool,
+  WorkspaceArchiveStorageError,
+} from "./workspace-archive-spool";
+
 export type ObjectStorage = {
   bucket: string;
   backend: "s3-compatible" | "aws-s3" | "azure-blob" | "gcs";

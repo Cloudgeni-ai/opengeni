@@ -1274,6 +1274,12 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       async getObjectBytes() {
         return null;
       },
+      async headObject() {
+        return null;
+      },
+      async getObjectRange() {
+        return null;
+      },
       async deleteObject() {
         return;
       },
@@ -1347,8 +1353,28 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           return;
         },
         async getObjectBytes(key: string) {
+          if (process.platform === "linux") throw new Error("whole-object restore forbidden");
           const bytes = objects.get(key);
           return bytes ? { bytes } : null;
+        },
+        async headObject(key: string) {
+          const bytes = objects.get(key);
+          return bytes ? { ContentLength: bytes.length, VersionToken: "fixture-v1" } : null;
+        },
+        async getObjectRange(input: {
+          key: string;
+          start: number;
+          endInclusive: number;
+          expectedVersionToken: string;
+        }) {
+          expect(input.expectedVersionToken).toBe("fixture-v1");
+          const bytes = objects.get(input.key);
+          return bytes
+            ? {
+                bytes: bytes.subarray(input.start, input.endInclusive + 1),
+                versionToken: "fixture-v1",
+              }
+            : null;
         },
         async deleteObject() {
           return;

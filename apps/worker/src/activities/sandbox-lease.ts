@@ -82,7 +82,10 @@ import {
   // box is typed as provider loss. Stale capture reconciliation separately uses
   // establishSandboxSessionFromEnvelope in strict resume-only mode so it can
   // reuse the runtime's provider-ready proof without ever cold-restoring.
-  captureVerifiedWorkspaceArchive,
+  captureWorkspaceArchiveForStorage,
+  disposeWorkspaceArchive,
+  type VerifiedWorkspaceArchivePayload,
+  type VerifiedHostWorkspaceArchive,
   cancelSelfhostedOp,
   assertConsistentSandboxProviderIdentity,
   createSandboxClientForBackend,
@@ -210,7 +213,7 @@ type DrainSandboxClient = {
  * aborts the terminate before client.delete()).
  */
 export type PersistArchiveFn = (
-  archiveBase64: string | null,
+  archiveBase64: string | VerifiedHostWorkspaceArchive | null,
   archiveMetadata?: WorkspaceArchiveDescriptor,
   providerSession?: unknown,
   providerBinding?: Awaited<
@@ -247,6 +250,7 @@ export type TerminateBoxFn = (
   providerCaptureRequestId?: string,
   captureDisposition?: DrainCaptureDisposition,
   capturePolicy?: ProviderWorkspaceCapturePolicy | null,
+  diskBackedArchives?: boolean,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -479,6 +483,7 @@ export function createSandboxLeaseActivities(
       providerCaptureRequestId,
       captureDisposition,
       capturePolicy,
+      diskBackedArchives,
     ) =>
       await terminateProviderBox(
         settings,
@@ -490,6 +495,7 @@ export function createSandboxLeaseActivities(
         providerCaptureRequestId,
         captureDisposition,
         capturePolicy,
+        diskBackedArchives,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -2675,7 +2681,7 @@ async function terminateDrainableBox(
       ? (lease.recovery.archive.current?.revision ?? null)
       : null;
   const persistArchive: PersistArchiveFn = async (
-    archiveBase64: string | null,
+    archiveBase64: string | VerifiedHostWorkspaceArchive | null,
     archiveMetadata?: WorkspaceArchiveDescriptor,
     _providerSession?: unknown,
     providerBinding?: Awaited<
@@ -2691,6 +2697,7 @@ async function terminateDrainableBox(
     const archiveMetrics = runtimeMetricsHooksForObservability(observability);
     let checkpointArtifactId: string | null = null;
     if (
+      typeof archiveBase64 === "string" &&
       archiveBase64 &&
       archiveMetadata?.version === 2 &&
       (archiveMetadata.provider === "modal_snapshot_filesystem" ||
@@ -2748,11 +2755,14 @@ async function terminateDrainableBox(
           accountId,
           workspaceId: row.workspaceId,
           sandboxGroupId: row.sandboxGroupId,
-          archive: {
-            bytes: Buffer.from(archiveBase64, "base64"),
-            descriptor: archiveMetadata,
-            base64: archiveBase64,
-          },
+          archive:
+            typeof archiveBase64 === "object"
+              ? archiveBase64
+              : {
+                  bytes: Buffer.from(archiveBase64, "base64"),
+                  descriptor: archiveMetadata,
+                  base64: archiveBase64,
+                },
           metrics: archiveMetrics,
         });
         workspaceArchiveRef = published.workspaceArchiveRef;
@@ -2823,6 +2833,7 @@ async function terminateDrainableBox(
         captureClaim?.providerRequestId ?? attempt.operationId,
         captureDisposition,
         capturePolicy,
+        Boolean(objectStorage),
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
@@ -2955,6 +2966,7 @@ export async function terminateProviderBox(
   providerCaptureRequestId?: string,
   captureDisposition: DrainCaptureDisposition = "capture_required",
   claimedCapturePolicy?: ProviderWorkspaceCapturePolicy | null,
+  diskBackedArchives = false,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
@@ -3147,7 +3159,7 @@ export async function terminateProviderBox(
   // snapshot must re-throw BEFORE any terminate so files are never lost — the next
   // sweep retries, the provider idle-timeout is the backstop. A NotFound here (the
   // box raced gone between resume and persist) is success: nothing to persist.
-  let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>> | undefined;
+  let verifiedArchive: VerifiedWorkspaceArchivePayload | undefined;
   const sessionWorkspacePersistence = (
     session as { state?: { workspacePersistence?: unknown } } | undefined
   )?.state?.workspacePersistence;
@@ -3162,10 +3174,15 @@ export async function terminateProviderBox(
       : null;
   try {
     if (captureDisposition !== "archive_published" && session?.persistWorkspace) {
-      const capture = captureVerifiedWorkspaceArchive(session, Date.now(), {
-        requestId: providerCaptureRequestId ?? randomUUID(),
-        strategy: liveCapturePolicy.strategy,
-      });
+      const capture = captureWorkspaceArchiveForStorage(
+        session,
+        Date.now(),
+        {
+          requestId: providerCaptureRequestId ?? randomUUID(),
+          strategy: liveCapturePolicy.strategy,
+        },
+        diskBackedArchives,
+      );
       verifiedArchive = await awaitProviderCaptureWithLatePublication({
         capture,
         timeoutMs: settings.sandboxSnapshotTimeoutMs,
@@ -3179,7 +3196,7 @@ export async function terminateProviderBox(
         publishLate: async (archive) => {
           try {
             const result = await persistArchive(
-              archive.base64,
+              archive.kind === "host_spool" ? archive : archive.base64,
               archive.descriptor,
               session,
               checkpointBinding,
@@ -3197,6 +3214,8 @@ export async function terminateProviderBox(
               ...logIdentity,
               error: error instanceof Error ? error.message : String(error),
             });
+          } finally {
+            await disposeWorkspaceArchive(archive);
           }
         },
         observeLateFailure: (error) => {
@@ -3237,12 +3256,17 @@ export async function terminateProviderBox(
       ...logIdentity,
     });
   } else if (verifiedArchive) {
-    const { wrote } = await persistArchive(
-      verifiedArchive.base64,
-      verifiedArchive.descriptor,
-      session,
-      checkpointBinding,
-    );
+    let wrote: boolean;
+    try {
+      ({ wrote } = await persistArchive(
+        verifiedArchive.kind === "host_spool" ? verifiedArchive : verifiedArchive.base64,
+        verifiedArchive.descriptor,
+        session,
+        checkpointBinding,
+      ));
+    } finally {
+      await disposeWorkspaceArchive(verifiedArchive);
+    }
     if (!wrote) {
       observability.info(
         "sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)",

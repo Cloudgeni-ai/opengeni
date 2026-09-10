@@ -1,4 +1,5 @@
-import type { ObjectStorage } from "@opengeni/storage";
+import { uploadWorkspaceArchiveSpool, type ObjectStorage } from "@opengeni/storage";
+import type { VerifiedHostWorkspaceArchive } from "@opengeni/runtime/sandbox";
 import {
   parseWorkspaceArchiveObjectRef,
   workspaceArchiveObjectKey,
@@ -35,7 +36,9 @@ export async function putTarWorkspaceArchiveObject(input: {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
-  archive: { bytes: Uint8Array; descriptor: WorkspaceArchiveDescriptor };
+  archive:
+    | { bytes: Uint8Array; descriptor: WorkspaceArchiveDescriptor }
+    | VerifiedHostWorkspaceArchive;
 }): Promise<WorkspaceArchiveObjectRef> {
   if (input.archive.descriptor.version !== 1) {
     throw new Error("Object-storage workspace archives are portable tar only");
@@ -46,12 +49,21 @@ export async function putTarWorkspaceArchiveObject(input: {
     sandboxGroupId: input.sandboxGroupId,
     revision: input.archive.descriptor.revision,
   });
-  await input.objectStorage.putObject({
-    key,
-    contentType: "application/x-tar",
-    body: input.archive.bytes,
-    sha256: input.archive.descriptor.archiveSha256,
-  });
+  if ("spool" in input.archive) {
+    if (
+      input.archive.spool.byteSize !== input.archive.descriptor.archiveBytes ||
+      input.archive.spool.sha256 !== input.archive.descriptor.archiveSha256
+    ) {
+      throw new Error("Workspace archive spool does not match its verified descriptor");
+    }
+    await uploadWorkspaceArchiveSpool(input.objectStorage, key, input.archive.spool);
+  } else
+    await input.objectStorage.putObject({
+      key,
+      contentType: "application/x-tar",
+      body: input.archive.bytes,
+      sha256: input.archive.descriptor.archiveSha256,
+    });
   return {
     schema: "sandbox_archive_object_v1",
     key,
@@ -67,11 +79,13 @@ export async function putVersion1TarArchiveOrInline(input: {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
-  archive: {
-    bytes: Uint8Array;
-    descriptor: WorkspaceArchiveDescriptor;
-    base64: string;
-  };
+  archive:
+    | VerifiedHostWorkspaceArchive
+    | {
+        bytes: Uint8Array;
+        descriptor: WorkspaceArchiveDescriptor;
+        base64: string;
+      };
   metrics?: {
     onWorkspaceArchiveObject?: (input: {
       outcome: "put" | "put_failed" | "deleted_unpublished";
@@ -83,12 +97,15 @@ export async function putVersion1TarArchiveOrInline(input: {
   workspaceArchiveRef?: WorkspaceArchiveObjectRef;
 }> {
   if (input.archive.descriptor.version !== 1) {
+    if ("spool" in input.archive) throw new Error("Native snapshots cannot use a portable spool");
     return { workspaceArchive: input.archive.base64 };
   }
   if (input.backend === "opensandbox" && !input.objectStorage) {
     throw new WorkspaceArchiveObjectStorageRequiredError("opensandbox");
   }
   if (!input.objectStorage) {
+    if ("spool" in input.archive)
+      throw new WorkspaceArchiveObjectStorageRequiredError(input.backend);
     return { workspaceArchive: input.archive.base64 };
   }
   try {
@@ -97,7 +114,7 @@ export async function putVersion1TarArchiveOrInline(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sandboxGroupId: input.sandboxGroupId,
-      archive: { bytes: input.archive.bytes, descriptor: input.archive.descriptor },
+      archive: input.archive,
     });
     try {
       input.metrics?.onWorkspaceArchiveObject?.({
