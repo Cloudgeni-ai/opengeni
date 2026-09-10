@@ -12,7 +12,9 @@ const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`
 describe("workspace rail destinations", () => {
   test("labels the settings entry without changing its destination", () => {
     expect(workspaceNavSource).toContain('aria-label="Settings"');
-    expect(workspaceNavSource).toContain('title={rail.collapsed ? "Settings" : undefined}');
+    expect(workspaceNavSource).toContain(
+      '<TooltipContent side={rail.collapsed ? "right" : "top"}>Settings</TooltipContent>',
+    );
     expect(workspaceNavSource).toContain('<span className="min-w-0 truncate">Settings</span>');
     expect(workspaceNavSource).toContain('to="/workspaces/$workspaceId/settings"');
     expect(workspaceNavSource).toContain('search={{ section: "general" }}');
