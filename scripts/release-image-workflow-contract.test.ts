@@ -9,9 +9,12 @@ const exactCiSource =
   "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
 
 type WorkflowStep = {
+  id?: string;
   name?: string;
   uses?: string;
   if?: string;
+  env?: Record<string, string>;
+  run?: string;
   with?: Record<string, unknown>;
 };
 
@@ -707,6 +710,51 @@ describe("release image workflow contract", () => {
     });
     expect(candidate).not.toContain('gh release view "$tag"');
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
+  });
+
+  test("candidate web deployment identity uses the validated source SHA, not its release version or controller", async () => {
+    const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
+    const steps = parsed.jobs.candidate?.steps ?? [];
+    const sourceRevision = "${{ inputs.source_sha }}";
+    const validation =
+      steps[stepIndex(parsed, "candidate", "Validate exact retained versioned main source")];
+    const checkout = steps[stepIndex(parsed, "candidate", "Check out candidate source")];
+    const webBuilds = steps.filter(
+      (step) => step.uses?.startsWith("docker/build-push-action@") && step.with?.target === "web",
+    );
+
+    expect(webBuilds).toHaveLength(1);
+    const web = webBuilds[0]!;
+    expect(web.id).toBe("build-web");
+    expect(web.with?.context).toBe(".");
+    expect(web.with?.file).toBe("docker/opengeni.Dockerfile");
+    expect(checkout.with?.ref).toBe(sourceRevision);
+    expect(validation.env?.SOURCE_SHA).toBe(sourceRevision);
+    expect(validation.if).toBeUndefined();
+    expect(validation.run).toContain('[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]');
+    expect(validation.run).toContain('[ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]');
+    expect(steps.indexOf(checkout)).toBeLessThan(steps.indexOf(validation));
+    expect(steps.indexOf(validation)).toBeLessThan(steps.indexOf(web));
+
+    // Build identity matches the API's source revision. The product version and
+    // immutable attempt tag remain separate release/publication identities.
+    expect(String(web.with?.["build-args"]).trim().split(/\r?\n/)).toEqual([
+      `OPENGENI_DEPLOYMENT_REVISION=${sourceRevision}`,
+      "OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}",
+    ]);
+    expect(web.with?.tags).toBe(
+      "${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}",
+    );
+    expect(String(web.with?.labels).trim().split(/\r?\n/)).toEqual([
+      `org.opencontainers.image.revision=${sourceRevision}`,
+      "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
+    ]);
+    const identity = steps[stepIndex(parsed, "candidate", "Resolve candidate identity")];
+    expect(identity.env?.SOURCE_SHA).toBe(sourceRevision);
+    expect(identity.run).toContain('echo "version=$version" >> "$GITHUB_OUTPUT"');
+    expect(identity.run).toContain(
+      'echo "candidate_tag=candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+    );
   });
 
   test("main CI publishes exact-SHA canary images without granting PR publication", async () => {

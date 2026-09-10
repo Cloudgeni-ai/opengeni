@@ -976,7 +976,29 @@ describe("web API auth helpers", () => {
     expect(resolveApiBaseUrl("https://opengeni.example.com/")).toBe("https://opengeni.example.com");
   });
 
-  test("reloads once when the API revision differs from the web bundle revision", () => {
+  test("matching source-SHA deployment identities never request a reload or write its guard", () => {
+    const sourceSha = "a".repeat(40);
+    const fakeStorage = {
+      getItem: jest.fn(() => null),
+      setItem: jest.fn(),
+    };
+    for (let read = 0; read < 2; read += 1) {
+      expect(
+        shouldReloadForDeploymentRevision(
+          { deploymentRevision: sourceSha },
+          sourceSha,
+          fakeStorage,
+        ),
+      ).toBe(false);
+    }
+    expect(fakeStorage.getItem).not.toHaveBeenCalled();
+    expect(fakeStorage.setItem).not.toHaveBeenCalled();
+  });
+
+  test("genuinely stale source-SHA bundles still reload once for each API revision", () => {
+    const apiSha = "a".repeat(40);
+    const staleBundleSha = "b".repeat(40);
+    const nextApiSha = "c".repeat(40);
     const storage = new Map<string, string>();
     const fakeStorage = {
       getItem: (key: string) => storage.get(key) ?? null,
@@ -985,16 +1007,33 @@ describe("web API auth helpers", () => {
       },
     };
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage),
+      shouldReloadForDeploymentRevision(
+        { deploymentRevision: apiSha },
+        staleBundleSha,
+        fakeStorage,
+      ),
     ).toBe(true);
+    expect(storage.get(`opengeni.reloadForRevision:${apiSha}`)).toBe(staleBundleSha);
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage),
+      shouldReloadForDeploymentRevision(
+        { deploymentRevision: apiSha },
+        staleBundleSha,
+        fakeStorage,
+      ),
     ).toBe(false);
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "api-sha", fakeStorage),
+      shouldReloadForDeploymentRevision({ deploymentRevision: apiSha }, apiSha, fakeStorage),
     ).toBe(false);
+    expect(shouldReloadForDeploymentRevision({ deploymentRevision: apiSha }, "", fakeStorage)).toBe(
+      false,
+    );
+    expect(storage.size).toBe(1);
     expect(
-      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "", fakeStorage),
+      shouldReloadForDeploymentRevision({ deploymentRevision: nextApiSha }, apiSha, fakeStorage),
+    ).toBe(true);
+    expect(storage.get(`opengeni.reloadForRevision:${nextApiSha}`)).toBe(apiSha);
+    expect(
+      shouldReloadForDeploymentRevision({ deploymentRevision: nextApiSha }, apiSha, fakeStorage),
     ).toBe(false);
   });
 
