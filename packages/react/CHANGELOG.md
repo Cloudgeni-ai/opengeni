@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 5.0.4
+
+### Patch Changes
+
+- 3d9ab25: Keep wide markdown tables stable while subsequent message text streams by preserving their layout observer and remeasuring content without resetting the expanded width.
+
 ## 5.0.3
 
 ### Patch Changes

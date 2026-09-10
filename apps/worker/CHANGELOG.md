@@ -1,5 +1,17 @@
 # @opengeni/worker-bundle
 
+## 0.28.3
+
+### Patch Changes
+
+- f427a76: Clarify that goal continuations should continue investigating or addressing unfinished work within the agent's current authority instead of repeating an incomplete-status final. The guidance applies whether or not the input-wait tool is available and preserves the existing completion, waiting, and blocked audits.
+- b85058e: Keep proactive compaction token reports scoped to the current SDK stream after an in-activity retry. Ignore pre-stream reports and translate fresh report revisions without resetting usage identities or deduplication.
+- Updated dependencies [a9cc903]
+  - @opengeni/db@4.3.2
+  - @opengeni/core@2.9.3
+  - @opengeni/documents@0.8.26
+  - @opengeni/events@0.4.24
+
 ## 0.28.2
 
 ### Patch Changes
