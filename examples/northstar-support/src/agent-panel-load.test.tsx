@@ -4,6 +4,7 @@ import {
   AgentPanelLoadBoundary,
   AgentPanelLoadError,
   agentPanelContentWhilePresent,
+  createAgentPanelLoadLifecycle,
   loadAgentPanelModule,
   shouldRestoreAgentPanel,
   type AgentPanelLoadEnvironment,
@@ -16,6 +17,46 @@ describe("Northstar deferred agent panel recovery", () => {
       "data-provider",
     );
     expect(renderToStaticMarkup(agentPanelContentWhilePresent(false, provider))).toBe("");
+  });
+
+  test("does not reload a stale panel after disable, even if a later enable starts", async () => {
+    const storage = memoryStorage();
+    const reloads: string[] = [];
+    const navigation = new Error("navigation requested");
+    const failure = new TypeError("Failed to fetch dynamically imported module");
+    let resolveCurrentBuild: (buildId: string) => void = () => {};
+    const currentBuildRequested = Promise.withResolvers<void>();
+    const staleEnvironment = environment({
+      loadedBuildId: "/assets/index-old.js",
+      currentBuildId: "/assets/index-new.js",
+      storage,
+      reloads,
+      navigation,
+    });
+    staleEnvironment.readCurrentBuildId = () => {
+      currentBuildRequested.resolve();
+      return new Promise((resolve) => {
+        resolveCurrentBuild = resolve;
+      });
+    };
+    const lifecycle = createAgentPanelLoadLifecycle(true);
+    const loadGeneration = lifecycle.capture();
+
+    const pendingLoad = loadAgentPanelModule(
+      async () => {
+        throw failure;
+      },
+      staleEnvironment,
+      () => lifecycle.isCurrent(loadGeneration),
+    );
+    await currentBuildRequested.promise;
+    lifecycle.setEnabled(false);
+    lifecycle.setEnabled(true);
+    resolveCurrentBuild("/assets/index-new.js");
+
+    await expect(pendingLoad).rejects.toBe(failure);
+    expect(reloads).toEqual([]);
+    expect(shouldRestoreAgentPanel(staleEnvironment)).toBe(false);
   });
 
   test("reloads once into the current build and clears the marker after recovery", async () => {

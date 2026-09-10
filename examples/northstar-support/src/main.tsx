@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import {
   AgentPanelLoadBoundary,
   AgentPanelPresenceGate,
+  createAgentPanelLoadLifecycle,
   createBrowserAgentPanelLoadEnvironment,
   loadAgentPanelModule,
   removeAgentPanelReloadParameter,
@@ -18,12 +19,15 @@ import "./styles.css";
 
 const agentPanelLoadEnvironment = createBrowserAgentPanelLoadEnvironment(import.meta.url);
 const restoreAgentPanel = shouldRestoreAgentPanel(agentPanelLoadEnvironment);
+const agentPanelLoadLifecycle = createAgentPanelLoadLifecycle(restoreAgentPanel);
 removeAgentPanelReloadParameter();
 
 const SupportAgentPanel = lazy(async () => {
+  const loadGeneration = agentPanelLoadLifecycle.capture();
   const mod = await loadAgentPanelModule(
     () => import("./support-agent-panel"),
     agentPanelLoadEnvironment,
+    () => agentPanelLoadLifecycle.isCurrent(loadGeneration),
   );
   return { default: mod.SupportAgentPanel };
 });
@@ -86,6 +90,7 @@ function NorthstarApp() {
           supportCase={selectedCase}
           agentEnabled={agentEnabled}
           onAgentEnabledChange={(enabled) => {
+            agentPanelLoadLifecycle.setEnabled(enabled);
             setAgentEnabled(enabled);
             if (!enabled) setAgentPanelExpanded(false);
             setSessionId(null);

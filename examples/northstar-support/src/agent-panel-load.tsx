@@ -14,6 +14,26 @@ export type AgentPanelLoadEnvironment = {
   waitForNavigation: (cause: unknown) => Promise<never>;
 };
 
+export type AgentPanelLoadLifecycle = {
+  capture: () => number;
+  isCurrent: (generation: number) => boolean;
+  setEnabled: (enabled: boolean) => void;
+};
+
+export function createAgentPanelLoadLifecycle(initiallyEnabled: boolean): AgentPanelLoadLifecycle {
+  let enabled = initiallyEnabled;
+  let generation = 0;
+  return {
+    capture: () => generation,
+    isCurrent: (candidate) => enabled && candidate === generation,
+    setEnabled: (nextEnabled) => {
+      if (nextEnabled === enabled) return;
+      enabled = nextEnabled;
+      generation += 1;
+    },
+  };
+}
+
 export function createBrowserAgentPanelLoadEnvironment(
   loadedEntryUrl: string,
 ): AgentPanelLoadEnvironment {
@@ -71,6 +91,7 @@ export function shouldRestoreAgentPanel(environment: AgentPanelLoadEnvironment):
 export async function loadAgentPanelModule<T>(
   load: () => Promise<T>,
   environment: AgentPanelLoadEnvironment,
+  canRecover: () => boolean = () => true,
 ): Promise<T> {
   try {
     const loaded = await load();
@@ -79,7 +100,7 @@ export async function loadAgentPanelModule<T>(
     }
     return loaded;
   } catch (cause) {
-    if (await reloadForCurrentBuildOnce(environment)) {
+    if (await reloadForCurrentBuildOnce(environment, canRecover)) {
       return await environment.waitForNavigation(cause);
     }
     throw cause;
@@ -94,8 +115,13 @@ export function AgentPanelPresenceGate({ children }: { children: ReactNode }) {
   return agentPanelContentWhilePresent(useIsPresent(), children);
 }
 
-async function reloadForCurrentBuildOnce(environment: AgentPanelLoadEnvironment): Promise<boolean> {
+async function reloadForCurrentBuildOnce(
+  environment: AgentPanelLoadEnvironment,
+  canRecover: () => boolean,
+): Promise<boolean> {
+  if (!canRecover()) return false;
   const currentBuildId = await environment.readCurrentBuildId();
+  if (!canRecover()) return false;
   const attemptedTarget = readReloadTarget(environment.storage);
   if (
     !currentBuildId ||
