@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 2.4.5
+
+### Patch Changes
+
+- 5b17932: Make bundled runtime skills authoritative and remove their duplicate repository-agent skill sources.
+
 ## 2.4.4
 
 ### Patch Changes
