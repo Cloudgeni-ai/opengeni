@@ -1,5 +1,14 @@
 # @opengeni/core
 
+## 2.9.3
+
+### Patch Changes
+
+- Updated dependencies [a9cc903]
+  - @opengeni/db@4.3.2
+  - @opengeni/documents@0.8.26
+  - @opengeni/events@0.4.24
+
 ## 2.9.2
 
 ### Patch Changes

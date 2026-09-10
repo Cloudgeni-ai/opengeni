@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 2.12.3
+
+### Patch Changes
+
+- a9cc903: Allow workspace artifact mutations from service turns that retain an immutable causal human only while the exact live attempt, selected artifact tool, publish permission, and interruption fences all hold. Document that the causal-human field is never standalone authorization, and continue to reject pure service work and stale attempts.
+- Updated dependencies [a9cc903]
+  - @opengeni/db@4.3.2
+  - @opengeni/core@2.9.3
+  - @opengeni/documents@0.8.26
+  - @opengeni/events@0.4.24
+
 ## 2.12.2
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 4.3.2
+
+### Patch Changes
+
+- a9cc903: Allow workspace artifact mutations from service turns that retain an immutable causal human only while the exact live attempt, selected artifact tool, publish permission, and interruption fences all hold. Document that the causal-human field is never standalone authorization, and continue to reject pure service work and stale attempts.
+
 ## 4.3.1
 
 ### Patch Changes
