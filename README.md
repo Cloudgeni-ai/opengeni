@@ -148,9 +148,11 @@ intentionally bind OpenGeni runtime infrastructure into their own process.
 
 Prerequisites:
 
-- Bun
+- Bun at the version in [`.bun-version`](.bun-version) or newer (`bun upgrade`)
 - Docker
 - rustup (the artifact kernel uses its checked-in exact Rust toolchain)
+- Git, curl, and a C build toolchain (Xcode Command Line Tools on macOS;
+  `build-essential` on Debian/Ubuntu)
 - OpenAI or Azure OpenAI credentials for real model runs
 
 Start the full local stack:

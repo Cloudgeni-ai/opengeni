@@ -8,9 +8,12 @@ Use this to develop against OpenGeni or to evaluate it before self-hosting. For 
 
 ## Prerequisites
 
-- [Bun](https://bun.sh)
-- Docker with a running daemon. The default sandbox backend and the local infrastructure use it.
-- Model credentials: an OpenAI API key, or another provider configured through the model provider settings.
+- macOS or Linux. On Windows, use WSL2 and run the commands inside Linux.
+- [Bun](https://bun.sh), at least the version in the checkout's `.bun-version`. Run `bun upgrade` if your installed version is older.
+- Docker with a running daemon and the Compose plugin for the default Docker setup.
+- [rustup](https://rustup.rs). Startup installs the repository's pinned Rust toolchain and builds the native artifact kernel and Connected Machines relay.
+- Git, curl, and native build tools: Xcode Command Line Tools on macOS (`xcode-select --install`), or `build-essential` on Debian/Ubuntu.
+- Model credentials for running agents: an OpenAI API key, or another configured provider. You can start the services and open the web app before configuring a model.
 
 ## Start the stack
 
@@ -21,7 +24,9 @@ cp .env.example .env
 bun run dev
 ```
 
-`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage in Docker, runs migrations, builds the local sandbox image, and starts the API, both workers, and the web app.
+`bun run dev` checks prerequisites, installs dependencies, prepares the native artifact runtime, starts Postgres, NATS, Temporal, and object storage, runs migrations, builds the local Docker sandbox image, and starts the API, both workers, artifact services, the Connected Machines relay, and the web app. The first build downloads and compiles dependencies and takes longer than subsequent starts. Wait for the `OpenGeni dev stack ready` message.
+
+The default `OPENGENI_DEV_BACKEND=auto` uses Docker when its daemon is reachable. On hosts without Docker, it selects native infrastructure and changes the default Docker sandbox to the local provider. Set `OPENGENI_DEV_BACKEND=docker` to require Docker, or `native` to select the native path explicitly.
 
 | Service    | URL                           |
 | ---------- | ----------------------------- |
@@ -49,6 +54,14 @@ The local stack runs in `local` access mode: a bootstrap account and workspace w
 | `OPENGENI_SANDBOX_PREPARATION_PROFILES` | Opt-in profiles such as `azure` or `github` that pre-authenticate CLIs inside the sandbox |
 
 Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
+
+## Troubleshooting startup
+
+- **Frozen lockfile error:** check `bun --version` against `.bun-version` and use an up-to-date checkout. A clean checkout must install with its committed lockfile; do not delete the lockfile to get past the error.
+- **Artifact runtime unavailable:** the optional sandbox Office runtime requires a matching CI artifact and authenticated GitHub CLI access. If it cannot be obtained, startup continues with standalone sandbox Office file operations disabled. The local editable-artifact services are prepared separately.
+- **Relation already exists during migration:** an existing development database may belong to a different branch or migration history. Preserve it and try a fresh clone in a separate directory, which gets its own infrastructure and data. Do not delete an existing database unless you intend to discard its contents.
+
+The launcher prints the selected ports and writes `.env.runtime`. Use those URLs when another checkout already occupies the defaults.
 
 ## Stop and clean up
 

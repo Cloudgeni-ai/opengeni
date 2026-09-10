@@ -17,6 +17,9 @@ esac
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Check before creating .env, installing packages, or starting infrastructure.
+bun scripts/check-development-prerequisites.ts
+
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "Created .env from .env.example. Configure model and sandbox credentials before running agent sessions."
