@@ -236,6 +236,78 @@ describe("timeline scroll ownership browser regression", () => {
       }
     }, 25_000);
 
+    test(`completed table stays horizontally stable while following prose streams (${consumer})`, async () => {
+      const tablePage = await openTables();
+      try {
+        await tablePage.evaluate(() => window.timelineTableHarness!.content("verified"));
+        await tablePage.waitForFunction(() => {
+          const table = document.querySelector("table")!;
+          return (
+            table.querySelector("th")?.textContent === "Source" &&
+            table.parentElement!.getBoundingClientRect().width > 778
+          );
+        });
+        const trace = await tablePage.evaluate(async () => {
+          const table = document.querySelector("table")!;
+          const wrapper = table.parentElement!;
+          const geometry = () => {
+            const outer = wrapper.getBoundingClientRect();
+            const inner = table.getBoundingClientRect();
+            return { x: outer.x, width: outer.width, tableX: inner.x, tableWidth: inner.width };
+          };
+          const frame = () =>
+            new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          // Exclude the intentional initial expansion, never the following stream.
+          for (let i = 0; i < 10; i += 1) await frame();
+          const initial = geometry();
+          const samples: Array<ReturnType<typeof geometry> & { phase: string }> = [];
+          let phase = "stream";
+          let active = true;
+          const sample = () => {
+            samples.push({ ...geometry(), phase });
+            if (active) requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+          const chunks =
+            "Following prose continues after the completed table without changing any of its cells. "
+              .repeat(6)
+              .match(/.{1,12}/g)!;
+          for (const chunk of chunks) {
+            window.timelineTableHarness!.appendProse(chunk);
+            await new Promise<void>((resolve) => setTimeout(resolve, 35));
+          }
+          window.timelineTableHarness!.finish();
+          phase = "settled";
+          for (let i = 0; i < 30; i += 1) await frame();
+          active = false;
+          await frame();
+          return {
+            initial,
+            samples,
+            sameTable: table === document.querySelector("table"),
+            proseRendered: document
+              .querySelector("[data-og-timeline-scroller]")!
+              .textContent!.includes(chunks.join("").trim()),
+          };
+        });
+        expect(trace.initial.width).toBeGreaterThan(778);
+        expect(trace.sameTable).toBe(true);
+        expect(trace.proseRendered).toBe(true);
+        for (const phase of ["stream", "settled"]) {
+          const samples = trace.samples.filter((sample) => sample.phase === phase);
+          expect(samples.length).toBeGreaterThan(20);
+          for (const key of ["x", "width", "tableX", "tableWidth"] as const) {
+            const drift = Math.max(
+              ...samples.map((sample) => Math.abs(sample[key] - trace.initial[key])),
+            );
+            expect(drift, `${consumer}: ${key} drift during ${phase}`).toBeLessThanOrEqual(1);
+          }
+        }
+      } finally {
+        await tablePage.close();
+      }
+    }, 15_000);
+
     test(`table TSV copy and focused keyboard scrolling remain local (${consumer})`, async () => {
       const tablePage = await openTables();
       try {
