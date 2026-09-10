@@ -85,10 +85,9 @@ attention projections (including unacknowledged failed descendants) read the
 cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
 projection. Legacy SQL writers are rebased at the database boundary, and late
 raw events roll back and retry through the semantic gate before becoming
-rejected audit evidence. SSE clients begin with durable replay, subscribe to
-live fanout, and backfill from Postgres whenever a sequence gap appears. A NATS
-restart may interrupt live delivery or machine reachability, but it must not
-erase session history or queued obligations.
+rejected audit evidence. SSE clients replay durable events, subscribe to live
+fanout, and backfill sequence gaps from Postgres. NATS restarts may interrupt
+delivery or machine reachability, never session history or queued obligations.
 
 The raw isolation route has an operational rollback switch:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
@@ -1637,12 +1636,13 @@ External actors and Site viewer authority: [embedding authority internals](embed
 
 ## 14. Keeping this current
 
-Update this map in the same change as application, package, example, provider,
-process, ownership, invariant (§3), flow (§4), lifecycle (§5), or canonical-source
-(§13) changes. State invariants, purpose, and ownership here; put mechanics and
-rollout details in focused docs indexed by [`README.md`](README.md).
+Update this map alongside application, package, example, provider, process,
+ownership, invariant (§3), flow (§4), lifecycle (§5), or canonical-source (§13)
+changes. Keep invariants, purpose, and ownership here; mechanics and rollout in
+[`README.md`](README.md)'s focused docs.
 
-Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
+`goal_resume` resumes goals regardless of pause reason or actor; active goals
+return unchanged. See `docs/goals.md` for `goal_resume` and `goal_pause`.
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
