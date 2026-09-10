@@ -46,7 +46,6 @@ const context = {
             ? {
                 connectionRef: {
                   subjectScope: "subject",
-                  connectionId: "connection",
                   providerDomain: "api.example.com",
                   kind: "api_key",
                 },

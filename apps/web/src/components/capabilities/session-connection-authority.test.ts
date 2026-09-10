@@ -12,7 +12,7 @@ import {
 
 const item = {
   enabled: true,
-  connectionRef: { subjectScope: "subject", connectionId: "connection" },
+  connectionRef: { subjectScope: "subject", providerDomain: "example.com", kind: "api_key" },
   runtime: { mcpServerId: "example" },
 } as CapabilityCatalogItem;
 const session = {
@@ -40,7 +40,14 @@ function harness(grants: unknown[] = []) {
   const client = {
     getSession: async () => session,
     listConnections: async () => [
-      { id: "connection", subjectId: "owner", status: "active", authorityId: "authority" },
+      {
+        id: "connection",
+        subjectId: "owner",
+        status: "active",
+        authorityId: "authority",
+        providerDomain: "example.com",
+        kind: "api_key",
+      },
     ],
     listUserResourceAuthorities: async () => ({
       authorities: [
@@ -51,7 +58,7 @@ function harness(grants: unknown[] = []) {
   } as unknown as OpenGeniBrowserClient;
   return { client, issueUserResourceGrant };
 }
-test("only exact session, visibility, epoch and active grants enter messages", async () => {
+test("private IDs resolve from owner metadata and only exact active session grants enter messages", async () => {
   const h = harness([
     { ...grant, mode: "always" },
     { ...grant, targetSessionId: "other" },
@@ -142,4 +149,29 @@ test("the explicit action issues an epoch-fenced session grant and reuses it on 
     () => true,
   );
   expect(existing.issueUserResourceGrant).not.toHaveBeenCalled();
+});
+
+test("ambiguous personal accounts never issue an arbitrary account grant", async () => {
+  const h = harness();
+  h.client.listConnections = async () =>
+    ["first", "second"].map((id) => ({
+      id,
+      subjectId: "owner",
+      status: "active",
+      authorityId: id,
+      providerDomain: "example.com",
+      kind: "api_key",
+    })) as Awaited<ReturnType<OpenGeniBrowserClient["listConnections"]>>;
+  await expect(
+    authorizeSessionPersonalConnection(
+      h.client,
+      "workspace",
+      "session",
+      item,
+      "workspace",
+      true,
+      () => true,
+    ),
+  ).rejects.toThrow("More than one personal account");
+  expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
 });

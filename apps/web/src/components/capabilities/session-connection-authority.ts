@@ -1,24 +1,45 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   CapabilityCatalogItem,
+  ConnectionMetadata,
   McpConnectionAuthoritySelection,
   Session,
   UserResourceAuthoritySummary,
 } from "@opengeni/sdk";
 
+import { normalizeProviderDomain } from "@/lib/capabilities";
+
+function personalConnection(item: CapabilityCatalogItem, connections: ConnectionMetadata[]) {
+  const ref = item.connectionRef;
+  if (ref?.subjectScope !== "subject") return undefined;
+  // The shared catalog deliberately omits personal IDs. Resolve only against
+  // the authenticated owner's private metadata, never store that ID in catalog.
+  const matches = connections.filter(
+    (entry) =>
+      entry.subjectId !== null &&
+      entry.status === "active" &&
+      entry.kind === ref.kind &&
+      normalizeProviderDomain(entry.providerDomain) === normalizeProviderDomain(ref.providerDomain),
+  );
+  if (matches.length > 1)
+    throw new Error(
+      "More than one personal account matches this integration. Review its connection settings before continuing.",
+    );
+  return matches[0];
+}
+
 export async function sessionConnectionAuthorities(
   client: OpenGeniBrowserClient,
   session: Pick<Session, "id" | "workspaceId" | "tenancy">,
   items: CapabilityCatalogItem[],
+  knownConnections?: ConnectionMetadata[],
 ): Promise<McpConnectionAuthoritySelection[]> {
   const personal = items.filter(
     (item) =>
-      item.enabled &&
-      item.connectionRef?.subjectScope === "subject" &&
-      item.connectionRef.connectionId &&
-      item.runtime.mcpServerId,
+      item.enabled && item.connectionRef?.subjectScope === "subject" && item.runtime.mcpServerId,
   );
   if (personal.length === 0) return [];
+  const connections = knownConnections ?? (await client.listConnections(session.workspaceId));
   if (!session.tenancy) throw new Error("Conversation sharing authority is not available.");
   const authorityEpoch = session.tenancy.authorityEpoch;
   const visibility =
@@ -35,8 +56,13 @@ export async function sessionConnectionAuthorities(
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
   return personal.flatMap((item) => {
+    const connection = personalConnection(item, connections);
+    if (!connection?.authorityId) return [];
     const authority = authorities.find(
-      (entry) => entry.resourceId === item.connectionRef!.connectionId && entry.status === "active",
+      (entry) =>
+        entry.resourceId === connection.id &&
+        entry.authorityId === connection.authorityId &&
+        entry.status === "active",
     );
     // Only an exact-session grant is adopted here. A standing grant from another
     // surface never silently opts a personal account into this conversation.
@@ -55,7 +81,7 @@ export async function sessionConnectionAuthorities(
       ? [
           {
             serverId: item.runtime.mcpServerId!,
-            connectionId: item.connectionRef!.connectionId!,
+            connectionId: connection.id,
             userDelegation: grant.delegation,
           },
         ]
@@ -74,7 +100,7 @@ export async function authorizeSessionPersonalConnection(
   stillCurrent: () => boolean,
 ): Promise<void> {
   const ref = item.connectionRef;
-  if (ref?.subjectScope !== "subject" || !ref.connectionId || !item.runtime.mcpServerId)
+  if (ref?.subjectScope !== "subject" || !item.runtime.mcpServerId)
     throw new Error("The personal connection could not be resolved. Refresh and retry.");
   const [session, connections] = await Promise.all([
     client.getSession(workspaceId, sessionId),
@@ -87,15 +113,12 @@ export async function authorizeSessionPersonalConnection(
     );
   if (session.tenancy.visibility === "workspace" && !sharedOutputAcknowledged)
     throw new Error("Acknowledge shared results before using your personal account here.");
-  const connection = connections.find(
-    (entry) =>
-      entry.id === ref.connectionId && entry.subjectId !== null && entry.status === "active",
-  );
+  const connection = personalConnection(item, connections);
   if (!connection?.authorityId)
     throw new Error(
       "This personal connection has no active sharing authority. Reconnect it and try again.",
     );
-  const existing = await sessionConnectionAuthorities(client, session, [item]);
+  const existing = await sessionConnectionAuthorities(client, session, [item], connections);
   if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
   if (existing.some((entry) => entry.connectionId === connection.id)) return;
   await client.issueUserResourceGrant(workspaceId, connection.authorityId, {
