@@ -61,7 +61,6 @@ const legacyBrowserUnusedMethods = [
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
-  "startSocialOAuth",
   "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateOrganizationWorkspaceSettings",
