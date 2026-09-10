@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 let App: typeof import("./App").App;
@@ -21,6 +21,39 @@ afterAll(() => {
 });
 
 describe("bootstrap error surface", () => {
+  test("StrictMode skips config I/O for its discarded effect and aborts the live request on unmount", async () => {
+    const originalFetch = globalThis.fetch;
+    const signals: AbortSignal[] = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const path = new URL(String(input), window.location.href).pathname;
+      if (path !== "/v1/config/client") throw new Error(`Unexpected request: ${path}`);
+      signals.push(init!.signal!);
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init!.signal!;
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as typeof fetch;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <StrictMode>
+            <App />
+          </StrictMode>,
+        ),
+      );
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.aborted).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = originalFetch;
+    }
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
   test.each([
     { status: 503, body: "unavailable", attempts: 3, title: "OpenGeni is temporarily unavailable" },
     { status: 401, body: "unauthorized", attempts: 1, title: "OpenGeni couldn't start" },

@@ -877,11 +877,16 @@ export function RootRouteComponent() {
     if (isPublicDevHarness) return;
     let cancelled = false;
     const controller = new AbortController();
-    void readBootstrap({
-      context: "client_configuration",
-      request: () => fetchClientConfig(controller.signal),
-      signal: controller.signal,
-    })
+    // Let synchronous effect cleanup (including StrictMode's discarded mount)
+    // cancel before starting I/O. Active requests still abort on real cleanup.
+    void Promise.resolve()
+      .then(() =>
+        readBootstrap({
+          context: "client_configuration",
+          request: () => fetchClientConfig(controller.signal),
+          signal: controller.signal,
+        }),
+      )
       .then((config) => {
         if (cancelled) {
           return;
