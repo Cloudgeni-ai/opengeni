@@ -1423,6 +1423,204 @@ describe("capture-driven default tab (Refinement 2)", () => {
 // ── Refinement 2: no post-paint content switch (component level) ──────────────
 
 describe("SandboxWorkspace capture-driven default renders with no content switch", () => {
+  function deferredSignedCapture(manifest: WorkspaceCaptureManifest) {
+    let resolveMetadata!: (value: GetWorkspaceCaptureResponse) => void;
+    let resolveDownload!: (value: Response) => void;
+    const metadata = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveMetadata = resolve;
+    });
+    const download = new Promise<Response>((resolve) => {
+      resolveDownload = resolve;
+    });
+    let gitReads = 0;
+    let downloads = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      downloads += 1;
+      return download;
+    }) as unknown as typeof fetch;
+    const { client, spy } = coldClient({
+      getWorkspaceCapture: () => metadata,
+      gitStatus: async () => {
+        gitReads += 1;
+        throw new Error("default selection must not read live Git");
+      },
+      gitDiff: async () => {
+        gitReads += 1;
+        throw new Error("default selection must not read live Git");
+      },
+    });
+    return {
+      client,
+      async metadata() {
+        await act(async () => {
+          resolveMetadata({
+            available: true,
+            revision: manifest.revision,
+            capturedAt: manifest.capturedAt,
+            turnId: manifest.turnId,
+            leaseEpoch: manifest.leaseEpoch,
+            stats: manifest.stats,
+            sizeBytes: 3_000_000,
+            manifest: null,
+            manifestUrl: {
+              url: "https://blob.example/deferred-manifest.json",
+              expiresAt: "2026-07-08T12:05:00.000Z",
+            },
+          });
+        });
+        await flush();
+        expect(downloads).toBe(1);
+      },
+      async finish(status = 200) {
+        await act(async () => {
+          resolveDownload(new Response(JSON.stringify(manifest), { status }));
+        });
+        await flush();
+      },
+      assertNoProviderWork() {
+        expect(gitReads).toBe(0);
+        expect(spy.attachCalls).toBe(0);
+      },
+      restore() {
+        globalThis.fetch = originalFetch;
+      },
+    };
+  }
+
+  test.each([1, 0])(
+    "deferred signed manifest with %s working-tree files never latches Files before captured changes resolve",
+    async (fileCount) => {
+      const manifest = fakeManifest(fileCount);
+      if (fileCount === 0) {
+        manifest.repos[0] = {
+          ...manifest.repos[0]!,
+          ahead: 1,
+          branchDiff: [fakeFileDiff({ path: "committed.ts" })],
+        };
+      }
+      const fixture = deferredSignedCapture(manifest);
+      const selected: string[] = [];
+      let rendered: Awaited<ReturnType<typeof renderComponent>> | undefined;
+      try {
+        rendered = await renderComponent(
+          withProvider(
+            fixture.client,
+            <SandboxWorkspace
+              sessionId={SESSION_ID}
+              events={[]}
+              primary={<div>chat</div>}
+              onActiveTabChange={(tab) => selected.push(tab)}
+            />,
+          ),
+        );
+        await flush();
+        expect(selectedTabName(rendered.container)).toBe("Changes");
+        await fixture.metadata();
+        expect(selectedTabName(rendered.container)).toBe("Changes");
+        await fixture.finish();
+        expect(selectedTabName(rendered.container)).toBe("Changes");
+        expect(selected).toEqual([]);
+        fixture.assertNoProviderWork();
+      } finally {
+        await rendered?.unmount();
+        fixture.restore();
+      }
+    },
+  );
+
+  test("deferred signed committed-only capture keeps the native default unresolved until its manifest arrives", async () => {
+    const manifest = fakeManifest(0);
+    manifest.repos[0] = { ...manifest.repos[0]!, ahead: 1, branchDiff: [fakeFileDiff()] };
+    const fixture = deferredSignedCapture(manifest);
+    let hook: Awaited<ReturnType<typeof renderTabsHook>> | undefined;
+    try {
+      hook = await renderTabsHook(fixture.client, { sessionId: SESSION_ID, events: [] });
+      expect(hook.result.current.defaultTab).toBeNull();
+      await fixture.metadata();
+      expect(hook.result.current.defaultTab).toBeNull();
+      await fixture.finish();
+      expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+      fixture.assertNoProviderWork();
+    } finally {
+      await hook?.unmount();
+      fixture.restore();
+    }
+  });
+
+  test.each([0, 1])(
+    "deferred signed manifest terminal failure resolves Files for %s metadata files",
+    async (fileCount) => {
+      const fixture = deferredSignedCapture(fakeManifest(fileCount));
+      let hook: Awaited<ReturnType<typeof renderTabsHook>> | undefined;
+      try {
+        hook = await renderTabsHook(fixture.client, { sessionId: SESSION_ID, events: [] });
+        await fixture.metadata();
+        await fixture.finish(503);
+        expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+        fixture.assertNoProviderWork();
+      } finally {
+        await hook?.unmount();
+        fixture.restore();
+      }
+    },
+  );
+
+  test("deferred signed empty capture resolves Files only after its manifest arrives", async () => {
+    const fixture = deferredSignedCapture(fakeManifest(0));
+    let hook: Awaited<ReturnType<typeof renderTabsHook>> | undefined;
+    try {
+      hook = await renderTabsHook(fixture.client, { sessionId: SESSION_ID, events: [] });
+      await fixture.metadata();
+      expect(hook.result.current.defaultTab).toBeNull();
+      await fixture.finish();
+      expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+      fixture.assertNoProviderWork();
+    } finally {
+      await hook?.unmount();
+      fixture.restore();
+    }
+  });
+
+  test.each(["host", "user"] as const)(
+    "deferred signed manifest preserves a %s Files selection",
+    async (selection) => {
+      const fixture = deferredSignedCapture(fakeManifest(1));
+      const selected: string[] = [];
+      let rendered: Awaited<ReturnType<typeof renderComponent>> | undefined;
+      try {
+        rendered = await renderComponent(
+          withProvider(
+            fixture.client,
+            <SandboxWorkspace
+              sessionId={SESSION_ID}
+              events={[]}
+              primary={<div>chat</div>}
+              {...(selection === "host" ? { initialTab: "files" } : {})}
+              onActiveTabChange={(tab) => selected.push(tab)}
+            />,
+          ),
+        );
+        await flush();
+        if (selection === "user") {
+          const files = findTab(rendered.container, "Files");
+          expect(files).toBeDefined();
+          await act(async () => files!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+        }
+        expect(selectedTabName(rendered.container)).toBe("Files");
+        await fixture.metadata();
+        expect(selectedTabName(rendered.container)).toBe("Files");
+        await fixture.finish();
+        expect(selectedTabName(rendered.container)).toBe("Files");
+        expect(selected).toEqual(selection === "user" ? ["files"] : []);
+        fixture.assertNoProviderWork();
+      } finally {
+        await rendered?.unmount();
+        fixture.restore();
+      }
+    },
+  );
+
   function tabName(element: HTMLElement | null): string {
     return element?.getAttribute("aria-label") ?? element?.textContent ?? "";
   }
