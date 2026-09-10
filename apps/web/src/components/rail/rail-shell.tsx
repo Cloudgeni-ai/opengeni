@@ -6,7 +6,7 @@
 import { findPickerRow, useLastStartedTurnPolicy, useSessionLineage } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { MenuIcon, MessagesSquareIcon, Settings2Icon, XIcon } from "lucide-react";
+import { MenuIcon, MessagesSquareIcon, Settings2Icon } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import {
@@ -22,6 +22,7 @@ import {
   type RefObject,
 } from "react";
 
+import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SessionHeader } from "@/components/rail/session-header";
 import {
@@ -38,7 +39,6 @@ import {
   sessionSupportsFleetSwitching,
 } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
-import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -78,39 +78,9 @@ function RailBody() {
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
-          {/* Brand */}
-          <div
-            className={cn(
-              "flex h-10 shrink-0 items-center gap-2",
-              rail.collapsed ? "justify-center px-2" : "px-3",
-            )}
-          >
-            <Link
-              to="/workspaces/$workspaceId/sessions"
-              params={{ workspaceId: rail.workspaceId }}
-              className="flex items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none"
-              aria-label="OpenGeni home"
-            >
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-                <BrandMark className="size-4" />
-              </span>
-              {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
-            </Link>
-            {rail.isMobile ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Close navigation"
-                onClick={() => rail.setDrawerOpen(false)}
-                className="ml-auto pointer-coarse:size-11"
-              >
-                <XIcon className="size-4" />
-              </Button>
-            ) : null}
-          </div>
+          <RailHeader />
 
-          {rail.isMobile ? null : <SwitcherBlock />}
+          {rail.collapsed ? <SwitcherBlock /> : null}
 
           {rail.isMobile ? (
             <>
@@ -184,8 +154,6 @@ function RailBody() {
                   aria-labelledby="mobile-nav-tab-workspace"
                   className="mt-2 flex shrink-0 flex-col border-t border-border pt-2"
                 >
-                  <SwitcherBlock />
-                  <div className="my-2 border-t border-border" />
                   <WorkspaceShortcutLinks className="px-2" />
                   <div className="my-2 border-t border-border" />
                 </div>
@@ -205,11 +173,7 @@ function RailBody() {
       </div>
       {/* Keep the persistent controls opaque and above the scroll viewport,
           including session-row actions with their own stacking levels. */}
-      <div
-        data-rail-footer
-        className="relative z-10 shrink-0 border-t border-border bg-surface pt-2"
-      >
-        <WorkspaceNav />
+      <div data-rail-footer className="relative z-10 shrink-0 border-t border-border bg-surface">
         <RailFooter />
       </div>
     </div>

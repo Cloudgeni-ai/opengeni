@@ -208,19 +208,23 @@ describe("fail-closed change impact", () => {
       reason: "artifact runtime build/verification boundary",
     });
 
-    const skill = createImpactPlan([".agents/skills/opengeni-documents/SKILL.md"]);
+    const skill = createImpactPlan([
+      "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
+    ]);
     expect(skill.mode).toBe("focused");
     expect(skill.affectedPackages).toContain("@opengeni/runtime");
-    expect(skill.unitTests).toContain("scripts/sync-artifact-skills.test.ts");
+    expect(skill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
     expect(skill.reasons).toContainEqual({
-      path: ".agents/skills/opengeni-documents/SKILL.md",
+      path: "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
       reason: "bundled artifact skill source boundary",
     });
 
-    const siteSkill = createImpactPlan([".agents/skills/opengeni-sites/SKILL.md"]);
+    const siteSkill = createImpactPlan([
+      "packages/runtime/src/bundled_site_skills/opengeni-sites/SKILL.md",
+    ]);
     expect(siteSkill.mode).toBe("focused");
     expect(siteSkill.affectedPackages).toContain("@opengeni/runtime");
-    expect(siteSkill.unitTests).toContain("scripts/sync-artifact-skills.test.ts");
+    expect(siteSkill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
   });
 
   test("React artifact UI selects its browser and full-stack acceptance coverage", () => {

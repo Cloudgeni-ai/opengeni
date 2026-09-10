@@ -1,5 +1,6 @@
 import {
   commitSessionAttemptQuiescence,
+  listPendingSessionTurns,
   recordCodexAccountUsageWithWakeTargets,
   releaseCodexCredentialLease,
   releaseXaiCredentialLease,
@@ -20,7 +21,11 @@ import type {
   SessionAttemptQuiescenceProof,
   TurnActivityServices as ActivityServices,
 } from "../types";
-import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "../workspace-capture";
+import {
+  captureWhileIdle,
+  captureWorkspaceRevision,
+  openFreshWorkspaceCaptureSession,
+} from "../workspace-capture";
 import { type ChannelASession } from "@opengeni/runtime/sandbox";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 import {
@@ -488,49 +493,60 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       deadlineRotationRequested: sandboxState.deadlineRotationRequested,
     });
     if (
+      settings.workspaceCaptureEnabled &&
       runTurnEndPersistence &&
       attempt.turnId &&
       sandboxState.resolvedSandbox &&
       sandboxState.setupBoxSession &&
       sandboxState.sandboxGroupId
     ) {
-      // Block new periodic snapshots, then drain any one already in flight.
-      // Keep the lease heartbeat itself running: capture may legitimately
-      // exceed the 90s holder TTL, and the reaper must remain unable to drain
-      // the exact box while this holder still reads it.
+      // Review reads yield to queued work. Recovery snapshots have their own
+      // physical-settlement requirement and are drained later in finalization.
       sandboxState.turnEndCaptureInProgress = true;
-      if (sandboxState.snapshotInFlight) {
-        await waitForWarmSnapshot(
-          sandboxState.snapshotInFlight,
-          settings.sandboxSnapshotTimeoutMs,
-          finalizerSignal,
-        );
-      }
-      const captureEstablished = sandboxState.resolvedSandbox.established;
-      await captureWorkspaceRevision({
-        db,
-        objectStorage,
-        settings,
-        publish: async (events) => {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
-        },
-        session: sandboxState.setupBoxSession as ChannelASession,
-        openReadSession: async () =>
-          await openFreshWorkspaceCaptureSession({
-            backendId: captureEstablished.backendId,
-            client: captureEstablished.client,
-            session: sandboxState.setupBoxSession as ChannelASession,
-            expectedInstanceId: captureEstablished.instanceId,
-          }),
-        leaseEpoch: sandboxState.resolvedSandbox.leaseEpoch,
-        sandboxGroupId: sandboxState.sandboxGroupId,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: attempt.turnId,
-        attemptId: input.attemptId,
-        observability,
+      const captureSandbox = sandboxState.resolvedSandbox;
+      const captureSession = sandboxState.setupBoxSession as ChannelASession;
+      const captureGroupId = sandboxState.sandboxGroupId;
+      const captureTurnId = attempt.turnId;
+      await captureWhileIdle({
         ...(finalizerSignal ? { signal: finalizerSignal } : {}),
+        hasPendingWork: async () =>
+          (await listPendingSessionTurns(db, input.workspaceId, input.sessionId)).some(
+            (turn) => turn.id !== captureTurnId,
+          ),
+        capture: async (signal) => {
+          if (sandboxState.snapshotInFlight) {
+            await waitForWarmSnapshot(
+              sandboxState.snapshotInFlight,
+              settings.sandboxSnapshotTimeoutMs,
+              signal,
+            );
+          }
+          if (signal.aborted) return;
+          await captureWorkspaceRevision({
+            db,
+            objectStorage,
+            settings,
+            publish: async (events) =>
+              publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+            session: captureSession,
+            openReadSession: async () =>
+              openFreshWorkspaceCaptureSession({
+                backendId: captureSandbox.established.backendId,
+                client: captureSandbox.established.client,
+                session: captureSession,
+                expectedInstanceId: captureSandbox.established.instanceId,
+              }),
+            leaseEpoch: captureSandbox.leaseEpoch,
+            sandboxGroupId: captureGroupId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: captureTurnId,
+            attemptId: input.attemptId,
+            observability,
+            signal,
+          });
+        },
       });
     }
     eventing.toolPreparationClosing = true;

@@ -385,8 +385,7 @@ const ARTIFACT_RUNTIME_SOURCE_WORKSPACES = new Set([
 ]);
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
-const ARTIFACT_SKILL_PATTERN =
-  /^\.agents\/skills\/opengeni-(?:documents|presentations|sites|spreadsheets|video-generation)\//;
+const ARTIFACT_SKILL_PATTERN = /^packages\/runtime\/src\/bundled_(?:artifact|site|video)_skills\//;
 
 type RootPathImpact = Readonly<{
   packages: readonly string[];
@@ -407,7 +406,7 @@ function rootPathImpact(path: string, unitTests: readonly string[]): RootPathImp
   if (ARTIFACT_SKILL_PATTERN.test(path)) {
     return {
       packages: ["@opengeni/runtime"],
-      unitTests: ["scripts/sync-artifact-skills.test.ts"],
+      unitTests: ["scripts/bundled-artifact-skills.test.ts"],
       reason: "bundled artifact skill source boundary",
     };
   }
@@ -642,7 +641,7 @@ export function createImpactPlan(
   const changedTests = new Set<string>();
   for (const path of changedFiles) {
     const pkg = workspaceForPath(graph, path);
-    if (pkg) {
+    if (pkg && !ARTIFACT_SKILL_PATTERN.test(path)) {
       direct.add(pkg.name);
       reasons.push({ path, reason: `workspace ${pkg.name}` });
       if (/\.test\.tsx?$/.test(path) && existsSync(join(process.cwd(), path)))
