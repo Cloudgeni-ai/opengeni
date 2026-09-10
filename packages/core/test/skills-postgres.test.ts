@@ -25,6 +25,8 @@ import {
   skillReviewResolution,
   acceptSessionHumanInputResponse,
   appendSessionEvents,
+  applySessionTurnSettlement,
+  claimSessionWorkForAttempt,
   preparePackInstallationOperation,
   finalizePackInstallationOperation,
   preparePluginPackageInstall,
@@ -1999,6 +2001,157 @@ describe("one chat Skill confirmation", () => {
     },
     180000,
   );
+
+  test("real settlement preserves Skill choices and exact legacy bytes across a parallel interruption re-freeze", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest");
+    const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
+    const questions = skillReviewHumanInput(pending.skillReview!).questions;
+    const skillRequestId = crypto.randomUUID();
+    const ordinaryRequestId = crypto.randomUUID();
+    const [trigger] = await appendSessionEvents(
+      client.db,
+      f.context.workspaceId,
+      f.agent.actor.sessionId,
+      [{ type: "user.message", payload: { text: "Create Skill" } }],
+    );
+    await shared.admin`update session_turns set trigger_event_id=${trigger!.id} where id=${f.agent.actor.turnId}`;
+    const skillRequest = {
+      id: skillRequestId,
+      toolCallId: "skill-call",
+      questions,
+      allowSkip: false,
+      expiresAt: null,
+    };
+    const first = await applySessionTurnSettlement(client.db, f.context.workspaceId, {
+      sessionId: f.agent.actor.sessionId,
+      turnId: f.agent.actor.turnId,
+      triggerEventId: trigger!.id,
+      attemptId: f.agent.actor.attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: f.agent.actor.turnId,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [],
+        humanInputRequests: [
+          skillRequest,
+          {
+            id: ordinaryRequestId,
+            toolCallId: "ordinary-call",
+            allowSkip: false,
+            expiresAt: null,
+            questions: [
+              {
+                id: "ordinary",
+                kind: "single_select",
+                prompt: "Continue?",
+                required: true,
+                allowOther: false,
+                options: [{ id: "yes", label: "Yes" }],
+              },
+            ],
+          },
+        ],
+      },
+      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+    });
+    expect(first.action).toBe("settled");
+    const [storedNew] =
+      await shared.admin`select questions from session_human_input_requests where id=${skillRequestId}`;
+    expect(storedNew!.questions).toEqual(questions);
+    expect(storedNew!.questions[0].allowOther).toBe(false);
+    // Simulate the exact historical serializer shape, never a migration write.
+    const legacy = questions.map((question) => ({
+      ...question,
+      allowOther: true,
+      validation: null,
+      options: question.options.map((option) => ({ ...option, description: null })),
+    }));
+    await shared.admin`update session_human_input_requests set questions=${shared.admin.json(legacy)}::jsonb where id=${skillRequestId}`;
+    const answered = await acceptSessionHumanInputResponse(client.db, {
+      ...f.context,
+      sessionId: f.agent.actor.sessionId,
+      requestId: ordinaryRequestId,
+      respondedBy: f.human.actor.subjectId,
+      response: { outcome: "answered", answers: [{ questionId: "ordinary", values: ["yes"] }] },
+    });
+    if (answered.action !== "accepted") throw new Error("ordinary interruption not admitted");
+    const attemptId = crypto.randomUUID();
+    const resumed = await claimSessionWorkForAttempt(client.db, f.context.workspaceId, {
+      sessionId: f.agent.actor.sessionId,
+      workflowId: f.agent.actor.turnId,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "approval", triggerEventId: answered.event.id },
+    });
+    if (resumed.action !== "claimed") throw new Error(`resume claim failed: ${resumed.reason}`);
+    const serialized = serializeHumanInputRequests([
+      {
+        name: "request_human_input",
+        rawItem: {
+          callId: "skill-call",
+          arguments: JSON.stringify({ questions: legacy, allowSkip: false }),
+        },
+      },
+    ])[0]!.input.questions;
+    const refreeze = (nextQuestions = serialized, expiresAt: Date | null = null) =>
+      applySessionTurnSettlement(client!.db, f.context.workspaceId, {
+        sessionId: f.agent.actor.sessionId,
+        turnId: resumed.turn.id,
+        triggerEventId: resumed.turn.triggerEventId,
+        attemptId,
+        turnStatus: "requires_action",
+        sessionStatus: "requires_action",
+        activeTurnId: resumed.turn.id,
+        runState: {
+          serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+          pendingApprovals: [],
+          humanInputRequests: [{ ...skillRequest, questions: nextQuestions, expiresAt }],
+        },
+        events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+      });
+    await expect(
+      refreeze(
+        serialized.map((question) => ({
+          ...question,
+          skillReview: { ...question.skillReview!, sourceOperationId: crypto.randomUUID() },
+        })),
+      ),
+    ).rejects.toThrow(/changed contract/);
+    await expect(
+      refreeze(serialized.map((question) => ({ ...question, prompt: "Save metadata only?" }))),
+    ).rejects.toThrow(/confirmation contract/);
+    await expect(refreeze(serialized, new Date(Date.now() + 60000))).rejects.toThrow(
+      /changed contract/,
+    );
+    // Unknown stored fields cannot disappear through parser projection.
+    await shared.admin`update session_human_input_requests set questions=jsonb_set(questions,'{0,options,0,extra}','null'::jsonb) where id=${skillRequestId}`;
+    await expect(refreeze()).rejects.toThrow(/changed contract/);
+    await shared.admin`update session_human_input_requests set questions=${shared.admin.json(legacy)}::jsonb where id=${skillRequestId}`;
+    expect((await refreeze()).action).toBe("settled");
+    const [retained] =
+      await shared.admin`select questions,turn_generation,skill_review_human_authorized from session_human_input_requests where id=${skillRequestId}`;
+    expect(retained!.questions).toEqual(legacy);
+    expect(retained!.turn_generation).toBe(resumed.turn.executionGeneration);
+    expect(retained!.skill_review_human_authorized).toBe(false);
+    const saved = await acceptSessionHumanInputResponse(client.db, {
+      ...f.context,
+      sessionId: f.agent.actor.sessionId,
+      requestId: skillRequestId,
+      respondedBy: f.human.actor.subjectId,
+      canonicalHumanSession: true,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: questions[0]!.id, values: ["save"] }],
+      },
+    });
+    expect(saved.action).toBe("accepted");
+    expect((await readSkill(client.db, f.context, pending.skillId))?.activeRevisionId).toBe(
+      pending.revisionId,
+    );
+  }, 180000);
 
   test("legacy-wire compatibility keeps exact option semantics and rejects Other at the SQL boundary", async () => {
     if (!client || !shared) return;

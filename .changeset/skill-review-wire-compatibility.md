@@ -1,6 +1,7 @@
 ---
 "@opengeni/db": patch
 "@opengeni/runtime": patch
+"@opengeni/contracts": patch
 ---
 
 Canonicalize typed Skill review cards using host-owned choices. Allow explicit

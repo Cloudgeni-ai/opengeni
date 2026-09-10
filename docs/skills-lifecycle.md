@@ -88,6 +88,15 @@ no need to rewrite the audit history. Rolling back the application to a
 migration or restart a pre-0435 binary. Deployment and the actual human decision
 remain separate operations.
 
+Database settlement uses the same canonical presentation validator and never
+forces Other onto a new Skill card. If another interruption is answered first,
+the remaining Skill request may re-freeze in the next execution generation.
+Settlement preserves its existing question bytes only after its stable request
+identity, full canonical presentation and complete typed reference match. The
+original pending-status, skip and deadline predicates remain exact, and only
+generation ownership advances. Unknown fields, changed references, misleading
+text, altered deadlines or settled requests do not qualify for compatibility.
+
 Confirmation validates the canonical prompt, label, help text, choices and typed
 reference against the original immutable receipt. The logical turn, initiating
 human, current workspace authority, full revision identity, latest revision,
