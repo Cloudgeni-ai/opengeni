@@ -8,7 +8,7 @@ import {
   RefreshCwIcon,
   Table2Icon,
 } from "lucide-react";
-import { lazy, useEffect, useState, type ReactNode } from "react";
+import { lazy, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
@@ -50,13 +50,16 @@ export function SessionEditableArtifactsWorkspace({
     () => initialSelectedArtifactId ?? artifacts[0]?.id ?? null,
   );
 
+  const handledRequestId = useRef<number | null>(null);
   useEffect(() => {
-    if (!openArtifactRequest) return;
-    setSelectedArtifactId(openArtifactRequest.artifactId);
-    onSelectedArtifactIdChange?.(openArtifactRequest.artifactId);
-  }, [openArtifactRequest, onSelectedArtifactIdChange]);
-
-  useEffect(() => {
+    // Consume navigation before reconciling a selection whose synthetic summary
+    // may have been replaced by this request. Later renders preserve manual choices.
+    if (openArtifactRequest && handledRequestId.current !== openArtifactRequest.requestId) {
+      handledRequestId.current = openArtifactRequest.requestId;
+      setSelectedArtifactId(openArtifactRequest.artifactId);
+      onSelectedArtifactIdChange?.(openArtifactRequest.artifactId);
+      return;
+    }
     if (status === "loading") return;
     if (selectedArtifactId && artifacts.some((artifact) => artifact.id === selectedArtifactId)) {
       return;
@@ -64,7 +67,7 @@ export function SessionEditableArtifactsWorkspace({
     const next = artifacts[0]?.id ?? null;
     setSelectedArtifactId(next);
     onSelectedArtifactIdChange?.(next);
-  }, [artifacts, onSelectedArtifactIdChange, selectedArtifactId, status]);
+  }, [artifacts, openArtifactRequest, onSelectedArtifactIdChange, selectedArtifactId, status]);
 
   const artifact =
     artifacts.find((candidate) => candidate.id === selectedArtifactId) ?? artifacts[0];
