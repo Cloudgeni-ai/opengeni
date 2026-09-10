@@ -35,6 +35,7 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { observeNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -4142,6 +4143,11 @@ describe("provider-neutral browser account acceptance", () => {
         await captureResponsiveEvidence(context, engine);
       }
 
+      const stopRaceAuthorityObservation = await Promise.all(
+        [page, secondTab].map((observedPage) =>
+          observeNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
+        ),
+      );
       setBrowserPhase(pageProblems, "cross-tab-select-race");
       setBrowserPhase(secondTabProblems, "cross-tab-select-race");
       projection = await sessionSet(page);
@@ -4231,6 +4237,7 @@ describe("provider-neutral browser account acceptance", () => {
           oldWorkspaceId: alpha.workspaceId,
         }),
       ]);
+      await Promise.all(stopRaceAuthorityObservation.map((stop) => stop()));
 
       setBrowserPhase(pageProblems, "late-old-epoch-setup-beta-to-alpha");
       setBrowserPhase(secondTabProblems, "late-old-epoch-setup-beta-to-alpha");
