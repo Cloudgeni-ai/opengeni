@@ -2059,6 +2059,133 @@ describe("production model-response usage callback authority", () => {
     }
   });
 
+  test.each([1, 3])(
+    "post-compaction guard rejects retained and late old reports after %i responses",
+    async (responseCountBeforeStream) => {
+      const state = createModelResponseEventState();
+      state.responseCount = responseCountBeforeStream;
+      const oldReport = { revision: responseCountBeforeStream, totalTokens: 12_000 };
+      state.contextSignal = oldReport;
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () =>
+            modelResponseContextSignal(state, responseCountBeforeStream),
+        },
+      );
+      const checkpoint = [{ type: "message", role: "user", content: "small checkpoint" }] as any;
+      await filter({ modelData: { input: checkpoint }, agent: {} as any });
+
+      // The SDK prepares the follow-up before the worker consumes fresh usage.
+      // Reassigning the old report also proves that merely clearing it at the
+      // boundary would not be enough: an old revision must remain ineligible.
+      state.contextSignal = { ...oldReport };
+      const next = [
+        ...checkpoint,
+        { type: "message", role: "assistant", content: "small response" },
+      ] as any;
+      await expect(filter({ modelData: { input: next }, agent: {} as any })).resolves.toMatchObject(
+        { input: next },
+      );
+      expect(modelResponseContextSignal(state, responseCountBeforeStream)).toBeNull();
+      expect(state.responseCount).toBe(responseCountBeforeStream);
+      expect(state.contextSignal).toEqual(oldReport);
+    },
+  );
+
+  test.each([1, 3])(
+    "post-compaction guard still compacts fresh large usage after %i responses",
+    async (responseCountBeforeStream) => {
+      const state = createModelResponseEventState();
+      state.responseCount = responseCountBeforeStream;
+      state.contextSignal = { revision: responseCountBeforeStream, totalTokens: 12_000 };
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () =>
+            modelResponseContextSignal(state, responseCountBeforeStream),
+        },
+      );
+      const checkpoint = [{ type: "message", role: "user", content: "small checkpoint" }] as any;
+      await filter({ modelData: { input: checkpoint }, agent: {} as any });
+      state.responseCount += 1;
+      state.contextSignal = { revision: state.responseCount, totalTokens: 12_000 };
+      const next = [
+        ...checkpoint,
+        { type: "message", role: "assistant", content: "new response" },
+      ] as any;
+      await expect(filter({ modelData: { input: next }, agent: {} as any })).rejects.toBeInstanceOf(
+        CompactionNeededError,
+      );
+      expect(modelResponseContextSignal(state, responseCountBeforeStream)).toEqual({
+        revision: 1,
+        totalTokens: 12_000,
+      });
+      // Reading stream-local accounting must not reset the global usage ordinal.
+      expect(state.responseCount).toBe(responseCountBeforeStream + 1);
+      expect(state.contextSignal.revision).toBe(responseCountBeforeStream + 1);
+    },
+  );
+
+  test("keeps missing and partially delayed reports unbound across successive compactions", async () => {
+    const state = createModelResponseEventState();
+    state.responseCount = 1;
+    state.contextSignal = { revision: 1, totalTokens: 12_000 };
+    for (let retry = 0; retry < 2; retry += 1) {
+      const responseCountBeforeStream = state.responseCount;
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () =>
+            modelResponseContextSignal(state, responseCountBeforeStream),
+        },
+      );
+      const input = [{ type: "message", role: "user", content: "checkpoint" }] as any;
+      const request = () => filter({ modelData: { input: [...input] }, agent: {} as any });
+      const appendResponse = () => {
+        input.push({ type: "message", role: "assistant", content: "response" });
+      };
+      await request();
+      // Missing usage still consumes response 1's ordinal.
+      state.responseCount += 1;
+      state.contextSignal = null;
+      appendResponse();
+      await request();
+      expect(modelResponseContextSignal(state, responseCountBeforeStream)).toBeNull();
+
+      // Request 3 starts before response 2's usage is consumed.
+      appendResponse();
+      await request();
+      state.responseCount += 1;
+      state.contextSignal = { revision: state.responseCount, totalTokens: 12_000 };
+      expect(modelResponseContextSignal(state, responseCountBeforeStream)?.revision).toBe(2);
+      appendResponse();
+      // The delayed response 2 report cannot bind to request 3.
+      await expect(request()).resolves.toBeDefined();
+
+      // Consume responses 3 and 4. Fresh response 4 must bind to request 4
+      // and retain the ability to request a second legitimate compaction.
+      state.responseCount += 2;
+      state.contextSignal = { revision: state.responseCount, totalTokens: 12_000 };
+      appendResponse();
+      await expect(request()).rejects.toBeInstanceOf(CompactionNeededError);
+      expect(state.responseCount).toBe(responseCountBeforeStream + 4);
+    }
+    expect(state.responseCount).toBe(9);
+  });
+
   test("keeps no-id response ordinals unique across an in-activity compaction retry", async () => {
     const observability = createObservability(testSettings(), { component: "worker" });
     const billingRows = new Map<string, Record<string, unknown>>();

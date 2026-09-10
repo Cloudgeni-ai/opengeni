@@ -129,8 +129,17 @@ export const createSessionTitleModelUsageEventState = createCompactionModelUsage
 
 export function modelResponseContextSignal(
   state: ModelResponseEventState,
+  responseCountBeforeStream = 0,
 ): { revision: number; totalTokens: number } | null {
-  return state.contextSignal;
+  const signal = state.contextSignal;
+  // A compaction retry creates a new SDK request counter, but usage identities
+  // remain activity-wide. Never bind a pre-stream report to a reused request
+  // ordinal; translate only this stream's reports without mutating usage state.
+  if (!signal || signal.revision <= responseCountBeforeStream) return null;
+  return {
+    revision: signal.revision - responseCountBeforeStream,
+    totalTokens: signal.totalTokens,
+  };
 }
 
 export function assertModelResponseLatencyMode(input: {
