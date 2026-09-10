@@ -1,5 +1,13 @@
 # @opengeni/api-router
 
+## 2.11.4
+
+### Patch Changes
+
+- Updated dependencies [5249b0d]
+  - @opengeni/runtime@2.4.4
+  - @opengeni/core@2.8.4
+
 ## 2.11.3
 
 ### Patch Changes
