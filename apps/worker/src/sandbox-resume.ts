@@ -55,7 +55,9 @@ import {
   type LeaseHolderKind,
 } from "@opengeni/db";
 import {
-  captureVerifiedWorkspaceArchive,
+  captureWorkspaceArchiveForStorage,
+  disposeWorkspaceArchive,
+  type VerifiedWorkspaceArchivePayload,
   describeLegacyNativeSnapshotArchive,
   inlineWorkspaceArchiveForRestore,
   MODAL_EXEC_READINESS_TIMEOUT_MS,
@@ -79,13 +81,15 @@ import {
   type RuntimeMetricsHooks,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
-import type { ObjectStorage } from "@opengeni/storage";
+import {
+  downloadWorkspaceArchiveSpool,
+  WorkspaceArchiveStorageError,
+  type ObjectStorage,
+} from "@opengeni/storage";
 import type { Observability } from "@opengeni/observability";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
-  collectWorkspaceArchiveObjectKeys,
-  deleteUnpublishedWorkspaceArchiveObject,
-  deleteWorkspaceArchiveObjectKeys,
+  persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
 
@@ -582,6 +586,14 @@ async function materializeSpawnEnvelopeArchive(
       "workspace archive object storage is not configured",
     );
   }
+  const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
+  if (
+    process.platform === "linux" &&
+    descriptor?.version === 1 &&
+    descriptor.workspace.projection === "sdk_local_archive_v1"
+  ) {
+    return envelope;
+  }
   return {
     ...record,
     sessionState: await inlineWorkspaceArchiveForRestore(sessionState, (key) =>
@@ -898,9 +910,10 @@ async function persistWarmWorkspaceSnapshot(
     // first (the bounded-wait race Bugbot flagged).
     const capturedAtMs = Date.now();
     const registerCandidate = async (
-      archive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>,
+      archive: VerifiedWorkspaceArchivePayload,
     ): Promise<{ id: string } | null> => {
       if (
+        archive.kind === "host_spool" ||
         archive.descriptor.version !== 2 ||
         (archive.descriptor.provider !== "modal_snapshot_filesystem" &&
           archive.descriptor.provider !== "modal_snapshot_directory")
@@ -938,82 +951,65 @@ async function persistWarmWorkspaceSnapshot(
     // turn signal resolves first. Its finally block is the only normal release
     // of the exact admission gate; a late callback cannot release a successor.
     const captureAndPublish = (async (): Promise<boolean> => {
+      let archive: VerifiedWorkspaceArchivePayload | undefined;
       let candidate: { id: string } | null = null;
-      let workspaceArchiveRef: Awaited<
-        ReturnType<typeof putVersion1TarArchiveOrInline>
-      >["workspaceArchiveRef"];
+      let publicationAttempted = false;
       try {
-        const archive = await captureVerifiedWorkspaceArchive(session, capturedAtMs, {
-          requestId: claimed.claim.providerRequestId,
-          strategy: capturePolicy.strategy,
-        });
-        candidate = await registerCandidate(archive);
-        const priorLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-        const priorKeys = collectWorkspaceArchiveObjectKeys(
-          (priorLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+        archive = await captureWorkspaceArchiveForStorage(
+          session,
+          capturedAtMs,
+          {
+            requestId: claimed.claim.providerRequestId,
+            strategy: capturePolicy.strategy,
+          },
+          Boolean(services.objectStorage),
         );
+        candidate = await registerCandidate(archive);
+        const archiveDescriptor = archive.descriptor;
         const published = await putVersion1TarArchiveOrInline({
           backend: lease.backend,
           objectStorage: services.objectStorage,
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
           sandboxGroupId: ids.sandboxGroupId,
-          archive: {
-            bytes: archive.bytes,
-            descriptor: archive.descriptor,
-            base64: archive.base64,
-          },
+          archive,
           ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         });
-        workspaceArchiveRef = published.workspaceArchiveRef;
-        const { wrote } = await persistWarmSnapshot(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: ids.sessionId,
-          turnId: ids.turnId,
-          attemptId: ids.attemptId,
-          sandboxGroupId: ids.sandboxGroupId,
-          expectedEpoch: leaseEpoch,
-          expectedInstanceId: instanceId,
-          expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
-          captureId,
-          workspaceArchiveMeta: archive.descriptor,
-          ...published,
-          checkpointArtifactId: candidate?.id ?? null,
-          minIntervalMs: force ? 0 : intervalMs,
-          capturedAtMs,
+        publicationAttempted = true;
+        const { wrote } = await persistWorkspaceArchiveCandidate({
+          ...(services.objectStorage ? { objectStorage: services.objectStorage } : {}),
+          ...(published.workspaceArchiveRef ? { ref: published.workspaceArchiveRef } : {}),
+          persist: () =>
+            persistWarmSnapshot(db, {
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              turnId: ids.turnId,
+              attemptId: ids.attemptId,
+              sandboxGroupId: ids.sandboxGroupId,
+              expectedEpoch: leaseEpoch,
+              expectedInstanceId: instanceId,
+              expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
+              captureId,
+              workspaceArchiveMeta: archiveDescriptor,
+              ...published,
+              checkpointArtifactId: candidate?.id ?? null,
+              minIntervalMs: force ? 0 : intervalMs,
+              capturedAtMs,
+            }),
         });
-        if (published.workspaceArchiveRef && services.objectStorage) {
-          if (!wrote) {
-            await deleteUnpublishedWorkspaceArchiveObject(
-              services.objectStorage,
-              published.workspaceArchiveRef,
-              services.sandboxMetrics,
-            );
-          } else {
-            const afterLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-            const afterKeys = collectWorkspaceArchiveObjectKeys(
-              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
-            );
-            await deleteWorkspaceArchiveObjectKeys(
-              services.objectStorage,
-              [...priorKeys].filter((key) => !afterKeys.has(key)),
-            ).catch(() => undefined);
-          }
-        }
         if (!wrote && candidate) {
           await abandonCandidate(candidate.id, "snapshot_publication_fenced");
         }
         return wrote;
       } catch (error) {
-        await deleteUnpublishedWorkspaceArchiveObject(
-          services.objectStorage,
-          workspaceArchiveRef,
-          services.sandboxMetrics,
-        );
-        if (candidate) await abandonCandidate(candidate.id, "snapshot_capture_failed");
+        if (candidate && !publicationAttempted)
+          await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {
+        await disposeWorkspaceArchive(archive).catch(() => {
+          console.warn("workspace archive spool cleanup failed");
+        });
         await releaseWorkspaceArchiveCapture(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
@@ -1504,6 +1500,26 @@ export async function resumeBoxForTurn(
       const established = await establishSandboxSessionFromEnvelope(settings, hydrateEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
+        ...(services.objectStorage
+          ? {
+              loadHostWorkspaceArchive: async (ref) => {
+                try {
+                  return await downloadWorkspaceArchiveSpool(services.objectStorage!, ref.key, {
+                    bytes: ref.bytes,
+                    sha256: ref.sha256,
+                  });
+                } catch (error) {
+                  if (error instanceof WorkspaceArchiveStorageError) {
+                    throw new WorkspaceArchiveIntegrityError(error.code, error.message, {
+                      retryable: error.retryable,
+                      cause: error,
+                    });
+                  }
+                  throw error;
+                }
+              },
+            }
+          : {}),
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),

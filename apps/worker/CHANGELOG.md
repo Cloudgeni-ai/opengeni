@@ -1,5 +1,24 @@
 # @opengeni/worker-bundle
 
+## 0.28.4
+
+### Patch Changes
+
+- e1a50ba: Spool Linux host-backed workspace archives through capture, object storage, and cold restore instead of materializing whole JSON/base64 payloads. Isolate each upload at a fresh physical locator and verify stored bytes without assuming conditional-PUT support. Preserve legacy locators, archive format, configured restore limits, and lease capture/publication authority; retain candidates after ambiguous publication outcomes.
+- a96c1cc: Track turn-progress gauges per physical attempt and always clear them when the activity finalizes, preventing recoverable replacements from leaving false stuck-turn alerts.
+- Updated dependencies [e1a50ba]
+  - @opengeni/runtime@2.5.3
+  - @opengeni/storage@0.2.127
+  - @opengeni/contracts@3.0.2
+  - @opengeni/db@4.3.3
+  - @opengeni/core@2.9.4
+  - @opengeni/documents@0.8.27
+  - @opengeni/codemode@0.5.6
+  - @opengeni/config@1.1.2
+  - @opengeni/events@0.4.25
+  - @opengeni/github@0.7.10
+  - @opengeni/observability@0.8.26
+
 ## 0.28.3
 
 ### Patch Changes

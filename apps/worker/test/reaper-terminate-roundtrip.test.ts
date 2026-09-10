@@ -17,7 +17,7 @@
 // this test does not mock @opengeni/runtime globally and poison unrelated tests.
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testSettings } from "@opengeni/testing";
@@ -78,6 +78,88 @@ const observability = {
 } as never;
 
 describe("reaper terminate envelope→resume round-trip preserves sandboxId", () => {
+  test.skipIf(process.platform !== "linux").each([false, true])(
+    "disk-backed drain owns its spool through publication (failure=%s)",
+    async (failPublication) => {
+      const root = mkdtempSync(join(tmpdir(), "opengeni-spool-drain-"));
+      writeFileSync(join(root, "retained.txt"), "retained workspace");
+      let deleted = false;
+      let spoolPath: string | undefined;
+      const client = {
+        backendId: "docker",
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async resume(state: Record<string, unknown>) {
+          return {
+            state,
+            persistWorkspace: async () => {
+              throw new Error("whole archive capture forbidden");
+            },
+            delete: async () => {
+              deleted = true;
+            },
+          };
+        },
+      };
+      try {
+        const operation = terminateProviderBox(
+          testSettings({ sandboxBackend: "docker", sandboxOwnershipEnabled: true }),
+          {
+            sandboxGroupId: "spool-drain",
+            leaseEpoch: 4,
+            backend: "docker",
+            instanceId: "docker-spool",
+            resumeBackendId: "docker",
+            resumeState: {
+              backendId: "docker",
+              sessionState: {
+                providerState: {
+                  containerId: "docker-spool",
+                  workspaceRootPath: root,
+                  workspaceRootOwned: true,
+                },
+              },
+            },
+          } as never,
+          observability,
+          async (archive) => {
+            if (!archive || typeof archive === "string")
+              throw new Error("expected disk-backed archive");
+            spoolPath = archive.spool.path;
+            expect(existsSync(spoolPath)).toBe(true);
+            expect(deleted).toBe(false);
+            const payload = JSON.parse(readFileSync(spoolPath, "utf8"));
+            expect(payload.files).toEqual([
+              { path: "retained.txt", data: Buffer.from("retained workspace").toString("base64") },
+            ]);
+            if (failPublication) throw new Error("synthetic publication failure");
+            return { wrote: true };
+          },
+          (() => client) as never,
+          undefined,
+          "stable-provider-request",
+          "capture_required",
+          undefined,
+          true,
+        );
+        if (failPublication)
+          await expect(operation).rejects.toThrow("synthetic publication failure");
+        else
+          expect(await operation).toEqual({
+            terminated: true,
+            providerMissingBeforeCapture: false,
+          });
+        expect(deleted).toBe(!failPublication);
+        expect(spoolPath).toBeDefined();
+        expect(existsSync(spoolPath!)).toBe(false);
+        expect(readFileSync(join(root, "retained.txt"), "utf8")).toBe("retained workspace");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("normalizes the SDK local ID and cold-commits an unavailable process-local workspace", async () => {
     const clientBuilds: string[] = [];
     const localClient = {

@@ -103,9 +103,26 @@ function objectStorageFor(
       },
       getFileRange: async () => null,
       async getObjectBytes(key: string) {
+        if (process.platform === "linux") throw new Error("whole-object restore forbidden");
         readCount += 1;
         expect(key).toBe(ref.key);
         return reply === null ? null : { bytes: reply };
+      },
+      async headObject(key: string) {
+        expect(key).toBe(ref.key);
+        // Count the initial object observation, not the final version check.
+        if (readCount === 0) readCount += 1;
+        return reply === null ? null : { ContentLength: reply.length, VersionToken: "fixture-v1" };
+      },
+      async getObjectRange(input) {
+        expect(input.key).toBe(ref.key);
+        expect(input.expectedVersionToken).toBe("fixture-v1");
+        return reply === null
+          ? null
+          : {
+              bytes: reply.subarray(input.start, input.endInclusive + 1),
+              versionToken: "fixture-v1",
+            };
       },
       putObject: async () => undefined,
       deleteObject: async () => undefined,

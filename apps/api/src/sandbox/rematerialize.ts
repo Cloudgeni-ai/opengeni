@@ -32,7 +32,11 @@ import {
   type EstablishedSandboxSession,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime/sandbox";
-import type { ObjectStorage } from "@opengeni/storage";
+import {
+  downloadWorkspaceArchiveSpool,
+  WorkspaceArchiveStorageError,
+  type ObjectStorage,
+} from "@opengeni/storage";
 
 function hasWorkspaceArchive(envelope: Record<string, unknown> | null): boolean {
   const sessionState =
@@ -72,6 +76,14 @@ async function materializeArchiveObjectRef(
       "archive_base64_invalid",
       "workspace archive object storage is not configured",
     );
+  }
+  const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
+  if (
+    process.platform === "linux" &&
+    descriptor?.version === 1 &&
+    descriptor.workspace.projection === "sdk_local_archive_v1"
+  ) {
+    return envelope;
   }
   return {
     ...envelope,
@@ -209,6 +221,26 @@ export async function establishApiSandboxSpawner(input: {
     established = await establishSandboxSessionFromEnvelope(input.settings, hydrateEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
+      ...(input.objectStorage
+        ? {
+            loadHostWorkspaceArchive: async (ref) => {
+              try {
+                return await downloadWorkspaceArchiveSpool(input.objectStorage!, ref.key, {
+                  bytes: ref.bytes,
+                  sha256: ref.sha256,
+                });
+              } catch (error) {
+                if (error instanceof WorkspaceArchiveStorageError) {
+                  throw new WorkspaceArchiveIntegrityError(error.code, error.message, {
+                    retryable: error.retryable,
+                    cause: error,
+                  });
+                }
+                throw error;
+              }
+            },
+          }
+        : {}),
       backendOverride: input.backend as never,
       environment: input.environment,
       onSandboxCreated: async (created) => {

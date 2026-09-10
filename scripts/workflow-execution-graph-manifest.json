@@ -50,7 +50,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "49d8a518d63f3b11ba8434a1238707831c83d1e8d01f9f37f5681d4d1183b535"
+      "sha256": "cf388d5503891b91fcf8edaddc7f2ae36f9b7a89743b90e82f068d011cd07dcb"
     },
     {
       "path": ".github/workflows/release-embedded.yml",

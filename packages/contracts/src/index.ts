@@ -180,7 +180,9 @@ export {
   encodeNativeSnapshotRef,
   omitInlineWorkspaceArchiveWhenObjectRefPresent,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectKey,
   parseWorkspaceArchiveObjectRef,
+  validateWorkspaceArchiveObjectRef,
   workspaceArchiveObjectKey,
   workspaceArchivePayloadPresent,
   type NativeSnapshotDescriptor,
@@ -189,6 +191,7 @@ export {
   type TarWorkspaceArchiveDescriptor,
   type WorkspaceArchiveDescriptor,
   type WorkspaceArchiveObjectRef,
+  type WorkspaceArchiveObjectKey,
   type WorkspaceTreeFingerprint,
 } from "./sandbox-snapshots";
 
