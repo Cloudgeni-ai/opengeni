@@ -62,6 +62,7 @@ import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
+import { readBootstrap } from "@/lib/bootstrap-read";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -875,7 +876,17 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
-    void fetchClientConfig()
+    const controller = new AbortController();
+    // Let synchronous effect cleanup (including StrictMode's discarded mount)
+    // cancel before starting I/O. Active requests still abort on real cleanup.
+    void Promise.resolve()
+      .then(() =>
+        readBootstrap({
+          context: "client_configuration",
+          request: () => fetchClientConfig(controller.signal),
+          signal: controller.signal,
+        }),
+      )
       .then((config) => {
         if (cancelled) {
           return;
@@ -899,6 +910,7 @@ export function RootRouteComponent() {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [configRequestVersion, isPublicDevHarness]);
 
@@ -974,14 +986,29 @@ export function RootRouteComponent() {
     setManagedSelfContext(null);
     setAccessLoading(true);
     setAccessError(null);
+    const controller = new AbortController();
+    // These SDK reads do not accept a caller signal. Fence their late results
+    // and every new attempt without changing the SDK's general retry policy.
+    const readAccess = <T,>(request: () => Promise<T>) =>
+      readBootstrap({
+        context: "workspace_access",
+        request,
+        signal: controller.signal,
+        isCurrent: () =>
+          ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal),
+      });
     const selfContextPromise = acceptedManagedIdentity
       ? loadCurrentManagedSelfContext({
           identity: acceptedManagedIdentity,
           currentIdentity: () => managedSelfContextIdentityRef.current,
-          request: () => client.listOrganizationMemberships(),
+          request: () => readAccess(() => client.listOrganizationMemberships()),
         })
       : Promise.resolve(null);
-    void Promise.all([client.getAccessContext(), client.listWorkspaces(), selfContextPromise])
+    void Promise.all([
+      readAccess(() => client.getAccessContext()),
+      readAccess(() => client.listWorkspaces()),
+      selfContextPromise,
+    ])
       .then(([context, nextWorkspaces, nextManagedSelfContext]) => {
         if (
           cancelled ||
@@ -1022,6 +1049,7 @@ export function RootRouteComponent() {
           return;
         }
         const presentation = bootstrapErrorPresentation(error, "workspace_access");
+        controller.abort();
         setAccessContext(null);
         setWorkspaces([]);
         setAccessError(presentation);
@@ -1039,6 +1067,7 @@ export function RootRouteComponent() {
       if (managedSelfContextIdentityRef.current === acceptedManagedIdentity) {
         managedSelfContextIdentityRef.current = null;
       }
+      controller.abort();
     };
   }, [
     accessKeyVersion,
