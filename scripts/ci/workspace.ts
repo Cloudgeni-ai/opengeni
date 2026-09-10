@@ -57,6 +57,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "requires a real FORCE-RLS PostgreSQL boundary and browser evidence and is owned by the curated onboarding gate",
   "test/e2e/browser-accounts-acceptance.e2e.ts":
     "requires actual Better Auth users, a real FORCE-RLS PostgreSQL boundary, and Chromium/Firefox/WebKit popup and cookie evidence in the account-acceptance lane",
+  "test/e2e/browser-account-request-observation.browser.e2e.ts":
+    "requires native Chromium request-header evidence and is owned by the Chromium account-acceptance lane",
   "test/e2e/queue-surface.browser.e2e.ts":
     "requires dedicated queue-surface evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/react-demo-mobile.browser.e2e.ts":
