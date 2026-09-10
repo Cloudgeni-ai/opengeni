@@ -61,6 +61,13 @@ export * from "./sandbox/runtime-settings";
 
 // Access layer (transport-neutral grant resolution + permission checks).
 export * from "./access";
+export * from "./application/external-workspace-members";
+export * from "./application/external-identity-lifecycle";
+export * from "./application/external-continuation";
+export * from "./application/external-link-work-admission";
+export * from "./application/connect-authority";
+export * from "./application/host-mcp-owner";
+export * from "./application/connect-operation";
 export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).

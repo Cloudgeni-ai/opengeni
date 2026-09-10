@@ -8,6 +8,25 @@ import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
+export const HostMcpCreateSelections = z
+  .array(
+    z
+      .object({
+        serverId: z.string().min(1).max(256),
+        delegationId: z
+          .string()
+          .uuid()
+          .transform((value) => value.toLowerCase()),
+        generation: z.number().int().positive().safe(),
+      })
+      .strict(),
+  )
+  .max(128)
+  .superRefine((values, ctx) => {
+    if (new Set(values.map((value) => value.serverId)).size !== values.length)
+      ctx.addIssue({ code: "custom", message: "Duplicate host server selection" });
+  });
+export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
@@ -4093,6 +4112,11 @@ export const McpServerConnectionRef = z
     connectionId: z.string().min(1).optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
+    /** Opt-in durable reference. A live execution validator is mandatory. */
+    hostBinding: z
+      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+      .strict()
+      .optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
     /** Provider host or tenant domain. */
@@ -4114,6 +4138,12 @@ export const McpServerConnectionRef = z
         path: ["connectionId"],
       });
     }
+    if (reference.hostBinding && reference.authoritySource !== "host")
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message: "Durable binding requires host authority",
+      });
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -4407,7 +4437,39 @@ export type McpCredentialResolution =
       authorizationUrl?: string;
     };
 
+/** Non-turn authority captured by the authenticated API gateway, never by caller JSON. */
+export type McpGatewayCredentialAuthority = {
+  kind: "external_user" | "organization_service";
+  subjectId: string;
+  permissions: AccessGrant["permissions"];
+};
+
+export type McpGatewayCredentialsRequest = Pick<
+  McpCredentialsRequest,
+  | "accountId"
+  | "workspaceId"
+  | "destinationUrl"
+  | "credentialTarget"
+  | "serverId"
+  | "toolName"
+  | "connectionRef"
+  | "forceRefresh"
+> & {
+  surface: "workspace_gateway";
+  requestId: string;
+  authority: McpGatewayCredentialAuthority;
+};
+
+export type McpGatewayCredentialResolution =
+  | (Omit<Extract<McpCredentialResolution, { status: "ok" }>, "sessionId"> & { requestId: string })
+  | (Omit<Extract<McpCredentialResolution, { status: "auth_needed" }>, "sessionId"> & {
+      requestId: string;
+    });
+
 export type ConnectionCredentialsPort = {
+  /** Restrict an optional remote adapter to explicit host refs. Omission keeps
+   * existing in-process host override and legacy-reference behavior. */
+  mcpAuthoritySource?: "host";
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
   // that leg only.
@@ -4426,6 +4488,11 @@ export type ConnectionCredentialsPort = {
    * used by model-visible MCP tools and the exact-attempt Codemode projection.
    */
   mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
+  /** Explicit opt-in for authenticated pre-session discovery and invocation.
+   * Does not call the turn-based mcpCredentials fallback or grant durable use. */
+  mcpGatewayCredentials?(
+    input: McpGatewayCredentialsRequest,
+  ): Promise<McpGatewayCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -6789,56 +6856,45 @@ export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
 
 /**
  * How far a live agent attempt on a session may reach across the workspace,
- * and how far peer attempts may reach into it. `workspace` is the platform
- * default. `user` limits both directions to sessions carrying the same
- * {@link SessionEndUser} label; `session` limits both to the own root tree.
- * The most restrictive side of a caller/target pair wins. Humans and API keys
+ * under ordinary resource authorization. `workspace` is the platform default.
+ * `user` limits outgoing reach to the same canonical {@link SessionScopeSubjectId};
+ * `session` limits it to the own root tree. Target task scope does not restrict
+ * incoming access; private ownership remains enforced. Humans and API keys
  * are unaffected: this is an agent-to-agent fence enforced only in the core
  * session-authorization seam.
  */
 export const SessionAgentAccess = z.enum(["session", "user", "workspace"]);
 export type SessionAgentAccess = z.infer<typeof SessionAgentAccess>;
 
-export const SESSION_END_USER_SOURCE_MAX_CHARS = 200;
-export const SESSION_END_USER_ID_MAX_CHARS = 1_024;
-
-const NUL_CHARACTER = String.fromCharCode(0);
-const UNPAIRED_SURROGATE_PATTERN =
-  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
-
-function opaqueEndUserSegment(maxChars: number) {
-  return z
-    .string()
-    .min(1)
-    .max(maxChars)
-    .refine((value) => !value.includes(NUL_CHARACTER), "must not contain NUL")
-    .refine((value) => !UNPAIRED_SURROGATE_PATTERN.test(value), "must be well-formed UTF-16");
-}
-
 /**
- * Opaque end-user label attached to a session by the embedding product. It
- * shares the external-identity shape (`source` + product-owned `id`) so a
- * later join is by pair. It is NOT a subject and grants NO authority: it only
- * scopes `agentAccess: "user"` reach, `memoryScope: "user"` Memory rows, and
- * the session-list `endUserSource`/`endUserId` filter.
+ * Server-derived canonical user for the session's agent-reach boundary.
+ * This is an output/filter value, never caller-supplied creation authority.
+ * Human visibility remains an independent resource authorization check.
  */
-export const SessionEndUser = z
-  .object({
-    source: opaqueEndUserSegment(SESSION_END_USER_SOURCE_MAX_CHARS),
-    id: opaqueEndUserSegment(SESSION_END_USER_ID_MAX_CHARS),
-  })
-  .strict();
-export type SessionEndUser = z.infer<typeof SessionEndUser>;
+export const SessionScopeSubjectId = z
+  .string()
+  .min(1)
+  .max(1024)
+  .regex(/^(?:user:|external_user:).+/);
+export type SessionScopeSubjectId = z.infer<typeof SessionScopeSubjectId>;
 
 /**
  * The typed Workspace Memory selector an agent reads and writes. `workspace`
- * is today's shared memory; `user` and `session` are ADDITIVE private layers
+ * is shared memory; `user` adds a private layer
  * (the agent still reads workspace facts and saves to its narrowest scope);
  * `off` registers no Memory tools for the session. `user` requires an
- * end-user label.
+ * authenticated canonical user on the active turn. Use task notes for task-local data.
  */
-export const SessionMemoryScope = z.enum(["workspace", "user", "session", "off"]);
+export const SessionMemoryScope = z.enum(["workspace", "user", "off"]);
 export type SessionMemoryScope = z.infer<typeof SessionMemoryScope>;
+
+/** Read old persisted selectors without promoting task-local data or authority.
+ * New requests must use SessionMemoryScope directly and reject `session`.
+ * Historical Memory rows remain retained; task notes own new task-local facts. */
+export function storedSessionMemoryScope(value: unknown): SessionMemoryScope {
+  if (value === "session") return "off";
+  return SessionMemoryScope.parse(value ?? "workspace");
+}
 
 /**
  * The calling agent attempt's own access scope, resolved by OpenGeni from the
@@ -6849,7 +6905,7 @@ export const SessionAgentAccessViewer = z
   .object({
     callerRootSessionId: z.string().uuid(),
     agentAccess: SessionAgentAccess,
-    endUser: SessionEndUser.nullable(),
+    scopeSubjectId: SessionScopeSubjectId.nullable(),
   })
   .strict();
 export type SessionAgentAccessViewer = z.infer<typeof SessionAgentAccessViewer>;
@@ -9403,6 +9459,7 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
   connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+  selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
   agentConfig: ScheduledTaskAgentConfigInput,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -9482,6 +9539,7 @@ export const UpdateScheduledTaskRequest =
     action: ScheduledTaskAction.optional(),
     targetSessionId: z.string().uuid().nullable().optional(),
     connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     agentConfig: ScheduledTaskAgentConfigInput.optional(),
     status: ScheduledTaskStatus.optional(),
     variableSetId: z.string().uuid().nullable().optional(),
@@ -10714,6 +10772,8 @@ export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
 
 export const SocialConnection = z.object({
   id: z.string().uuid(),
+  /** Present on version-aware deployments; required for observed reconnect. */
+  version: z.number().int().positive().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   provider: SocialProvider,
@@ -10845,6 +10905,8 @@ export const FikenInstallRequest = z.object({
 export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
 
 export const FikenOAuthStartRequest = z.object({
+  /** Same-origin product route to return to after provider consent. */
+  returnPath: z.string().min(1).max(2048).optional(),
   /** Existing Fiken connection to re-authorize in place (reconnect). */
   connectionId: z.string().uuid().optional(),
 });
@@ -11046,6 +11108,7 @@ export const OAuthStartRequest = z
     resource: z.string().url().optional(),
     requestedScopes: z.array(z.string().min(1)).default([]),
     returnPath: z.string().min(1).optional(),
+    returnUrl: z.string().min(1).max(4096).optional(),
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
     oauthClient: z
@@ -12270,8 +12333,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
     /** Agent-to-agent reach declared at create; see {@link SessionAgentAccess}. */
     agentAccess: SessionAgentAccess.default("workspace"),
-    /** Opaque product label; null when the create carried none. */
-    endUser: SessionEndUser.nullable().default(null),
+    /** Canonical native/asUser scope identity; null for unscoped service work. */
+    scopeSubjectId: SessionScopeSubjectId.nullable().default(null),
     /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
     memoryScope: SessionMemoryScope.default("workspace"),
     resources: z.array(ResourceRef),
@@ -12487,27 +12550,17 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
 /**
- * `GET /v1/organizations/:organizationId/sessions` query. `endUserSource` and
- * `endUserId` must be supplied together; `status` keeps only sessions in that
- * exact lifecycle state.
+ * Organization session queries may filter a canonical scope subject and lifecycle
+ * state. Legacy end-user label filters are rejected.
  */
-export const ListOrganizationSessionsQuery = z
-  .object({
-    limit: z.coerce.number().int().min(1).max(200).default(50),
-    cursor: z.string().min(1).optional(),
-    endUserSource: z.string().trim().min(1).max(200).optional(),
-    endUserId: z.string().trim().min(1).max(1024).optional(),
-    status: SessionStatus.optional(),
-  })
-  .superRefine((value, context) => {
-    if ((value.endUserSource === undefined) !== (value.endUserId === undefined)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "endUserSource and endUserId must be supplied together",
-        path: ["endUserId"],
-      });
-    }
-  });
+export const ListOrganizationSessionsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  cursor: z.string().min(1).optional(),
+  scopeSubjectId: SessionScopeSubjectId.optional(),
+  endUserSource: z.never().optional(),
+  endUserId: z.never().optional(),
+  status: SessionStatus.optional(),
+});
 export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessionsQuery>;
 
 /**
@@ -14838,6 +14891,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * identity or authorization from the UUID.
        */
       requestedSessionId: z.string().uuid().optional(),
+      /** Explicit external-owner grants for the direct initial turn only. */
+      selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
       /** Top-level omission is workspace-visible. Agent-child omission inherits
        * the exact parent visibility; cross-visibility child creation is rejected.
        * Top-level private creation is an activated managed-cookie owning-human
@@ -14849,12 +14904,11 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * omission and may only narrow it (workspace > user > session); a wider
        * explicit child value is rejected. Never widens human or API-key access. */
       agentAccess: SessionAgentAccess.default("workspace"),
-      /** Opaque product label for the human this session serves. A child
-       * inherits its parent's label; naming a different pair is rejected. */
-      endUser: SessionEndUser.optional(),
-      /** Typed Memory selector. `user` requires an end-user label (own or
-       * inherited; 422 otherwise). A child inherits its parent's value on
-       * omission and may only narrow it (workspace > user > session > off). */
+      /** Identity comes from verified native/asUser authority, never request fields. */
+      scopeSubjectId: z.never().optional(),
+      endUser: z.never().optional(),
+      /** Typed Memory selector. `user` requires canonical user authority. Children
+       * inherit omission and may only narrow (workspace > user > off). */
       memoryScope: SessionMemoryScope.default("workspace"),
       initialMessage: z.string().min(1).optional(),
       // Creates the durable session shell without fabricating a user message or
@@ -15051,9 +15105,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         message: "new-session attachment authority epoch is derived by the server",
       });
     }
-    // memoryScope "user" requires an end-user label, but an agent-created child
-    // inherits its parent's label on omission, so that rule is enforced by the
-    // core create resolver (422) after inheritance rather than at parse time.
+    // Canonical user authority and child inheritance are resolved by the core
+    // create resolver, which rejects user Memory without that authority.
   }),
 );
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
@@ -15266,6 +15319,7 @@ export const SessionUserMessagePayload = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact logical turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
@@ -15315,6 +15369,7 @@ export const SteerSessionMessageRequest = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact steered turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()

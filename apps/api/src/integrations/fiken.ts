@@ -1,10 +1,15 @@
+import { safeReturnPath } from "./oauth-return-path";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
+import { createHash } from "node:crypto";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
   FIKEN_PROVIDER_DOMAIN,
   FikenOAuthStartResponse,
+  FikenInstallRequest,
   type AccessGrant,
   type ConnectionMetadata,
   type FikenCompanySummary,
@@ -13,7 +18,6 @@ import {
 } from "@opengeni/contracts";
 import {
   fikenConnectionMetadata,
-  hasPermission,
   isFikenConnection,
   preferredFikenConnection,
   requireEnvironmentEncryption,
@@ -24,8 +28,11 @@ import {
   consumeIntegrationOAuthStateNonce,
   createConnection,
   encryptEnvironmentValue,
+  decryptEnvironmentValue,
+  getConnectAttempt,
+  claimConnectOperation,
+  finishConnectOperation,
   getConnectionMetadata,
-  getWorkspaceGrant,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordAuditEvent,
@@ -54,6 +61,84 @@ const MAX_DRAFT_LINES = 100;
 
 // Fiken company slugs as issued by Fiken: lowercase alphanumerics and dashes.
 const COMPANY_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
+
+/** Shared native/embedded token adapter. Provider verification happens before
+ * persistence; the caller reauthorizes inside its durable commit transaction. */
+export async function prepareFikenTokenInstall(
+  deps: ApiRouteDeps,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId" | "subjectId">,
+  raw: unknown,
+  expectedVersion?: number,
+): Promise<(tx: Database) => Promise<ConnectionMetadata>> {
+  const payload = FikenInstallRequest.parse(raw);
+  const key = requireEnvironmentEncryption(deps.settings);
+  const existing = payload.connectionId
+    ? await getConnectionMetadata(deps.db, grant.workspaceId, payload.connectionId, null)
+    : null;
+  if (payload.connectionId && !existing)
+    throw new HTTPException(404, { message: "connection not found" });
+  if (existing && !isFikenConnection(existing))
+    throw new HTTPException(422, { message: "connectionId is not a Fiken connection" });
+  if (expectedVersion !== undefined && existing?.version !== expectedVersion)
+    throw new HTTPException(409, { message: "The selected Fiken account changed" });
+  const verified = await verifyFikenApiToken(payload.apiToken, deps.fikenFetch ?? fetch);
+  const defaultCompanySlug = resolveFikenDefaultCompanySlug({
+    requested: payload.defaultCompanySlug ?? null,
+    previous: existing
+      ? (fikenConnectionMetadata(existing.metadata)?.defaultCompanySlug ?? null)
+      : null,
+    companies: verified.companies,
+  });
+  if (payload.defaultCompanySlug && defaultCompanySlug !== payload.defaultCompanySlug)
+    throw new HTTPException(422, {
+      message: "The selected company is not accessible with this token",
+    });
+  const metadata = {
+    credentialRole: FIKEN_CREDENTIAL_ROLE,
+    credentialLabel: FIKEN_CREDENTIAL_LABEL,
+    companies: verified.companies,
+    defaultCompanySlug,
+    verifiedAt: new Date().toISOString(),
+  };
+  const credentialEncrypted = encryptEnvironmentValue(
+    key,
+    JSON.stringify(fikenCredentialBundle(payload.apiToken)),
+  );
+  return async (tx) => {
+    if (existing) {
+      const updated = await updateConnection(tx, {
+        workspaceId: grant.workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: null,
+        expectedVersion: existing.version,
+        kind: "api_key",
+        status: "active",
+        credentialEncrypted,
+        grantedScopes: [],
+        expiresAt: null,
+        metadata,
+        updatedBySubjectId: grant.subjectId,
+      });
+      if (!updated)
+        throw new HTTPException(409, {
+          message: "The Fiken connection changed; reload before retrying",
+        });
+      return updated;
+    }
+    return createConnection(tx, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: null,
+      providerDomain: FIKEN_PROVIDER_DOMAIN,
+      kind: "api_key",
+      credentialEncrypted,
+      grantedScopes: [],
+      expiresAt: null,
+      metadata,
+      createdBySubjectId: grant.subjectId,
+    });
+  };
+}
 
 export type FikenOperation =
   | "companies.list"
@@ -978,6 +1063,8 @@ export class FikenOAuthCallbackError extends Error {
 }
 
 type FikenOAuthState = {
+  externalContinuation?: ExternalActorContinuation;
+  connectAttemptId?: string;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -1011,6 +1098,8 @@ export async function startFikenOAuth(
     subjectId: string;
     requestUrl: string;
     payload: FikenOAuthStartRequest;
+    externalContinuation?: ExternalActorContinuation;
+    connectAttemptId?: string;
   },
 ): Promise<FikenOAuthStartResponse> {
   const fiken = requireFikenOAuthSettings(deps.settings);
@@ -1028,7 +1117,18 @@ export async function startFikenOAuth(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
-    returnPath: `/workspaces/${input.workspaceId}/capabilities`,
+    returnPath: safeReturnPath(
+      input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
+    ),
+    ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(input.externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            requireEnvironmentEncryption(deps.settings),
+            JSON.stringify(ExternalActorContinuation.parse(input.externalContinuation)),
+          ),
+        }
+      : {}),
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const authorizationUrl = new URL(FIKEN_AUTHORIZE_URL);
@@ -1050,12 +1150,32 @@ export async function completeFikenOAuthCallback(
     error?: string | undefined;
     requestUrl: string;
   },
-): Promise<{ redirectTo: string }> {
+): Promise<{ redirectTo: string; exactReturn?: boolean }> {
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/, "") ?? baseUrl;
   let state: FikenOAuthState | null = null;
+  let exactReturnUrl: string | undefined;
+  let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   try {
     state = readFikenOAuthState(input.state, deps.settings);
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+      if (stored.attempt.providerId !== "fiken-oauth" || stored.attempt.ownership !== "workspace")
+        throw new FikenOAuthCallbackError("invalid_state");
+      exactReturnUrl = stored.returnUrl;
+      operation = {
+        attemptId: state.connectAttemptId,
+        operationId: `oauth:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state!).digest("hex"),
+      };
+      const claim = await claimConnectOperation(deps.db, state, {
+        ...operation,
+        expectedRevision: stored.attempt.revision,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+      });
+      if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
+    }
     await requireFikenCallbackGrant(deps.db, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -1067,6 +1187,27 @@ export async function completeFikenOAuthCallback(
     });
     if (!consumed) {
       throw new FikenOAuthCallbackError("state_replayed");
+    }
+    // A proven pre-exchange rejection is terminal, not an uncertain provider
+    // effect. Persist its receipt so repeated browser callbacks cannot retry it.
+    if (operation && (input.error || !input.code)) {
+      await finishConnectOperation(deps.db, state, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          state: input.error === "access_denied" ? "cancelled" : "failed",
+          nextAction: { type: "none" },
+          error: {
+            code: input.error ? "provider_denied" : "missing_code",
+            message: "Authorization was not completed. Start a new connection attempt.",
+            retryable: false,
+          },
+        }),
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
     if (input.error) {
       throw new FikenOAuthCallbackError(
@@ -1132,34 +1273,66 @@ export async function completeFikenOAuthCallback(
       defaultCompanySlug,
       verifiedAt: new Date().toISOString(),
     };
-    const connection = existing
-      ? await updateConnection(deps.db, {
-          workspaceId: state.workspaceId,
-          connectionId: existing.id,
-          visibleToSubjectId: null,
-          expectedVersion: existing.version,
-          kind: "oauth2",
-          status: "active",
-          credentialEncrypted,
-          expiresAt: token.expiresAt,
-          metadata,
-          updatedBySubjectId: state.subjectId,
-        })
-      : await createConnection(deps.db, {
-          accountId: state.accountId,
-          workspaceId: state.workspaceId,
-          // Workspace-owned by design, like the pasted-token install: the
-          // first-party fiken tools resolve only workspace connections until
-          // the delegation-snapshot lane exists for personal ownership.
-          subjectId: null,
-          providerDomain: FIKEN_PROVIDER_DOMAIN,
-          kind: "oauth2",
-          credentialEncrypted,
-          grantedScopes: [],
-          expiresAt: token.expiresAt,
-          metadata,
-          createdBySubjectId: state.subjectId,
-        });
+    const persist = (tx: Database) =>
+      existing
+        ? updateConnection(tx, {
+            workspaceId: state!.workspaceId,
+            connectionId: existing.id,
+            visibleToSubjectId: null,
+            expectedVersion: existing.version,
+            kind: "oauth2",
+            status: "active",
+            credentialEncrypted,
+            expiresAt: token.expiresAt,
+            metadata,
+            updatedBySubjectId: state!.subjectId,
+          })
+        : createConnection(tx, {
+            accountId: state!.accountId,
+            workspaceId: state!.workspaceId,
+            // Workspace-owned by design, like the pasted-token install: the
+            // first-party fiken tools resolve only workspace connections until
+            // the delegation-snapshot lane exists for personal ownership.
+            subjectId: null,
+            providerDomain: FIKEN_PROVIDER_DOMAIN,
+            kind: "oauth2",
+            credentialEncrypted,
+            grantedScopes: [],
+            expiresAt: token.expiresAt,
+            metadata,
+            createdBySubjectId: state!.subjectId,
+          });
+    if (operation) {
+      await finishConnectOperation(deps.db, state, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (tx, current) => {
+          const connection = await persist(tx);
+          if (!connection) throw new FikenOAuthCallbackError("connection_conflict");
+          return {
+            ...current,
+            revision: current.revision + 1,
+            state: "complete",
+            credentialsCommitted: true,
+            nextAction: { type: "none" },
+            account: {
+              id: connection.id,
+              version: connection.version,
+              providerId: "fiken-oauth",
+              label: "Fiken",
+              ownership: "workspace",
+              status: "connected",
+            },
+          };
+        },
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
+    const connection = await deps.db.transaction(async (tx) => {
+      await requireFikenCallbackGrant(tx, state!);
+      return persist(tx);
+    });
     if (!connection) {
       throw new FikenOAuthCallbackError("connection_conflict");
     }
@@ -1167,6 +1340,7 @@ export async function completeFikenOAuthCallback(
       redirectTo: fikenReturnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
     };
   } catch (error) {
+    if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     return {
       redirectTo: fikenReturnUrl(
         returnBaseUrl,
@@ -1270,6 +1444,21 @@ function readFikenOAuthState(raw: string | undefined, settings: Settings): Fiken
     workspaceId: required(payload.workspaceId),
     subjectId: required(payload.subjectId),
     returnPath: required(payload.returnPath),
+    ...(typeof payload.connectAttemptId === "string"
+      ? { connectAttemptId: required(payload.connectAttemptId) }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     ...(typeof payload.connectionId === "string" ? { connectionId: payload.connectionId } : {}),
     ...(typeof payload.connectionVersion === "number"
       ? { connectionVersion: payload.connectionVersion }
@@ -1280,14 +1469,7 @@ function readFikenOAuthState(raw: string | undefined, settings: Settings): Fiken
 }
 
 async function requireFikenCallbackGrant(db: Database, state: FikenOAuthState): Promise<void> {
-  const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
-  if (
-    !grant ||
-    grant.accountId !== state.accountId ||
-    !hasPermission(grant.permissions, "connections:write")
-  ) {
-    throw new FikenOAuthCallbackError("permission_lost");
-  }
+  await requireConnectOwnerAuthority(db, state);
 }
 
 function fikenReturnUrl(

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
+import { ConnectAttemptConflictError, ConnectAttemptNotFoundError } from "@opengeni/db";
 import {
   apiRequestBodyLimitBytes,
   allowedCorsOrigin,
@@ -822,6 +823,8 @@ describe("API helpers", () => {
   });
 
   test("preserves HTTPException status codes in error metrics", () => {
+    expect(httpStatusForError(new ConnectAttemptConflictError())).toBe(409);
+    expect(httpStatusForError(new ConnectAttemptNotFoundError())).toBe(404);
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
     expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);

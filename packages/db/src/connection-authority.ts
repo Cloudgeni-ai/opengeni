@@ -14,6 +14,7 @@ import {
   type UserResourceDelegation,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
+import { getExternalLinkTurnAuthorization } from "./external-link-work";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import {
   issueSelfUserResourceGrant,
@@ -218,6 +219,14 @@ export async function resolveAcceptedConnectionUse(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      const linked = await getExternalLinkTurnAuthorization(scopedDb, input, input.turnId);
+      if (
+        linked &&
+        (!linked.authorized ||
+          (!linked.permissions.includes("connections:read") &&
+            !linked.permissions.includes("workspace:admin")))
+      )
+        return { status: "denied", reason: "grant_status_inactive" };
       const [row] = await rawRows<{
         authorizationStatus: "authorized" | "denied";
         denialReason: string | null;

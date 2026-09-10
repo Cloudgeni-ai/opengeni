@@ -73,6 +73,39 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
+  test("distinguishes catalog routine patches from executed dynamic SQL and real guards", () => {
+    const patch = `DO $patch$ DECLARE definition text; replacement text; anchor text;
+BEGIN
+definition := pg_get_functiondef('example()'::regprocedure);
+replacement := $body$ IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'runtime only'; END IF; $body$;
+IF definition IS NULL THEN RAISE EXCEPTION 'missing catalog routine'; END IF;
+EXECUTE replace(definition, anchor, replacement);
+END $patch$;`;
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE,
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toHaveLength(0);
+    expect(
+      analyze(
+        patch.replace(
+          "END $patch$",
+          "IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'real guard'; END IF; END $patch$",
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(
+        patch.replace("EXECUTE replace(definition, anchor, replacement);", "EXECUTE replacement;"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      analyze(patch.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace")),
+    ).toHaveLength(1);
+  });
   test("flags a bare backfill over a FORCE-RLS table", () => {
     const directory = fixture({
       "0001_base.sql": FORCED_TABLE,

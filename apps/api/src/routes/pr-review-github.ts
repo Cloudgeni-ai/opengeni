@@ -14,7 +14,8 @@ import {
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   prReviewPackConnectorId,
   requireAutomationAdapter,
-  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
   requirePermission,
   verifyPrReviewWebhook,
   type ApiRouteDeps,
@@ -47,10 +48,15 @@ import {
   type GitHubSignedStatePayload,
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
+import { requireLegacyOAuthActor } from "../connection-ownership";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
 import { acceptAutomationEvent, readAutomationWebhookBody } from "./automations";
+import {
+  completeGitHubAppConnect,
+  isGitHubAppConnectState,
+} from "../integrations/github-app-connect";
 
 const stateCookie = "opengeni_pr_review_github_state";
 const bindingStateMaxAgeSeconds = 10 * 60;
@@ -123,7 +129,8 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
 
   app.get("/v1/workspaces/:workspaceId/pr-review/github", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const grant = access.grant;
     await requireActivePack(deps, workspaceId);
     const missing = prReviewGitHubAppMissingSettings(deps.settings);
     const configured = missing.length === 0;
@@ -136,6 +143,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       workspaceId,
     );
     const canManage =
+      !externalActorContinuationForAuthorization(access) &&
       hasPermission(grant.permissions, "workspace:admin") &&
       hasPermission(grant.permissions, "secrets:write");
     const connectState =
@@ -252,6 +260,15 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   );
 
   const handleInstallCallback = async (c: Context) => {
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        expectedProvider: "github-lens",
+        state: c.req.query("state"),
+        installationId: c.req.query("installation_id"),
+        setupAction: c.req.query("setup_action"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const state =
       c.req.query("state") ??
       allCookieValues(c, stateCookie).find((candidate) => {
@@ -303,6 +320,14 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/pr-review/github/install/callback", handleInstallCallback);
 
   app.get("/v1/pr-review/github/oauth/callback", async (c) => {
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        expectedProvider: "github-lens",
+        state: c.req.query("state"),
+        code: c.req.query("code"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code || !state) {
@@ -517,7 +542,9 @@ async function requirePrReviewManageGrant(
 ): Promise<AccessGrant> {
   let grant: AccessGrant;
   try {
-    grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
+    requireLegacyOAuthActor(access);
+    grant = access.grant;
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) throw error;
     const handedOff = prReviewBrowserGrantFromState(deps, state, workspaceId);

@@ -22,7 +22,6 @@ function post(path: string, body: unknown, headers: Record<string, string> = {})
 }
 
 const resolveTenant: ChatResolve = async () => ({ tenant: "acme", user: "u_42" });
-const U_42 = { source: "app", id: "u_42" };
 
 function responsesClient(server: ReturnType<typeof fakeServer>): OpenAI {
   return new OpenAI({
@@ -76,10 +75,15 @@ describe("handleChatCompletionsRequest", () => {
     expect(chunks.at(-1)!.opengeni).toMatchObject({ status: "completed", pending: null });
 
     expect(server.creates[0]!.initialMessage).toBe("hello");
-    expect(server.creates[0]!.endUser).toEqual({ source: "app", id: "u_42" });
-    expect(server.creates[0]!.requestedSessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_9", U_42),
-    );
+    expect(
+      JSON.parse(
+        decodeURIComponent(
+          server.requestsTo("POST", "/sessions")[0]!.headers["x-opengeni-external-actor"]!,
+        ),
+      ),
+    ).toEqual({ mode: "external", identity: { source: "app", externalId: "u_42" } });
+    expect(Object.hasOwn(server.creates[0]!, "endUser")).toBe(false);
+    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
     expect(server.creates[0]!.modelContext).toBe(
       "Earlier conversation imported from the product, oldest first:\nsystem: ignored",
     );
@@ -142,9 +146,7 @@ describe("handleChatCompletionsRequest", () => {
         { index: 0, message: { role: "assistant", content: "Hello" }, finish_reason: "stop" },
       ],
     });
-    expect(server.creates[0]!.requestedSessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_meta", U_42),
-    );
+    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_meta"));
   });
 
   test("returns 400 without a conversation and 5xx-class JSON for a failed turn", async () => {
@@ -275,9 +277,7 @@ describe("handleResponsesRequest", () => {
       ],
     });
     expect(decodeResponseId(completed.id)).toBe(sessionId);
-    expect(server.creates[0]!.requestedSessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_9", U_42),
-    );
+    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
   });
 
   const terminalCases: Array<{
@@ -441,7 +441,7 @@ describe("handleResponsesRequest", () => {
   });
 
   test("previous_response_id of another user's session is 403", async () => {
-    const server = fakeServer();
+    const server = fakeServer({ authorizeSession: (user) => user === "u_42" });
     const first = await handleResponsesRequest(
       server.og,
       post("/responses", { input: "hello", conversation: "c_9" }),
@@ -455,7 +455,7 @@ describe("handleResponsesRequest", () => {
       async () => ({ tenant: "acme", user: "u_43" }),
     );
     expect(other.status).toBe(403);
-    expect(await other.json()).toMatchObject({ error: { code: "conversation_not_authorized" } });
+    expect(await other.json()).toMatchObject({ error: { code: "forbidden" } });
 
     const anonymous = await handleResponsesRequest(
       server.og,

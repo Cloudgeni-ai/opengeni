@@ -244,6 +244,10 @@ export const McpServerConnectionRefSchema = z
       })
       .optional(),
     authoritySource: z.literal("host").optional(),
+    hostBinding: z
+      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+      .strict()
+      .optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
   .strict()
@@ -255,6 +259,12 @@ export const McpServerConnectionRefSchema = z
         path: ["connectionId"],
       });
     }
+    if (reference.hostBinding && reference.authoritySource !== "host")
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message: "Durable binding requires host authority",
+      });
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -532,6 +542,9 @@ const SettingsSchema = z.object({
   // separate compatibility lane for already-persisted embedding integrations.
   // Env: OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED.
   hostMcpAuthoritySourceAdmissionEnabled: EnvBoolean.default(false),
+  // Server-owned per-organization remote MCP resolver configuration. Optional;
+  // inline credentials and native provider OAuth do not require this service.
+  hostMcpCredentialResolversJson: z.string().optional(),
   // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
   // not count a personal workspace as a candidate, so an organization with one
   // shared workspace resolves it as the sole candidate and never asks; the
@@ -2946,6 +2959,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     hostMcpAuthoritySourceAdmissionEnabled: optional(
       "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
     ),
+    hostMcpCredentialResolversJson: optional("OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),

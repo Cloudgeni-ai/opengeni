@@ -1,17 +1,26 @@
+// opengeni:test-shared-postgres-exclusive
 import { registerModelConnectionAccessRoutes } from "../src/routes/model-connection-access";
+import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomUUID } from "node:crypto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
   deleteWorkspace,
   ensureManagedAccessForUser,
+  ensureExternalIdentity,
+  createOrganizationApiKey,
+  revokeOrganizationApiKey,
+  grantWorkspaceAccess,
+  withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
-  acquireSharedTestDatabase,
+  acquireOwnerMigratedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -137,7 +146,19 @@ beforeAll(async () => {
           appUrl: externalAppUrl,
           release: async () => undefined,
         }
-      : await acquireSharedTestDatabase("api-supergrok-routes");
+      : await (async () => {
+          const owned = await acquireOwnerMigratedTestDatabase("api-supergrok-routes");
+          if (!owned) return null;
+          await migrate(owned.ownerUrl);
+          await provisionRoles(owned.adminUrl, {
+            appPassword: owned.appPassword,
+            rlsStrategy: "force",
+          });
+          const appUrl = new URL(owned.ownerUrl);
+          appUrl.username = "opengeni_app";
+          appUrl.password = owned.appPassword;
+          return { ...owned, appUrl: appUrl.toString() };
+        })();
   if (!shared) {
     available = false;
     return;
@@ -472,6 +493,61 @@ describe("SuperGrok subscription routes", () => {
       accounts: [],
       activeAccountId: null,
     });
+  });
+
+  test("external owners connect private SuperGrok without cookies and cannot replace a revoked device origin", async () => {
+    if (!client || !managedApp) throw new Error("Real database fixture required");
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: managedAccountId,
+      externalId: `supergrok-${randomUUID()}`,
+    });
+    await withWorkspaceSubjectRls(client.db, managedWorkspaceId, managedSubjectId, (tx) =>
+      grantWorkspaceAccess(tx, {
+        accountId: managedAccountId,
+        workspaceId: managedWorkspaceId,
+        subjectId: identity.subjectId,
+        permissions: ["workspace:read", "connections:write"],
+      }),
+    );
+    const tokens = [randomUUID(), randomUUID()];
+    const keys = await Promise.all(
+      tokens.map((token) =>
+        createOrganizationApiKey(client!.db, {
+          accountId: managedAccountId,
+          name: "External device fixture",
+          prefix: "test",
+          keyHash: createHash("sha256").update(token).digest("hex"),
+          permissions: ["workspace:read", "connections:write"],
+        }),
+      ),
+    );
+    const deviceRequest = (path: string, body: unknown, index = 0) =>
+      managedApp!.request(`/v1/workspaces/${managedWorkspaceId}/supergrok${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${tokens[index]}`,
+          "content-type": "application/json",
+          "x-opengeni-external-actor": encodeURIComponent(
+            JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+          ),
+        },
+        body: JSON.stringify(body),
+      });
+    const start = await deviceRequest("/connect/start", { scope: "user" });
+    expect(start.status).toBe(200);
+    const started = await start.json();
+    const connected = await deviceRequest("/connect/poll", { state: started.state });
+    expect({
+      status: connected.status,
+      ...(connected.status !== 200 ? { body: await connected.clone().text() } : {}),
+    }).toEqual({ status: 200 });
+    expect(await connected.json()).toMatchObject({ status: "connected", scope: "user" });
+    const waiting = await deviceRequest("/connect/start", { scope: "user" });
+    expect(waiting.status).toBe(200);
+    const pending = await waiting.json();
+    await revokeOrganizationApiKey(client.db, managedAccountId, keys[0]!.id);
+    const denied = await deviceRequest("/connect/poll", { state: pending.state }, 1);
+    expect(denied.status).toBe(403);
   });
 
   test("private accounts require the exact same-origin managed browser and never accept bearer borrowing", async () => {

@@ -26,6 +26,7 @@ import {
   buildCapabilityCatalog,
   codexAppsCatalogItem,
   enableCapability,
+  prepareCapabilityEnable,
 } from "../src";
 
 let available = true;
@@ -105,7 +106,11 @@ function encryptedFixture(): string {
 async function createMcpCapability(
   workspace: { accountId: string; workspaceId: string },
   id: string,
-  overrides: { endpointUrl?: string; metadata?: Record<string, unknown> } = {},
+  overrides: {
+    endpointUrl?: string;
+    metadata?: Record<string, unknown>;
+    authModel?: string | null;
+  } = {},
 ): Promise<void> {
   await upsertCapabilityCatalogItem(db, {
     ...workspace,
@@ -117,12 +122,41 @@ async function createMcpCapability(
     category: "integrations",
     tags: ["fixture"],
     endpointUrl: overrides.endpointUrl ?? "https://mcp.slack.com/mcp",
-    authModel: "credential_ref",
+    authModel: overrides.authModel === undefined ? "credential_ref" : overrides.authModel,
     metadata: { mcpServerId: `${id}-runtime`, ...overrides.metadata },
   });
 }
 
 describe("subject-owned capability connection references", () => {
+  test("MCP preparation probes without publishing and commits without creating a credential", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:public-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    let probes = 0;
+    const prepared = await prepareCapabilityEnable({
+      db,
+      ...workspace,
+      settings,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      payload: { config: {}, metadata: {}, headers: {} },
+      probeMcpServer: async (input) => {
+        probes++;
+        expect(input.headers).toBeUndefined();
+        return { toolCount: 2 };
+      },
+    });
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
+    const installed = await prepared.commit(db);
+    expect(installed.status).toBe("active");
+    expect(installed.config.connectionRef).toBeUndefined();
+    expect(installed.config.headersEncrypted).toBeUndefined();
+    expect(probes).toBe(1);
+  });
   test("projects Codex Apps with truthful designation state without generic built-in widening", () => {
     const availableItem = codexAppsCatalogItem(true);
     expect(availableItem).toMatchObject({

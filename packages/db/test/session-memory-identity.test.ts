@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import { SessionEndUser } from "@opengeni/contracts";
 import { endUserMemorySubjectId, normalizeMemoryScope } from "../src/memory-domain";
 
-test("opaque end-user memory identities are unambiguous, exact, and bounded", () => {
+test("historical label-memory identities remain addressable without becoming canonical users", () => {
   const labels = [
     { source: "app:team", id: "alice" },
     { source: "app", id: "team:alice" },
@@ -11,7 +10,7 @@ test("opaque end-user memory identities are unambiguous, exact, and bounded", ()
     { source: "app", id: "Alice" },
     { source: "a".repeat(200), id: "b".repeat(1024) },
     { source: 'a"b', id: "[c,d]" },
-  ].map((value) => SessionEndUser.parse(value));
+  ];
   const identities = labels.map(endUserMemorySubjectId);
   expect(new Set(identities).size).toBe(labels.length);
   for (const [index, subjectId] of identities.entries()) {

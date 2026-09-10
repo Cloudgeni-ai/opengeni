@@ -11,6 +11,9 @@ import type {
   McpConnectionResourceScope,
   McpCredentialAuthNeededReason,
   McpCredentialsRequest,
+  McpCredentialResolution,
+  McpGatewayCredentialsRequest,
+  McpGatewayCredentialResolution,
   TurnInitiator,
   TurnInitiatorContext,
 } from "@opengeni/contracts";
@@ -183,6 +186,11 @@ export type HostMcpCredentialResolverContext = {
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
   surface: McpCredentialsRequest["surface"];
+  /** Backend-owned attempt liveness, independent of binding delegation. */
+  authorizeExecution?: (request: McpCredentialsRequest) => Promise<boolean>;
+  /** Backend-owned live validator. Never populate from caller JSON or a host
+   * credential response. Omission denies every explicit durable reference. */
+  authorizeDurableBinding?: (request: McpCredentialsRequest) => Promise<boolean>;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -247,8 +255,15 @@ function isOfficialGmailRestDestination(
  */
 export function buildHostConnectionTokenResolver(
   resolve: NonNullable<ConnectionCredentialsPort["mcpCredentials"]>,
-  context: HostMcpCredentialResolverContext,
+  suppliedContext: HostMcpCredentialResolverContext,
 ): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
+  // Bind the accepted execution once. A caller retaining its constructor
+  // object must not retarget later requests or replace the post-use validator.
+  const context: HostMcpCredentialResolverContext = {
+    ...suppliedContext,
+    initiator: structuredClone(suppliedContext.initiator),
+    initiatorContext: structuredClone(suppliedContext.initiatorContext),
+  };
   return async (input) => {
     if (input.workspaceId !== context.workspaceId) {
       throw new HostMcpCredentialScopeError("workspaceId");
@@ -281,6 +296,9 @@ export function buildHostConnectionTokenResolver(
         ...(input.connectionRef.authoritySource
           ? { authoritySource: input.connectionRef.authoritySource }
           : {}),
+        ...(input.connectionRef.hostBinding
+          ? { hostBinding: { ...input.connectionRef.hostBinding } }
+          : {}),
         ...(input.connectionRef.provider ? { provider: input.connectionRef.provider } : {}),
         ...(input.connectionRef.connectionId
           ? { connectionId: input.connectionRef.connectionId }
@@ -305,62 +323,173 @@ export function buildHostConnectionTokenResolver(
       ...(toolName ? { toolName } : {}),
       ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
     };
-    const result = await resolve(request);
-    assertHostMcpCredentialScope(result, context);
-    assertHostMcpCredentialBinding(result, input.connectionRef);
-    if (result.status === "auth_needed") {
-      const authorizationUrl = normalizedAuthorizationUrl(result.authorizationUrl);
-      return {
-        status: "auth_needed",
-        reason: result.reason,
-        providerDomain: result.providerDomain,
-        authoritySource: "host",
-        ...(result.provider ? { provider: result.provider } : {}),
-        ...(result.connectionId ? { connectionId: result.connectionId } : {}),
-        ...(result.scopes ? { scopes: [...result.scopes] } : {}),
-        ...(result.resource ? { resource: result.resource } : {}),
-        ...(result.selectedResources
-          ? { selectedResources: copySelectedResources(result.selectedResources) }
-          : {}),
-        ...(authorizationUrl ? { authorizationUrl } : {}),
-      };
-    }
-    if (result.connectionId.length === 0) {
-      throw new Error("host MCP credential returned an empty connectionId");
-    }
-    const explicitPlacements =
-      result.placements === undefined
-        ? undefined
-        : normalizedCredentialPlacements(result.placements);
-    const headers = normalizedHostCredentialHeaders(
-      result.headers,
-      explicitPlacements !== undefined,
-    );
-    if (explicitPlacements) {
-      if (!sameHeaderMap(headers, headerMapForPlacements(explicitPlacements))) {
-        throw new HostMcpCredentialBindingError("credentialPlacements");
-      }
-      if (
-        (input.credentialTarget ?? "mcp") !== "http_api" &&
-        explicitPlacements.some((placement) => placement.carrier !== "header")
-      ) {
-        throw new HostMcpCredentialBindingError("credentialPlacements");
-      }
-    }
-    const expiresAt = parseHostCredentialExpiry(result.expiresAt);
-    return {
-      status: "ok",
-      headers,
+    const snapshot = structuredClone(request);
+    const requestedRef = structuredClone(input.connectionRef);
+    const credentialTarget = input.credentialTarget ?? "mcp";
+    const durableDenial = (
+      reason: McpCredentialAuthNeededReason,
+    ): ResolveConnectionCredentialResult => ({
+      status: "auth_needed",
+      reason,
+      providerDomain: requestedRef.providerDomain,
       authoritySource: "host",
-      ...(explicitPlacements ? { placements: explicitPlacements } : {}),
-      connectionId: result.connectionId,
-      ...(expiresAt !== undefined ? { expiresAt } : {}),
+      ...(requestedRef.connectionId ? { connectionId: requestedRef.connectionId } : {}),
+    });
+    const authorized = async () => {
+      try {
+        if (
+          context.authorizeExecution &&
+          !(await context.authorizeExecution(structuredClone(snapshot)))
+        )
+          return "resource_scope_unavailable" as const;
+        if (
+          requestedRef.hostBinding &&
+          !(await context.authorizeDurableBinding?.(structuredClone(snapshot)))
+        )
+          return "personal_authority_unavailable" as const;
+        return null;
+      } catch {
+        return "refresh_failed" as const;
+      }
+    };
+    if (requestedRef.hostBinding && !context.authorizeDurableBinding)
+      return durableDenial("unsupported_auth");
+    const requiresAuthorization = Boolean(requestedRef.hostBinding || context.authorizeExecution);
+    if (requiresAuthorization) {
+      const denial = await authorized();
+      if (denial) return durableDenial(denial);
+    }
+    const result = await resolve(structuredClone(snapshot));
+    if (requiresAuthorization) {
+      const denial = await authorized();
+      if (denial) return durableDenial(denial);
+    }
+    assertHostMcpCredentialScope(result, context);
+    const normalized = normalizeHostCredentialResolution(result, requestedRef, credentialTarget);
+    return normalized.status === "ok" && requiresAuthorization
+      ? { ...normalized, authorizeProviderRequest: async () => (await authorized()) === null }
+      : normalized;
+  };
+}
+
+/** Authenticated request-time adapter. No synthetic session/turn authority and
+ * no durable binding admission; every physical use must retain live API proof. */
+export function buildHostGatewayConnectionTokenResolver(
+  resolve: NonNullable<ConnectionCredentialsPort["mcpGatewayCredentials"]>,
+  suppliedContext: Pick<McpGatewayCredentialsRequest, "accountId" | "workspaceId" | "authority">,
+  reauthorize: () => Promise<void>,
+): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
+  const context = structuredClone(suppliedContext);
+  return async (input) => {
+    const ref = structuredClone(input.connectionRef);
+    const deny = (reason: McpCredentialAuthNeededReason): ResolveConnectionCredentialResult => ({
+      status: "auth_needed",
+      reason,
+      authoritySource: "host",
+      providerDomain: ref.providerDomain,
+      ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    });
+    if (input.workspaceId !== context.workspaceId)
+      throw new HostMcpCredentialScopeError("workspaceId");
+    if (ref.authoritySource !== "host" || ref.hostBinding) return deny("unsupported_auth");
+    const destinationUrl = canonicalHttpUrl(input.destinationUrl);
+    if (
+      !destinationUrl ||
+      (!destinationHostMatchesProvider(destinationUrl, ref.providerDomain) &&
+        !isOfficialGmailRestDestination(destinationUrl, ref))
+    )
+      throw new HostMcpCredentialBindingError("destinationUrl");
+    const request: McpGatewayCredentialsRequest = {
+      ...structuredClone(context),
+      surface: "workspace_gateway",
+      requestId: crypto.randomUUID(),
+      destinationUrl,
+      credentialTarget: input.credentialTarget ?? "mcp",
+      serverId: input.serverId,
+      connectionRef: ref,
+      forceRefresh: input.forceRefresh === true,
+      ...((input.toolName ?? input.toolId) ? { toolName: input.toolName ?? input.toolId } : {}),
+    };
+    await reauthorize();
+    const result = await resolve(structuredClone(request));
+    await reauthorize();
+    for (const field of ["accountId", "workspaceId", "requestId"] as const) {
+      if (result[field] !== request[field])
+        throw new Error(`host gateway credential ${field} scope mismatch`);
+    }
+    const normalized = normalizeHostCredentialResolution(
+      result,
+      ref,
+      request.credentialTarget ?? "mcp",
+    );
+    if (normalized.status !== "ok") return normalized;
+    return {
+      ...normalized,
+      authorizeProviderRequest: async () => {
+        try {
+          await reauthorize();
+          return true;
+        } catch {
+          return false;
+        }
+      },
     };
   };
 }
 
+function normalizeHostCredentialResolution(
+  result: McpCredentialResolution | McpGatewayCredentialResolution,
+  requestedRef: McpServerConnectionRef,
+  credentialTarget: "mcp" | "http_api",
+): ResolveConnectionCredentialResult {
+  assertHostMcpCredentialBinding(result, requestedRef);
+  if (result.status === "auth_needed") {
+    const authorizationUrl = normalizedAuthorizationUrl(result.authorizationUrl);
+    return {
+      status: "auth_needed",
+      reason: result.reason,
+      providerDomain: result.providerDomain,
+      authoritySource: "host",
+      ...(result.provider ? { provider: result.provider } : {}),
+      ...(result.connectionId ? { connectionId: result.connectionId } : {}),
+      ...(result.scopes ? { scopes: [...result.scopes] } : {}),
+      ...(result.resource ? { resource: result.resource } : {}),
+      ...(result.selectedResources
+        ? { selectedResources: copySelectedResources(result.selectedResources) }
+        : {}),
+      ...(authorizationUrl ? { authorizationUrl } : {}),
+    };
+  }
+  if (result.connectionId.length === 0) {
+    throw new Error("host MCP credential returned an empty connectionId");
+  }
+  const explicitPlacements =
+    result.placements === undefined ? undefined : normalizedCredentialPlacements(result.placements);
+  const headers = normalizedHostCredentialHeaders(result.headers, explicitPlacements !== undefined);
+  if (explicitPlacements) {
+    if (!sameHeaderMap(headers, headerMapForPlacements(explicitPlacements))) {
+      throw new HostMcpCredentialBindingError("credentialPlacements");
+    }
+    if (
+      credentialTarget !== "http_api" &&
+      explicitPlacements.some((placement) => placement.carrier !== "header")
+    ) {
+      throw new HostMcpCredentialBindingError("credentialPlacements");
+    }
+  }
+  const expiresAt = parseHostCredentialExpiry(result.expiresAt);
+  return {
+    status: "ok",
+    headers,
+    authoritySource: "host",
+    ...(explicitPlacements ? { placements: explicitPlacements } : {}),
+    connectionId: result.connectionId,
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
+  };
+}
+
 function assertHostMcpCredentialBinding(
-  result: Awaited<ReturnType<NonNullable<ConnectionCredentialsPort["mcpCredentials"]>>>,
+  result: McpCredentialResolution | McpGatewayCredentialResolution,
   requested: McpServerConnectionRef,
 ): void {
   if (result.providerDomain !== requested.providerDomain) {
@@ -446,7 +575,7 @@ function assertHostMcpCredentialScope(
   }
 }
 
-function normalizedHostCredentialHeaders(
+export function normalizedHostCredentialHeaders(
   headers: Record<string, string>,
   allowEmpty = false,
 ): Record<string, string> {

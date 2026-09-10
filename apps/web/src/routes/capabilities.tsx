@@ -1,3 +1,4 @@
+import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Plugins: the workspace integrations marketplace. A single scrollable
 // page with exactly three sections: Integrations, Connectors, and Bundles.
@@ -791,11 +792,27 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       });
   }
 
+  async function enableMcpThroughConnect(capabilityId: string) {
+    const attempt = await client.beginConnect(workspaceId, {
+      providerId: "mcp-install",
+      ownership: "workspace",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const completed = await client.connectTransport().advance(workspaceId, attempt.id, {
+      expectedRevision: attempt.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: { type: "credentials", values: { capabilityId } },
+    });
+    if (completed.state !== "complete" || !completed.integrationInstalled)
+      throw new Error("MCP setup did not complete. Reload connection setup before retrying.");
+  }
+
   async function quickEnable(item: CapabilityCatalogItem) {
     setBusyId(item.id);
     try {
       const persisted = await persistIfRegistry(item, false);
-      await client.enableCapability(workspaceId, persisted.id);
+      await enableMcpThroughConnect(persisted.id);
       await refresh();
       onRuntimeChanged();
       toast.success(`Enabled ${item.name}`);
@@ -895,269 +912,32 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   }
 
   async function handleAction(action: ConnectAction) {
-    // Act on the LIVE item (derived from the catalog by id), never the stored
-    // snapshot - a mutation elsewhere may have changed it since the sheet opened.
-    if (!selected || !selectedItem) return;
-    const item = selectedItem;
-    setBusyId(item.id);
+    if (!selected || !selectedItem || busyId !== null) return;
+    setBusyId(selectedItem.id);
     setSheetError(null);
     try {
-      // The plan is derived from the current catalog/registry item (it carries
-      // authKind/mcpUrl/providerDomain); connect calls use the persisted id.
-      const plan = capabilityConnectPlan(item);
-
-      if (action.type === "install_skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to install Skills.");
-        }
-        const libraryId = metadataString(item.metadata.libraryId);
-        const expectedVersion = metadataString(item.metadata.version);
-        const expectedContentSha256 = metadataString(item.metadata.contentSha256);
-        if (!libraryId || !expectedVersion || !expectedContentSha256) {
-          throw new Error(
-            "This Skill is missing its reviewed library identity. Refresh and try again.",
-          );
-        }
-        const installationVersion = installedSkillVersion(item);
-        await client.installLibrarySkill(workspaceId, libraryId, {
-          expectedVersion,
-          expectedContentSha256,
-          ...(installationVersion !== null
-            ? { expectedInstallationVersion: installationVersion }
-            : {}),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(item.enabled ? `Updated ${item.name}` : `Installed ${item.name}`, {
-          description: `Pinned to reviewed Skill version ${expectedVersion}.`,
-        });
-        setSelected(null);
-        return;
-      }
-
-      if (action.type === "remove_skill") {
-        if (!canManageSkills) {
-          throw new Error("Workspace administrator permission is required to remove Skills.");
-        }
-        const preview = await client.previewSkillUninstall(workspaceId, item.id);
-        if (!preview.installed || preview.installationVersion === null || !preview.directOwner) {
-          throw new Error("This Skill is no longer directly installed. Refresh and try again.");
-        }
-        setSkillRemoval({ item, preview });
-        return;
-      }
-
-      if (action.type === "disconnect") {
-        if (item.kind !== "mcp" || !item.actions.includes("disconnect")) {
-          throw new Error(`${item.name} must be managed through its dedicated controls.`);
-        }
-        await client.disableCapability(workspaceId, item.id);
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Disabled ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      if (action.type === "social_oauth" && plan.mode === "social_oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await client.startSocialOAuth(workspaceId, {
-          provider: action.provider,
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "disconnect_social") {
-        await client.disconnectSocialConnection(workspaceId, action.connectionId);
-        await refresh();
-        toast.success(`Disconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // First-party Fiken connect / token replacement. The install route
-      // verifies the token against Fiken before storing it, so a bad paste
-      // fails here with a specific message instead of at first tool use.
-      if (action.type === "fiken_api_token") {
-        await client.installFikenConnection(workspaceId, {
-          apiToken: action.apiToken,
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Connected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Full-page redirect into Fiken's consent screen; the API callback
-      // stores the workspace connection and returns to this page with a
-      // `fiken` query param handled by the return effect below.
-      if (action.type === "fiken_oauth") {
-        const response = await client.startFikenOAuth(workspaceId, {
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("Fiken did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "fiken_disconnect") {
-        await client.deleteConnection(workspaceId, action.connectionId);
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Disconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Reconnect an already-enabled item whose credential lapsed. When the
-      // connection row survives, OAuth reuses it (pass connectionId) and the
-      // return handler just refreshes; when it was deleted (null id), OAuth
-      // mints a fresh row and the return handler re-enables against it. API-key
-      // reactivates the surviving row in place, or mints + re-enables if gone.
-      if (action.type === "reconnect_oauth") {
-        // Trust the installation's connectionRef.kind (the sheet already chose this
-        // branch from it), not the catalog plan - on drift plan.mode can read
-        // "enable", so fall back to the ref's domain and the item's own MCP URL.
-        const providerDomain =
-          plan.mode === "oauth"
-            ? plan.providerDomain
-            : (item.connectionRef?.providerDomain ?? null);
-        const mcpUrl =
-          plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-          ...(mcpUrl ? { mcpUrl } : {}),
-          ...(providerDomain ? { providerDomain } : {}),
-          // Reuse the existing row when it survives; a null id means the row was
-          // deleted, so OAuth mints a fresh connection and the return handler
-          // re-enables against it.
-          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "reconnect_api_key") {
-        if (action.connectionId) {
-          // The existing row went inactive - rewrite its credential and
-          // reactivate it in place; the installation ref already points at it.
-          await client.updateConnection(workspaceId, action.connectionId, {
-            credential: { headers: action.headers },
-            status: "active",
-          });
-        } else {
-          // The row was deleted - mint a fresh connection and re-enable the
-          // installation against it (enable upserts the installation config). Domain
-          // comes from the plan, or the installation's ref when the catalog drifted.
-          const providerDomain =
-            plan.mode === "api_key"
-              ? plan.providerDomain
-              : (item.connectionRef?.providerDomain ?? "");
-          const connection = await client.createConnection(workspaceId, {
-            providerDomain,
-            kind: "api_key",
-            ownership: action.ownership,
-            credential: { headers: action.headers },
-          });
-          await client.enableCapability(workspaceId, item.id, {
-            connectionRef: apiKeyConnectionRef(
-              action.ownership,
-              connection.id,
-              connection.providerDomain,
-            ),
-          });
-        }
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Reconnected ${item.name}`);
-        setSelected(null);
-        return;
-      }
-
-      if (item.kind !== "mcp") {
-        throw new Error(`${item.name} must be installed through its dedicated controls.`);
-      }
-      const persisted = await persistIfRegistry(item, selected.registry);
-
-      if (action.type === "oauth" && plan.mode === "oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-        const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-          ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
-          ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          ownership: action.ownership,
-          returnPath,
-        });
-        if (!response.authorizationUrl) {
-          throw new Error("The provider did not return an authorization link.");
-        }
-        // Full-page redirect into the provider's consent screen; we return to
-        // returnPath and resume in the OAuth-return effect below.
-        window.location.assign(response.authorizationUrl);
-        return;
-      }
-
-      if (action.type === "api_key" && plan.mode === "api_key") {
-        // Reuse only a connection with the selected ownership rather than creating
-        // a duplicate on retry; workspace and personal rows never cross-reuse.
-        const reuseId = connectionToReuseForApiKey(
-          item,
-          connections ?? [],
-          plan.providerDomain,
-          action.ownership,
-        );
-        const connection = reuseId
-          ? await client.updateConnection(workspaceId, reuseId, {
-              credential: { headers: action.headers },
-              status: "active",
-            })
-          : await client.createConnection(workspaceId, {
-              providerDomain: plan.providerDomain,
-              kind: "api_key",
-              ownership: action.ownership,
-              credential: { headers: action.headers },
-            });
-        // Build the enable ref from the connection row the API returns, never the
-        // catalog domain - the API may canonicalize providerDomain, and the row
-        // is the authoritative match the enable path validates against.
-        await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: apiKeyConnectionRef(
-            action.ownership,
-            connection.id,
-            connection.providerDomain,
-          ),
-        });
-        await refresh();
-        onRuntimeChanged();
-        toast.success(`Connected and enabled ${persisted.name}`);
-        setSelected(null);
-        return;
-      }
-
-      // Plain enable (no credentials).
-      await client.enableCapability(workspaceId, persisted.id);
-      await refresh();
-      if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(`Enabled ${persisted.name}`);
-      setSelected(null);
+      await performCapabilityAction(
+        {
+          client,
+          workspaceId,
+          item: selectedItem,
+          registry: selected.registry,
+          connections: connectionsLoadFailed ? null : connections,
+          canManageSkills,
+          refresh,
+          onRuntimeChanged,
+          onComplete: () => setSelected(null),
+          onSkillRemoval: setSkillRemoval,
+          connectReturnUrl: window.location.href,
+          returnPathFor: (id) =>
+            `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`,
+          redirect: (url) => window.location.assign(url),
+        },
+        action,
+      );
     } catch (error) {
+      await refresh();
       const copy = capabilityErrorToast(error, "Something went wrong");
-      // In-sheet human copy; the raw missing-credentials 422 becomes a prompt to
-      // connect rather than an error string.
       setSheetError(
         isMissingCredentialsError(error)
           ? "This integration needs credentials before it can be enabled."
@@ -2024,17 +1804,4 @@ export function integrationQuickConnect(
   if (chip.tone !== "idle" || footer.kind !== "setup") return undefined;
   if (footer.disabled === true || footer.busy === true) return undefined;
   return footer.onSetup;
-}
-
-function metadataString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
-function installedSkillVersion(item: CapabilityCatalogItem): number | null {
-  const installedSkill = item.metadata.installedSkill;
-  if (!installedSkill || typeof installedSkill !== "object" || Array.isArray(installedSkill)) {
-    return null;
-  }
-  const value = (installedSkill as Record<string, unknown>).installationVersion;
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }

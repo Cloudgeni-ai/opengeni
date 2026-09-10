@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
 import type {
   GitHubActionPoliciesResponse,
@@ -57,6 +58,12 @@ const GITHUB_ACTION_POLICY_GROUPS: Array<{
  */
 export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): IntegrationAdapter {
   const context = useAppContext();
+  const connectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const completeConnect = useCallback(() => {
+    setConnectRequest(null);
+    void context.refreshGitHub(workspaceId);
+  }, [context, workspaceId]);
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "github:manage");
   const canManagePersonal = hasWorkspacePermission(
     context.accessContext,
@@ -196,8 +203,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   }
 
   function reconnect() {
-    if (connectUrl) {
-      window.location.assign(connectUrl);
+    if (status?.configured && canManage) {
+      setConnectRequest({
+        scope: { workspaceId, transport: connectTransport },
+        providerId: "github-app",
+        displayName: "GitHub App",
+        ownership: "workspace",
+        returnUrl: window.location.href,
+        idempotencyKey: crypto.randomUUID(),
+      });
       return;
     }
     if (status?.setupMode === "operator" && !status.configured) {
@@ -420,6 +434,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
 
   const dialogs = (
     <>
+      {connectRequest && (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={completeConnect}
+        />
+      )}
       <ConfirmDialog
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}

@@ -1726,6 +1726,8 @@ const modelToolInvocation = new AsyncLocalStorage<ModelToolInvocation>();
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
+  authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
   inputWaitYield?: InputWaitYield;
   model?: Model;
@@ -2678,6 +2680,9 @@ export function buildOpenGeniAgent(
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
+      ...(options.authorizeAttemptExecution
+        ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
+        : {}),
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
@@ -3413,6 +3418,7 @@ export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
   options: {
+    authorizeAttemptExecution?: () => Promise<void> | void;
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
@@ -3442,6 +3448,7 @@ function buildAgentCapabilitiesFromComposition(
   settings: Settings,
   skillComposition: RuntimeSkillComposition,
   options: {
+    authorizeAttemptExecution?: () => Promise<void> | void;
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
@@ -3487,7 +3494,7 @@ function buildAgentCapabilitiesFromComposition(
       ? { configureTools: configureFilesystemTools }
       : {}),
   });
-  if (options.structuredToolTransport === false) {
+  if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
   const caps: ReturnType<typeof Capabilities.default> = [
@@ -3511,6 +3518,25 @@ function buildAgentCapabilitiesFromComposition(
         capability as unknown as { tools(): Tool<unknown>[] },
         toolCancellation,
       );
+    }
+  }
+  if (options.authorizeAttemptExecution) {
+    for (const capability of caps) {
+      const target = capability as unknown as { tools(): Tool<unknown>[] };
+      const original = target.tools;
+      target.tools = function () {
+        return original.call(this).map((tool) => {
+          if (tool.type !== "function") return tool;
+          const invoke = tool.invoke;
+          return {
+            ...tool,
+            invoke: async (context, input, details) => {
+              await options.authorizeAttemptExecution!();
+              return invoke(context, input, details);
+            },
+          };
+        });
+      };
     }
   }
   return caps;
@@ -3644,6 +3670,10 @@ export type PrepareToolsOptions = {
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
+  /** Live accepted-attempt fence, evaluated at execution rather than catalog
+   * preparation. Includes model and Codemode calls and runs before consuming
+   * connector approval authority. Does not alter catalog identity. */
+  authorizeAttemptExecution?: () => Promise<void> | void;
   /** Attempt-bound connector policy installed into the canonical gateway lifecycle. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   /** Private connector identities for exact-name attempt-local tools. */
@@ -4489,10 +4519,29 @@ async function prepareAttemptToolEnvironment(
     options.connectorActionPolicy,
   );
   const subjectId = options.subjectId ?? "worker:mcp-model";
+  const guardedDefinitions = options.authorizeAttemptExecution
+    ? definitions.map((definition) => ({
+        ...definition,
+        lifecycle: {
+          prepare: async (
+            input: Parameters<NonNullable<AttemptToolDefinition["lifecycle"]>["prepare"]>[0],
+          ) => {
+            const prior = await definition.lifecycle?.prepare(input);
+            return {
+              begin: async () => {
+                await options.authorizeAttemptExecution!();
+                await prior?.begin?.();
+              },
+              ...(prior?.complete ? { complete: prior.complete } : {}),
+            };
+          },
+        },
+      }))
+    : definitions;
   const environment = createAttemptToolEnvironment({
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions,
+    definitions: guardedDefinitions,
     confirmModelApproval: ({ modelName, subjectId: callerSubjectId }) =>
       callerSubjectId === subjectId &&
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,

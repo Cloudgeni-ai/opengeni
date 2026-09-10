@@ -27,6 +27,7 @@ import {
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
+import { createRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
   resolveCatalogSettings,
@@ -419,6 +420,7 @@ export async function startApi(
   }
   const { app, routeDeps } = createAppComposition({
     settings,
+    connectionCredentials: createRemoteMcpCredentialsPort(settings),
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,

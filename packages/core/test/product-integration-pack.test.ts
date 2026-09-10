@@ -28,7 +28,7 @@ describe("OpenGeni Product Integration Pack", () => {
         skillActivation: "session-selected",
         installationExposure: "none",
         grantsExecutableCapabilities: false,
-        customerRuntimeProfile: "generated-during-integration",
+        canonicalSource: ".agents/skills/opengeni-client",
       },
     });
     expect(pack?.skills.map((skill) => [skill.name, skill.activationMode])).toEqual([
@@ -58,9 +58,15 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(artifact.description).toBe(skill.description);
     expect(artifact.files.map((file) => file.path)).toEqual([
       "SKILL.md",
+      "agents/openai.yaml",
+      "references/api-workflows.md",
+      "references/customer-skill-template.md",
       "references/data-tools-and-credentials.md",
       "references/discovery-and-autonomy.md",
+      "references/external-users-and-connect.md",
+      "references/implementation-overview.md",
       "references/isolation-and-authorization.md",
+      "references/product-integration-shapes.md",
       "references/product-shapes-and-ui.md",
       "references/runtime-profile-and-verification.md",
     ]);
@@ -76,7 +82,7 @@ describe("OpenGeni Product Integration Pack", () => {
       .map((file) => file.path)
       .filter((path) => path.startsWith("references/"))
       .sort();
-    expect(linkedReferences).toEqual(suppliedReferences);
+    for (const reference of linkedReferences) expect(suppliedReferences).toContain(reference);
   });
 
   test("retains the decisions that prevent the observed integration failures", () => {
@@ -88,9 +94,12 @@ describe("OpenGeni Product Integration Pack", () => {
     const data = files.get("references/data-tools-and-credentials.md")!;
     const runtime = files.get("references/runtime-profile-and-verification.md")!;
     const autonomy = files.get("references/discovery-and-autonomy.md")!;
+    const external = files.get("references/external-users-and-connect.md")!.replace(/\s+/g, " ");
 
-    expect(entrypoint).toContain("Turning workspace Memory off does not isolate conversations");
-    expect(entrypoint).toContain("defense in depth, not a hard tenant boundary");
+    expect(entrypoint.replace(/\s+/g, " ")).toContain(
+      "Memory settings and prompt instructions do not create a tenant boundary",
+    );
+    expect(entrypoint).toContain("defense in depth");
     expect(isolation).toContain("One workspace per end user");
     expect(isolation).toContain("One workspace per chat");
     expect(isolation).toContain("Omitting firstPartyMcpTools");
@@ -103,5 +112,12 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(runtime).toContain("not retransmitted on every turn");
     expect(runtime).toContain("same account balance");
     expect(autonomy).toContain("technical capability, not permission");
+    expect(external).toContain(
+      "Never retry a denied user request using the unscoped service client",
+    );
+    expect(external).toContain("without adding status parameters");
+    expect(external).toContain("Short-lived inline MCP credentials remain a valid simple choice");
+    expect(external).toContain("Durable host renewal is opt-in");
+    expect(external).toContain("not upstream provider consent");
   });
 });

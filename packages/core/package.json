@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/core",
-  "version": "2.8.4",
+  "version": "2.8.5",
   "description": "OpenGeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./remote-mcp-credentials": {
+      "types": "./src/remote-mcp-credentials.ts",
+      "default": "./src/remote-mcp-credentials.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -49,7 +53,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun ../../scripts/build-typescript-package.ts",
+    "build": "bun ../../scripts/sync-product-integration-skill.ts --check && bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

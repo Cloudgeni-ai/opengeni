@@ -5,7 +5,6 @@ import {
   UpdateGitHubActionPolicyRequest,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
-  type GitHubInstallationBindingProof,
 } from "@opengeni/contracts";
 import { PersonalGitHubConnectionMetadata } from "@opengeni/contracts/personal-github";
 import {
@@ -50,6 +49,7 @@ import {
   personalGitHubActionPolicyActor,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
   updateGitHubActionPolicyGroup,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -67,8 +67,19 @@ import {
   listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
-import { assertPersonalConnectionOwnerPrincipal } from "../connection-ownership";
+import {
+  assertPersonalConnectionOwnerPrincipal,
+  requireLegacyOAuthActor,
+} from "../connection-ownership";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
+import {
+  isConsistentGitHubBindingCandidates,
+  isConsistentGitHubBindingProof,
+} from "../integrations/github-installation-proof";
+import {
+  completeGitHubAppConnect,
+  isGitHubAppConnectState,
+} from "../integrations/github-app-connect";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -79,7 +90,8 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "github:use");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:use");
+    const grant = access.grant;
     const missing = githubAppMissingSettings(settings);
     const slug = settings.githubAppSlug?.trim() || null;
     const installations =
@@ -88,7 +100,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         : [];
     const status = githubBindingStatus(missing.length === 0, installations);
     const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
-    const canManage = hasPermission(grant.permissions, "github:manage");
+    const canManage =
+      !externalActorContinuationForAuthorization(access) &&
+      hasPermission(grant.permissions, "github:manage");
     const returnPath = githubSessionReturnPath(c.req.query("returnPath"), grant.workspaceId);
     const connectState =
       missing.length === 0 && slug && canManage
@@ -414,7 +428,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/github/app-manifest", async (c) => {
     assertOperatorGitHubAppSetup(settings);
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
+    requireLegacyOAuthActor(access);
+    const grant = access.grant;
     const payload = GitHubAppManifestCreate.parse(await c.req.json());
     const baseUrl = (settings.githubAppManifestBaseUrl ?? new URL(c.req.url).origin).replace(
       /\/+$/,
@@ -465,6 +481,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   const handleGitHubInstallCallback = async (c: Context) => {
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        state: c.req.query("state"),
+        installationId: c.req.query("installation_id"),
+        setupAction: c.req.query("setup_action"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const state =
       c.req.query("state") ??
       allCookieValues(c, githubStateCookie).find((candidate) => {
@@ -542,6 +566,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/github/install/callback", handleGitHubInstallCallback);
 
   app.get("/v1/github/oauth/callback", async (c) => {
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        state: c.req.query("state"),
+        code: c.req.query("code"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code) {
@@ -884,7 +915,9 @@ async function requireGitHubManageGrant(
   expectedState: GitHubSignedStatePayload,
 ): Promise<AccessGrant> {
   try {
-    return await requireAccessGrant(c, deps, workspaceId, "github:manage");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
+    requireLegacyOAuthActor(access);
+    return access.grant;
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) {
       throw error;
@@ -1022,29 +1055,6 @@ function githubSetupPendingHtml(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Requested</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0;color:#d4d4d8}</style></head><body><main><h1>GitHub App request sent</h1><p>A GitHub organization owner must approve the installation. OpenGeni has not created a workspace binding.</p></main></body></html>`;
 }
 
-function isConsistentGitHubBindingCandidates(
-  candidates: GitHubInstallationBindingCandidate[],
-): boolean {
-  const ids = new Set<number>();
-  return candidates.every(({ installation, authorityKind }) => {
-    if (
-      !Number.isSafeInteger(installation.installationId) ||
-      installation.installationId <= 0 ||
-      !Number.isSafeInteger(installation.accountId) ||
-      installation.accountId <= 0 ||
-      !installation.accountLogin?.trim() ||
-      installation.suspended ||
-      ids.has(installation.installationId)
-    ) {
-      return false;
-    }
-    ids.add(installation.installationId);
-    return authorityKind === "personal_owner"
-      ? installation.accountType === "User"
-      : installation.accountType === "Organization";
-  });
-}
-
 function parsePositiveInteger(value: string | undefined | null): number | null {
   if (!value || !/^\d+$/.test(value)) {
     return null;
@@ -1056,41 +1066,6 @@ function parsePositiveInteger(value: string | undefined | null): number | null {
 function isFreshGitHubBindingState(payload: GitHubSignedStatePayload): boolean {
   const age = Math.floor(Date.now() / 1_000) - payload.iat;
   return age >= 0 && age < githubBindingStateMaxAgeSeconds;
-}
-
-function isConsistentGitHubBindingProof(
-  proof: GitHubInstallationBindingProof,
-  installationId: number,
-): boolean {
-  const installation = proof.installation;
-  if (
-    installation.installationId !== installationId ||
-    !Number.isSafeInteger(installation.accountId) ||
-    installation.accountId <= 0 ||
-    !installation.accountLogin?.trim() ||
-    installation.suspended ||
-    !Number.isSafeInteger(proof.actorId) ||
-    proof.actorId <= 0 ||
-    !proof.actorLogin.trim() ||
-    proof.repositories.length === 0
-  ) {
-    return false;
-  }
-  if (
-    proof.authorityKind === "personal_owner"
-      ? installation.accountType !== "User" || proof.actorId !== installation.accountId
-      : installation.accountType !== "Organization"
-  ) {
-    return false;
-  }
-  return proof.repositories.every(
-    (repository) =>
-      Number.isSafeInteger(repository.id) &&
-      repository.id > 0 &&
-      repository.installationId === installationId &&
-      repository.accountLogin === installation.accountLogin &&
-      repository.accountType === installation.accountType,
-  );
 }
 
 function escapeHtml(value: string): string {
