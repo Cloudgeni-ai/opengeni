@@ -53,6 +53,7 @@ export function WorkspaceSwitcherMenu(props: {
   onSelect: (workspaceId: string) => void;
   onCreateOrganization?: () => void;
   className?: string;
+  compact?: boolean;
 }) {
   const context = useAppContext();
   const activeWorkspace =
@@ -111,6 +112,7 @@ export function WorkspaceSwitcherMenu(props: {
           activeWorkspace={activeWorkspace}
           activeOrganizationLabel={currentOrgLabel}
           personal={activeIsPersonal}
+          compact={props.compact}
           collapsed={props.collapsed}
           className={props.className}
         />
@@ -131,6 +133,7 @@ export function WorkspaceSwitcherMenu(props: {
 }
 
 type WorkspaceSwitcherTriggerProps = {
+  compact?: boolean;
   activeWorkspace: Workspace | null;
   activeOrganizationLabel: string;
   personal: boolean;
@@ -145,6 +148,7 @@ export const WorkspaceSwitcherTrigger = forwardRef<
     activeWorkspace,
     activeOrganizationLabel: organizationLabel,
     personal,
+    compact,
     collapsed,
     className,
     ...buttonProps
@@ -179,6 +183,7 @@ export const WorkspaceSwitcherTrigger = forwardRef<
       ref={ref}
       aria-label={accessibleLabel}
       className={className}
+      compact={compact}
       label={activeWorkspace?.name ?? "Select workspace"}
       icon={workspaceInitial(activeWorkspace)}
       badge={personal ? <PersonalWorkspaceBadge decorative /> : null}

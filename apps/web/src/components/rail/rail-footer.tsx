@@ -1,6 +1,5 @@
-// Pinned rail footer: the collapse-toggle chevron and the signed-in user menu
-// (account/sign-out, depending on auth mode). Collapsed → just the avatar +
-// a collapse chevron, both with tooltips.
+// Pinned account row with direct settings, feedback, and collapse actions.
+// In the collapsed rail, the same controls stack with accessible labels.
 import {
   ChartColumnIcon,
   ChevronsLeftIcon,
@@ -13,7 +12,7 @@ import {
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
-import { cn } from "@/lib/utils";
+import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { AppearanceMenu } from "@/components/appearance-menu";
 import {
   accountMenuAriaLabel,
@@ -80,39 +79,21 @@ export function RailFooter() {
   });
 
   return (
-    <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+    <div className="mt-auto p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
       {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
-        <>
-          <Suspense fallback={null}>
-            <FeedbackDialog
-              key={rail.workspaceId}
-              client={context.client}
-              workspaceId={rail.workspaceId}
-              open={feedbackOpen}
-              onOpenChange={setFeedbackOpen}
-              onSubmitted={() => toast.success("Thanks for your feedback")}
-            />
-          </Suspense>
-          <button
-            type="button"
-            className={cn(
-              "mb-1 flex h-8 items-center rounded-md text-sm font-medium text-fg-muted outline-none transition-colors pointer-coarse:h-10",
-              "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
-              rail.collapsed
-                ? "mx-auto w-8 justify-center pointer-coarse:w-10"
-                : "w-full gap-2.5 px-2.5 text-left",
-            )}
-            aria-label="Send feedback"
-            title="Send feedback"
-            onClick={() => setFeedbackOpen(true)}
-          >
-            <FeedbackIcon className="size-4 shrink-0" />
-            {rail.collapsed ? null : <span className="min-w-0 truncate">Send feedback</span>}
-          </button>
-        </>
+        <Suspense fallback={null}>
+          <FeedbackDialog
+            key={rail.workspaceId}
+            client={context.client}
+            workspaceId={rail.workspaceId}
+            open={feedbackOpen}
+            onOpenChange={setFeedbackOpen}
+            onSubmitted={() => toast.success("Thanks for your feedback")}
+          />
+        </Suspense>
       ) : null}
       <div
-        className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}
+        className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-0.5"}
       >
         {browserAccounts ? (
           <div className={rail.collapsed ? undefined : "min-w-0 flex-1"}>
@@ -222,6 +203,25 @@ export function RailFooter() {
           </div>
         )}
 
+        <WorkspaceNav compact />
+        {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0 text-fg-muted pointer-coarse:size-10"
+                aria-label="Send feedback"
+                onClick={() => setFeedbackOpen(true)}
+              >
+                <FeedbackIcon className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side={rail.collapsed ? "right" : "top"}>Send feedback</TooltipContent>
+          </Tooltip>
+        ) : null}
+
         {!rail.isMobile ? (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -231,7 +231,7 @@ export function RailFooter() {
                 size="icon-sm"
                 aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
                 onClick={rail.toggleCollapsed}
-                className="shrink-0 text-fg-subtle hover:text-fg"
+                className="shrink-0 text-fg-subtle hover:text-fg pointer-coarse:size-10"
               >
                 {rail.collapsed ? (
                   <ChevronsRightIcon className="size-4" />
