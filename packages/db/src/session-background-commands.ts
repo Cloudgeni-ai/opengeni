@@ -4,7 +4,7 @@ import type {
 } from "@opengeni/contracts";
 import { SessionCommandFailure } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gte, inArray, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
 import { withRlsContext, withSessionActivityRlsContext } from "./database";
@@ -79,8 +79,26 @@ function commandPreview(value: string): string {
   return Array.from(normalized).slice(0, 512).join("");
 }
 
+const commandObservationUnavailable = sql<boolean>`
+  ${schema.sessionBackgroundCommands.state} in ('running','stopping') and exists (
+    select 1 from sandbox_retained_processes process
+    where process.id = ${schema.sessionBackgroundCommands.retainedProcessId}
+      and process.account_id = ${schema.sessionBackgroundCommands.accountId}
+      and process.workspace_id = ${schema.sessionBackgroundCommands.workspaceId}
+      and process.session_id = ${schema.sessionBackgroundCommands.sessionId}
+      and process.state = 'active'
+      and process.last_reconcile_outcome in ('process_observation_unavailable',
+        'quarantined_process_observation_unavailable', 'provider_binding_missing',
+        'quarantined_provider_binding_missing', 'provider_binding_mismatch',
+        'quarantined_provider_binding_mismatch'))`;
+
+const commandReadColumns = {
+  ...getTableColumns(schema.sessionBackgroundCommands),
+  observationUnavailable: commandObservationUnavailable,
+};
+
 function mapCommand(
-  row: typeof schema.sessionBackgroundCommands.$inferSelect,
+  row: typeof schema.sessionBackgroundCommands.$inferSelect & { observationUnavailable?: boolean },
 ): SessionBackgroundCommand {
   const terminal = row.state === "exited" || row.state === "lost";
   const legacyFailureCode =
@@ -116,6 +134,9 @@ function mapCommand(
     sessionId: row.sessionId,
     provider: row.provider,
     state: row.state,
+    ...(!terminal && row.observationUnavailable
+      ? { observationStatus: "unavailable" as const }
+      : {}),
     commandPreview: row.commandPreview,
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
     exitCode: row.exitCode ?? null,
@@ -142,6 +163,7 @@ export async function backgroundCommandActivityForSessions(
           sessionId: schema.sessionBackgroundCommands.sessionId,
           count: sql<number>`count(*)::int`,
           stoppingCount: sql<number>`count(*) filter (where ${schema.sessionBackgroundCommands.state} = 'stopping')::int`,
+          unavailableCount: sql<number>`count(*) filter (where ${commandObservationUnavailable})::int`,
         })
         .from(schema.sessionBackgroundCommands)
         .where(
@@ -158,6 +180,9 @@ export async function backgroundCommandActivityForSessions(
           {
             state: Number(row.stoppingCount) > 0 ? ("stopping" as const) : ("running" as const),
             count: Number(row.count),
+            ...(Number(row.unavailableCount) > 0
+              ? { unavailableCount: Number(row.unavailableCount) }
+              : {}),
           },
         ]),
       );
@@ -174,7 +199,7 @@ export async function listSessionBackgroundCommands(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb
-        .select()
+        .select(commandReadColumns)
         .from(schema.sessionBackgroundCommands)
         .where(
           and(
@@ -931,7 +956,7 @@ export async function getSessionBackgroundCommand(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const [row] = await scopedDb
-        .select()
+        .select(commandReadColumns)
         .from(schema.sessionBackgroundCommands)
         .where(
           and(

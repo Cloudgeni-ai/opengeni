@@ -24,6 +24,7 @@ import {
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
+import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CodexReloginRequired,
@@ -870,6 +871,9 @@ export function agentRunFailurePayload(
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
 } {
+  if (error instanceof RetainedAttachmentTransportLimitError) {
+    return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
+  }
   if (error instanceof MandatoryHistoryPersistenceError) {
     const underlying = isSessionEventPersistenceError(error.cause)
       ? agentRunFailurePayload(error.cause, options)

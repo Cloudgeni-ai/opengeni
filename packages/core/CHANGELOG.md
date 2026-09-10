@@ -1,5 +1,94 @@
 # @opengeni/core
 
+## 2.8.4
+
+### Patch Changes
+
+- Updated dependencies [5249b0d]
+  - @opengeni/runtime@2.4.4
+
+## 2.8.3
+
+### Patch Changes
+
+- Updated dependencies [1b0f4f2]
+- Updated dependencies [87fbd92]
+- Updated dependencies [8a55774]
+- Updated dependencies [5835c27]
+- Updated dependencies [eb21b93]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/db@4.2.2
+  - @opengeni/events@0.4.21
+  - @opengeni/runtime@2.4.3
+  - @opengeni/config@1.0.4
+  - @opengeni/documents@0.8.23
+  - @opengeni/observability@0.8.23
+  - @opengeni/storage@0.2.124
+
+## 2.8.2
+
+### Patch Changes
+
+- 2fa33e4: Unify installed and authored workspace Skills behind one versioned text-folder
+  store and shared editor. Derive names and descriptions from mandatory SKILL.md
+  frontmatter, provide eager sandbox-free reading with exact requested paths, and
+  expose lazy search, install, save, checkout, and publish tools under workspace
+  Learning policy. Preserve workspace customizations on source updates and let
+  embedding hosts narrow bundled guidance independently of lazy tool discovery.
+
+  Migration 0433 is a maintenance cutover: drain old runtimes and use the
+  parser-backed migration runner. Preserve historical snapshots and archive legacy
+  configuration before conversion; invalid or pinned headerless configuration
+  requires explicit repair before migration. See docs/skills-lifecycle.md for the
+  deployment procedure and compatibility boundaries.
+
+- Updated dependencies [068be26]
+- Updated dependencies [69924e8]
+- Updated dependencies [d1cb266]
+- Updated dependencies [9233c88]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+  - @opengeni/db@4.2.1
+  - @opengeni/runtime@2.4.2
+  - @opengeni/events@0.4.20
+  - @opengeni/config@1.0.3
+  - @opengeni/documents@0.8.22
+  - @opengeni/observability@0.8.22
+  - @opengeni/storage@0.2.123
+
+## 2.8.1
+
+### Patch Changes
+
+- 392c575: Retain Modal command handles, provider execution identities, output, and exact exit status across provider-client reconstruction. Persist stream pages before acknowledging their cursors, and treat unavailable historical locators as unknown rather than proof of process loss. Execution status is provider-owned and never read from sandbox-writable files.
+- 9827c25: Add message action slots and an optional source message boundary for managed-human forks. The web UI places turn feedback and Fork from here beside Copy and the timestamp. Message forks preserve existing authorization and idempotency, copy only the selected canonical history prefix, and reject ambiguous, compacted, or incomplete boundaries.
+
+  Migration 0429 requires draining the API and both worker pools and provisioning the updated runtime routine contract before starting the new binary.
+
+- c915b0f: Remove the separate `@opengeni/react/chat` component. Use the existing
+  `SessionConversation` or compose the timeline and composer for the full agent
+  experience. The server-side `@opengeni/sdk/chat` wrapper and adapters remain
+  unchanged; their protocol requires a custom or compatible frontend.
+- 14dd6fe: Add workspace transcription provider preferences and optional fallback after explicit rejection, preserving recording pins after uncertain or successful attempts. Refresh expired SuperGrok credentials and recover the provider's invalid-credential 403 response.
+- f04243d: Preserve durable wake acknowledgment receipts through API and worker signalers. Report pending admission and unconfirmed legacy signal delivery separately from acknowledged revisions, so transport acceptance cannot be mistaken for agent execution progress. Existing wake retries and admission fences remain authoritative.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [befd389]
+- Updated dependencies [9827c25]
+- Updated dependencies [f3bd0d0]
+- Updated dependencies [7e73418]
+- Updated dependencies [5904fd1]
+- Updated dependencies [29551cb]
+- Updated dependencies [14dd6fe]
+  - @opengeni/db@4.2.0
+  - @opengeni/contracts@2.15.0
+  - @opengeni/runtime@2.4.1
+  - @opengeni/documents@0.8.21
+  - @opengeni/events@0.4.19
+  - @opengeni/config@1.0.2
+  - @opengeni/observability@0.8.21
+  - @opengeni/storage@0.2.122
+
 ## 2.8.0
 
 ### Minor Changes

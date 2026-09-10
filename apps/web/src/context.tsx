@@ -107,12 +107,12 @@ import {
   isAbortError,
   mergeMcpServerOptions,
   selectableMcpServers,
-  selectedAvailableCapabilityToolIds,
   type IntelligenceEffort,
   type McpServerOption,
   type RepoDraft,
   type RepositoryGroup,
 } from "@/lib/session-tools";
+import { useCapabilityToolDefaults } from "@/lib/use-capability-tool-defaults";
 import { upsertWorkspace } from "@/lib/workspaces";
 import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
@@ -664,9 +664,9 @@ export function RootRouteComponent() {
   const authPrincipalIdRef = useRef<string | null>(null);
   const accessPrincipalIdRef = useRef<string | null>(null);
   const managedSelfContextIdentityRef = useRef<ManagedSelfContextIdentity | null>(null);
-  // Every available tool is selected when it first appears. Explicit
+  // Every default-enabled tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
+  const seenCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const personalGitHubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
@@ -821,7 +821,7 @@ export function RootRouteComponent() {
       setSelectedPersonalGitHubRepoIds(new Set());
       setSelectedPersonalGitHubRepoRefs({});
       setSelectedCapabilityToolIds(new Set());
-      previousCapabilityToolIds.current = new Set();
+      seenCapabilityToolIds.current = new Set();
       appliedWorkspaceToolDefaultsKey.current = null;
       setGithubAppOpen(false);
       setGithubOrg("");
@@ -1142,30 +1142,17 @@ export function RootRouteComponent() {
   const currentResources = repositoryBuild.resources;
   const repositoryValidationError = repositoryBuild.error;
 
-  useEffect(() => {
-    if (!clientConfig) {
-      return;
-    }
-    const availableIds = toolMcpServers.map((server) => server.id);
-    const defaultsKey = `${routedWorkspaceId ?? ""}\u0000${[...workspaceDefaultToolIds]
-      .sort()
-      .join("\u0000")}`;
-    if (appliedWorkspaceToolDefaultsKey.current !== defaultsKey) {
-      appliedWorkspaceToolDefaultsKey.current = defaultsKey;
-      setSelectedCapabilityToolIds(new Set(workspaceDefaultToolIds));
-      previousCapabilityToolIds.current = new Set(availableIds);
-      return;
-    }
-    setSelectedCapabilityToolIds((current) =>
-      selectedAvailableCapabilityToolIds(
-        current,
-        availableIds,
-        previousCapabilityToolIds.current,
-        workspaceDefaultToolIds,
-      ),
-    );
-    previousCapabilityToolIds.current = new Set(availableIds);
-  }, [clientConfig, routedWorkspaceId, toolMcpServers, workspaceDefaultToolIds]);
+  useCapabilityToolDefaults({
+    principalKey: JSON.stringify(principalTransitionIdentity.current),
+    ready: clientConfig !== null,
+    workspaceId: routedWorkspaceId,
+    configuredIds: configuredWorkspaceToolDefaults?.mcpServerIds,
+    availableIds: toolMcpServers.map((server) => server.id),
+    defaultIds: workspaceDefaultToolIds,
+    appliedKey: appliedWorkspaceToolDefaultsKey,
+    seenIds: seenCapabilityToolIds,
+    setSelected: setSelectedCapabilityToolIds,
+  });
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.

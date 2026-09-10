@@ -79,7 +79,7 @@ describe("workspace pack runtime resolution", () => {
         id: "pack:infra-runtime:infra-ops",
         artifact: {
           name: "infra-ops",
-          description: null,
+          description: "Operate infrastructure safely.",
           files: infraSkill.files,
         },
         reason: "active legacy Pack infra-runtime",
@@ -105,21 +105,34 @@ describe("workspace pack runtime resolution", () => {
     expect(() => workspacePackRuntimeFromPacks(packs)).toThrow(
       'Enabled packs pack-a and pack-b both declare a skill named "infra-ops".',
     );
-    // Cross-pack uniqueness is case-insensitive, matching the per-pack
-    // contract rule.
+    // Legacy labels cannot rename the frontmatter-owned Skill identity.
     expect(() =>
       workspacePackRuntimeFromPacks([
         pack({ id: "pack-a", skills: [infraSkill] }),
         pack({ id: "pack-b", skills: [{ ...infraSkill, name: "Infra-Ops" }] }),
       ]),
-    ).toThrow("both declare a skill named");
+    ).toThrow("Skill name must match SKILL.md frontmatter");
   });
 
-  test("keeps explicit skill descriptions", () => {
+  test("keeps descriptions authored in Skill frontmatter", () => {
     const runtime = workspacePackRuntimeFromPacks([
       pack({
         id: "infra-runtime",
-        skills: [{ ...infraSkill, description: "Operate workspace infrastructure." }],
+        skills: [
+          {
+            files: infraSkill.files.map((file) =>
+              file.path === "SKILL.md"
+                ? {
+                    ...file,
+                    content: file.content.replace(
+                      "Operate infrastructure safely.",
+                      "Operate workspace infrastructure.",
+                    ),
+                  }
+                : file,
+            ),
+          },
+        ],
       }),
     ]);
     expect(runtime.skillActivations[0]?.artifact.description).toBe(

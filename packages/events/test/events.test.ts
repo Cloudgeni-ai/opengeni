@@ -98,7 +98,7 @@ describe("SSE formatting", () => {
     expect(JSON.parse(data)).toMatchObject({ sequence: 10, coveredThrough: 49 });
   });
 
-  test("bounds legacy multi-megabyte text, image, and error payloads in one explicit frame", () => {
+  test("serializes canonical multi-megabyte text, image, and error payloads exactly", () => {
     const legacy = event(8, {
       id: "parallel-call",
       name: "computer_screenshot",
@@ -117,21 +117,13 @@ describe("SSE formatting", () => {
       .find((line) => line.startsWith("data: "))!
       .slice("data: ".length);
     const decoded = JSON.parse(data) as SessionEvent;
-    const boundary = sessionEventPayloadTruncation(decoded.payload);
-
-    expect(bytes).toBeLessThanOrEqual(SESSION_EVENT_SSE_FRAME_MAX_BYTES);
-    expect(decoded.sequence).toBe(8);
-    expect(boundary?.surface).toBe("sse_legacy_guard");
-    expect(boundary?.fullEvidence).toEqual({
-      available: false,
-      reason: "not_retained",
-    });
-    expect(data).not.toContain("data:image/png;base64");
-    expect(data).toContain("HEAD-");
-    expect(data).toContain("-TAIL");
+    expect(bytes).toBeGreaterThan(SESSION_EVENT_SSE_FRAME_MAX_BYTES);
+    expect(decoded).toEqual(legacy);
+    expect(data).toBe(JSON.stringify(legacy));
+    expect(sessionEventPayloadTruncation(decoded.payload)).toBeNull();
   });
 
-  test("bounds and explicitly identifies malformed multibyte event envelope fields", () => {
+  test("explicit bounding identifies malformed multibyte event envelope fields", () => {
     const legacy = {
       ...event(9, { id: "legacy-envelope", output: "small" }),
       type: `bad\r\ntype-${"界".repeat(100_000)}`,
@@ -139,21 +131,13 @@ describe("SSE formatting", () => {
       duplicateReason: "界".repeat(100_000),
     } as SessionEvent;
 
-    const frame = formatSessionEventSse(legacy);
-    const decoded = JSON.parse(
-      frame
-        .split("\n")
-        .find((line) => line.startsWith("data: "))!
-        .slice("data: ".length),
-    ) as SessionEvent;
-    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-    );
+    const decoded = boundSessionEvent(legacy, { surface: "http_projection" });
+    expect(sessionEventJsonBytes(decoded)).toBeLessThanOrEqual(SESSION_EVENT_SSE_FRAME_MAX_BYTES);
     expect(decoded.type).toBe("session.event.envelope_omitted");
     expect(decoded.payload).toMatchObject({
       envelopeProjection: {
         truncated: true,
-        surface: "sse_legacy_guard",
+        surface: "http_projection",
         fields: expect.arrayContaining([
           expect.objectContaining({ field: "type" }),
           expect.objectContaining({ field: "clientEventId" }),
@@ -166,6 +150,23 @@ describe("SSE formatting", () => {
 });
 
 describe("session event transport envelopes", () => {
+  test("delivers malformed legacy types through safe SSE framing without rewriting content", () => {
+    const invalid = {
+      ...event(1, { text: "full message" }),
+      type: "bad\nevent: forged",
+    } as SessionEvent;
+    const frame = formatSessionEventSse(invalid);
+    expect(frame.split("\n")[1]).toBe("event: session.event.envelope_omitted");
+    expect(
+      JSON.parse(
+        frame
+          .split("\n")
+          .find((line) => line.startsWith("data: "))!
+          .slice(6),
+      ),
+    ).toEqual(invalid);
+    expect(formatSessionEventSse(event(2, { text: "next" }))).toStartWith("id: 2\n");
+  });
   test("preserves a trusted retained receipt across bounded transports and content-free telemetry", async () => {
     const artifactId = "33333333-3333-4333-8333-333333333333";
     const receipt = {
@@ -302,8 +303,10 @@ describe("session event transport envelopes", () => {
 
     const direct = boundSessionEvent(poison);
     const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
-    const frame = formatSessionEventSse(poison);
-    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+    const page = boundSessionEventHttpPage([poison], {
+      direction: "after",
+      eventProjection: "bounded",
+    });
 
     expect(serializerCalls).toBe(0);
     expect(accessorCalls).toBe(0);
@@ -317,9 +320,6 @@ describe("session event transport envelopes", () => {
     expect(JSON.stringify(direct)).not.toContain("must-not-run");
     expect(encodedBatchBytes(batches.flat())).toBeLessThanOrEqual(
       SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
-    );
-    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     );
     expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_HTTP_PAGE_MAX_BYTES);
     expect(page.events).toHaveLength(1);
@@ -337,8 +337,10 @@ describe("session event transport envelopes", () => {
 
     const direct = boundSessionEvent(poison);
     const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
-    const frame = formatSessionEventSse(poison);
-    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+    const page = boundSessionEventHttpPage([poison], {
+      direction: "after",
+      eventProjection: "bounded",
+    });
 
     expect(serializerCalls).toBe(0);
     for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
@@ -353,10 +355,7 @@ describe("session event transport envelopes", () => {
         fullEvidence: { available: false, reason: "not_retained" },
       });
     }
-    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-    );
-    expect(frame).not.toContain("must-not-run");
+    expect(JSON.stringify([direct, batches, page.events])).not.toContain("must-not-run");
   });
 
   test("makes inherited event serialization loss explicit without invoking it", () => {
@@ -374,8 +373,10 @@ describe("session event transport envelopes", () => {
 
     const direct = boundSessionEvent(poison);
     const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
-    const frame = formatSessionEventSse(poison);
-    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+    const page = boundSessionEventHttpPage([poison], {
+      direction: "after",
+      eventProjection: "bounded",
+    });
 
     expect(serializerCalls).toBe(0);
     for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
@@ -390,10 +391,7 @@ describe("session event transport envelopes", () => {
         fullEvidence: { available: false, reason: "not_retained" },
       });
     }
-    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-    );
-    expect(frame).not.toContain("must-not-run");
+    expect(JSON.stringify([direct, batches, page.events])).not.toContain("must-not-run");
   });
 
   test("makes omitted additive top-level event fields explicit without reading them", () => {
@@ -411,8 +409,10 @@ describe("session event transport envelopes", () => {
 
     const direct = boundSessionEvent(poison);
     const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
-    const frame = formatSessionEventSse(poison);
-    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+    const page = boundSessionEventHttpPage([poison], {
+      direction: "after",
+      eventProjection: "bounded",
+    });
 
     expect(accessorCalls).toBe(0);
     for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
@@ -430,13 +430,10 @@ describe("session event transport envelopes", () => {
         fullEvidence: { available: false, reason: "not_retained" },
       });
     }
-    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-    );
-    expect(frame).not.toContain("must-not-run");
+    expect(JSON.stringify([direct, batches, page.events])).not.toContain("must-not-run");
   });
 
-  test("normalizes a top-level payload accessor with unknown source bytes on every surface", () => {
+  test("normalizes a top-level payload accessor with unknown source bytes on explicit bounded surfaces", () => {
     let accessorCalls = 0;
     const poison = event(83, { output: "placeholder" });
     Object.defineProperty(poison, "payload", {
@@ -449,8 +446,10 @@ describe("session event transport envelopes", () => {
 
     const direct = boundSessionEvent(poison);
     const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [poison]);
-    const frame = formatSessionEventSse(poison);
-    const page = boundSessionEventHttpPage([poison], { direction: "after" });
+    const page = boundSessionEventHttpPage([poison], {
+      direction: "after",
+      eventProjection: "bounded",
+    });
 
     expect(accessorCalls).toBe(0);
     for (const projected of [direct, batches[0]![0]!, page.events[0]!]) {
@@ -465,10 +464,7 @@ describe("session event transport envelopes", () => {
         fullEvidence: { available: false, reason: "not_retained" },
       });
     }
-    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
-      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-    );
-    expect(frame).not.toContain("must-not-run");
+    expect(JSON.stringify([direct, batches, page.events])).not.toContain("must-not-run");
   });
 
   test("chunks parallel NATS batches by exact encoded bytes without reordering", () => {
@@ -545,7 +541,7 @@ describe("session event transport envelopes", () => {
     expect(page.nextSequence).toBe(10);
   });
 
-  test("returns a byte-bounded backward suffix and defensively normalizes a legacy first row", () => {
+  test("explicit bounded HTTP normalizes an oversized row in a backward page", () => {
     const events = [
       event(1, { output: "a" }),
       event(2, { output: "b" }),
@@ -554,6 +550,7 @@ describe("session event transport envelopes", () => {
     const page = boundSessionEventHttpPage(events, {
       direction: "before",
       maxBytes: SESSION_EVENT_HTTP_PAGE_MAX_BYTES,
+      eventProjection: "bounded",
     });
 
     expect(page.events.map((item) => item.sequence)).toEqual([1, 2, 3]);
@@ -565,7 +562,7 @@ describe("session event transport envelopes", () => {
     );
   });
 
-  test("preserves canonical oversized payloads only for explicit exact HTTP pages", () => {
+  test("preserves canonical oversized payloads by default and bounds only explicit diagnostic HTTP pages", () => {
     const payload = {
       id: "forensic-call",
       output: {
@@ -583,12 +580,52 @@ describe("session event transport envelopes", () => {
     expect(exact.events[0]?.payload).toEqual(payload);
     expect(sessionEventPayloadTruncation(exact.events[0]?.payload)).toBeNull();
 
-    const bounded = boundSessionEventHttpPage([retained], { direction: "after" });
+    const defaultPage = boundSessionEventHttpPage([retained], { direction: "after" });
+    expect(defaultPage).toEqual(exact);
+
+    const bounded = boundSessionEventHttpPage([retained], {
+      direction: "after",
+      eventProjection: "bounded",
+    });
     expect(bounded.events[0]?.payload).not.toEqual(payload);
     expect(sessionEventPayloadTruncation(bounded.events[0]?.payload)?.surface).toBe(
       "http_projection",
     );
   });
+
+  for (const direction of ["after", "before"] as const) {
+    test(`default exact HTTP admits an oversized first event alone and resumes ${direction} without gaps`, () => {
+      const text = `start\n${'界🙂e\u0301"\\\n'.repeat(150_000)}\nend`;
+      const oversized: SessionEvent = { ...event(2, { text }), type: "agent.message.completed" };
+      const events = [event(1, { text: "before" }), oversized, event(3, { text: "after" })];
+      const candidates = direction === "after" ? events.slice(1) : events.slice(0, 2);
+      const page = boundSessionEventHttpPage(candidates, { direction });
+
+      expect(page.events).toEqual([oversized]);
+      expect(page.bytes).toBe(sessionEventJsonBytes([oversized]));
+      expect(page.bytes).toBeGreaterThan(SESSION_EVENT_HTTP_PAGE_MAX_BYTES);
+      expect(page.truncated).toBeTrue();
+      expect(page.nextSequence).toBe(2);
+
+      const remaining = candidates.filter((item) =>
+        direction === "after"
+          ? item.sequence > page.nextSequence!
+          : item.sequence < page.nextSequence!,
+      );
+      const next = boundSessionEventHttpPage(remaining, { direction });
+      expect(next.events).toEqual([direction === "after" ? events[2]! : events[0]!]);
+      expect(next.nextSequence).toBe(direction === "after" ? 3 : 1);
+      expect(next.truncated).toBeFalse();
+      expect(
+        direction === "after" ? [...page.events, ...next.events] : [...next.events, ...page.events],
+      ).toEqual(candidates);
+
+      const alone = boundSessionEventHttpPage([oversized], { direction });
+      expect(alone.events).toEqual([oversized]);
+      expect(alone.truncated).toBeFalse();
+      expect(alone.nextSequence).toBe(2);
+    });
+  }
 });
 
 describe("workspace-control transport envelopes", () => {

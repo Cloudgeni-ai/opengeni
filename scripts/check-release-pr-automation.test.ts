@@ -3790,7 +3790,7 @@ describe("workflow contracts", () => {
     );
     expect(release.on.schedule).toBeUndefined();
     expect(ci.jobs.deployment.if).toBe(
-      "${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",

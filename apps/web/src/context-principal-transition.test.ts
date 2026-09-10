@@ -66,6 +66,8 @@ describe("principal transition contract", () => {
       "setManualRepos([])",
       "setSelectedRepoIds(new Set())",
       "setSelectedCapabilityToolIds(new Set())",
+      "seenCapabilityToolIds.current = new Set()",
+      "appliedWorkspaceToolDefaultsKey.current = null",
       "setWorkspaceStateOwnerId(workspaceId)",
       "sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId)",
     ]) {

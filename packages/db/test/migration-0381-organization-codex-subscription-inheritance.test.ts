@@ -182,6 +182,129 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     );
   });
 
+  test("disconnect clears used organization credentials across workspace fences atomically", async () => {
+    if (!shared || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('organization-codex-disconnect') returning id`;
+    const actorSubjectId = `user:${crypto.randomUUID()}`;
+    const workspaceIds: string[] = [];
+    for (const name of ["personal", "shared", "disabled"]) {
+      const [workspace] = await shared.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, ${name}) returning id`;
+      workspaceIds.push(workspace!.id);
+      await shared.admin`
+        insert into workspace_inference_controls (account_id, workspace_id)
+        values (${account!.id}, ${workspace!.id})`;
+    }
+    await shared.admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (${account!.id}, ${actorSubjectId}, 'owner', 'active', ${workspaceIds[0]!})`;
+    const connect = () =>
+      upsertOrganizationCodexSubscriptionCredential(client!.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialEncrypted: "fixture-not-a-token",
+        chatgptAccountId: crypto.randomUUID(),
+        scopes: null,
+        planType: "pro",
+        isFedramp: false,
+        expiresAt: null,
+        lastRefreshAt: null,
+      });
+    const credential = await connect();
+    const replacement = await connect();
+    const sessionIds: string[] = [];
+    for (const workspaceId of workspaceIds) {
+      const session = await createSession(client.db, {
+        accountId: account!.id,
+        workspaceId,
+        initialMessage: "disconnect fixture",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "codex/gpt-5",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      sessionIds.push(session.id);
+      await shared.admin`
+        update sessions set codex_pinned_credential_id = ${credential.id},
+          codex_last_credential_id = ${credential.id}, codex_pin_source = 'manual'
+        where id = ${session.id}`;
+    }
+    // Historical references can survive a routing change. The delete must fence
+    // the whole organization inventory, not just currently inheriting sources.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into workspace_codex_subscription_preferences (account_id, workspace_id, mode)
+        values (${account!.id}, ${workspaceIds[2]!}, 'disabled')`;
+    });
+    const before = await shared.admin`
+      select id, updated_at, activity_revision, visibility, owner_subject_id, authority_epoch
+      from sessions where account_id = ${account!.id} order by id`;
+    // A non-administrator cannot acquire deletion authority through the new fences.
+    await expect(
+      disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId: `user:${crypto.randomUUID()}`,
+        credentialId: credential.id,
+      }),
+    ).rejects.toThrow();
+    const [otherAccount] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('unrelated-codex-disconnect') returning id`;
+    const [otherCredential] = await shared.admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id
+      ) values (${otherAccount!.id}, ${otherAccount!.id}, 'organization',
+        'unrelated-fixture-not-a-token', ${crypto.randomUUID()}) returning id`;
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: otherCredential!.id,
+      }),
+    ).toMatchObject({ removed: false, newActiveCredentialId: credential.id });
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: credential.id,
+      }),
+    ).toMatchObject({ removed: true, newActiveCredentialId: replacement.id });
+    const references = await shared.admin`
+      select id, codex_pinned_credential_id, codex_last_credential_id
+      from sessions where account_id = ${account!.id} order by id`;
+    expect(references).toHaveLength(sessionIds.length);
+    for (const row of references) {
+      expect(row.codex_pinned_credential_id).toBeNull();
+      expect(row.codex_last_credential_id).toBeNull();
+    }
+    const after = await shared.admin`
+      select id, updated_at, activity_revision, visibility, owner_subject_id, authority_epoch
+      from sessions where account_id = ${account!.id} order by id`;
+    expect([...after]).toEqual([...before]);
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: credential.id,
+      }),
+    ).toMatchObject({ removed: false, newActiveCredentialId: replacement.id });
+    expect(
+      await disconnectOrganizationCodexAccount(client.db, {
+        organizationId: account!.id,
+        actorSubjectId,
+        credentialId: replacement.id,
+      }),
+    ).toMatchObject({ removed: true, newActiveCredentialId: null });
+    expect(
+      await shared.admin`select id from codex_subscription_credentials
+      where id = ${otherCredential!.id}`,
+    ).toHaveLength(1);
+  });
+
   test("inherits into shared and Personal workspaces and honors overrides", async () => {
     if (!shared || !app || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`

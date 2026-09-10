@@ -47,6 +47,7 @@ const sessionTemplate: AutomationSessionTemplate = {
   skills: [
     {
       name: "pr-review",
+      description: "Review pull requests.",
       files: [
         {
           path: "SKILL.md",

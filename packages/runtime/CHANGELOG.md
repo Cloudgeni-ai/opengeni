@@ -1,5 +1,73 @@
 # @opengeni/runtime
 
+## 2.4.4
+
+### Patch Changes
+
+- 5249b0d: Detach provider response item identities from portable checkpoint requests while preserving inline history and tool call/result correlation. This prevents Azure from rejecting a message whose opaque reasoning identity was omitted during compaction. Classify the known rejection without persisting provider message content.
+
+  Explicitly disable tool selection for Azure-profile Responses checkpoints so historical tool records cannot yield a new tool call instead of summary text. Empty/provider failure safeguards remain unchanged.
+
+## 2.4.3
+
+### Patch Changes
+
+- 8a55774: Preserve the original Modal SDK observer when setup or readiness commands yield, without colliding with retained command handles or replaying commands.
+- Updated dependencies [1b0f4f2]
+  - @opengeni/contracts@2.15.2
+  - @opengeni/sdk@4.0.2
+  - @opengeni/codemode@0.5.3
+  - @opengeni/config@1.0.4
+  - @opengeni/tool-gateway@0.1.4
+
+## 2.4.2
+
+### Patch Changes
+
+- 068be26: Complete a Skill save in the same transaction as its one verified human chat decision. Show the full immutable Skill folder, preserve exact scope and revision checks, and refuse delegated, stale, or mismatched approval. Autonomous saves activate directly; declining a proposal preserves existing active guidance.
+- 69924e8: Preserve structured model-history ordering through PostgreSQL replay and pending-tool recovery. Retain authorized uploaded images across turns and compaction input, preserve images in retained messages, and include their projected token cost in compaction retention budgets. Migration requires draining writers.
+- d1cb266: Keep automatic history filling from evicting the latest reply or cycling between older and newer pages. Preserve explicit history navigation and stable jumps back to latest. Retain provider message identity so assistant chunks interleaved with tool activity remain one message without merging distinct replies.
+- 2fa33e4: Unify installed and authored workspace Skills behind one versioned text-folder
+  store and shared editor. Derive names and descriptions from mandatory SKILL.md
+  frontmatter, provide eager sandbox-free reading with exact requested paths, and
+  expose lazy search, install, save, checkout, and publish tools under workspace
+  Learning policy. Preserve workspace customizations on source updates and let
+  embedding hosts narrow bundled guidance independently of lazy tool discovery.
+
+  Migration 0433 is a maintenance cutover: drain old runtimes and use the
+  parser-backed migration runner. Preserve historical snapshots and archive legacy
+  configuration before conversion; invalid or pinned headerless configuration
+  requires explicit repair before migration. See docs/skills-lifecycle.md for the
+  deployment procedure and compatibility boundaries.
+
+- Updated dependencies [068be26]
+- Updated dependencies [2fa33e4]
+  - @opengeni/contracts@2.15.1
+  - @opengeni/sdk@4.0.1
+  - @opengeni/config@1.0.3
+  - @opengeni/codemode@0.5.2
+  - @opengeni/tool-gateway@0.1.3
+
+## 2.4.1
+
+### Patch Changes
+
+- 392c575: Retain Modal command handles, provider execution identities, output, and exact exit status across provider-client reconstruction. Persist stream pages before acknowledging their cursors, and treat unavailable historical locators as unknown rather than proof of process loss. Execution status is provider-owned and never read from sandbox-writable files.
+- befd389: Preserve prompt-cache reuse across turns with unchanged governance by keeping attempt-specific snapshot receipt UUIDs out of system instructions. Stable content hashes, policy revisions, and skill retrieval handles remain model-visible; exact-attempt snapshot IDs remain in durable audit records.
+- f3bd0d0: Preserve unknown Modal command observations instead of falsely settling local SDK handle loss as physical process loss. Retain exact command holders with explicit deferred/quarantine diagnostics while allowing the original owner's terminal proof to settle normally.
+- 5904fd1: Remove the Site SDK endpoint allowlist. Workspace API requests now reach ordinary authorization handlers in published Sites and sandbox previews; tenant routing, agent permission limits, and direct integration-tool checks remain unchanged. Clarify the distinction between authoring, preview, and viewer access in the Sites skill, including honest reporting of viewer-only verification.
+- 29551cb: Clarify that ancestor Pause interrupts the calling agent and that accepted coordination messages require identity-correlated delivery and result verification. Preserve existing recursive controls and discourage duplicate unconsumed messages.
+- Updated dependencies [231b103]
+- Updated dependencies [392c575]
+- Updated dependencies [9827c25]
+- Updated dependencies [5904fd1]
+- Updated dependencies [14dd6fe]
+  - @opengeni/contracts@2.15.0
+  - @opengeni/sdk@4.0.0
+  - @opengeni/codemode@0.5.1
+  - @opengeni/config@1.0.2
+  - @opengeni/tool-gateway@0.1.2
+
 ## 2.4.0
 
 ### Minor Changes

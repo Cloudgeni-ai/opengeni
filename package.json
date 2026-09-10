@@ -62,6 +62,7 @@
     "test:agent-mcp-control": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 packages/db/test/agent-session-commands.test.ts && OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 ./test/integration/api.integration.ts -t 'registers manager orchestration MCP tools gated by session permissions'",
     "test:worker-restart-control": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 300000 ./test/integration/worker-restart.integration.ts",
     "test:ui-session-control": "bun test packages/react/test/chat-composer-controls.test.tsx packages/react/test/hooks.test.tsx packages/react/test/queue-surface.test.tsx apps/web/src/App.test.ts && bun scripts/run-browser-e2e.ts ./test/e2e/session-pins.browser.e2e.ts",
+    "verify:portable-compaction": "bun scripts/operator/verify-portable-compaction.ts",
     "bench:session-control": "bun scripts/bench-session-control.ts",
     "bench:session-event-append": "bun scripts/bench-session-event-append.ts",
     "bench:agent-session-authorization": "bun scripts/bench-agent-session-authorization.ts",

@@ -11,6 +11,11 @@ import { and, eq, inArray, ne, sql } from "drizzle-orm";
 
 import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
+import {
+  lockSkillPublication,
+  prepareSkillPublication,
+  readSkillPublications,
+} from "./skill-publication";
 
 export class PackOperationIdempotencyError extends Error {
   readonly name = "PackOperationIdempotencyError";
@@ -73,6 +78,7 @@ export async function preparePackInstallationOperation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await lockSkillPublication(tx as unknown as Database, input.workspaceId);
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`capability-operation:${input.workspaceId}:${input.idempotencyKey}`}, 0))`,
         );
@@ -252,6 +258,58 @@ export async function finalizePackInstallationOperation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await prepareSkillPublication(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.operationId,
+        );
+        const [priorFinalization] = await tx
+          .select()
+          .from(schema.capabilityOperations)
+          .where(
+            and(
+              eq(schema.capabilityOperations.id, input.operationId),
+              eq(schema.capabilityOperations.accountId, input.accountId),
+              eq(schema.capabilityOperations.workspaceId, input.workspaceId),
+              eq(schema.capabilityOperations.targetKind, "pack"),
+              eq(schema.capabilityOperations.targetId, input.packId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (priorFinalization?.status === "completed") {
+          const { skillPublications: _storedPublications, ...originalResult } =
+            (priorFinalization.result ?? {}) as Record<string, unknown>;
+          const { skillPublications: _submittedPublications, ...requestedResult } = input.result;
+          if (
+            priorFinalization.version !== input.operationVersion + 1 ||
+            stableJson(originalResult) !== stableJson(requestedResult)
+          )
+            throw new PackOperationIdempotencyError("Pack finalization request changed");
+          const [priorInstallation] = await tx
+            .select()
+            .from(schema.packInstallations)
+            .where(
+              and(
+                eq(schema.packInstallations.id, input.packInstallationId),
+                eq(schema.packInstallations.accountId, input.accountId),
+                eq(schema.packInstallations.workspaceId, input.workspaceId),
+                eq(schema.packInstallations.packId, input.packId),
+              ),
+            )
+            .limit(1);
+          if (!priorInstallation)
+            throw new PackOperationClaimLostError("Pack finalization installation unavailable");
+          const skillPublications = await readSkillPublications(
+            tx as unknown as Database,
+            input.workspaceId,
+            input.operationId,
+          );
+          return {
+            ...mapPackInstallation(priorInstallation),
+            ...(skillPublications.length ? { skillPublications } : {}),
+          };
+        }
         await assertActivePackOperationClaim(tx as unknown as Database, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -272,12 +330,17 @@ export async function finalizePackInstallationOperation(
           )
           .returning();
         if (!installation) throw new Error("Pack installation was not found during finalize");
+        const skillPublications = await readSkillPublications(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.operationId,
+        );
         const [completed] = await tx
           .update(schema.capabilityOperations)
           .set({
             status: "completed",
             phase: "completed",
-            result: input.result,
+            result: { ...input.result, ...(skillPublications.length ? { skillPublications } : {}) },
             errorCode: null,
             version: sql`${schema.capabilityOperations.version} + 1`,
             completedAt: now,
@@ -292,7 +355,10 @@ export async function finalizePackInstallationOperation(
           )
           .returning({ id: schema.capabilityOperations.id });
         if (!completed) throw new PackOperationClaimLostError("Pack operation claim was lost");
-        return mapPackInstallation(installation);
+        return {
+          ...mapPackInstallation(installation),
+          ...(skillPublications.length ? { skillPublications } : {}),
+        };
       }),
   );
 }
@@ -873,9 +939,7 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     packId: row.packId,
     status: row.status as PackInstallationStatus,
     version: row.version,
-    manifestSnapshot: row.manifestSnapshot
-      ? (row.manifestSnapshot as unknown as CapabilityPack)
-      : null,
+    manifestSnapshot: row.manifestSnapshot,
     manifestDigest: row.manifestDigest,
     selectedRigId: row.selectedRigId,
     installedBySubjectId: row.installedBySubjectId,

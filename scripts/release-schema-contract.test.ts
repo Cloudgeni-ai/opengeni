@@ -29,6 +29,9 @@ async function buildSchemaContract(directory?: string) {
         "0429_message_boundary_session_forks.sql",
         "0430_session_personal_variable_set_continuations.sql",
         "0431_retained_provider_commands.sql",
+        "0432_xai_disconnect_session_pins.sql",
+        "0434_ordered_model_history.sql",
+        "0436_unobservable_command_idle_drain.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -134,16 +137,98 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe("0452_canonical_session_scope_subject.sql");
+    const unobservableDrain = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0436_unobservable_command_idle_drain.sql",
+    );
+    const orderedModelHistory = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0434_ordered_model_history.sql",
+    );
+    const xaiDisconnectPins = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0432_xai_disconnect_session_pins.sql",
+    );
+    const messageBoundarySessionForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0429_message_boundary_session_forks.sql",
+    );
+    const retainedProviderCommands = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0431_retained_provider_commands.sql",
+    );
+    const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
+    );
+    const unifiedSkillLifecycle = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
+    );
+    const skillChatConfirmation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0435_skill_chat_confirmation.sql",
+    );
+    expect(completeSourceContract).toMatchObject({
+      fileCount:
+        437 +
+        (unobservableDrain ? 1 : 0) +
+        (orderedModelHistory ? 1 : 0) +
+        (xaiDisconnectPins ? 1 : 0) +
+        (messageBoundarySessionForks ? 1 : 0) +
+        (sessionPersonalVariableSetContinuations ? 1 : 0) +
+        (retainedProviderCommands ? 1 : 0) +
+        (unifiedSkillLifecycle ? 1 : 0) +
+        (skillChatConfirmation ? 1 : 0),
+      latestMigration: unobservableDrain
+        ? "0436_unobservable_command_idle_drain.sql"
+        : skillChatConfirmation
+          ? "0435_skill_chat_confirmation.sql"
+          : orderedModelHistory
+            ? "0434_ordered_model_history.sql"
+            : unifiedSkillLifecycle
+              ? "0433_unified_skill_lifecycle.sql"
+              : xaiDisconnectPins
+                ? "0432_xai_disconnect_session_pins.sql"
+                : retainedProviderCommands
+                  ? "0431_retained_provider_commands.sql"
+                  : sessionPersonalVariableSetContinuations
+                    ? "0430_session_personal_variable_set_continuations.sql"
+                    : messageBoundarySessionForks
+                      ? "0429_message_boundary_session_forks.sql"
+                      : "0428_scheduled_task_creator_policy.sql",
+    });
+    expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      path: "0436_unobservable_command_idle_drain.sql",
+      deploymentMode: "rolling",
+    });
     expect(
       completeSourceContract.migrations.find(
-        (m) => m.path === "0431_retained_provider_commands.sql",
+        (migration) => migration.path === "0431_retained_provider_commands.sql",
       ),
-    ).toMatchObject({ deploymentMode: "rolling" });
+    ).toMatchObject({
+      path: "0431_retained_provider_commands.sql",
+      deploymentMode: "rolling",
+    });
     expect(
       completeSourceContract.migrations.find(
-        (migration) =>
-          migration.path === "0422_personal_workspace_organization_codex_inheritance.sql",
+        (migration) => migration.path === "0432_xai_disconnect_session_pins.sql",
+      ),
+    ).toMatchObject({
+      path: "0432_xai_disconnect_session_pins.sql",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
+      ),
+    ).toMatchObject({
+      path: "0430_session_personal_variable_set_continuations.sql",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0429_message_boundary_session_forks.sql",
+      ),
+    ).toMatchObject({
+      path: "0429_message_boundary_session_forks.sql",
+      deploymentMode: "maintenance",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
@@ -242,6 +327,9 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
+    const unifiedSkillLifecycle = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
+    );
     const scheduledInheritedToolAdmission = completeSourceContract.migrations.some(
       (migration) => migration.path === "0416_scheduled_inherited_tool_admission.sql",
     );
@@ -277,78 +365,6 @@ describe("release schema contract", () => {
     );
     const scheduledTaskCreatorPolicy = completeSourceContract.migrations.some(
       (migration) => migration.path === "0428_scheduled_task_creator_policy.sql",
-    );
-    const messageBoundarySessionForks = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0429_message_boundary_session_forks.sql",
-    );
-    const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
-    );
-    const organizationScopedExternalWorkspaces = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0432_organization_scoped_external_workspaces.sql",
-    );
-    const durableConnectAttempts = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0433_durable_connect_attempts.sql",
-    );
-    const externalIdentityProvisioning = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0434_external_identity_provisioning.sql",
-    );
-    const externalWorkspaceMemberRemoval = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0435_external_workspace_member_removal.sql",
-    );
-    const externalIdentityMembershipLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0436_external_identity_membership_lifecycle.sql",
-    );
-    const externalOwningUserAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0437_external_owning_user_authority.sql",
-    );
-    const hostMcpBindingRegistry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0438_host_mcp_binding_registry.sql",
-    );
-    const hostMcpDelegations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0439_host_mcp_delegations.sql",
-    );
-    const hostMcpTurnAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0440_host_mcp_turn_authorities.sql",
-    );
-    const hostMcpCausalContinuation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0441_host_mcp_causal_continuation.sql",
-    );
-    const hostMcpTaskAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0442_host_mcp_task_authorities.sql",
-    );
-    const hostMcpChildAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0443_host_mcp_child_authority.sql",
-    );
-    const externalIdentityLinkLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0444_external_identity_link_lifecycle.sql",
-    );
-    const externalIdentityLinkWork = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0445_external_identity_link_work.sql",
-    );
-    const externalLinkPreviewAndPermissionCeiling = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0446_external_link_preview_and_permission_ceiling.sql",
-    );
-    const externalLinkScheduledOrigin = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0447_external_link_scheduled_origin.sql",
-    );
-    const hostMcpNativeOwner = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0448_host_mcp_native_owner.sql",
-    );
-    const connectOriginAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0449_connect_origin_authority.sql",
-    );
-    const externalLinkInventoryLabels = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0450_external_link_inventory_labels.sql",
-    );
-    const retainedProviderCommands = completeSourceContract.migrations.some(
-      (m) => m.path === "0431_retained_provider_commands.sql",
-    );
-    const canonicalSessionScopeSubject = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0452_canonical_session_scope_subject.sql",
-    );
-    const socialConnectionVersions = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0451_social_connection_versions.sql",
     );
     const personalWorkspaceOrganizationCodexInheritance = completeSourceContract.migrations.some(
       (migration) =>
@@ -809,29 +825,7 @@ describe("release schema contract", () => {
       "0425_feedback_submissions.sql",
       "0427_session_agent_access_scope.sql",
       "0428_scheduled_task_creator_policy.sql",
-      "0429_message_boundary_session_forks.sql",
-      "0430_session_personal_variable_set_continuations.sql",
-      "0432_organization_scoped_external_workspaces.sql",
-      "0433_durable_connect_attempts.sql",
-      "0434_external_identity_provisioning.sql",
-      "0435_external_workspace_member_removal.sql",
-      "0436_external_identity_membership_lifecycle.sql",
-      "0437_external_owning_user_authority.sql",
-      "0438_host_mcp_binding_registry.sql",
-      "0439_host_mcp_delegations.sql",
-      "0440_host_mcp_turn_authorities.sql",
-      "0441_host_mcp_causal_continuation.sql",
-      "0442_host_mcp_task_authorities.sql",
-      "0443_host_mcp_child_authority.sql",
-      "0444_external_identity_link_lifecycle.sql",
-      "0445_external_identity_link_work.sql",
-      "0446_external_link_preview_and_permission_ceiling.sql",
-      "0447_external_link_scheduled_origin.sql",
-      "0448_host_mcp_native_owner.sql",
-      "0449_connect_origin_authority.sql",
-      "0450_external_link_inventory_labels.sql",
-      "0451_social_connection_versions.sql",
-      "0452_canonical_session_scope_subject.sql",
+      "0433_unified_skill_lifecycle.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -909,141 +903,36 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0425_feedback_submissions.sql",
       };
-    if (organizationScopedExternalWorkspaces)
+    if (codexBookkeepingPreservesSessionRecency)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0432_organization_scoped_external_workspaces.sql",
+        latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql",
       };
-    if (durableConnectAttempts)
+    if (sessionAgentAccessScope)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0433_durable_connect_attempts.sql",
+        latestMigration: "0427_session_agent_access_scope.sql",
       };
-    if (externalIdentityProvisioning)
+    if (scheduledTaskCreatorPolicy)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0434_external_identity_provisioning.sql",
+        latestMigration: "0428_scheduled_task_creator_policy.sql",
       };
-    if (externalWorkspaceMemberRemoval)
+    if (unifiedSkillLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0435_external_workspace_member_removal.sql",
-      };
-    if (externalIdentityMembershipLifecycle)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0436_external_identity_membership_lifecycle.sql",
-      };
-    if (externalOwningUserAuthority)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0437_external_owning_user_authority.sql",
-      };
-    if (hostMcpBindingRegistry)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0438_host_mcp_binding_registry.sql",
-      };
-    if (hostMcpDelegations)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0439_host_mcp_delegations.sql",
-      };
-    if (hostMcpTurnAuthorities)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0440_host_mcp_turn_authorities.sql",
-      };
-    if (hostMcpCausalContinuation)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0441_host_mcp_causal_continuation.sql",
-      };
-    if (hostMcpTaskAuthorities)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0442_host_mcp_task_authorities.sql",
-      };
-    if (hostMcpChildAuthority)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0443_host_mcp_child_authority.sql",
-      };
-    if (externalIdentityLinkLifecycle)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0444_external_identity_link_lifecycle.sql",
-      };
-    if (externalIdentityLinkWork)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0445_external_identity_link_work.sql",
-      };
-    if (externalLinkPreviewAndPermissionCeiling)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0446_external_link_preview_and_permission_ceiling.sql",
-      };
-    if (externalLinkScheduledOrigin)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0447_external_link_scheduled_origin.sql",
-      };
-    if (hostMcpNativeOwner)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0448_host_mcp_native_owner.sql",
-      };
-    if (connectOriginAuthority)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0449_connect_origin_authority.sql",
-      };
-    if (externalLinkInventoryLabels)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0450_external_link_inventory_labels.sql",
-      };
-    if (socialConnectionVersions)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: canonicalSessionScopeSubject
-          ? "0452_canonical_session_scope_subject.sql"
-          : "0451_social_connection_versions.sql",
+        latestMigration: "0433_unified_skill_lifecycle.sql",
       };
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
         ? { latestMigration: "0397_sandbox_deadline_rotation_preemption.sql" }
         : {}),
       fileCount:
-        (sessionAgentAccessScope ? 1 : 0) +
         (scheduledTaskCreatorPolicy ? 1 : 0) +
-        (messageBoundarySessionForks ? 1 : 0) +
-        (sessionPersonalVariableSetContinuations ? 1 : 0) +
-        (feedbackSubmissions ? 1 : 0) +
         (codexBookkeepingPreservesSessionRecency ? 1 : 0) +
-        (organizationScopedExternalWorkspaces ? 1 : 0) +
-        (durableConnectAttempts ? 1 : 0) +
-        (externalIdentityProvisioning ? 1 : 0) +
-        (externalWorkspaceMemberRemoval ? 1 : 0) +
-        (externalIdentityMembershipLifecycle ? 1 : 0) +
-        (externalOwningUserAuthority ? 1 : 0) +
-        (hostMcpBindingRegistry ? 1 : 0) +
-        (hostMcpDelegations ? 1 : 0) +
-        (hostMcpTurnAuthorities ? 1 : 0) +
-        (hostMcpCausalContinuation ? 1 : 0) +
-        (hostMcpTaskAuthorities ? 1 : 0) +
-        (hostMcpChildAuthority ? 1 : 0) +
-        (externalIdentityLinkLifecycle ? 1 : 0) +
-        (externalIdentityLinkWork ? 1 : 0) +
-        (externalLinkPreviewAndPermissionCeiling ? 1 : 0) +
-        (externalLinkScheduledOrigin ? 1 : 0) +
-        (hostMcpNativeOwner ? 1 : 0) +
-        (connectOriginAuthority ? 1 : 0) +
-        (externalLinkInventoryLabels ? 1 : 0) +
-        (retainedProviderCommands ? 1 : 0) +
-        (canonicalSessionScopeSubject ? 1 : 0) +
-        (socialConnectionVersions ? 1 : 0) +
+        (sessionAgentAccessScope ? 1 : 0) +
+        (feedbackSubmissions ? 1 : 0) +
+        (unifiedSkillLifecycle ? 1 : 0) +
         (modelConnectionAccess ? 1 : 0) +
         (organizationSupergrokSubscriptions ? 1 : 0) +
         (workspacePauseTimers ? 1 : 0) +
@@ -1121,8 +1010,8 @@ describe("release schema contract", () => {
         (workspaceHtmlSiteSources ? 1 : 0) +
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
-      latestMigration: canonicalSessionScopeSubject
-        ? "0452_canonical_session_scope_subject.sql"
+      latestMigration: unifiedSkillLifecycle
+        ? "0433_unified_skill_lifecycle.sql"
         : scheduledTaskCreatorPolicy
           ? "0428_scheduled_task_creator_policy.sql"
           : sessionAgentAccessScope
@@ -1333,54 +1222,16 @@ describe("release schema contract", () => {
         : {}),
       ...(modelConnectionAccess ? { latestMigration: "0424_model_connection_access.sql" } : {}),
       ...(feedbackSubmissions ? { latestMigration: "0425_feedback_submissions.sql" } : {}),
-      ...(organizationScopedExternalWorkspaces
-        ? { latestMigration: "0432_organization_scoped_external_workspaces.sql" }
+      ...(codexBookkeepingPreservesSessionRecency
+        ? { latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql" }
         : {}),
-      ...(durableConnectAttempts ? { latestMigration: "0433_durable_connect_attempts.sql" } : {}),
-      ...(externalIdentityProvisioning
-        ? { latestMigration: "0434_external_identity_provisioning.sql" }
+      ...(sessionAgentAccessScope
+        ? { latestMigration: "0427_session_agent_access_scope.sql" }
         : {}),
-      ...(externalWorkspaceMemberRemoval
-        ? { latestMigration: "0435_external_workspace_member_removal.sql" }
+      ...(scheduledTaskCreatorPolicy
+        ? { latestMigration: "0428_scheduled_task_creator_policy.sql" }
         : {}),
-      ...(externalIdentityMembershipLifecycle
-        ? { latestMigration: "0436_external_identity_membership_lifecycle.sql" }
-        : {}),
-      ...(externalOwningUserAuthority
-        ? { latestMigration: "0437_external_owning_user_authority.sql" }
-        : {}),
-      ...(hostMcpBindingRegistry ? { latestMigration: "0438_host_mcp_binding_registry.sql" } : {}),
-      ...(hostMcpDelegations ? { latestMigration: "0439_host_mcp_delegations.sql" } : {}),
-      ...(hostMcpTurnAuthorities ? { latestMigration: "0440_host_mcp_turn_authorities.sql" } : {}),
-      ...(hostMcpCausalContinuation
-        ? { latestMigration: "0441_host_mcp_causal_continuation.sql" }
-        : {}),
-      ...(hostMcpTaskAuthorities ? { latestMigration: "0442_host_mcp_task_authorities.sql" } : {}),
-      ...(hostMcpChildAuthority ? { latestMigration: "0443_host_mcp_child_authority.sql" } : {}),
-      ...(externalIdentityLinkLifecycle
-        ? { latestMigration: "0444_external_identity_link_lifecycle.sql" }
-        : {}),
-      ...(externalIdentityLinkWork
-        ? { latestMigration: "0445_external_identity_link_work.sql" }
-        : {}),
-      ...(externalLinkPreviewAndPermissionCeiling
-        ? { latestMigration: "0446_external_link_preview_and_permission_ceiling.sql" }
-        : {}),
-      ...(externalLinkScheduledOrigin
-        ? { latestMigration: "0447_external_link_scheduled_origin.sql" }
-        : {}),
-      ...(hostMcpNativeOwner ? { latestMigration: "0448_host_mcp_native_owner.sql" } : {}),
-      ...(connectOriginAuthority ? { latestMigration: "0449_connect_origin_authority.sql" } : {}),
-      ...(externalLinkInventoryLabels
-        ? { latestMigration: "0450_external_link_inventory_labels.sql" }
-        : {}),
-      ...(socialConnectionVersions
-        ? {
-            latestMigration: canonicalSessionScopeSubject
-              ? "0452_canonical_session_scope_subject.sql"
-              : "0451_social_connection_versions.sql",
-          }
-        : {}),
+      ...(unifiedSkillLifecycle ? { latestMigration: "0433_unified_skill_lifecycle.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
@@ -1441,6 +1292,9 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const unifiedSkillLifecycle = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0433_unified_skill_lifecycle.sql",
+    );
     const scheduledInheritedToolAdmission = completeSourceContract.migrations.some(
       (migration) => migration.path === "0416_scheduled_inherited_tool_admission.sql",
     );
@@ -1476,78 +1330,6 @@ describe("release schema contract", () => {
     );
     const scheduledTaskCreatorPolicy = completeSourceContract.migrations.some(
       (migration) => migration.path === "0428_scheduled_task_creator_policy.sql",
-    );
-    const messageBoundarySessionForks = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0429_message_boundary_session_forks.sql",
-    );
-    const sessionPersonalVariableSetContinuations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0430_session_personal_variable_set_continuations.sql",
-    );
-    const organizationScopedExternalWorkspaces = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0432_organization_scoped_external_workspaces.sql",
-    );
-    const durableConnectAttempts = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0433_durable_connect_attempts.sql",
-    );
-    const externalIdentityProvisioning = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0434_external_identity_provisioning.sql",
-    );
-    const externalWorkspaceMemberRemoval = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0435_external_workspace_member_removal.sql",
-    );
-    const externalIdentityMembershipLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0436_external_identity_membership_lifecycle.sql",
-    );
-    const externalOwningUserAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0437_external_owning_user_authority.sql",
-    );
-    const hostMcpBindingRegistry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0438_host_mcp_binding_registry.sql",
-    );
-    const hostMcpDelegations = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0439_host_mcp_delegations.sql",
-    );
-    const hostMcpTurnAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0440_host_mcp_turn_authorities.sql",
-    );
-    const hostMcpCausalContinuation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0441_host_mcp_causal_continuation.sql",
-    );
-    const hostMcpTaskAuthorities = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0442_host_mcp_task_authorities.sql",
-    );
-    const hostMcpChildAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0443_host_mcp_child_authority.sql",
-    );
-    const externalIdentityLinkLifecycle = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0444_external_identity_link_lifecycle.sql",
-    );
-    const externalIdentityLinkWork = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0445_external_identity_link_work.sql",
-    );
-    const externalLinkPreviewAndPermissionCeiling = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0446_external_link_preview_and_permission_ceiling.sql",
-    );
-    const externalLinkScheduledOrigin = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0447_external_link_scheduled_origin.sql",
-    );
-    const hostMcpNativeOwner = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0448_host_mcp_native_owner.sql",
-    );
-    const connectOriginAuthority = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0449_connect_origin_authority.sql",
-    );
-    const externalLinkInventoryLabels = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0450_external_link_inventory_labels.sql",
-    );
-    const retainedProviderCommands = completeSourceContract.migrations.some(
-      (m) => m.path === "0431_retained_provider_commands.sql",
-    );
-    const canonicalSessionScopeSubject = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0452_canonical_session_scope_subject.sql",
-    );
-    const socialConnectionVersions = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0451_social_connection_versions.sql",
     );
     const personalWorkspaceOrganizationCodexInheritance = completeSourceContract.migrations.some(
       (migration) =>
@@ -1885,33 +1667,14 @@ describe("release schema contract", () => {
       "0419_background_command_launch_authority.sql",
       "0421_recovery_notification_claim_snapshot.sql",
       "0422_personal_workspace_organization_codex_inheritance.sql",
-      "0425_feedback_submissions.sql",
-      "0427_session_agent_access_scope.sql",
-      "0428_scheduled_task_creator_policy.sql",
       "0429_message_boundary_session_forks.sql",
       "0430_session_personal_variable_set_continuations.sql",
       "0431_retained_provider_commands.sql",
-      "0432_organization_scoped_external_workspaces.sql",
-      "0433_durable_connect_attempts.sql",
-      "0434_external_identity_provisioning.sql",
-      "0435_external_workspace_member_removal.sql",
-      "0436_external_identity_membership_lifecycle.sql",
-      "0437_external_owning_user_authority.sql",
-      "0438_host_mcp_binding_registry.sql",
-      "0439_host_mcp_delegations.sql",
-      "0440_host_mcp_turn_authorities.sql",
-      "0441_host_mcp_causal_continuation.sql",
-      "0442_host_mcp_task_authorities.sql",
-      "0443_host_mcp_child_authority.sql",
-      "0444_external_identity_link_lifecycle.sql",
-      "0445_external_identity_link_work.sql",
-      "0446_external_link_preview_and_permission_ceiling.sql",
-      "0447_external_link_scheduled_origin.sql",
-      "0448_host_mcp_native_owner.sql",
-      "0449_connect_origin_authority.sql",
-      "0450_external_link_inventory_labels.sql",
-      "0451_social_connection_versions.sql",
-      "0452_canonical_session_scope_subject.sql",
+      "0433_unified_skill_lifecycle.sql",
+      "0432_xai_disconnect_session_pins.sql",
+      "0434_ordered_model_history.sql",
+      "0436_unobservable_command_idle_drain.sql",
+      "0435_skill_chat_confirmation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2225,138 +1988,33 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0425_feedback_submissions.sql",
       };
-    if (organizationScopedExternalWorkspaces)
+    if (codexBookkeepingPreservesSessionRecency)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0432_organization_scoped_external_workspaces.sql",
+        latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql",
       };
-    if (durableConnectAttempts)
+    if (sessionAgentAccessScope)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0433_durable_connect_attempts.sql",
+        latestMigration: "0427_session_agent_access_scope.sql",
       };
-    if (externalIdentityProvisioning)
+    if (scheduledTaskCreatorPolicy)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0434_external_identity_provisioning.sql",
+        latestMigration: "0428_scheduled_task_creator_policy.sql",
       };
-    if (externalWorkspaceMemberRemoval)
+    if (unifiedSkillLifecycle)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0435_external_workspace_member_removal.sql",
-      };
-    if (externalIdentityMembershipLifecycle)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0436_external_identity_membership_lifecycle.sql",
-      };
-    if (externalOwningUserAuthority)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0437_external_owning_user_authority.sql",
-      };
-    if (hostMcpBindingRegistry)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0438_host_mcp_binding_registry.sql",
-      };
-    if (hostMcpDelegations)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0439_host_mcp_delegations.sql",
-      };
-    if (hostMcpTurnAuthorities)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0440_host_mcp_turn_authorities.sql",
-      };
-    if (hostMcpCausalContinuation)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0441_host_mcp_causal_continuation.sql",
-      };
-    if (hostMcpTaskAuthorities)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0442_host_mcp_task_authorities.sql",
-      };
-    if (hostMcpChildAuthority)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0443_host_mcp_child_authority.sql",
-      };
-    if (externalIdentityLinkLifecycle)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0444_external_identity_link_lifecycle.sql",
-      };
-    if (externalIdentityLinkWork)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0445_external_identity_link_work.sql",
-      };
-    if (externalLinkPreviewAndPermissionCeiling)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0446_external_link_preview_and_permission_ceiling.sql",
-      };
-    if (externalLinkScheduledOrigin)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0447_external_link_scheduled_origin.sql",
-      };
-    if (hostMcpNativeOwner)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0448_host_mcp_native_owner.sql",
-      };
-    if (connectOriginAuthority)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0449_connect_origin_authority.sql",
-      };
-    if (externalLinkInventoryLabels)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0450_external_link_inventory_labels.sql",
-      };
-    if (socialConnectionVersions)
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: canonicalSessionScopeSubject
-          ? "0452_canonical_session_scope_subject.sql"
-          : "0451_social_connection_versions.sql",
+        latestMigration: "0433_unified_skill_lifecycle.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
-        (sessionAgentAccessScope ? 1 : 0) +
+        (unifiedSkillLifecycle ? 1 : 0) +
         (scheduledTaskCreatorPolicy ? 1 : 0) +
-        (messageBoundarySessionForks ? 1 : 0) +
-        (sessionPersonalVariableSetContinuations ? 1 : 0) +
-        (feedbackSubmissions ? 1 : 0) +
         (codexBookkeepingPreservesSessionRecency ? 1 : 0) +
-        (organizationScopedExternalWorkspaces ? 1 : 0) +
-        (durableConnectAttempts ? 1 : 0) +
-        (externalIdentityProvisioning ? 1 : 0) +
-        (externalWorkspaceMemberRemoval ? 1 : 0) +
-        (externalIdentityMembershipLifecycle ? 1 : 0) +
-        (externalOwningUserAuthority ? 1 : 0) +
-        (hostMcpBindingRegistry ? 1 : 0) +
-        (hostMcpDelegations ? 1 : 0) +
-        (hostMcpTurnAuthorities ? 1 : 0) +
-        (hostMcpCausalContinuation ? 1 : 0) +
-        (hostMcpTaskAuthorities ? 1 : 0) +
-        (hostMcpChildAuthority ? 1 : 0) +
-        (externalIdentityLinkLifecycle ? 1 : 0) +
-        (externalIdentityLinkWork ? 1 : 0) +
-        (externalLinkPreviewAndPermissionCeiling ? 1 : 0) +
-        (externalLinkScheduledOrigin ? 1 : 0) +
-        (hostMcpNativeOwner ? 1 : 0) +
-        (connectOriginAuthority ? 1 : 0) +
-        (externalLinkInventoryLabels ? 1 : 0) +
-        (retainedProviderCommands ? 1 : 0) +
-        (canonicalSessionScopeSubject ? 1 : 0) +
-        (socialConnectionVersions ? 1 : 0) +
+        (sessionAgentAccessScope ? 1 : 0) +
+        (feedbackSubmissions ? 1 : 0) +
         (modelConnectionAccess ? 1 : 0) +
         (organizationSupergrokSubscriptions ? 1 : 0) +
         (workspacePauseTimers ? 1 : 0) +
@@ -2439,8 +2097,8 @@ describe("release schema contract", () => {
         (workspaceHtmlSiteSources ? 1 : 0) +
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
-      latestMigration: canonicalSessionScopeSubject
-        ? "0452_canonical_session_scope_subject.sql"
+      latestMigration: unifiedSkillLifecycle
+        ? "0433_unified_skill_lifecycle.sql"
         : scheduledTaskCreatorPolicy
           ? "0428_scheduled_task_creator_policy.sql"
           : sessionAgentAccessScope
@@ -2648,54 +2306,16 @@ describe("release schema contract", () => {
         : {}),
       ...(modelConnectionAccess ? { latestMigration: "0424_model_connection_access.sql" } : {}),
       ...(feedbackSubmissions ? { latestMigration: "0425_feedback_submissions.sql" } : {}),
-      ...(organizationScopedExternalWorkspaces
-        ? { latestMigration: "0432_organization_scoped_external_workspaces.sql" }
+      ...(codexBookkeepingPreservesSessionRecency
+        ? { latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql" }
         : {}),
-      ...(durableConnectAttempts ? { latestMigration: "0433_durable_connect_attempts.sql" } : {}),
-      ...(externalIdentityProvisioning
-        ? { latestMigration: "0434_external_identity_provisioning.sql" }
+      ...(sessionAgentAccessScope
+        ? { latestMigration: "0427_session_agent_access_scope.sql" }
         : {}),
-      ...(externalWorkspaceMemberRemoval
-        ? { latestMigration: "0435_external_workspace_member_removal.sql" }
+      ...(scheduledTaskCreatorPolicy
+        ? { latestMigration: "0428_scheduled_task_creator_policy.sql" }
         : {}),
-      ...(externalIdentityMembershipLifecycle
-        ? { latestMigration: "0436_external_identity_membership_lifecycle.sql" }
-        : {}),
-      ...(externalOwningUserAuthority
-        ? { latestMigration: "0437_external_owning_user_authority.sql" }
-        : {}),
-      ...(hostMcpBindingRegistry ? { latestMigration: "0438_host_mcp_binding_registry.sql" } : {}),
-      ...(hostMcpDelegations ? { latestMigration: "0439_host_mcp_delegations.sql" } : {}),
-      ...(hostMcpTurnAuthorities ? { latestMigration: "0440_host_mcp_turn_authorities.sql" } : {}),
-      ...(hostMcpCausalContinuation
-        ? { latestMigration: "0441_host_mcp_causal_continuation.sql" }
-        : {}),
-      ...(hostMcpTaskAuthorities ? { latestMigration: "0442_host_mcp_task_authorities.sql" } : {}),
-      ...(hostMcpChildAuthority ? { latestMigration: "0443_host_mcp_child_authority.sql" } : {}),
-      ...(externalIdentityLinkLifecycle
-        ? { latestMigration: "0444_external_identity_link_lifecycle.sql" }
-        : {}),
-      ...(externalIdentityLinkWork
-        ? { latestMigration: "0445_external_identity_link_work.sql" }
-        : {}),
-      ...(externalLinkPreviewAndPermissionCeiling
-        ? { latestMigration: "0446_external_link_preview_and_permission_ceiling.sql" }
-        : {}),
-      ...(externalLinkScheduledOrigin
-        ? { latestMigration: "0447_external_link_scheduled_origin.sql" }
-        : {}),
-      ...(hostMcpNativeOwner ? { latestMigration: "0448_host_mcp_native_owner.sql" } : {}),
-      ...(connectOriginAuthority ? { latestMigration: "0449_connect_origin_authority.sql" } : {}),
-      ...(externalLinkInventoryLabels
-        ? { latestMigration: "0450_external_link_inventory_labels.sql" }
-        : {}),
-      ...(socialConnectionVersions
-        ? {
-            latestMigration: canonicalSessionScopeSubject
-              ? "0452_canonical_session_scope_subject.sql"
-              : "0451_social_connection_versions.sql",
-          }
-        : {}),
+      ...(unifiedSkillLifecycle ? { latestMigration: "0433_unified_skill_lifecycle.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
@@ -4818,6 +4438,10 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
     "0429_message_boundary_session_forks.sql",
     "0430_session_personal_variable_set_continuations.sql",
     "0431_retained_provider_commands.sql",
+    "0432_xai_disconnect_session_pins.sql",
+    "0434_ordered_model_history.sql",
+    "0436_unobservable_command_idle_drain.sql",
+    "0435_skill_chat_confirmation.sql",
   ]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;

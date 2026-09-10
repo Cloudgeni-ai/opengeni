@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
+import {
+  Manifest,
+  SandboxWorkspaceReadNotFoundError,
+  type SandboxSessionLike,
+} from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
 import { testSettings } from "@opengeni/testing";
 
 import { buildAgentCapabilities, repositoryWorkspaceSkillPathsOption } from "../src";
@@ -13,6 +18,65 @@ import {
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
+  for (const Missing of [SandboxFilesystemNotFoundError, SandboxWorkspaceReadNotFoundError]) {
+    test(`skips optional roots and SKILL.md with real ${Missing.name}`, async () => {
+      const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+      const listDir = session.listDir!;
+      session.listDir = async (args) => {
+        if (args.path === ".claude/skills") throw new Missing("path missing");
+        return await listDir(args);
+      };
+      session.readFile = async () => {
+        throw new Missing("SKILL.md missing");
+      };
+      await expect(
+        discoverWorkspaceSkills(session, [
+          { path: ".claude/skills", source: "claude" },
+          { path: ".agents/skills", source: "agents" },
+        ]),
+      ).resolves.toEqual([]);
+    });
+  }
+  for (const code of ["rotation_in_progress", "EACCES", "ECONNRESET", "ABORT_ERR"]) {
+    test(`propagates directory ${code} without probing another root`, async () => {
+      const failure = Object.assign(new Error(code), { code });
+      let calls = 0;
+      const session = fakeSession({});
+      session.listDir = async () => {
+        calls++;
+        throw failure;
+      };
+      await expect(
+        discoverWorkspaceSkills(session, [
+          { path: ".agents/skills", source: "agents" },
+          { path: ".claude/skills", source: "claude" },
+        ]),
+      ).rejects.toBe(failure);
+      expect(calls).toBe(1);
+    });
+
+    test(`propagates skill file ${code}`, async () => {
+      const failure = Object.assign(new Error(code), { code });
+      const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
+      session.readFile = async () => {
+        throw failure;
+      };
+      await expect(
+        discoverWorkspaceSkills(session, [{ path: ".agents/skills", source: "agents" }]),
+      ).rejects.toBe(failure);
+    });
+  }
+
+  test("does not confuse a provider not-found with a missing skill path", async () => {
+    const failure = new Error("sandbox not found");
+    const session = fakeSession({});
+    session.listDir = async () => {
+      throw failure;
+    };
+    await expect(
+      discoverWorkspaceSkills(session, [{ path: ".agents/skills", source: "agents" }]),
+    ).rejects.toBe(failure);
+  });
   test("does not add workspace probes when no repository is attached", () => {
     expect(repositoryWorkspaceSkillPathsOption([])).toEqual({});
     expect(
@@ -276,7 +340,12 @@ description: Prepare a safe release.
   test("deduplicates identical inline session skills and rejects conflicts", () => {
     const release = {
       name: "release",
-      files: [{ path: "SKILL.md", content: "# Release\n" }],
+      files: [
+        {
+          path: "SKILL.md",
+          content: "---\nname: release\ndescription: Release instructions\n---\n# Release\n",
+        },
+      ],
     };
     expect(() =>
       buildAgentCapabilities(testSettings(), [
@@ -288,7 +357,16 @@ description: Prepare a safe release.
       buildAgentCapabilities(testSettings(), [
         sessionActivation(release, "one"),
         sessionActivation(
-          { name: "release", files: [{ path: "SKILL.md", content: "# Different\n" }] },
+          {
+            name: "release",
+            files: [
+              {
+                path: "SKILL.md",
+                content:
+                  "---\nname: release\ndescription: Release instructions\n---\n# Different\n",
+              },
+            ],
+          },
           "two",
         ),
       ]),
@@ -323,7 +401,8 @@ function fakeSession(files: Record<string, string>): SandboxSessionLike {
     state: { manifest: new Manifest({ root: "/workspace" }) },
     listDir: async ({ path }) => {
       const directory = normalize(path);
-      if (!directories.has(directory)) throw new Error("not found");
+      if (!directories.has(directory))
+        throw Object.assign(new Error("not found"), { code: "ENOENT" });
       const prefix = directory ? `${directory}/` : "";
       const names = new Map<string, "file" | "dir">();
       for (const candidate of directories) {
@@ -344,7 +423,7 @@ function fakeSession(files: Record<string, string>): SandboxSessionLike {
     },
     readFile: async ({ path }) => {
       const content = normalizedFiles.get(normalize(path));
-      if (content === undefined) throw new Error("not found");
+      if (content === undefined) throw Object.assign(new Error("not found"), { code: "ENOENT" });
       return content;
     },
   };

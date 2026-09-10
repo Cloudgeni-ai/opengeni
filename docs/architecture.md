@@ -6,9 +6,9 @@
 ## Navigation
 
 1. **New here?** Read §2–4; skim §6.
-2. **Changing a subsystem?** Start with §13 and its canonical sources.
-3. **Exact behavior?** Follow source links, not this summary.
-4. **Stale boundary?** Update this map; see §14.
+2. **Subsystem changes:** §13 links canonical sources.
+3. **Exact behavior:** follow source links.
+4. **Stale boundaries:** update per §14.
 
 ---
 
@@ -30,56 +30,39 @@ Workers execute agents in provisioned sandboxes or Connected Machines.
 Postgres owns durable truth; Temporal coordinates work; NATS transports
 reconstructible live updates and Connected Machine traffic.
 
-Separate surfaces:
+Surfaces (canonical sources in §13):
 
-- **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
-  goals, approvals, structured human input, durable semantic titles, and
-  durable history.
-- **Browser voice** supports realtime sessions and editable transcription drafts.
-  Drafts enter session history through Send. Workspace settings select billing
-  provider and fallback; successful or uncertain attempts pin the provider.
-  See [transcription](transcription.md) for recovery rules.
-- **Compute** supports provisioned sandbox providers and user-owned Connected
-  Machines without changing the session model.
-- **Tools and integrations** combine first-party MCP, per-session MCP servers,
-  workspace capabilities, Codemode, connections, and provider-specific
-  adapters under explicit authority.
-- **Knowledge and governance** keep Documents/RAG, Agent Knowledge, typed
-  Memory, preferences, instructions, organization identity, and learning policy
-  as distinct authorities.
-- **Artifacts and interaction** support retained files, generated media,
-  editable documents/spreadsheets/presentations, browser control, managed
-  ComputerSession interaction, terminals, and published outputs.
-- **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
-  stock web console, and advanced in-process host seams.
-  Native and host products share Connect/Sites behavior; hosts own presentation
-  and authoring prompts. External users require explicit live membership;
-  linking never merges identities. Inline credentials remain supported and
-  durable renewal is opt-in. `asUser()` supplies canonical identity, not a second
-  session end-user label. Human private/shared visibility is distinct from optional
-  cross-tree `agentAccess`; user Memory follows the verified active-turn user,
-  while task notes cover temporary tree-local coordination. Site SDK forwarding
-  binds the workspace destination and uses ordinary API authorization, not a
-  fixed page-operation list; tool calls retain version-pinned catalogs.
-  See [embedding authority internals](embedding-authority-internals.md),
-  [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md).
-- **[Feedback](feedback.md)**.
-- **Operations** include usage metering, entitlement admission, billing,
-  deployment contracts, observability, and release evidence.
+- **Sessions:** turn control, queues, goals, approvals, human input, titles, history.
+- **Voice:** realtime sessions and editable drafts; Send persists transcription.
+  Workspace billing/fallback settings govern provider selection; successful or
+  uncertain attempts pin it. See [transcription](transcription.md).
+- **Compute:** provisioned sandboxes and user-owned Connected Machines.
+- **Tools:** MCP, capabilities, Codemode, connections, and authorized adapters.
+- **Knowledge:** Documents/RAG, Agent Knowledge, typed Memory, preferences,
+  instructions, organization identity, and learning policy retain distinct authority.
+- **Artifacts:** files, media, editable documents, browser/ComputerSession control,
+  terminals, and published outputs.
+- **Clients:** SDK, React, web console, in-process embedding.
+- **[Feedback](feedback.md)** and **operations:** metering, entitlements, billing,
+  deployment, observability, release evidence.
 
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
+
+Skills: [`content, authority, and migration`](skills-lifecycle.md).
 
 ---
 
 ## 3. Core invariants
 
-Cross-package invariants; focused docs own details.
+Cross-package invariants; focused docs own complete contracts and edge cases.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
-Postgres commits precede notifications. NATS carries fanout, invalidations,
-request/reply and Connected Machine streams, never durable commit evidence.
+Authoritative state is committed to Postgres before any live notification is
+published. NATS carries session-event fanout, invalidations, request/reply, and
+Connected Machine streams, but it is not the event store and is never evidence
+that a mutation committed.
 
 Session events have a monotonic per-session sequence. The narrow
 `session_event_cursors` row transactionally verifies every append and is the
@@ -101,28 +84,34 @@ The raw isolation route has an operational rollback switch:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
 validation active while restoring wide-session locking and compatibility writes.
 
-Commands acknowledge durable transactions; NATS/Temporal notifications are
-replayable follow-ups, never prerequisites for committed-command success.
+Interactive commands acknowledge their durable transaction. NATS publication
+and immediate Temporal signalling are replayable follow-up work. Never make a
+committed command depend on a successful best-effort fanout.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
-Temporal orchestrates workflows, activities, signals, timers and `continueAsNew`.
-Activities read Postgres obligations; duplicate, delayed, lost or closing-run
-signals never replace that truth. Conversation, goals, queues, tokens, tool
-output and provider transcripts stay outside workflow history. Streams use
-the ordinary event path.
+Temporal owns orchestration: the long-lived session workflow, activity
+dispatch, signals, timers where appropriate, and `continueAsNew`. It does not
+own conversation truth, goals, queue state, token streams, tool output, or
+provider transcripts.
+
+The workflow reads durable obligations through activities. Postgres remains
+authoritative when a signal is duplicated, delayed, lost, or delivered to a
+workflow run that is closing. Token and tool streams travel through the normal
+event path rather than inflating workflow history.
 
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt** is its physical execution. Recovery,
-interruption or capacity waiting may replace an attempt without duplicating
-the turn or completed effects.
+A **turn** is one accepted unit of work. An **attempt** is one physical worker
+execution of that turn. Worker death, recovery, interruption, or capacity
+waiting may create another attempt without creating another logical turn or
+replaying an already-completed side effect.
 
 Internal-update delivery is atomic per batch, not unique per logical turn:
 resumed attempts may append a new batch while retaining earlier receipts.
@@ -212,6 +201,8 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
+[Chat delivery](run-lifecycle.md): lossless content, windowed history.
+
 Workspace Memory stores retrieval context. It is enabled by default: exact
 live agent attempts autonomously save and correct active facts, decisions,
 incidents, fixes, and outcomes independently of Learning mode. A workspace
@@ -234,8 +225,8 @@ rest and exposed only through explicit permissioned operations with
 metadata-only audit.
 
 Generated media and editable artifacts are durable workspace artifacts, not
-conversation blobs. Model-facing history retains compact receipts and resolves
-bytes through the file or artifact authority when needed.
+conversation blobs. Active image history resolves authorized references, including
+compaction input. History preserves JSON key order; JSONB serves queries.
 
 Canonical: [`run-lifecycle.md`](run-lifecycle.md),
 [`hierarchical-memory.md`](hierarchical-memory.md),
@@ -504,9 +495,6 @@ producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
-
-The root client in `packages/sdk/src/embedding-client.ts` adds server-side
-administration; `/browser` and `/artifacts` keep narrower dependency boundaries.
 
 ### 3.11 Work discovery remains advisory and permission-first
 
@@ -870,11 +858,13 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `load_skill`,
+`write_stdin`, `apply_patch`, `view_image`, `load_skill`, `skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
+
+Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no
@@ -1013,7 +1003,6 @@ handlers because its host owns process lifecycle.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `packages/contracts` | `@opengeni/contracts` | Cross-boundary schemas, enums, permissions, events, capability descriptors, and tokens |
-| `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
@@ -1046,7 +1035,6 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/embedded-product` | `@opengeni/example-embedded-product` | Loopback-only Connect/Sites host reference: explicit actor/CSRF adapter, server-selected return URL, shared components and synthetic browser acceptance; production authentication must be supplied by the host |
 | `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
@@ -1118,6 +1106,7 @@ it may not detach a rejecting task or install an `unhandledRejection` handler
 that exits the shared worker. The worker's global rejection listener is a
 last-resort observational boundary, while deliberate restart remains an
 OpenGeni drain-and-checkpoint decision.
+Audited historical recovery preserves generation gaps; see [`run-lifecycle.md`](run-lifecycle.md).
 
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
@@ -1137,7 +1126,7 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects: always-indexed, worker-loaded `opengeni-projects` skill.
+Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
 
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
@@ -1194,7 +1183,7 @@ Multiple SDK clients in the same document retain independent ports; connecting
 one must not cancel another. Workspace SDK requests have no endpoint allowlist:
 the host binds routing; API handlers authorize. Published calls use viewer auth;
 previews retain the Codemode permission ceiling and cancellable streaming.
-Build/edit shortcuts send ordinary user prompts without authority overrides.
+Build/edit shortcuts send user prompts without authority overrides.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
@@ -1305,17 +1294,19 @@ Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased archives at
 `/opt/opengeni/site-packages`; deployed images do not.
 
-Timeline history ownership stays in `packages/react`: `use-session-events.ts`
-fences history navigation by session/client lifetime, independently of SSE
-reconnects. The web route supplies source events alongside projected rows;
-it keys the timeline by session so pagination ownership and reading state cannot
-survive navigation to another session.
-Retained event identity determines window overlap because partial-message row
-IDs can change on prepend. `timeline-anchor.tsx` captures the reading position
-immediately before React mutates the DOM; `message-timeline.tsx` applies only
-the residual correction after browser anchoring. Corrections cannot resume
-tip-follow, and continued upward input permits bounded sequential older-page
-loads even when collapsed content adds no scroll range.
+Timeline history belongs to `packages/react`. `use-session-events.ts` fences
+navigation by session/client lifetime, independently of SSE reconnects. The web
+route supplies source events and keys the timeline by session. Retained event
+identity determines overlap; partial-message row IDs can change on prepend.
+`timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx`
+corrects only residual browser-anchor movement, without resuming tip-follow.
+Continued upward input permits bounded older-page loads despite collapsed rows.
+Automatic underfill preserves the tail and offers explicit earlier navigation
+at the window limit. Underfilled history never auto-pages forward; Jump to latest
+restores the live tail. Provider message identity survives normalization and
+coalescing, joining interleaved chunks without merging distinct messages.
+The database reader batches up to 256 events, preserving the default 1 MiB
+full-payload page budget through metadata planning before payload transfer.
 
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
@@ -1327,12 +1318,23 @@ proxy and optional React surfaces. Advanced in-process embedding may bind host
 identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
-The opt-in `opengeni-product-integration` Pack adds developer guidance, not tools,
-credentials or customer-facing behavior. Its `session_selected` activation
-requires explicit create-time `installedSkillIds`; installation alone never
-injects it into chats. Migration 0394 requires draining old workers that lack
-this filter. A separate implementation workspace is optional. Canonical:
-`packages/core/src/domain/product-integration-pack.ts` and
+The built-in `opengeni-product-integration` Pack is an opt-in implementation
+aid for those standalone integrations. Installing it adds no executable tools,
+credentials, compute, or customer-facing agent behavior. Its Skill teaches an
+implementation agent to derive the workspace isolation unit, UI surface, data
+tool boundary, runtime profile, and delivery workflow from the host product.
+The Skill uses the existing `capability_facets.activation_mode` authority as
+`session_selected`: ordinary workspace Skill resolution excludes it, and an
+explicit create-time `installedSkillIds` selection freezes the verified
+artifact into exactly one session. The web Pack action carries that immutable
+capability ID into the new-session composer; Pack installation alone cannot add
+the guidance to customer-facing chats. The activation value enters storage at
+maintenance migration 0394; old workers must be fully drained because they do
+not filter this mode. A dedicated implementation workspace
+remains an optional additional operational boundary, not a prerequisite for
+this activation guarantee. The Pack lives in
+`packages/core/src/domain/product-integration-pack.ts`, while the exact customer
+integration contract remains
 [`product-integration.md`](product-integration.md).
 
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
@@ -1363,6 +1365,9 @@ can exist before a box does. The lease tracks provider identity, epoch,
 holders, workspace mutation generation, archive/recovery state, and teardown
 authority. The active session pointer selects an effective target without
 rewriting the session's durable home policy.
+
+Repository skill discovery skips definite path misses. Other failures reach
+turn settlement; rotation resumes through the durable lifecycle wake.
 
 Immutable rig setup is single-flight at the lease boundary. The exact lease
 epoch, provider instance, and non-secret setup specification hash own one
@@ -1415,11 +1420,10 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
-After five Modal binding-missing/mismatch probes, quarantine permits a 24-hour
-recheck only. Process/admission/PTY/holder capture blockers remain; quarantine
-never authorizes exit/loss, capture, rotation, termination, or replay.
-
-Modal command retention: `docs/run-lifecycle.md`.
+Idle, unobservable Modal commands use the existing drain after group-wide agent,
+holder, mutation, and idle-grace checks. Records remain until termination;
+unobserved outcomes become lost. Command backoff never suppresses rotation's
+provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
@@ -1464,6 +1468,10 @@ Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
 
 ---
+
+Skill approval atomically settles a verified managed/local human response and
+activates the exact folder under scope/head checks. Agents and delegated
+subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifecycle.md).
 
 ## 10. Security and access model
 
@@ -1562,8 +1570,6 @@ This index intentionally routes at subsystem granularity. Use
 
 ### Contracts, access, and persistence
 
-External actors and Site viewer authority: [embedding authority internals](embedding-authority-internals.md).
-
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Wire type, enum, permission, or event | `packages/contracts/src/` | §3.7 and contract-parity tests |
@@ -1624,31 +1630,10 @@ External actors and Site viewer authority: [embedding authority internals](embed
 
 ## 14. Keeping this current
 
-A stale architecture map is a defect because it sends maintainers to the wrong
-authority. Update this file in the same change when you:
-
-- add, remove, or rename an application, package, example workspace, sandbox
-  backend, or major process;
-- move a responsibility across package or process boundaries;
-- change a cross-cutting invariant in §3;
-- change the control/data-flow shape in §4 or the session/turn/attempt spine in
-  §5; or
-- change the canonical source or topic doc for a row in §13.
-
-Use [`README.md`](README.md) as the complete docs map. Update the focused topic
-doc—not this file—with feature mechanics, migration histories, rollout
-instructions, exact settings, provider-specific behavior, route inventories,
-or schema detail.
-
-Keep additions concise:
-
-1. State the stable architectural rule.
-2. Explain why the boundary exists.
-3. Link to the code and focused document that own exact behavior.
-4. Prefer deletion over retaining a stale enumeration.
-
-This file should remain an orientation document that can be read in one sitting,
-not an append-only ledger of everything the repository has ever learned.
+Update this map in the same change as application, package, example, provider,
+process, ownership, invariant (§3), flow (§4), lifecycle (§5), or canonical-source
+(§13) changes. State invariants, purpose, and ownership here; put mechanics and
+rollout details in focused docs indexed by [`README.md`](README.md).
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
 

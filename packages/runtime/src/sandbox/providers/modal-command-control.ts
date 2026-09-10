@@ -117,14 +117,14 @@ function decodePage(prior: string, input: Uint8Array[], terminal: boolean) {
 export class ModalCommandControl {
   private constructor(
     private readonly client: ControlPlane,
-    private readonly sandboxId: string,
+    private readonly sandboxIdentity: string | (() => string),
     private readonly root: string,
     private readonly environment: Record<string, string> | (() => Record<string, string>) = {},
   ) {}
 
   static forSandbox(
     client: CommandClient,
-    sandboxId: string,
+    sandboxId: string | (() => string),
     root: string,
     environment: Record<string, string> | (() => Record<string, string>) = {},
   ): ModalCommandControl {
@@ -133,16 +133,24 @@ export class ModalCommandControl {
     return new ModalCommandControl(commandControlPlane(client), sandboxId, root, environment);
   }
 
+  private get sandboxId(): string {
+    return typeof this.sandboxIdentity === "function"
+      ? this.sandboxIdentity()
+      : this.sandboxIdentity;
+  }
+
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalProviderCommand> {
     signal?.throwIfAborted();
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
       throw new Error("Command workdir is outside the sandbox workspace");
-    const task = await this.client.sandboxGetTaskId(
-      { sandboxId: this.sandboxId },
-      signal ? { signal } : undefined,
-    );
+    // Hydration replaces the SDK sandbox. Freeze its current identity for this
+    // start so an asynchronous replacement cannot relabel the returned locator.
+    const sandboxId = this.sandboxId;
+    const task = await this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined);
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+    if (sandboxId !== this.sandboxId)
+      throw new Error("Modal sandbox changed during command preparation");
     const login = args.shell ? (args.login ?? true) : false;
     let command = [args.shell ?? "/bin/sh", login ? "-lc" : "-c", args.cmd];
     if (args.runAs) {
@@ -194,7 +202,7 @@ export class ModalCommandControl {
     if (!result.execId) throw new Error("Modal command start returned no execution identity");
     return {
       kind: "modal-control-v1",
-      sandboxId: this.sandboxId,
+      sandboxId,
       taskId: task.taskId,
       execId: result.execId,
       ...(args.tty ? { pty: true } : {}),

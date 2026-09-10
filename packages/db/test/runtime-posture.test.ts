@@ -242,9 +242,6 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_membership_lifecycle_events",
     "organization_membership_operation_receipts",
     "organization_memberships",
-    "external_identities",
-    "external_identity_links",
-    "workspace_inference_controls",
     "organization_profile_events",
     "organization_shared_workspace_administration_capabilities",
     "organization_user_setup_deliveries",
@@ -561,15 +558,15 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 319],
+            [FORCE_RLS_TABLES, 322],
             [NON_RLS_RUNTIME_TABLES, 19],
             [RUNTIME_FULL_DML_TABLES, 164],
-            [RUNTIME_READ_ONLY_TABLES, 22],
+            [RUNTIME_READ_ONLY_TABLES, 24],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 71],
-            [RUNTIME_DML_TABLES, 267],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 72],
+            [RUNTIME_DML_TABLES, 269],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 206],
@@ -583,43 +580,20 @@ describe("runtime database posture evaluator", () => {
             [RUNTIME_DML_TABLES, 188],
           ] as const);
       for (const [tables, length] of contracts) {
-        // Nine additive embedding tables: three full-DML, four append-only,
-        // one link lifecycle journal and one protected identity table.
-        const embeddingTableCount =
-          tables === FORCE_RLS_TABLES
-            ? 9
-            : tables === RUNTIME_FULL_DML_TABLES
-              ? 3
-              : tables === RUNTIME_READ_INSERT_TABLES
-                ? 4
-                : tables === RUNTIME_READ_INSERT_UPDATE_TABLES
-                  ? 1
-                  : tables === PROTECTED_NO_DIRECT_DML_TABLES
-                    ? 1
-                    : tables === RUNTIME_DML_TABLES
-                      ? 8
-                      : 0;
         const expectedLength =
-          embeddingTableCount +
-          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
+          tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount
-            : length);
+            : length;
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
         expect([...tables].sort()).toEqual([...tables]);
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 338 : 218) + 9;
-      expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
-      expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
-      for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
-        expect(FORCE_RLS_TABLES).toContain(table);
-        expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT", "UPDATE", "DELETE"]);
-      }
+      const tableCount = hasCurrentMainActivityLedger ? 341 : 218;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -735,26 +709,6 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
-  });
-
-  test("external provisioner requires all authority tables owned by its definer", () => {
-    const missing = safePosture();
-    missing.tables = missing.tables.filter((table) => table.name !== "external_identities");
-    expect(
-      evaluateRuntimeDatabasePosture(missing, options).some(
-        (message) => message.includes("ensure_external_identity") && message.includes("missing"),
-      ),
-    ).toBe(true);
-    const split = safePosture();
-    split.tables = split.tables.map((table) =>
-      table.name === "external_identities" ? { ...table, owner: "unrelated_owner" } : table,
-    );
-    expect(
-      evaluateRuntimeDatabasePosture(split, options).some(
-        (message) =>
-          message.includes("ensure_external_identity") && message.includes("owners do not match"),
-      ),
-    ).toBe(true);
   });
 
   test("enforces the automatic session title fanout capability boundary", () => {

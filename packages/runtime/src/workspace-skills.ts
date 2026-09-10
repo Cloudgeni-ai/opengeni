@@ -1,13 +1,27 @@
 import { createHash } from "node:crypto";
 
-import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
+import {
+  Capability,
+  SandboxWorkspaceReadNotFoundError,
+  type SandboxSessionLike,
+} from "@openai/agents/sandbox";
+import { SandboxFilesystemNotFoundError } from "modal";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import { isDefinitePathNotFoundError } from "./sandbox/channel-a";
 
 const SKILL_FILE = "SKILL.md";
 const MAX_DISCOVERED_SKILLS = 256;
 const MAX_SKILL_ENTRIES = 1_024;
 const MAX_SKILL_BYTES = 32 * 1024 * 1024;
 const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function isMissingSkillPath(error: unknown): boolean {
+  return (
+    isDefinitePathNotFoundError(error) ||
+    error instanceof SandboxWorkspaceReadNotFoundError ||
+    error instanceof SandboxFilesystemNotFoundError
+  );
+}
 
 export type WorkspaceSkillSearchPath = Readonly<{
   path: string;
@@ -138,7 +152,8 @@ async function discoverWorkspaceSkillsUnmeasured(
     let entries;
     try {
       entries = await session.listDir({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
-    } catch {
+    } catch (error) {
+      if (!isMissingSkillPath(error)) throw error;
       continue;
     }
     for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
@@ -155,7 +170,8 @@ async function discoverWorkspaceSkillsUnmeasured(
           ...(runAs ? { runAs } : {}),
         });
         markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
-      } catch {
+      } catch (error) {
+        if (!isMissingSkillPath(error)) throw error;
         continue;
       }
       const frontmatter = parseSkillFrontmatter(markdown);

@@ -19,6 +19,17 @@ function session(
 }
 
 describe("session background command rail status", () => {
+  test("unavailable observations never claim those commands are running", () => {
+    expect(
+      sessionStateLabel(session("unknown", { state: "running", count: 1, unavailableCount: 1 })),
+    ).toBe("Command status unavailable");
+    expect(
+      sessionStateLabel(session("mixed", { state: "running", count: 3, unavailableCount: 2 })),
+    ).toBe("1 other active background command · 2 command statuses unavailable");
+    expect(
+      sessionStateLabel(session("stopping", { state: "stopping", count: 1, unavailableCount: 1 })),
+    ).toBe("Stop requested · Command status unavailable");
+  });
   test("an idle session with a running command is grouped as active", () => {
     const active = session("active", { state: "running", count: 1 });
     const idle = session("idle");

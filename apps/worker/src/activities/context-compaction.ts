@@ -362,7 +362,12 @@ async function compactContextRemoteV2(
     rewrittenToolOutputs = retry.rewrittenToolOutputs;
     compactionItem = await options.requestRemoteCompactionV2(settings, retry.input);
   }
-  const replacementHistory = buildRemoteV2ReplacementHistory(canonicalItems, compactionItem);
+  const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const replacementHistory = buildRemoteV2ReplacementHistory(
+    canonicalItems,
+    compactionItem,
+    (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+  );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const tailItem = replacementHistory.at(-1);
@@ -433,7 +438,12 @@ async function compactContextPortable(
   const estimatedTokensBefore = estimateTokens(items);
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
   const summaryBody = summarized.summaryBody;
-  const replacementHistory = buildCompactionReplacementHistory(canonicalItems, summaryBody);
+  const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const replacementHistory = buildCompactionReplacementHistory(
+    canonicalItems,
+    summaryBody,
+    (item) => retainedTokens.get(item) ?? estimateTokens([item]),
+  );
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
   const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
@@ -578,4 +588,18 @@ export function isExactContextLengthExceeded(
     isExactContextLengthExceeded(record.error, seen) ||
     isExactContextLengthExceeded(record.diagnostics, seen)
   );
+}
+
+/** Charge retained uploads by their projected image context, not reference text. */
+async function retentionTokenCounts(
+  items: CompactionItem[],
+  project: (items: CompactionItem[]) => Promise<CompactionItem[]>,
+): Promise<Map<CompactionItem, number>> {
+  const counts = new Map<CompactionItem, number>();
+  for (const item of items) {
+    if (item.role === "user" || item.role === "developer") {
+      counts.set(item, estimateTokens(await project([item])));
+    }
+  }
+  return counts;
 }

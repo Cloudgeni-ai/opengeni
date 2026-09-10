@@ -694,7 +694,12 @@ Temporal retry. When an OpenAI/Azure context overflow is classified,
 Codex-local plaintext for non-Codex and portable-locked Codex sessions, or
 Codex remote compaction v2 for `remote_v2` Codex sessions. On the portable path the summarizer
 receives a bounded, protocol-valid temporary copy of structured active history
-plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
+plus the checkpoint prompt. Portable Responses also detach optional stored item
+ids from that copy while preserving required hosted/approval/program identities
+and tool correlation. Only the Azure wire profile forces `tool_choice: "none"`;
+other transports retain their existing behavior, including rejection of tool-only
+summaries. See [context compaction](context-compaction.md#portable-responses-identity-regression).
+Aggregate tool outputs are replaced oldest-first in
 that copy; whole oldest user-delimited units are removed only if necessary. A
 provider overflow gets one smaller refit, so the path performs at most two
 provider calls rather than one failing request per history item. Other failures
@@ -852,8 +857,8 @@ operation enters the existing single-flight provisioner, writes that exact
 resolved material to the lease before the waiting operation, and starts renewal.
 A model-only turn therefore owns no credential write, renewal, lease, box, or
 exact-generation cleanup work. Signed file resources are eager only on the exact
-turn that attached them; historical attachment ids do not cause sandbox or
-object-storage work. This-turn generated-video files may still copy onto the
+turn that attached them; historical attachment ids do not cause sandbox work.
+Active model-history images are independently read from object storage. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
 Source-bearing `generate_video` calls join that same single-flight provisioner
@@ -1325,6 +1330,24 @@ replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
 
+An operator may explicitly authorize recovery from an older, verified checkpoint
+after the provider is gone. `scripts/operator/historical-checkpoint-recovery.ts`
+accepts `preview` or `authorize` and a private JSON input file. Preview needs
+account/workspace/group IDs. Authorization additionally requires the exact lease
+epoch, workspace and archive generations, selected revision, operation UUID,
+operator subject, reason, and `acceptHistoricalCheckpoint: true`. Authorization
+uses operator-controlled database access; the subject is audit attribution.
+Activity checks reuse session control's pending-quiescence predicate: a historical
+closed attempt without a quiescence timestamp is not itself an active writer.
+Claimed/running attempts and actual pending interruption receipts remain blockers.
+Every attempt in the group must be quiescent and the cold lease must have no holders or
+unsettled mutations. The existing audit store retains that decision and its
+generation gap. Neither generation nor checkpoint artifact provenance is
+rewritten. Existing election, restore verification, and warm publication consume
+the exact receipt; unrelated revisions or newer writes invalidate it. Only a
+subsequent fresh checkpoint makes the archive current. This operation does not
+resume a turn, modify session history, or claim recovery of unavailable writes.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected rig/pack/base
 image instead of replacing the whole machine. Existing serialized sessions keep
@@ -1456,6 +1479,12 @@ lookup and ordinary reconciliation.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
+Command reads expose `observationStatus: unavailable` when the exact retained
+process cannot be observed; session aggregates expose `unavailableCount`.
+The panel and sidebar distinguish that uncertainty from running or a requested
+stop. Observation failure never invents terminal state, and definitive settlement
+clears the unavailable projection.
+
 Connected Machine background commands use the same proof-before-settlement
 discipline without borrowing managed lease identity. The global maintenance pass
 claims oldest-due rows with `SKIP LOCKED`, sends `OpQuery` for `running` or
@@ -1514,6 +1543,14 @@ non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
 and retry-disabled calls. Cancelling observation is not process-exit proof;
 the existing token/PGID cleanup fence still owns physical cancellation.
 
+SDK-internal setup/readiness commands still use their original live SDK observer
+and may yield. Their adapter-local aliases are above the admitted command range
+(1–2147483647), so a setup process cannot collide with a retained command. Only
+the same adapter can read those aliases; they cannot be bound as durable commands
+or adopted by another reader. A missing retained alias never falls back to an
+SDK process with a coincident numeric ID. Observation failure remains an error,
+not command replay or exit proof.
+
 For historical commands without that locator, the reaper reports
 `process_observation_unavailable`, retaining the exact process/admission/holder.
 After five probes it records `quarantined_process_observation_unavailable` and
@@ -1522,6 +1559,18 @@ A current owner's exact exit proof still settles immediately; independently
 verified loss of the bound provider instance remains authoritative. Neither a
 missing SDK map entry nor failure to recover terminal output proves command loss,
 including when a completed entry aged out in its original adapter.
+
+Observation backoff does not suppress provider-lifecycle checks during rotation.
+An idle Modal lease held only by unobservable commands can enroll their exact
+identities into the existing drain. Enrollment requires every attempt in the
+sandbox group to be quiescent beyond idle grace, no other holders, and no child
+mutation admissions. It fences new admission while preserving command records
+and holders until provider termination. Capture excludes only enrolled parent
+admissions and holders; checkpoint publication, termination, cold commit, and
+durable wake remain owned by the existing lifecycle. Unknown commands settle
+lost, never successful; a real exit arriving during drain retains its exit code.
+Failed checkpoints retain the provider and command holders for retry. Filesystem
+snapshots preserve neither running processes nor application transaction state.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
@@ -1838,7 +1887,11 @@ audit reads may return it, so it is never a secret boundary.
    content and RLS-scoped. Token-shaped strings, headers, assignments, URLs,
    PEM-looking text, and configured-secret-shaped strings are never classified
    or rewritten. A new turn's
-   input is built from this store. It is dual-written as the agent streams
+   input is built from this store. Ordered PostgreSQL `json` columns preserve
+   object-key order, with trigger-synchronized `jsonb` projections for existing
+   SQL queries. The pending-call ledger uses the same representation. Reads use
+   normal JSON decoding without sorting or another database round trip. Legacy
+   rows retain their already-normalized order. It is dual-written as the agent streams
    (reconciled after every model response and at every turn-end path) so a crash
    loses at most the single in-flight model call. Ordinary inference has no
    second conversation-memory read path. At this persistence boundary only,
@@ -1878,15 +1931,21 @@ audit reads may return it, so it is never a secret boundary.
    `session_attempt_codemode_calls` is unchanged. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
-   User attachments use a separate one-turn delivery rule. The accepted user
-   row stores private stable file references beside the message. Only that
-   triggering turn resolves metadata, optionally inlines supported bytes, and
-   materializes the files into active compute. Later model requests project the
-   references as compact `fileId` receipts without file metadata reads,
-   object-storage reads, filesystem checks, remounts, or downloads. Compaction
-   preserves omitted references in one compact catalog. When old bytes are
-   actually needed, the model uses the existing dedicated Files MCP download
-   URL plus shell instead of startup rematerialization.
+   User attachment rows store stable file references, not inline bytes. Active
+   messages reconstruct the same authorized receipt and supported image content
+   across turns and before compaction. File metadata is batch-authorized once
+   per turn and bytes are memoized; object reads have bounded concurrency.
+   Historical images do not cause sandbox remounts. Each image retains the
+   existing inline admission limit; adding an image does not evict older images.
+   Before blob reads, a 64 MiB raw-image transport limit bounds both accumulated
+   per-turn bytes and repeated images in each request. Exceeding it fails the
+   turn explicitly without altering history; compaction cannot bypass it.
+   Such histories require a smaller conversation or a fork before the heavy
+   messages until a streaming image transport exists.
+   Missing/corrupt eligible bytes fail preparation rather than silently changing
+   context. Compaction preserves images in retained messages and charges their
+   projected token cost. Its omitted-file catalog is reference-only, so it does
+   not rehydrate images from messages deliberately replaced by compaction.
 2. **`agent_run_states` — requires-action sentinel plus control snapshots.**
    Pauses flush completed-pair history, then persist the bounded open suffix
    on `session_pending_tool_calls` (the pending call item, tied reasoning the
@@ -1910,11 +1969,11 @@ audit reads may return it, so it is never a secret boundary.
    Do not use it as conversation memory.
 3. **`session_events` — the exact human/audit timeline for accepted payloads.**
    Append-only, per-session sequence numbers, drives replay/SSE/UI. Event content
-   is never secret-scanned or rewritten. The event, SSE, monitoring, and browser
-   contracts still apply deterministic count/byte/media bounds; those bounds are
-   content-agnostic protocol limits with explicit omission metadata, not secret
-   classification. Inline media is represented by a compact `media_preview`; its
-   bytes are not retained by that generic bounded path.
+   is never secret-scanned or rewritten. Full REST reads, compact text-delta
+   batches, SSE, and browser chat preserve that content, including long messages
+   and tool outputs. Pagination and loaded-history windows select whole events;
+   they never replace content with omission markers. Explicit monitoring
+   previews remain separately bounded and must not be reused as full messages.
    A newly retained `computer_screenshot` event instead carries only its closed
    session artifact receipt after settlement succeeds, or a typed unavailable
    reason if validation, quota, or storage could not establish that receipt.
@@ -2047,22 +2106,24 @@ fixed safe message plus structured diagnostics while retaining the exact driver
 failure only as the internal cause.
 
 Those durable stores are still not the realtime or browser representation.
-NATS chunks bounded encoded messages; each session/workspace-control SSE body
-queues at most one complete frame of at most 96 KiB, retains one latest-wins
+NATS chunks bounded notifications; session SSE always re-reads canonical events
+from Postgres rather than rendering those notification previews. Each SSE body
+queues at most one complete frame, retains one latest-wins
 live notification, and uses bounded-page Postgres replay/gap fill. If a second
 write sees non-positive `desiredSize` for 30 seconds, the API errors only that
 connection, releases its upstream subscription, and records a fixed-label bound
 metric; reconnect resumes from the client's last observed durable sequence.
-REST uses byte-bounded forward prefixes/backward suffixes; and
+REST uses byte-targeted forward prefixes/backward suffixes; an oversized event
+travels intact and alone in a page or frame, so it cannot strand its cursor. And
 React retains one direction-aware count+byte window. Live/default accumulation
 keeps the newest suffix. If backward paging retains an older prefix and evicts
 the live tail, the hook aborts that iterator and reconnects from the retained
 high-water mark, replaying the evicted tail before appending newer live rows.
 Its highest-ever-observed sequence and latest status are stored separately from
-that rewindable resume cursor. Historical oversized event rows remain readable
-during the rolling migration and are defensively normalized at each outbound
-boundary. Generic omitted output is unavailable unless a separate
-access-controlled artifact/file receipt explicitly retained it.
+that rewindable resume cursor. A single event exceeding the browser byte target
+is retained alone rather than shortened or dropped. Model tool-output budgets
+and explicit diagnostic summaries are independent of this full-content contract.
+Previously lost source bytes cannot be reconstructed from omission markers.
 
 Workspace-control events follow a smaller independent contract because they are
 cursor invalidations, not evidence or conversation history. Human reason input
@@ -2070,7 +2131,7 @@ is limited to 8 KiB UTF-8 (and cannot contain NUL), authenticated actor ids are
 limited to 1 KiB, and the durable event is at most 16 KiB with explicit original /
 delivered / omitted byte facts for guarded historical or direct-writer values.
 The generic full value was not retained. NATS asserts a 32-KiB message, SSE uses
-the same one-frame 96-KiB connection queue, and REST pages use a separate 1-MiB
+the same one-frame connection queue, and REST pages use a separate 1-MiB
 byte envelope plus the last delivered sequence as the resume cursor. Replaying
 one guarded poison row must still advance to every later durable revision.
 

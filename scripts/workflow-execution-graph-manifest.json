@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8c565573aa4ad3688853993793a035192d98c9b1f79df77cd9652560f3fa5f3f"
+      "sha256": "5fe6200d11f849a8234ecf8859237d0075b359a1e09f4d7b343f30ecd0f5076e"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -92,7 +92,7 @@
   "actions": [
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "1d1865cf748e6cfa686eb69216057d6aa02037549f4728ae05a63828397942c7"
+      "sha256": "546880d5a15d618687b04dbd34c2ce8e4fee1c3af4b332296507502f823404eb"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -618,12 +618,6 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
-      "step": "Built embedding package exports",
-      "sha256": "e9fd69268d8d35f117eaf01cd4e99ab65e3d471dd58885c69b56f101760f246c"
-    },
-    {
-      "workflow": ".github/workflows/ci.yml",
-      "job": "package-contracts",
       "step": "Clean published consumer",
       "sha256": "d326dc84fc2a13a7f0c9d41e79fbc52abc77750b39811c0e882acfe42a99810c"
     },
@@ -721,7 +715,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "20a914e98aea4f6c8ff25ad17e14a0a5523db1faeeafcb8cf14aa8dc63ca10a8"
+      "sha256": "e4f7ba2c4878e2b12091455a670eebd39d611ba882da6f7f3adf85b19a51d46f"
     },
     {
       "workflow": ".github/workflows/ci.yml",

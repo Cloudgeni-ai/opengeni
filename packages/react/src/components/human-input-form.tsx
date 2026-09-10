@@ -1,6 +1,7 @@
 import type {
   HumanInputAnswer,
   HumanInputQuestion,
+  SkillRecord,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
@@ -64,6 +65,10 @@ export const defaultHumanInputFormMessages: HumanInputFormMessages = {
 };
 
 export type HumanInputFormProps = {
+  /** Scoped immutable revision reader. Saving a Skill fails closed without its full preview. */
+  loadSkillReview?:
+    | ((reference: NonNullable<HumanInputQuestion["skillReview"]>) => Promise<SkillRecord>)
+    | undefined;
   request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt">;
   onSubmit: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
   submitting?: boolean | undefined;
@@ -98,6 +103,7 @@ export function HumanInputForm(props: HumanInputFormProps) {
 function HumanInputRequestForm({
   request,
   onSubmit,
+  loadSkillReview,
   submitting = false,
   error,
   title,
@@ -142,6 +148,116 @@ function HumanInputRequestForm({
   const submissionInFlight = useRef(false);
   const submissionGeneration = useRef(0);
   const busy = submitting || submittingInternally;
+  const reviewIdentity = JSON.stringify(
+    request.questions
+      .filter((question) => question.skillReview)
+      .map((question) => ({
+        id: question.id,
+        reference: {
+          sourceOperationId: question.skillReview!.sourceOperationId,
+          skillId: question.skillReview!.skillId,
+          revisionId: question.skillReview!.revisionId,
+          expectedRevisionId: question.skillReview!.expectedRevisionId,
+          expectedScopeVersion: question.skillReview!.expectedScopeVersion,
+        },
+      })),
+  );
+  const [reviewReload, setReviewReload] = useState(0);
+  const [reviews, setReviews] = useState<{
+    loader: typeof loadSkillReview;
+    identity: string;
+    records: Record<string, SkillRecord>;
+    error: string | null;
+  } | null>(null);
+  useEffect(() => {
+    let current = true;
+    const questions = JSON.parse(reviewIdentity) as Array<{
+      id: string;
+      reference: NonNullable<HumanInputQuestion["skillReview"]>;
+    }>;
+    if (!questions.length) return;
+    setReviews(null);
+    void Promise.all(
+      questions.map(async (question) => {
+        if (!loadSkillReview)
+          throw new Error(
+            "This client cannot preview Skill files. Open this request in OpenGeni to review it.",
+          );
+        const reference = question.reference;
+        const record = await loadSkillReview(reference);
+        if (
+          record.id !== reference.skillId ||
+          record.revisionId !== reference.revisionId ||
+          !record.files.some((file) => file.path === "SKILL.md")
+        ) {
+          throw new Error("The requested Skill revision could not be verified.");
+        }
+        return [question.id, record] as const;
+      }),
+    )
+      .then((records) => {
+        if (current)
+          setReviews({
+            loader: loadSkillReview,
+            identity: reviewIdentity,
+            records: Object.fromEntries(records),
+            error: null,
+          });
+      })
+      .catch((cause) => {
+        if (current)
+          setReviews({
+            loader: loadSkillReview,
+            identity: reviewIdentity,
+            records: {},
+            error: cause instanceof Error ? cause.message : "Could not load the Skill files.",
+          });
+      });
+    return () => {
+      current = false;
+    };
+  }, [loadSkillReview, reviewIdentity, reviewReload]);
+  const visibleReviews =
+    reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
+  const preview = (question: HumanInputQuestion) => {
+    if (!question.skillReview) return null;
+    const record = visibleReviews?.records[question.id];
+    return (
+      <div className="mb-3 min-w-0 space-y-2" data-skill-review="">
+        {record ? (
+          <>
+            <p className="text-og-sm">
+              {record.title ?? "Skill"} · {record.scope} · {record.files.length} files
+            </p>
+            <p className="text-og-xs text-og-fg-muted">
+              Saving activates these exact files. No additional review is required.
+            </p>
+            {record.files.map((file) => (
+              <details key={file.path} open={file.path === "SKILL.md"}>
+                <summary className="cursor-pointer break-all text-og-sm">{file.path}</summary>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-og-md bg-og-surface-1 p-2 text-og-xs">
+                  {file.content}
+                </pre>
+              </details>
+            ))}
+          </>
+        ) : visibleReviews?.error ? (
+          <>
+            <p role="alert" className="text-og-sm">
+              {visibleReviews.error}
+            </p>
+            <button type="button" onClick={() => setReviewReload((value) => value + 1)}>
+              Retry preview
+            </button>
+          </>
+        ) : (
+          <p role="status" className="text-og-sm">
+            Loading the exact Skill files…
+          </p>
+        )}
+      </div>
+    );
+  };
 
   useEffect(() => {
     if (collapsed) {
@@ -230,6 +346,18 @@ function HumanInputRequestForm({
         // After paint so aria-invalid / error text exist under the question.
         requestAnimationFrame(() => focusQuestion(firstInvalid.id));
       }
+      return;
+    }
+    const unreviewedSave = request.questions.find(
+      (question) =>
+        question.skillReview &&
+        !visibleReviews?.records[question.id] &&
+        result.answers.some(
+          (answer) => answer.questionId === question.id && answer.values.includes("save"),
+        ),
+    );
+    if (unreviewedSave) {
+      setValidationErrors({ [unreviewedSave.id]: "Load the exact Skill files before saving." });
       return;
     }
     await submitResponse({ outcome: "answered", answers: result.answers });
@@ -365,6 +493,7 @@ function HumanInputRequestForm({
                 // Title already carries the question; only render the control + help extras.
                 return (
                   <div key={question.id} data-human-input-question={question.id}>
+                    {preview(question)}
                     <QuestionControls
                       question={question}
                       questionNumber={null}
@@ -389,6 +518,7 @@ function HumanInputRequestForm({
                   data-human-input-question={question.id}
                   className="flex flex-col gap-1.5"
                 >
+                  {preview(question)}
                   <QuestionControls
                     question={question}
                     questionNumber={index + 1}
@@ -643,62 +773,64 @@ function QuestionControls({
               </label>
             );
           })}
-          <div
-            className={cn(
-              "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
-              draft.otherSelected
-                ? "bg-og-status-waiting/12 text-og-fg"
-                : "text-og-fg hover:bg-og-surface-1/80",
-            )}
-          >
-            <input
-              id={otherChoiceId}
-              type={question.kind === "single_select" ? "radio" : "checkbox"}
-              name={question.kind === "single_select" ? fieldId : undefined}
-              aria-labelledby={otherLabelId}
-              checked={draft.otherSelected}
-              autoFocus={autoFocus && firstOption && question.options.length === 0}
-              onChange={(event) =>
-                onUpdate((current) => ({
-                  ...current,
-                  otherSelected: event.target.checked,
-                  ...(question.kind === "single_select" && event.target.checked
-                    ? { values: [] }
-                    : {}),
-                }))
-              }
-              className="mt-2 accent-og-accent"
-            />
-            <span className="min-w-0 flex-1">
-              <label
-                id={otherLabelId}
-                htmlFor={otherChoiceId}
-                className="block text-og-sm font-medium"
-              >
-                {messages.other}
-              </label>
-              <label htmlFor={otherTextId} className="sr-only">
-                {messages.other} answer for {visibleLabel}
-              </label>
+          {!question.skillReview ? (
+            <div
+              className={cn(
+                "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
+                draft.otherSelected
+                  ? "bg-og-status-waiting/12 text-og-fg"
+                  : "text-og-fg hover:bg-og-surface-1/80",
+              )}
+            >
               <input
-                id={otherTextId}
-                type="text"
-                value={draft.other}
-                disabled={busy}
-                placeholder="Type a value…"
-                onClick={() => onUpdate(selectOtherDraft)}
-                onFocus={() => onUpdate(selectOtherDraft)}
-                onChange={(event) => {
-                  const other = event.target.value;
+                id={otherChoiceId}
+                type={question.kind === "single_select" ? "radio" : "checkbox"}
+                name={question.kind === "single_select" ? fieldId : undefined}
+                aria-labelledby={otherLabelId}
+                checked={draft.otherSelected}
+                autoFocus={autoFocus && firstOption && question.options.length === 0}
+                onChange={(event) =>
                   onUpdate((current) => ({
-                    ...selectOtherDraft(current),
-                    other,
-                  }));
-                }}
-                className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
+                    ...current,
+                    otherSelected: event.target.checked,
+                    ...(question.kind === "single_select" && event.target.checked
+                      ? { values: [] }
+                      : {}),
+                  }))
+                }
+                className="mt-2 accent-og-accent"
               />
-            </span>
-          </div>
+              <span className="min-w-0 flex-1">
+                <label
+                  id={otherLabelId}
+                  htmlFor={otherChoiceId}
+                  className="block text-og-sm font-medium"
+                >
+                  {messages.other}
+                </label>
+                <label htmlFor={otherTextId} className="sr-only">
+                  {messages.other} answer for {visibleLabel}
+                </label>
+                <input
+                  id={otherTextId}
+                  type="text"
+                  value={draft.other}
+                  disabled={busy}
+                  placeholder="Type a value…"
+                  onClick={() => onUpdate(selectOtherDraft)}
+                  onFocus={() => onUpdate(selectOtherDraft)}
+                  onChange={(event) => {
+                    const other = event.target.value;
+                    onUpdate((current) => ({
+                      ...selectOtherDraft(current),
+                      other,
+                    }));
+                  }}
+                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
+                />
+              </span>
+            </div>
+          ) : null}
         </div>
       )}
       {error ? (

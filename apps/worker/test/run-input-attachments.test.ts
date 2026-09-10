@@ -4,8 +4,10 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
+import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import {
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+  RetainedAttachmentTransportLimitError,
   createModelHistoryAttachmentProjector,
   modelAttachmentContentForFiles,
   turnInput,
@@ -222,7 +224,7 @@ describe("modelAttachmentContentForFiles", () => {
 });
 
 describe("durable attachment history projection", () => {
-  test("keeps historical refs as receipts and inlines only explicitly current files", async () => {
+  test("keeps the same attachment representation through same-turn reprojection", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const pdfBytes = new TextEncoder().encode("pdf");
     const textBytes = new TextEncoder().encode("notes");
@@ -275,12 +277,12 @@ describe("durable attachment history projection", () => {
     expect(json).toContain(`fileId=${notes.id}`);
     expect(json).not.toContain(MODEL_ATTACHMENT_REFS_FIELD);
     expect(second).toEqual(first);
-    expect(JSON.stringify(historicalAgain)).not.toContain(";base64,");
+    expect(historicalAgain).toEqual(first);
     expect(reads).toEqual([image.id]);
     expect(history[0]?.[MODEL_ATTACHMENT_REFS_FIELD]).toHaveLength(3);
   });
 
-  test("historical projection reads neither metadata nor object bytes", async () => {
+  test("legacy callers without a file resolver keep reference-only history", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const image = {
       ...file("00000000-0000-4000-8000-000000000064", "image/png", imageBytes.length, "a.png"),
@@ -681,4 +683,192 @@ describe("turnInput attachment projection", () => {
       getEnvelope.mockRestore();
     }
   });
+});
+
+describe("retained upload replay", () => {
+  test("new turn and compaction reconstruct the original image without modifying canonical history", async () => {
+    const bytes = new TextEncoder().encode("image");
+    const asset = {
+      ...file("00000000-0000-4000-8000-000000000081", "image/png", bytes.length, "a.png"),
+      sha256: sha256(bytes),
+    };
+    const history = [
+      { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+    ];
+    const original = JSON.stringify(history);
+    const first = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+    )(history, { inlineFiles: [asset] });
+    let lookups = 0,
+      reads = 0;
+    const replay = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => {
+        reads++;
+        return bytes;
+      },
+      async (ids) => {
+        lookups++;
+        expect(ids).toEqual([asset.id]);
+        return [asset];
+      },
+    );
+    expect(await replay(history)).toEqual(first);
+    expect(await replay(history)).toEqual(first);
+    expect(lookups).toBe(1);
+    expect(reads).toBe(1);
+    expect(JSON.stringify(history)).toBe(original);
+  });
+  test("compacted archive references do not reload discarded image context", async () => {
+    let reads = 0;
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => {
+        reads++;
+        return new Uint8Array();
+      },
+      async () => {
+        reads++;
+        return [];
+      },
+    );
+    const history = [
+      {
+        ...user("retained attachment references"),
+        opengeni_attachment_catalog: true,
+        [MODEL_ATTACHMENT_REFS_FIELD]: [
+          { kind: "file", fileId: "00000000-0000-4000-8000-000000000082" },
+        ],
+      },
+    ];
+    expect(JSON.stringify(await projector(history))).not.toContain("base64");
+    expect(reads).toBe(0);
+  });
+  test("a failed retained image read cannot silently become a successful receipt-only retry", async () => {
+    const bytes = new TextEncoder().encode("image");
+    const asset = {
+      ...file("00000000-0000-4000-8000-000000000083", "image/png", bytes.length, "a.png"),
+      sha256: sha256(bytes),
+    };
+    const history = [
+      { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+    ];
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => new Uint8Array(),
+      async () => [asset],
+    );
+    await expect(projector(history)).rejects.toThrow("Retained attachment bytes");
+    await expect(projector(history)).rejects.toThrow("Retained attachment bytes");
+  });
+});
+
+test("retained uploads exceed the old aggregate cap without eviction or unbounded concurrent reads", async () => {
+  const bytes = new Uint8Array(2 * 1024 * 1024);
+  const digest = sha256(bytes);
+  const files = Array.from({ length: 12 }, (_, i) => ({
+    ...file(
+      `00000000-0000-4000-8000-${String(100 + i).padStart(12, "0")}`,
+      "image/png",
+      bytes.length,
+      `image-${i}.png`,
+    ),
+    sha256: digest,
+  }));
+  let active = 0,
+    peak = 0,
+    reads = 0;
+  const projector = createModelHistoryAttachmentProjector(
+    { supportsImageInput: true, inputFileMediaTypes: [] },
+    async () => {
+      reads++;
+      active++;
+      peak = Math.max(peak, active);
+      await Bun.sleep(1);
+      active--;
+      return bytes;
+    },
+    async () => files,
+  );
+  const history = [
+    {
+      ...user("compare these"),
+      [MODEL_ATTACHMENT_REFS_FIELD]: files.map((f) => ({ kind: "file", fileId: f.id })),
+    },
+  ];
+  const first = await projector(history);
+  expect(
+    (first[0]!.content as Array<{ type: string }>).filter((p) => p.type === "input_image"),
+  ).toHaveLength(12);
+  await projector(history);
+  expect(reads).toBe(12);
+  expect(peak).toBeLessThanOrEqual(8);
+});
+
+test("a new turn cannot reuse image bytes when its file authority no longer grants access", async () => {
+  const bytes = new TextEncoder().encode("image");
+  const asset = {
+    ...file("00000000-0000-4000-8000-000000000099", "image/png", bytes.length, "a.png"),
+    sha256: sha256(bytes),
+  };
+  const history = [
+    { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+  ];
+  const policy = { supportsImageInput: true, inputFileMediaTypes: [] };
+  const allowed = createModelHistoryAttachmentProjector(
+    policy,
+    async () => bytes,
+    async () => [asset],
+  );
+  expect(JSON.stringify(await allowed(history))).toContain("data:image");
+  let reads = 0;
+  const revoked = createModelHistoryAttachmentProjector(
+    policy,
+    async () => {
+      reads++;
+      return bytes;
+    },
+    async () => [],
+  );
+  expect(JSON.stringify(await revoked(history))).not.toContain("data:image");
+  expect(reads).toBe(0);
+});
+
+test("retained image transport admission failures do not retry the same oversized context", () => {
+  expect(agentRunFailurePayload(new RetainedAttachmentTransportLimitError())).toMatchObject({
+    code: "retained_attachment_transport_limit",
+    retryable: false,
+  });
+});
+
+test("oversized retained images fail before blob reads without rewriting history", async () => {
+  const files = Array.from({ length: 4 }, (_, i) => ({
+    ...file(
+      `00000000-0000-4000-8000-${String(200 + i).padStart(12, "0")}`,
+      "image/png",
+      MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+    ),
+    sha256: "a".repeat(64),
+  }));
+  let reads = 0;
+  const projector = createModelHistoryAttachmentProjector(
+    { supportsImageInput: true, inputFileMediaTypes: [] },
+    async () => {
+      reads++;
+      return new Uint8Array();
+    },
+    async () => files,
+  );
+  for (const refs of [files, Array.from({ length: 4 }, () => files[0]!)]) {
+    const history = refs.map((asset) => ({
+      ...user("inspect"),
+      [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }],
+    }));
+    const original = JSON.stringify(history);
+    await expect(projector(history)).rejects.toThrow("64 MiB inline transport limit");
+    await expect(projector(history)).rejects.toThrow("64 MiB inline transport limit");
+    expect(JSON.stringify(history)).toBe(original);
+  }
+  expect(reads).toBe(0);
 });
