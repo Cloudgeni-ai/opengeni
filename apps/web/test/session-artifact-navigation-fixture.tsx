@@ -13,7 +13,7 @@ import { WorkspaceDock } from "@opengeni/react";
 import { MarkdownText } from "../src/components/markdown";
 import { ArtifactLinkBoundary } from "../src/components/session/artifact-link-boundary";
 import { ArtifactSessionPage } from "../src/components/session/artifact-session-page";
-import { artifactReturnSearch } from "../src/lib/session-artifact-navigation";
+import { artifactReturnSearch } from "../src/lib/routes";
 import "../src/styles.css";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";

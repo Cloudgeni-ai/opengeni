@@ -17,9 +17,3 @@ export function sessionArtifactFromHref(href: string, origin: string, workspaceI
     return null;
   }
 }
-
-export function artifactReturnSearch(search: Record<string, unknown>): { fromSession?: string } {
-  return typeof search.fromSession === "string" && UUID.test(search.fromSession)
-    ? { fromSession: search.fromSession }
-    : {};
-}

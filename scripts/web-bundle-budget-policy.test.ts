@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import {
   ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
@@ -55,6 +56,27 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
+  test("calibrates only the measured session artifact navigation gzip envelope", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(656_741, 1.5 * kib)");
+    const envelope = wholeKibEnvelope(656_741, 1.5 * KIB);
+    expect(envelope).toBe(643 * KIB);
+    expect(envelope - 656_774).toBeGreaterThanOrEqual(1.5 * KIB);
+    // Keep the unrelated hard limits pinned while adding the measured gzip cost.
+    for (const limit of [
+      "initialRaw: 1485 * kib",
+      "initialGzip: 405 * kib",
+      "initialFileGzip: 79 * kib",
+      "initialFiles: 17",
+      "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
+      "directSessionFiles: 31",
+      "lazyChunkRaw: 800 * kib",
+      "lazyChunkGzip: 240 * kib",
+      "cssGzip: wholeKibEnvelope(33_674)",
+    ])
+      expect(source).toContain(limit);
+  });
+
   test("retains at least one KiB above the combined personal GitHub and current-main graph", () => {
     expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_219_469);
     expect(DIRECT_SESSION_RAW_BUDGET).toBe(2169 * KIB);
