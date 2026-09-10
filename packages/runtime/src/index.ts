@@ -197,7 +197,6 @@ import {
   inContainerMountStrategy,
   s3Mount,
   shell,
-  skills,
   type SandboxClient,
   type SandboxSessionLike,
   type SandboxSessionState,
@@ -281,6 +280,7 @@ import {
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
+  type RuntimeSkillIndexEntry,
 } from "./runtime-skills";
 export {
   composeRuntimeSkills,
@@ -294,6 +294,7 @@ export {
   type RuntimeSkillArtifactFile,
   type RuntimeSkillComposition,
   type RuntimeSkillDescriptor,
+  type RuntimeSkillIndexEntry,
   type SessionSkillActivation,
 } from "./runtime-skills";
 import {
@@ -1612,6 +1613,8 @@ export type CodemodeTokenWriterSession = SandboxSessionLike;
 
 const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
 const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
+const agentRuntimeSkillIndex = new WeakMap<object, readonly RuntimeSkillIndexEntry[]>();
+const emptyRuntimeSkillIndex: readonly RuntimeSkillIndexEntry[] = Object.freeze([]);
 const agentInstructionInspection = new WeakMap<object, PersistentAgentInstructionInspection>();
 const emptyInstructionInspection: PersistentAgentInstructionInspection = Object.freeze({
   layers: Object.freeze([]),
@@ -1628,6 +1631,11 @@ export function effectiveSkillSelectionsForAgent(
   agent: object,
 ): readonly EffectiveSkillSelection[] {
   return agentSkillSelections.get(agent) ?? emptySkillSelections;
+}
+
+/** Sandbox-independent Skill index admitted for this agent. */
+export function runtimeSkillIndexForAgent(agent: object): readonly RuntimeSkillIndexEntry[] {
+  return agentRuntimeSkillIndex.get(agent) ?? emptyRuntimeSkillIndex;
 }
 
 export function persistentAgentInstructionInspectionFor(
@@ -1939,8 +1947,6 @@ export type BuildAgentOptions = {
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Server-backed Skill descriptors, independent of sandbox capabilities. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
-  /** Shared reader serves configured Skills; filesystem discovery remains for repo Skills only. */
-  serverSkillReading?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2597,21 +2603,17 @@ export function buildOpenGeniAgent(
   }
 
   const skillComposition = composeRuntimeSkills(
-    options.serverSkillReading ? [] : (options.skillActivations ?? []),
+    options.skillActivations ?? [],
     {
-      editableArtifacts: !options.serverSkillReading && editableArtifactToolsAvailable,
+      editableArtifacts: editableArtifactToolsAvailable,
       // Sites guidance is bundled capability metadata, not eager tool authority.
       // Tool discovery/execution remains governed by the lazy attempt gateway.
       sites:
-        !options.serverSkillReading &&
         (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
       // A connected machine owns its filesystem, and its session deliberately
-      // does not materialize host-local lazy entries. Advertising this bundled
-      // skill there makes load_skill report a path that does not exist. Keep the
-      // executable tools (whose descriptions contain the full short workflow),
-      // but expose the filesystem-backed helper only where it can be delivered.
+      // does not materialize host-local bundled Site files. Keep the executable
+      // tools, but expose the bundled helper only where it can be read.
       videoGeneration:
-        !options.serverSkillReading &&
         Boolean(options.videoGeneration) &&
         options.activeSandboxBackend !== "selfhosted",
     },
@@ -2659,6 +2661,7 @@ export function buildOpenGeniAgent(
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
+  agentRuntimeSkillIndex.set(agent, skillComposition.index);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -3453,11 +3456,6 @@ function buildAgentCapabilitiesFromComposition(
       ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
     }),
   ];
-  caps.push(
-    skills({
-      lazyFrom: skillComposition.lazySource,
-    }),
-  );
   if (options.workspaceSkillPaths?.length) {
     caps.push(
       workspaceSkills(

@@ -91,6 +91,18 @@ export type RuntimeSkillComposition = Readonly<{
   configuredDescriptors: readonly RuntimeSkillDescriptor[];
   configuredNames: readonly string[];
   nativeToolNames: readonly string[];
+  /**
+   * Sandbox-independent Skill index for configured activations and bundled
+   * native-tool Skills. This is the supported inspection contract; it is not
+   * an SDK lazy loader.
+   */
+  index: readonly RuntimeSkillIndexEntry[];
+}>;
+
+export type RuntimeSkillIndexEntry = Readonly<{
+  name: string;
+  description: string;
+  path: string;
 }>;
 
 export type RuntimeSkillDescriptor = Readonly<{
@@ -188,6 +200,16 @@ export function composeRuntimeSkills(
     });
   }
 
+  const nativeIndex: RuntimeSkillIndexEntry[] = loadNativeToolSkillArtifacts(nativeTools)
+    .filter((artifact) => !activatedNameKeys.has(artifact.name.toLowerCase()))
+    .map((artifact) =>
+      Object.freeze({
+        name: artifact.name,
+        description: runtimeSkillDescription(artifact),
+        path: artifact.name,
+      }),
+    );
+
   return Object.freeze({
     lazySource: {
       source: dir({ children }),
@@ -230,6 +252,7 @@ export function composeRuntimeSkills(
       effectiveActivations.map(({ activation }) => activation.artifact.name),
     ),
     nativeToolNames: Object.freeze([...nativeSources.flatMap((source) => source.names)]),
+    index: Object.freeze([...nativeIndex, ...activationIndex]),
   });
 }
 

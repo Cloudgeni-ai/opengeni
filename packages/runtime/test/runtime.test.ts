@@ -70,6 +70,7 @@ import {
   oneShotGenesisTitleInputFilter,
   composeRuntimeSkills,
   effectiveSkillSelectionsForAgent,
+  runtimeSkillIndexForAgent,
   listSkillLibraryEntries,
   loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
@@ -11136,9 +11137,8 @@ describe("runtime Skill activation", () => {
   });
 
   test("without explicit activation the domain Skill index is empty", () => {
-    const source = composeRuntimeSkills([]).lazySource;
-    expect((source.source as { type: string }).type).toBe("dir");
-    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    const composition = composeRuntimeSkills([]);
+    const index = composition.index;
     expect(index).toEqual([]);
   });
 
@@ -11148,8 +11148,7 @@ describe("runtime Skill activation", () => {
       sites: false,
       videoGeneration: false,
     });
-    const source = composition.lazySource;
-    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    const index = composition.index;
     expect(index.map((entry) => entry.name)).toEqual(
       expect.arrayContaining([
         "opengeni-spreadsheets",
@@ -11157,11 +11156,6 @@ describe("runtime Skill activation", () => {
         "opengeni-presentations",
       ]),
     );
-    const sourceDir = source.source as {
-      type: string;
-      children: Record<string, any>;
-    };
-    expect(sourceDir.children["opengeni-spreadsheets"].type).toBe("local_dir");
     expect(composition.selections).toContainEqual(
       expect.objectContaining({
         id: "native-tool:opengeni-spreadsheets",
@@ -11177,7 +11171,7 @@ describe("runtime Skill activation", () => {
       sites: true,
       videoGeneration: false,
     });
-    const index = enabled.lazySource.getIndex?.(emptyManifest, ".agents") ?? [];
+    const index = enabled.index;
     expect(index.map((entry) => entry.name)).toContain("opengeni-sites");
     const siteSource = (enabled.lazySource.source as any).children["opengeni-sites"];
     const packagePins = JSON.parse(siteSource.children["package-versions.json"].content);
@@ -11262,17 +11256,8 @@ describe("runtime Skill activation", () => {
   });
 
   function indexedSkillNames(agent: unknown, manifest: Manifest): string[] {
-    const skillsCapability = (
-      (agent as any).capabilities as Array<{
-        type: string;
-        lazyFrom?: {
-          getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }>;
-        };
-      }>
-    ).find((capability) => capability.type === "skills");
-    return (
-      skillsCapability?.lazyFrom?.getIndex?.(manifest, ".agents").map((entry) => entry.name) ?? []
-    );
+    void manifest;
+    return runtimeSkillIndexForAgent(agent as object).map((entry) => entry.name);
   }
 
   test("artifact runtime doctor blocks the agent before an unavailable image can be used", async () => {
@@ -11369,7 +11354,8 @@ describe("runtime Skill activation", () => {
   });
 
   test("pack skills join the explicit skill index", () => {
-    const source = composeRuntimeSkills([packActivation(infraSkill)]).lazySource;
+    const composition = composeRuntimeSkills([packActivation(infraSkill)]);
+    const source = composition.lazySource;
     const sourceDir = source.source as {
       type: string;
       children: Record<string, any>;
@@ -11381,7 +11367,7 @@ describe("runtime Skill activation", () => {
     expect(sourceDir.children["infra-ops"].children.references.children["runbook.md"].content).toBe(
       "Runbook.",
     );
-    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    const index = composition.index;
     const names = index.map((entry) => entry.name);
     expect(names).toContain("infra-ops");
     const infra = index.find((entry) => entry.name === "infra-ops");
@@ -11511,31 +11497,68 @@ describe("runtime Skill activation", () => {
     ).toThrow("Invalid Skill name");
   });
 
-  test("buildOpenGeniAgent feeds explicit activations through the SDK Skills capability", () => {
+  test("buildOpenGeniAgent keeps configured activations without SDK load_skill", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
       skillActivations: [packActivation(infraSkill)],
     });
-    const capabilities = (agent as any).capabilities as Array<{
-      type: string;
-      lazyFrom?: {
-        source: { type: string };
-        getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }>;
-      };
-    }>;
-    const skillsCapability = capabilities.find((capability) => capability.type === "skills");
-    expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
-    const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
-    expect(index.map((entry) => entry.name)).toContain("infra-ops");
-    // Without explicit Skills, the capability retains an empty in-memory
-    // source so repository discovery can still compose.
+    expect(
+      ((agent as any).capabilities as Array<{ type?: string }>).some(
+        (capability) => capability.type === "skills",
+      ),
+    ).toBe(false);
+    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toContain("infra-ops");
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
-    const plainCapability = (
-      (plainAgent as any).capabilities as Array<{
-        type: string;
-        lazyFrom?: { source: { type: string } };
-      }>
-    ).find((capability) => capability.type === "skills");
-    expect(plainCapability?.lazyFrom?.source.type).toBe("dir");
+    expect(
+      ((plainAgent as any).capabilities as Array<{ type?: string }>).some(
+        (capability) => capability.type === "skills",
+      ),
+    ).toBe(false);
+  });
+
+  test("capability construction does not emit load_skill", () => {
+    const capabilities = buildAgentCapabilities(testSettings(), [packActivation(infraSkill)], {
+      editableArtifactToolsAvailable: true,
+      videoGenerationAvailable: true,
+    });
+    expect(
+      (capabilities as Array<{ type?: string }>).some((capability) => capability.type === "skills"),
+    ).toBe(false);
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+      skillActivations: [packActivation(infraSkill)],
+    });
+    const toolNames = ((agent as { tools?: Array<{ name?: string }> }).tools ?? []).map(
+      (tool) => tool.name,
+    );
+    expect(toolNames).not.toContain("load_skill");
+    expect(composeRuntimeSkills([packActivation(infraSkill)]).index.map((entry) => entry.name)).toContain(
+      "infra-ops",
+    );
+  });
+
+  test("configured and bundled Skill index survives without a sandbox", () => {
+    const bundled = composeRuntimeSkills([], {
+      editableArtifacts: true,
+      sites: true,
+      videoGeneration: false,
+    });
+    expect(bundled.index.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        "opengeni-documents",
+        "opengeni-spreadsheets",
+        "opengeni-presentations",
+        "opengeni-sites",
+      ]),
+    );
+    const configured = composeRuntimeSkills([packActivation(infraSkill)]);
+    expect(configured.configuredDescriptors).toEqual([
+      expect.objectContaining({
+        name: "infra-ops",
+        description: "Operate workspace infrastructure.",
+      }),
+    ]);
+    expect(configured.index).toContainEqual(
+      expect.objectContaining({ name: "infra-ops", path: "infra-ops" }),
+    );
   });
 
   test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
