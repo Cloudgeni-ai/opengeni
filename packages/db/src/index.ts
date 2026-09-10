@@ -54462,6 +54462,21 @@ async function commitWorkspaceCaptureRevision(
           return null;
         }
 
+        // Capture yields when new work is accepted. Its last database call can
+        // still be in flight when that cancellation arrives, so serialize this
+        // fence with enqueue/claim on the session row and refuse older reviews.
+        // Position is priority order, not chronology.
+        const successor = await tx.execute<{ id: string }>(sql`
+          select id from session_turns
+          where workspace_id = ${input.workspaceId}
+            and session_id = ${input.sessionId}
+            and id <> ${input.turnId}
+            and (created_at >= (select created_at from session_turns where id = ${input.turnId})
+              or status in ('queued', 'running'))
+          limit 1
+        `);
+        if (successor.length > 0) return null;
+
         const capturedAt = input.capturedAt ?? new Date();
         const rows = await tx.execute<{ revision: number | string }>(sql`
           insert into workspace_captures
