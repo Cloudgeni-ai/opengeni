@@ -1037,8 +1037,9 @@ export async function resetPassword(input: {
   });
 }
 
-export async function fetchClientConfig(): Promise<ClientConfig> {
-  const config = await request<ClientConfig>("/v1/config/client");
+export async function fetchClientConfig(signal?: AbortSignal): Promise<ClientConfig> {
+  const config = await request<ClientConfig>("/v1/config/client", { signal });
+  signal?.throwIfAborted();
   reloadIfStaleApiContract(config);
   reloadIfStaleDeployment(config);
   configureClientAuth(config.auth);
