@@ -59,10 +59,7 @@ test.skipIf(process.platform !== "linux")(
     }, 100);
     const storage = {
       backend: "s3-compatible",
-      async putObjectStreamIfAbsent(input: {
-        chunks: AsyncIterable<Uint8Array>;
-        byteSize: number;
-      }) {
+      async putObjectStream(input: { chunks: AsyncIterable<Uint8Array>; byteSize: number }) {
         const handle = await open(objectPath, "wx");
         try {
           for await (const bytes of input.chunks) {
@@ -78,7 +75,6 @@ test.skipIf(process.platform !== "linux")(
           await handle.close();
         }
         expect(storedBytes).toBe(input.byteSize);
-        return true;
       },
       async headObject() {
         return { ContentLength: (await stat(objectPath)).size, VersionToken: "fixture-version-1" };

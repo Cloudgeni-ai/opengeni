@@ -163,9 +163,7 @@ import {
 } from "../opensandbox-kubernetes-inventory";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
-  collectWorkspaceArchiveObjectKeys,
-  deleteUnpublishedWorkspaceArchiveObject,
-  deleteWorkspaceArchiveObjectKeys,
+  persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "../sandbox-archive-storage";
 
@@ -2742,62 +2740,33 @@ async function terminateDrainableBox(
       if (!archiveMetadata) {
         throw new Error("Sandbox snapshot publication requires a verified archive descriptor");
       }
-      const priorKeys = collectWorkspaceArchiveObjectKeys(
-        (lease.resumeState as Record<string, unknown> | null | undefined) ?? null,
-      );
-      let workspaceArchiveRef:
-        | Awaited<ReturnType<typeof putVersion1TarArchiveOrInline>>["workspaceArchiveRef"]
-        | undefined;
-      try {
-        const published = await putVersion1TarArchiveOrInline({
-          backend: lease.backend,
-          objectStorage,
-          accountId,
-          workspaceId: row.workspaceId,
-          sandboxGroupId: row.sandboxGroupId,
-          archive:
-            typeof archiveBase64 === "object"
-              ? archiveBase64
-              : {
-                  bytes: Buffer.from(archiveBase64, "base64"),
-                  descriptor: archiveMetadata,
-                  base64: archiveBase64,
-                },
-          metrics: archiveMetrics,
-        });
-        workspaceArchiveRef = published.workspaceArchiveRef;
-        result = await persistDrainSnapshot(db, {
-          ...baseInput,
-          workspaceArchiveMeta: archiveMetadata,
-          ...published,
-          ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
-        });
-        if (published.workspaceArchiveRef && objectStorage) {
-          if (!result.wrote) {
-            await deleteUnpublishedWorkspaceArchiveObject(
-              objectStorage,
-              published.workspaceArchiveRef,
-              archiveMetrics,
-            );
-          } else {
-            const afterLease = await readLease(db, row.workspaceId, row.sandboxGroupId);
-            const afterKeys = collectWorkspaceArchiveObjectKeys(
-              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
-            );
-            await deleteWorkspaceArchiveObjectKeys(
-              objectStorage,
-              [...priorKeys].filter((key) => !afterKeys.has(key)),
-            ).catch(() => undefined);
-          }
-        }
-      } catch (error) {
-        await deleteUnpublishedWorkspaceArchiveObject(
-          objectStorage,
-          workspaceArchiveRef,
-          archiveMetrics,
-        );
-        throw error;
-      }
+      const published = await putVersion1TarArchiveOrInline({
+        backend: lease.backend,
+        objectStorage,
+        accountId,
+        workspaceId: row.workspaceId,
+        sandboxGroupId: row.sandboxGroupId,
+        archive:
+          typeof archiveBase64 === "object"
+            ? archiveBase64
+            : {
+                bytes: Buffer.from(archiveBase64, "base64"),
+                descriptor: archiveMetadata,
+                base64: archiveBase64,
+              },
+        metrics: archiveMetrics,
+      });
+      result = await persistWorkspaceArchiveCandidate({
+        objectStorage,
+        ...(published.workspaceArchiveRef ? { ref: published.workspaceArchiveRef } : {}),
+        persist: () =>
+          persistDrainSnapshot(db, {
+            ...baseInput,
+            workspaceArchiveMeta: archiveMetadata,
+            ...published,
+            ...(checkpointArtifactId ? { checkpointArtifactId } : {}),
+          }),
+      });
     }
     if (!result.wrote && checkpointArtifactId) {
       await markSandboxCheckpointArtifactDeletePending(db, {

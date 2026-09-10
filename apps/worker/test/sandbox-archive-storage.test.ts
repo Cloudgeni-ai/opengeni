@@ -4,10 +4,10 @@ import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
   collectWorkspaceArchiveObjectKeys,
-  deleteUnpublishedWorkspaceArchiveObject,
   deleteWorkspaceArchiveObjectKeys,
   putTarWorkspaceArchiveObject,
   putVersion1TarArchiveOrInline,
+  persistWorkspaceArchiveCandidate,
   WorkspaceArchiveObjectStorageRequiredError,
 } from "../src/sandbox-archive-storage";
 
@@ -17,6 +17,32 @@ function fakeStorage() {
     backend: "s3-compatible" as const,
     async putObject(input: { key: string; body: Uint8Array }) {
       objects.set(input.key, input.body);
+    },
+    async putObjectStream(input: { key: string; chunks: AsyncIterable<Uint8Array> }) {
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of input.chunks) chunks.push(chunk);
+      objects.set(input.key, Buffer.concat(chunks));
+    },
+    async headObject(key: string) {
+      const bytes = objects.get(key);
+      return bytes
+        ? {
+            ContentLength: bytes.length,
+            VersionToken: createHash("sha256").update(bytes).digest("hex"),
+          }
+        : null;
+    },
+    async getObjectRange(input: {
+      key: string;
+      start: number;
+      endInclusive: number;
+      expectedVersionToken: string;
+    }) {
+      const bytes = objects.get(input.key);
+      if (!bytes) return null;
+      const token = createHash("sha256").update(bytes).digest("hex");
+      if (token !== input.expectedVersionToken) return null;
+      return { bytes: bytes.subarray(input.start, input.endInclusive + 1), versionToken: token };
     },
     async getObjectBytes(key: string) {
       const bytes = objects.get(key);
@@ -37,17 +63,17 @@ describe("workspace archive object storage", () => {
     const storage = {
       backend: "s3-compatible",
       async headObject() {
-        return null;
+        expect(uploaded).toBe(true);
+        return { ContentLength: bytes.length, VersionToken: sha256 };
       },
-      async getObjectRange() {
-        return null;
+      async getObjectRange(input: { start: number; endInclusive: number }) {
+        return { bytes: bytes.subarray(input.start, input.endInclusive + 1), versionToken: sha256 };
       },
-      async putObjectStreamIfAbsent(input: { chunks: AsyncIterable<Uint8Array> }) {
+      async putObjectStream(input: { chunks: AsyncIterable<Uint8Array> }) {
         const chunks: Uint8Array[] = [];
         for await (const chunk of input.chunks) chunks.push(chunk);
         expect(Buffer.concat(chunks)).toEqual(Buffer.from(bytes));
         uploaded = true;
-        return true;
       },
     } as unknown as ObjectStorage;
     const archive = {
@@ -125,16 +151,24 @@ describe("workspace archive object storage", () => {
     });
     expect(ref).toEqual({
       schema: "sandbox_archive_object_v1",
-      key: workspaceArchiveObjectKey({
-        accountId,
-        workspaceId,
-        sandboxGroupId,
-        revision: descriptor.revision,
-      }),
+      key: expect.stringMatching(/\.[0-9a-f-]{36}\.tar$/),
       sha256,
       bytes: bytes.length,
       backend: "s3-compatible",
     });
+    expect(objects.get(ref.key)).toEqual(bytes);
+    const concurrent = await Promise.all(
+      [1, 2].map(() =>
+        putTarWorkspaceArchiveObject({
+          objectStorage: storage,
+          accountId,
+          workspaceId,
+          sandboxGroupId,
+          archive: { bytes, descriptor },
+        }),
+      ),
+    );
+    expect(new Set([ref.key, ...concurrent.map((value) => value.key)]).size).toBe(3);
     expect(objects.get(ref.key)).toEqual(bytes);
 
     const keys = collectWorkspaceArchiveObjectKeys({
@@ -196,7 +230,7 @@ describe("workspace archive object storage", () => {
     expect(inlined.workspaceArchive?.length).toBeGreaterThan(0);
   });
 
-  test("deletes an unpublished object after persist throws", async () => {
+  test("retains an ambiguously committed candidate and deletes only a definitively unused candidate", async () => {
     const { objects, storage } = fakeStorage();
     const bytes = new TextEncoder().encode("orphan-tar");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -225,7 +259,41 @@ describe("workspace archive object storage", () => {
     });
     expect(published.workspaceArchive).toBeUndefined();
     expect(objects.has(published.workspaceArchiveRef!.key)).toBe(true);
-    await deleteUnpublishedWorkspaceArchiveObject(storage, published.workspaceArchiveRef);
-    expect(objects.has(published.workspaceArchiveRef!.key)).toBe(false);
+    let committedKey: string | undefined;
+    await expect(
+      persistWorkspaceArchiveCandidate({
+        objectStorage: storage,
+        ref: published.workspaceArchiveRef,
+        persist: async () => {
+          committedKey = published.workspaceArchiveRef!.key;
+          throw new Error("commit succeeded but acknowledgement was lost");
+        },
+      }),
+    ).rejects.toThrow("acknowledgement was lost");
+    expect(objects.has(committedKey!)).toBe(true);
+    await persistWorkspaceArchiveCandidate({
+      objectStorage: storage,
+      ref: published.workspaceArchiveRef,
+      persist: async () => ({
+        wrote: true,
+        candidateDisposition: "already_referenced" as const,
+      }),
+    });
+    expect(objects.has(committedKey!)).toBe(true);
+    // A separate candidate, not the committed one, is rejected by the database.
+    const unused = await putTarWorkspaceArchiveObject({
+      objectStorage: storage,
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+      archive: { bytes, descriptor },
+    });
+    await persistWorkspaceArchiveCandidate({
+      objectStorage: storage,
+      ref: unused,
+      persist: async () => ({ wrote: true, candidateDisposition: "unused" as const }),
+    });
+    expect(objects.has(unused.key)).toBe(false);
+    expect(objects.has(committedKey!)).toBe(true);
   });
 });

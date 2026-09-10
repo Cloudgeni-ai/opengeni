@@ -108,6 +108,19 @@ export type ObjectStorage = {
     body: Uint8Array;
     sha256?: string | null;
   }) => Promise<void>;
+  /**
+   * Unconditional authenticated upload from a bounded byte stream. May overwrite
+   * an existing key; this is NOT an atomic create-only operation. Callers needing
+   * write isolation must supply a fresh unique key and verify stored content.
+   */
+  putObjectStream?: (args: {
+    key: string;
+    contentType: string;
+    chunks: AsyncIterable<Uint8Array>;
+    byteSize: number;
+    sha256?: string;
+    signal?: AbortSignal;
+  }) => Promise<void>;
   /** Atomic create-only raw PUT. Returns false when the key already exists. */
   putObjectIfAbsent?: (args: {
     key: string;
@@ -258,6 +271,52 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       } catch (error) {
         if (isS3VersionMismatch(error)) return false;
         throw error;
+      }
+    },
+    async putObjectStream(args) {
+      const body = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
+      // A producer error can leave the HTTP request waiting for its advertised
+      // ContentLength. Abort this request explicitly; never abort the caller's
+      // controller or rely on provider timeouts to settle the failed upload.
+      const request = new AbortController();
+      let producerFailed = false;
+      let producerError: unknown;
+      const onBodyError = (error: unknown) => {
+        producerFailed = true;
+        producerError = error;
+        request.abort(error);
+      };
+      const onCallerAbort = () => request.abort(args.signal?.reason);
+      body.once("error", onBodyError);
+      // Keep an error listener through asynchronous destruction, then release it.
+      const detachBodyError = () => body.off("error", onBodyError);
+      body.once("close", detachBodyError);
+      args.signal?.addEventListener("abort", onCallerAbort, { once: true });
+      if (args.signal?.aborted) onCallerAbort();
+      try {
+        await requestClient.send(
+          new PutObjectCommand({
+            Bucket: settings.objectStorageBucket,
+            Key: args.key,
+            ContentType: args.contentType,
+            ContentLength: args.byteSize,
+            Body: body,
+            Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
+          }),
+          { abortSignal: request.signal },
+        );
+        if (producerFailed) throw producerError;
+      } catch (error) {
+        // The SDK commonly rejects with AbortError after our producer abort;
+        // preserve the original integrity/source failure for its caller.
+        if (producerFailed) throw producerError;
+        throw error;
+      } finally {
+        args.signal?.removeEventListener("abort", onCallerAbort);
+        body.destroy();
       }
     },
     async putObjectStreamIfAbsent(args) {
@@ -522,6 +581,23 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         throw error;
       }
     },
+    async putObjectStream(args) {
+      const destination = bucket.file(args.key).createWriteStream({
+        resumable: false,
+        contentType: args.contentType,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+        ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
+      });
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
+      if (args.signal) {
+        await pipeline(source, destination, { signal: args.signal });
+      } else {
+        await pipeline(source, destination);
+      }
+    },
     async putObjectStreamIfAbsent(args) {
       const destination = bucket.file(args.key).createWriteStream({
         resumable: false,
@@ -713,6 +789,27 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       } catch (error) {
         if (isAzureVersionMismatch(error)) return false;
         throw error;
+      }
+    },
+    async putObjectStream(args) {
+      const blobClient = requestContainerClient.getBlockBlobClient(args.key);
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
+      try {
+        await blobClient.uploadStream(
+          source,
+          INTERNAL_STREAM_BUFFER_BYTES,
+          INTERNAL_STREAM_CONCURRENCY,
+          {
+            blobHTTPHeaders: { blobContentType: args.contentType },
+            ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
+            ...(args.signal ? { abortSignal: args.signal } : {}),
+          },
+        );
+      } finally {
+        source.destroy();
       }
     },
     async putObjectStreamIfAbsent(args) {

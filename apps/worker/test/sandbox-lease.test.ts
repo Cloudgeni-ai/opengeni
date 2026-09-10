@@ -1122,7 +1122,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const workspaceId = "22222222-2222-4222-8222-222222222222";
     const sandboxGroupId = "33333333-3333-4333-8333-333333333333";
     const archive = Buffer.from("left-bytes").toString("base64");
-    const meta = archiveDescriptor(archive, 1_900_000_000_000);
+    // Keep the locator and descriptor valid together so this exercises the
+    // independent inline-byte comparison, not descriptor/ref validation.
+    const meta = archiveDescriptor(
+      Buffer.from("right-bytes").toString("base64"),
+      1_900_000_000_000,
+    );
     await expect(
       persistWarmSnapshotRaw(db, {
         accountId,
@@ -1145,7 +1150,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             sandboxGroupId,
             revision: meta.revision,
           }),
-          sha256: "0".repeat(64),
+          sha256: meta.archiveSha256,
           bytes: meta.archiveBytes,
           backend: "s3-compatible",
         },

@@ -32,23 +32,28 @@ export class WorkspaceArchiveStorageError extends Error {
   }
 }
 
-/** Creates at the caller's deterministic key; never owns/disposes the input spool. */
+/**
+ * Uploads at a caller-owned fresh unique key and independently verifies readback.
+ * Unconditional PUT may overwrite: callers must never reuse published keys.
+ * Never owns/disposes the input spool or deletes a failed/unpublished object.
+ */
 export async function uploadWorkspaceArchiveSpool(
   storage: ObjectStorage,
   key: string,
   spool: WorkspaceArchiveSpool,
 ): Promise<void> {
   requireBoundedReads(storage);
-  if (!storage.putObjectStreamIfAbsent) {
+  if (!storage.putObjectStream) {
     throw new WorkspaceArchiveStorageError(
       "archive_hydration_failed",
-      "Workspace archive storage unsupported: streaming create-only upload required",
+      "Workspace archive storage unsupported: unconditional streaming upload required",
       false,
     );
   }
   const expected = { bytes: spool.byteSize, sha256: spool.sha256 };
   validateExpected(expected);
   let validated = false;
+  let streamFailed = false;
   let streamFailure: unknown;
   const chunks = (async function* () {
     const digest = createHash("sha256");
@@ -75,35 +80,42 @@ export async function uploadWorkspaceArchiveSpool(
       }
       validated = true;
     } catch (error) {
+      streamFailed = true;
       streamFailure = error;
       throw error;
     }
   })();
-  let created: boolean;
   try {
-    created = await storage.putObjectStreamIfAbsent({
+    await storage.putObjectStream({
       key,
       contentType: "application/x-tar",
       chunks,
       byteSize: expected.bytes,
       sha256: expected.sha256,
     });
-    if (created && !validated) {
-      if (streamFailure) throw streamFailure;
+    if (!validated) {
+      if (streamFailed) throw streamFailure;
       throw new WorkspaceArchiveStorageError(
         "archive_hydration_failed",
         "Workspace archive upload provider did not completely consume and validate the stream",
         false,
       );
     }
+    // A successful PUT and SHA metadata are not proof of stored content.
+    await verifyRanges(storage, key, expected);
+  } catch (error) {
+    const failure = streamFailed ? streamFailure : error;
+    if (failure instanceof WorkspaceArchiveStorageError) throw failure;
+    throw new WorkspaceArchiveStorageError(
+      "archive_hydration_failed",
+      "Workspace archive upload or readback failed",
+      true,
+      { cause: failure },
+    );
   } finally {
-    // Providers may reject an existing key without consuming the input, or
-    // terminate early. Close any opened file iterator without owning the spool.
+    // Close an early-terminated provider's iterator without owning the spool.
     await chunks.return(undefined);
   }
-  // A collision is not success until the actual pinned bytes match. Metadata
-  // may have been written by a different/untrusted uploader.
-  if (!created) await verifyRanges(storage, key, expected);
 }
 
 /** Caller owns the returned private spool and must dispose it after use. */
@@ -229,12 +241,25 @@ async function verifyRanges(
       endInclusive: bytes + length - 1,
       expectedVersionToken: version,
     });
-    if (!result)
+    if (!result) {
+      // Adapters also return null for failed If-Match/generation reads. Do not
+      // classify replacement as permanent loss or retry without a version pin.
+      const current = await storage.headObject!(key);
+      if (!current) {
+        throw new WorkspaceArchiveStorageError(
+          "archive_base64_invalid",
+          "Workspace archive object is missing during range read",
+          false,
+        );
+      }
       throw new WorkspaceArchiveStorageError(
-        "archive_base64_invalid",
-        "Workspace archive object is missing during range read",
-        false,
+        "archive_hydration_failed",
+        current.VersionToken !== version
+          ? "Workspace archive object version changed"
+          : "Workspace archive pinned range is temporarily unavailable",
+        true,
       );
+    }
     if (result.versionToken !== version)
       throw new WorkspaceArchiveStorageError(
         "archive_hydration_failed",

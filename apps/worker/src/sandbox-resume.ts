@@ -89,9 +89,7 @@ import {
 import type { Observability } from "@opengeni/observability";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
-  collectWorkspaceArchiveObjectKeys,
-  deleteUnpublishedWorkspaceArchiveObject,
-  deleteWorkspaceArchiveObjectKeys,
+  persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
 
@@ -955,9 +953,7 @@ async function persistWarmWorkspaceSnapshot(
     const captureAndPublish = (async (): Promise<boolean> => {
       let archive: VerifiedWorkspaceArchivePayload | undefined;
       let candidate: { id: string } | null = null;
-      let workspaceArchiveRef: Awaited<
-        ReturnType<typeof putVersion1TarArchiveOrInline>
-      >["workspaceArchiveRef"];
+      let publicationAttempted = false;
       try {
         archive = await captureWorkspaceArchiveForStorage(
           session,
@@ -969,10 +965,7 @@ async function persistWarmWorkspaceSnapshot(
           Boolean(services.objectStorage),
         );
         candidate = await registerCandidate(archive);
-        const priorLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-        const priorKeys = collectWorkspaceArchiveObjectKeys(
-          (priorLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
-        );
+        const archiveDescriptor = archive.descriptor;
         const published = await putVersion1TarArchiveOrInline({
           backend: lease.backend,
           objectStorage: services.objectStorage,
@@ -982,53 +975,36 @@ async function persistWarmWorkspaceSnapshot(
           archive,
           ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         });
-        workspaceArchiveRef = published.workspaceArchiveRef;
-        const { wrote } = await persistWarmSnapshot(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: ids.sessionId,
-          turnId: ids.turnId,
-          attemptId: ids.attemptId,
-          sandboxGroupId: ids.sandboxGroupId,
-          expectedEpoch: leaseEpoch,
-          expectedInstanceId: instanceId,
-          expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
-          captureId,
-          workspaceArchiveMeta: archive.descriptor,
-          ...published,
-          checkpointArtifactId: candidate?.id ?? null,
-          minIntervalMs: force ? 0 : intervalMs,
-          capturedAtMs,
+        publicationAttempted = true;
+        const { wrote } = await persistWorkspaceArchiveCandidate({
+          ...(services.objectStorage ? { objectStorage: services.objectStorage } : {}),
+          ...(published.workspaceArchiveRef ? { ref: published.workspaceArchiveRef } : {}),
+          persist: () =>
+            persistWarmSnapshot(db, {
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              turnId: ids.turnId,
+              attemptId: ids.attemptId,
+              sandboxGroupId: ids.sandboxGroupId,
+              expectedEpoch: leaseEpoch,
+              expectedInstanceId: instanceId,
+              expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
+              captureId,
+              workspaceArchiveMeta: archiveDescriptor,
+              ...published,
+              checkpointArtifactId: candidate?.id ?? null,
+              minIntervalMs: force ? 0 : intervalMs,
+              capturedAtMs,
+            }),
         });
-        if (published.workspaceArchiveRef && services.objectStorage) {
-          if (!wrote) {
-            await deleteUnpublishedWorkspaceArchiveObject(
-              services.objectStorage,
-              published.workspaceArchiveRef,
-              services.sandboxMetrics,
-            );
-          } else {
-            const afterLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-            const afterKeys = collectWorkspaceArchiveObjectKeys(
-              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
-            );
-            await deleteWorkspaceArchiveObjectKeys(
-              services.objectStorage,
-              [...priorKeys].filter((key) => !afterKeys.has(key)),
-            ).catch(() => undefined);
-          }
-        }
         if (!wrote && candidate) {
           await abandonCandidate(candidate.id, "snapshot_publication_fenced");
         }
         return wrote;
       } catch (error) {
-        await deleteUnpublishedWorkspaceArchiveObject(
-          services.objectStorage,
-          workspaceArchiveRef,
-          services.sandboxMetrics,
-        );
-        if (candidate) await abandonCandidate(candidate.id, "snapshot_capture_failed");
+        if (candidate && !publicationAttempted)
+          await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {
         await disposeWorkspaceArchive(archive).catch(() => {

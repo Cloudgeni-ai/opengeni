@@ -3,8 +3,10 @@
 Linux host-backed Local/Docker captures with object storage retain the SDK v1
 JSON archive format but spool payload bytes to private disk files. Capture and
 restore fingerprint the persistent projection in bounded chunks; publication
-uses create-only streaming uploads, and restoration downloads version-pinned
-ranges and validates the complete archive before changing the destination.
+allocates a fresh physical object key for every upload, validates the outgoing
+stream, and reads back every stored byte through version-pinned ranges before
+publishing a locator. Restoration validates the complete archive before changing
+the destination. This does not rely on conditional PUT support.
 
 The canonical codec is `packages/runtime/src/sandbox/host-archive-spool.ts`;
 bounded object transport is `packages/storage/src/workspace-archive-spool.ts`.
@@ -15,6 +17,26 @@ explicitly. Non-Linux hosts, inline archives without object storage, and remote
 provider archive protocols retain their existing compatibility paths; this is
 not a bounded-memory guarantee for those paths. Existing archive limits and
 capture/publication ownership fences remain authoritative and unchanged.
+
+The logical revision stays unchanged; physical locators append a random upload
+UUID before `.tar`. Application-owned unique keys isolate simultaneous attempts
+and malformed producers from existing checkpoints. This is not provider-enforced
+immutability against arbitrary holders of storage credentials. A candidate is
+publishable only after complete stream and stored-content verification.
+Database publication binds the exact locator to its account, workspace, group,
+revision, digest, and size. An exception or lost acknowledgement is an unknown
+publication outcome, never permission to delete the candidate. Cleanup follows
+transaction-derived ownership outcomes, not a separate before/after lease read.
+Only a definitively unused fresh candidate is deleted automatically here.
+Superseded locators and unknown publication outcomes are retained until a durable
+retirement/garbage-collection mechanism can prove they cannot be reattached.
+Storage retention can therefore grow; this correction does not introduce an
+age-based deletion policy or a resource cap.
+
+New readers accept both legacy unsuffixed and new suffixed locators. Old readers
+reject suffixed locators: deploy compatible API/worker readers before enabling
+new writers, and retain suffix-aware readers on rollback. Existing objects are
+not renamed or rewritten. Restore always follows the stored exact key.
 
 The streaming reader supports canonical SDK-produced v1 archives; it rejects
 malformed/noncanonical base64 and duplicate logical entries rather than adopting

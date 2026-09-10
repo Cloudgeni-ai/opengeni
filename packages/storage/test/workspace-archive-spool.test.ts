@@ -27,7 +27,13 @@ function fixture(bytes = payload) {
       ranges.push(input);
       return { bytes: bytes.slice(input.start, input.endInclusive + 1), versionToken: "v1" };
     },
-    putObjectStreamIfAbsent: async () => false,
+    putObjectStream: async ({ chunks }: { chunks: AsyncIterable<Uint8Array> }) => {
+      for await (const _ of chunks) {
+      }
+    },
+    putObjectStreamIfAbsent: async () => {
+      throw new Error("create-only upload forbidden");
+    },
     getObjectBytes: async () => {
       throw new Error("whole-body read forbidden");
     },
@@ -93,7 +99,7 @@ describe("workspace archive spool storage", () => {
 
   test("streams new uploads at the supplied key without taking spool ownership", async () => {
     const { storage, ranges } = fixture();
-    storage.putObjectStreamIfAbsent = async (input) => {
+    storage.putObjectStream = async (input) => {
       expect(input.key).toBe(key);
       expect(input.byteSize).toBe(expected.bytes);
       expect(input.sha256).toBe(expected.sha256);
@@ -101,13 +107,12 @@ describe("workspace archive spool storage", () => {
       const digest = createHash("sha256");
       for await (const chunk of input.chunks) digest.update(chunk);
       expect(digest.digest("hex")).toBe(expected.sha256);
-      return true;
     };
     await uploadWorkspaceArchiveSpool(storage, key, source());
-    expect(ranges.length).toBe(0);
+    expect(ranges.length).toBe(3);
   });
 
-  test("verifies existing bytes, not forged SHA metadata", async () => {
+  test("always verifies successfully stored bytes, not forged SHA metadata", async () => {
     const { storage, ranges } = fixture();
     await uploadWorkspaceArchiveSpool(storage, key, source());
     expect(ranges.length).toBe(3);
@@ -116,6 +121,60 @@ describe("workspace archive spool storage", () => {
       "digest",
     );
   });
+
+  test("rejects a successful write that produces no object", async () => {
+    const { storage } = fixture();
+    storage.headObject = async () => null;
+    await expect(uploadWorkspaceArchiveSpool(storage, key, source())).rejects.toMatchObject({
+      code: "archive_base64_invalid",
+      retryable: false,
+    });
+  });
+
+  for (const stage of ["upload", "readback"] as const) {
+    test(`classifies ${stage} provider errors without full-body fallback`, async () => {
+      const { storage, ranges } = fixture();
+      const failure = new Error("synthetic provider error");
+      if (stage === "upload")
+        storage.putObjectStream = async () => {
+          throw failure;
+        };
+      else
+        storage.getObjectRange = async () => {
+          throw failure;
+        };
+      await expect(uploadWorkspaceArchiveSpool(storage, key, source())).rejects.toMatchObject({
+        code: "archive_hydration_failed",
+        retryable: true,
+        cause: failure,
+      });
+      expect(ranges).toEqual([]);
+    });
+  }
+
+  for (const after of ["missing", "replaced", "same"] as const) {
+    test(`rechecks HEAD after a null pinned range (${after})`, async () => {
+      const { storage, ranges } = fixture();
+      const head = storage.headObject!;
+      let heads = 0;
+      storage.headObject = async (objectKey) => {
+        const result = await head(objectKey);
+        if (++heads === 1) return result;
+        return after === "missing"
+          ? null
+          : after === "replaced"
+            ? { ...result, VersionToken: "v2" }
+            : result;
+      };
+      storage.getObjectRange = async () => null;
+      await expect(downloadWorkspaceArchiveSpool(storage, key, expected)).rejects.toMatchObject({
+        code: after === "missing" ? "archive_base64_invalid" : "archive_hydration_failed",
+        retryable: after !== "missing",
+      });
+      expect(heads).toBe(2);
+      expect(ranges).toEqual([]);
+    });
+  }
 
   test("rejects a same-length disk spool alteration before fresh upload", async () => {
     const original = new Uint8Array([1, 2, 3]);
@@ -126,10 +185,9 @@ describe("workspace archive spool storage", () => {
     });
     try {
       await writeFile(spool.path, new Uint8Array([3, 2, 1]));
-      storage.putObjectStreamIfAbsent = async ({ chunks }) => {
+      storage.putObjectStream = async ({ chunks }) => {
         for await (const _ of chunks) {
         }
-        return true;
       };
       await expect(uploadWorkspaceArchiveSpool(storage, key, spool)).rejects.toMatchObject({
         code: "archive_hash_mismatch",
@@ -138,6 +196,29 @@ describe("workspace archive spool storage", () => {
     } finally {
       await spool.dispose();
     }
+  });
+
+  test("preserves producer integrity errors when a provider reports only its consequent abort", async () => {
+    const { storage } = fixture();
+    const spool = source();
+    spool.open = async function* () {
+      yield new Uint8Array(payload.length);
+    };
+    let producerFailure: unknown;
+    storage.putObjectStream = async ({ chunks }) => {
+      try {
+        for await (const _ of chunks) {
+        }
+      } catch (error) {
+        producerFailure = error;
+        throw new DOMException("request aborted", "AbortError");
+      }
+    };
+    const failure = await uploadWorkspaceArchiveSpool(storage, key, spool).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBe(producerFailure);
+    expect(failure).toMatchObject({ code: "archive_hash_mismatch", retryable: false });
   });
 
   for (const consumption of ["none", "partial", "swallowed-mismatch", "short", "long"] as const) {
@@ -155,13 +236,13 @@ describe("workspace archive spool storage", () => {
           );
         };
       }
-      storage.putObjectStreamIfAbsent = async ({ chunks }) => {
-        if (consumption === "none") return true;
+      storage.putObjectStream = async ({ chunks }) => {
+        if (consumption === "none") return;
         if (consumption === "partial") {
           for await (const _ of chunks) {
             break;
           }
-          return true;
+          return;
         }
         try {
           for await (const _ of chunks) {
@@ -169,7 +250,6 @@ describe("workspace archive spool storage", () => {
         } catch {
           /* Simulate a provider swallowing producer failure. */
         }
-        return true;
       };
       await expect(uploadWorkspaceArchiveSpool(storage, key, spool)).rejects.toBeInstanceOf(
         WorkspaceArchiveStorageError,
@@ -236,6 +316,7 @@ describe("workspace archive spool storage", () => {
       storage.headObject = async () => {
         const value = await head(key);
         if (failure === "missing") return null;
+        if (failure === "range-missing" && ++heads > 1) return null;
         if (failure === "size") return { ...value, ContentLength: 1 };
         if (failure === "token") return { ...value, VersionToken: "" };
         if (failure === "final-drift" && ++heads > 1) return { ...value, VersionToken: "v2" };
@@ -287,7 +368,7 @@ describe("workspace archive spool storage", () => {
   });
 
   test("fails explicitly without bounded primitives, before uploading", async () => {
-    for (const primitive of ["headObject", "getObjectRange", "putObjectStreamIfAbsent"] as const) {
+    for (const primitive of ["headObject", "getObjectRange", "putObjectStream"] as const) {
       const { storage } = fixture();
       delete storage[primitive];
       await expect(uploadWorkspaceArchiveSpool(storage, key, source())).rejects.toThrow(
@@ -297,7 +378,7 @@ describe("workspace archive spool storage", () => {
         code: "archive_hydration_failed",
         retryable: false,
       });
-      if (primitive !== "putObjectStreamIfAbsent") {
+      if (primitive !== "putObjectStream") {
         await expect(downloadWorkspaceArchiveSpool(storage, key, expected)).rejects.toThrow(
           "unsupported",
         );
