@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 4.3.1
+
+### Patch Changes
+
+- 6a60a58: Canonicalize typed Skill review cards using host-owned choices. Allow explicit
+  authorized Save/Don't save responses to existing exact-bound cards with the
+  legacy Other flag and null option descriptions, without rewriting cards,
+  manufacturing consent, or weakening human, tenant, turn, or revision fences.
+  Apply rolling migration 0458; pre-0435 runtimes remain unsupported.
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+  - @opengeni/codemode@0.5.5
+  - @opengeni/config@1.1.1
+
 ## 4.3.0
 
 ### Minor Changes
