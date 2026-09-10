@@ -61,7 +61,7 @@ Cross-package invariants; focused docs own complete contracts and edge cases.
 
 Postgres commits authoritative state before live notification. NATS transports
 session-event fanout, invalidations, request/reply, and Connected Machine streams;
-it neither stores events nor proves a mutation committed.
+it neither owns durable truth nor proves a mutation committed.
 
 Session events have a monotonic per-session sequence. The narrow
 `session_event_cursors` row transactionally verifies every append and is the
