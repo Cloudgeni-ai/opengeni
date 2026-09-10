@@ -805,8 +805,31 @@ describe("first-party MCP tool visibility policy", () => {
         },
       },
     ) as ApiRouteDeps["db"];
-    const bounded = await callRegisteredTool(server, "session_create", { initialMessage: "work" });
+    const internal = await callRegisteredTool(server, "session_create", { initialMessage: "work" });
+    expect(internal).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_create_failed",
+          message: "OpenGeni could not complete the request.",
+        },
+      },
+    });
+    expect(JSON.stringify(internal)).not.toContain("private-");
+
+    const bounded = await callRegisteredTool(server, "session_create", {
+      initialMessage: "work",
+      goal: {
+        text: "Run checks",
+        rootConstraints: Array.from({ length: 20 }, () => ({
+          "private-record-key": "private-value",
+        })),
+      },
+    });
     expect(bounded.structuredContent?.error?.code).toBe("session_create_invalid_request");
+    expect(bounded.structuredContent?.error?.message).toContain(
+      "goal.rootConstraints expected string",
+    );
     expect(bounded.structuredContent?.error?.message).toContain(
       "additional fields failed validation",
     );
@@ -814,6 +837,25 @@ describe("first-party MCP tool visibility policy", () => {
     expect(
       new TextEncoder().encode(bounded.structuredContent?.error?.message).byteLength,
     ).toBeLessThanOrEqual(1024);
+
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          throw new HTTPException(403, { message: "Attempt is not authorized" });
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const agentServer = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create"], ["session_create"]),
+    );
+    const unauthorized = await callRegisteredTool(agentServer, "session_create", {
+      initialMessage: "work",
+      goal: { objective: "private-objective" },
+    });
+    expect(unauthorized.structuredContent?.error?.code).toBe("session_create_forbidden");
+    expect(JSON.stringify(unauthorized)).not.toContain("private-");
   });
 
   test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {

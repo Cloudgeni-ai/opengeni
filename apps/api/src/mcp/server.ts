@@ -378,39 +378,46 @@ function orchestrationFailureCode(tool: OrchestrationToolName, error: HTTPExcept
   return `${tool}_${suffix}`.slice(0, ORCHESTRATION_FAILURE_CODE_MAX_LENGTH);
 }
 
+function sessionCreateValidationFailureResult(error: z4.ZodError) {
+  // Only call with issues from the raw request preflight, never downstream errors.
+  // Paths may contain caller-controlled record keys, and custom issue messages
+  // may contain values. Only publish canonical field names and fixed type labels.
+  const details = error.issues.slice(0, 5).map((issue) => {
+    const [field, goalField] = issue.path;
+    let path =
+      typeof field === "string" && Object.hasOwn(CreateSessionRequest.out.shape, field)
+        ? field
+        : "request";
+    if (
+      field === "goal" &&
+      typeof goalField === "string" &&
+      Object.hasOwn(GoalSpec.shape, goalField)
+    ) {
+      path += `.${goalField}`;
+    }
+    const expected =
+      issue.code === "invalid_type" &&
+      ["string", "number", "boolean", "object", "array", "int"].includes(issue.expected)
+        ? `expected ${issue.expected === "int" ? "integer" : issue.expected}`
+        : "failed schema validation";
+    return `${path} ${expected}`;
+  });
+  const envelope = {
+    error: {
+      code: "session_create_invalid_request",
+      message: boundedOrchestrationFailureMessage(
+        `Invalid session create request: ${details.join("; ") || "request failed schema validation"}${error.issues.length > 5 ? "; additional fields failed validation" : ""}.`,
+      ),
+    },
+  };
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    structuredContent: envelope,
+    isError: true as const,
+  };
+}
+
 function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
-  if (tool === "session_create" && error instanceof z4.ZodError) {
-    // Paths may contain caller-controlled record keys, and custom issue messages
-    // may contain values. Only publish canonical field names and fixed type labels.
-    const details = error.issues.slice(0, 5).map((issue) => {
-      const [field, goalField] = issue.path;
-      let path =
-        typeof field === "string" && Object.hasOwn(CreateSessionRequest.out.shape, field)
-          ? field
-          : "request";
-      if (
-        field === "goal" &&
-        typeof goalField === "string" &&
-        Object.hasOwn(GoalSpec.shape, goalField)
-      ) {
-        path += `.${goalField}`;
-      }
-      const expected =
-        issue.code === "invalid_type" &&
-        ["string", "number", "boolean", "object", "array", "int"].includes(issue.expected)
-          ? `expected ${issue.expected === "int" ? "integer" : issue.expected}`
-          : "failed schema validation";
-      return `${path} ${expected}`;
-    });
-    return {
-      error: {
-        code: "session_create_invalid_request",
-        message: boundedOrchestrationFailureMessage(
-          `Invalid session create request: ${details.join("; ") || "request failed schema validation"}${error.issues.length > 5 ? "; additional fields failed validation" : ""}.`,
-        ),
-      },
-    };
-  }
   if (error instanceof SessionSpawnDeniedError) {
     const denial = sessionSpawnDenialEnvelope(error);
     return {
@@ -5245,22 +5252,28 @@ function registerWorkspaceOrchestrationTools(
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
           const { machineTarget, title, projectId, ...request } = args;
+          const rawRequest = {
+            ...request,
+            ...(projectId !== undefined ? { channelId: projectId } : {}),
+            ...(machineTarget
+              ? {
+                  targetSandboxId: machineTarget.targetSandboxId,
+                  ...(machineTarget.workingDir !== undefined
+                    ? { workingDir: machineTarget.workingDir }
+                    : {}),
+                }
+              : {}),
+          };
+          // Keep authorization above validation and let core parse the original
+          // request. Only this preflight's failures are attributable to input;
+          // arbitrary downstream schema failures retain the private fallback.
+          const validation = CreateSessionRequest.safeParse(rawRequest);
+          if (!validation.success) return sessionCreateValidationFailureResult(validation.error);
           const result = await createSessionForRequestWithOutcome(
             deps,
             grant,
             grant.workspaceId,
-            {
-              ...request,
-              ...(projectId !== undefined ? { channelId: projectId } : {}),
-              ...(machineTarget
-                ? {
-                    targetSandboxId: machineTarget.targetSandboxId,
-                    ...(machineTarget.workingDir !== undefined
-                      ? { workingDir: machineTarget.workingDir }
-                      : {}),
-                  }
-                : {}),
-            },
+            rawRequest,
             undefined,
             title === undefined ? {} : { automaticTitleCandidate: title },
           );
