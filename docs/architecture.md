@@ -1643,17 +1643,12 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 
 ### In-conversation connection setup
 
-The stock web session renders catalog recommendations and exact server/Connection
-recovery notices through `SessionCapabilityCard`. Its optional
-`MessageTimeline.renderAuthNeeded` slot leaves host-owned authorization with the
-embedding host. Forms resolve live catalog configuration, share
-`performCapabilityAction` with the Capabilities page, and send credentials only
-to the existing human-authorized Connection API. OAuth returns to the same
-conversation; connection completion never replays an earlier tool call.
-`attachSessionCapability` adds the reviewed tools while preserving the session's
-existing selection and tool-policy CAS. Catalog library Skill installs retain
-their existing workspace scope and exact reviewed version/hash; the card does
-not offer unsupported conversation/personal installation scopes.
-
-
-Personal MCP connections connected from conversation cards are explicitly admitted through an owner-issued, exact-session user-resource grant. Shared conversations require acknowledgement that results are shared. The web composer restores only active grants matching the session visibility and authority epoch and includes their opaque connection-authority selections in new messages; saving credentials or enabling tools alone grants no personal-account use.
+The stock session's `SessionCapabilityCard` uses `MessageTimeline.renderAuthNeeded`;
+embedding hosts retain their authorization. Live catalog forms share
+`performCapabilityAction` with Capabilities and send credentials only to the
+human-authorized Connection API. OAuth returns here without replaying tools.
+`attachSessionCapability` preserves existing tool selection through CAS.
+Library Skills retain workspace scope and reviewed version/hash.
+Personal MCP use requires an owner-issued exact-session grant, with shared-results
+acknowledgement for shared conversations. The composer restores only active grants
+matching visibility and authority epoch; credentials alone grant no use.
