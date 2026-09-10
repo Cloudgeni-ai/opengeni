@@ -4,12 +4,7 @@ import { readdir } from "node:fs/promises";
 import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
 import postgres from "postgres";
 
-import {
-  bootstrapWorkspace,
-  createDb,
-  listInstalledPortableSkills,
-  listInstalledSkills,
-} from "../src";
+import { createDb, listInstalledPortableSkills, listInstalledSkills } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -29,17 +24,14 @@ describe("Skill and Integration authority migration replay", () => {
     }
     let app = createDb(shared.appUrl);
     try {
-      const grant = (
-        await bootstrapWorkspace(app.db, {
-          accountExternalSource: "test",
-          accountExternalId: `capability-authority-account-${crypto.randomUUID()}`,
-          accountName: "Capability authority account",
-          workspaceExternalSource: "test",
-          workspaceExternalId: `capability-authority-workspace-${crypto.randomUUID()}`,
-          workspaceName: "Capability authority workspace",
-          subjectId: "user:capability-authority",
-        })
-      ).workspaceGrants[0]!;
+      // Seed the historical schema directly: current bootstrapWorkspace uses
+      // organization-scoped external-ID uniqueness introduced after this checkpoint.
+      const [account] = await shared.admin<{ id: string }[]>`
+        insert into managed_accounts (name) values ('Capability authority account') returning id`;
+      const [workspace] = await shared.admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${account!.id}, 'Capability authority workspace') returning id`;
+      const grant = { accountId: account!.id, workspaceId: workspace!.id };
       await app.close();
 
       const entry = listSkillLibraryEntries().find((candidate) => candidate.id === "checkov")!;

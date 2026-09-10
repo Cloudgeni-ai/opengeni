@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
 
 import { request as apiRequest } from "@/api";
@@ -44,6 +45,14 @@ export function useAtlassianIntegration({
   replaceConnection: (connection: ConnectionMetadata) => void;
 }): IntegrationAdapter {
   const context = useAppContext();
+  const connectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const completeConnect = useCallback(() => {
+    setConnectRequest(null);
+    void refresh()
+      .then(() => setSourceDialogOpen(true))
+      .catch(() => toast.error("Connected, but account details could not be refreshed"));
+  }, [refresh]);
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const canWrite = hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
   const canManageWorkspace = hasWorkspacePermission(
@@ -94,24 +103,17 @@ export function useAtlassianIntegration({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
-  async function connect(reconnect = false) {
+  function connect(reconnect = false) {
     if (!canWrite || readOnly) return;
-    setBusy(true);
-    try {
-      const start = await apiRequest<{ authorizationUrl: string }>(
-        `/v1/workspaces/${workspaceId}/connections/atlassian/install`,
-        {
-          method: "POST",
-          body: JSON.stringify(reconnect && connection ? { connectionId: connection.id } : {}),
-        },
-      );
-      window.location.assign(start.authorizationUrl);
-    } catch (error) {
-      toast.error("Atlassian connection could not start", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setBusy(false);
-    }
+    setConnectRequest({
+      scope: { workspaceId, transport: connectTransport },
+      providerId: "atlassian",
+      displayName: "Atlassian",
+      ownership: "personal",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+      ...(reconnect && connection ? { reconnectAccountId: connection.id } : {}),
+    });
   }
 
   async function disconnect(): Promise<boolean> {
@@ -276,6 +278,15 @@ export function useAtlassianIntegration({
 
   const dialogs = canRead ? (
     <>
+      {connectRequest && (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={completeConnect}
+        />
+      )}
       <ConfirmDialog
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}

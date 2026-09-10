@@ -17,6 +17,9 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
   markCodemodeOperationExecutionStarted,
+  mutateSessionControlInTransaction,
+  withWorkspaceSessionActivityRls,
+  type SessionActivityDatabase,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
 } from "@opengeni/db";
@@ -25,7 +28,9 @@ import {
   MemoryEventBus,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
+  testSettings,
 } from "@opengeni/testing";
+import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 import {
   CodemodeAttemptDispatcher,
   codemodeToolCallCreatedClientEventId,
@@ -121,7 +126,7 @@ async function fixture(
     ],
   });
   await persistAttemptToolCatalog(client.db, environment.catalog);
-  return { scope, environment };
+  return { scope, environment, turn: claimed.turn };
 }
 
 async function waitForTerminal(
@@ -162,6 +167,111 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("host credentials use the live canonical attempt during Codemode dispatch", async () => {
+    if (!available) throw new Error("This host execution test requires PostgreSQL");
+    let resolveHost!: ReturnType<typeof connectionTokenResolverForTurn>;
+    let hostCalls = 0;
+    let effects = 0;
+    let authorizePhysical: (() => Promise<boolean>) | undefined;
+    const { scope, environment, turn } = await fixture(async () => {
+      const resolution = await resolveHost({
+        workspaceId: scope.workspaceId,
+        serverId: "host-tools",
+        destinationUrl: "https://tools.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-id",
+          providerDomain: "tools.example.test",
+        },
+      });
+      expect(resolution.status).toBe("ok");
+      if (resolution.status !== "ok") throw new Error("Host credentials unavailable");
+      authorizePhysical = resolution.authorizeProviderRequest;
+      expect(await resolution.authorizeProviderRequest?.()).toBe(true);
+      effects++;
+      return "host-authorized";
+    });
+    resolveHost = connectionTokenResolverForTurn({
+      ...scope,
+      db: client.db,
+      settings: testSettings(),
+      rootSessionId: scope.sessionId,
+      turn,
+      connectionCredentials: {
+        mcpAuthoritySource: "host",
+        mcpCredentials: async (request) => {
+          hostCalls++;
+          expect(request).toMatchObject({
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            turnId: scope.turnId,
+            attemptId: scope.attemptId,
+            executionGeneration: scope.executionGeneration,
+          });
+          return {
+            status: "ok",
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            providerDomain: request.connectionRef.providerDomain,
+            connectionId: request.connectionRef.connectionId,
+            headers: { Authorization: "Bearer synthetic" },
+          };
+        },
+      },
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      await bus.request(
+        codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+        encodeCodemodeDispatchRequest({
+          version: 1,
+          operationId,
+          catalogDigest: environment.catalog.digest,
+        }),
+        { timeoutMs: 1_000 },
+      );
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "completed",
+        result: { content: [{ type: "text", text: "host-authorized" }] },
+      });
+      expect(hostCalls).toBe(1);
+      expect(effects).toBe(1);
+      await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as SessionActivityDatabase, {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            actor: { type: "service", subjectId: "host-liveness-fixture" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+            reason: "verify resolved host credentials cannot outlive an interruption",
+          }),
+        ),
+      );
+      expect(await authorizePhysical?.()).toBe(false);
+      expect(hostCalls).toBe(1);
+      expect(effects).toBe(1);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
   test("executes one durable call through the exact attempt environment", async () => {
     if (!available) return;
     let executions = 0;

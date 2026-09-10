@@ -231,7 +231,7 @@ export async function createCatalogItem(input: {
   });
 }
 
-export async function enableCapability(input: {
+type EnableCapabilityInput = {
   db: Database;
   grant: AccessGrant;
   accountId: string;
@@ -240,13 +240,28 @@ export async function enableCapability(input: {
   capabilityId: string;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
-}): Promise<CapabilityInstallation> {
+};
+
+export async function enableCapability(
+  input: EnableCapabilityInput,
+): Promise<CapabilityInstallation> {
+  const prepared = await prepareCapabilityEnable(input);
+  return prepared.commit(input.db);
+}
+
+/** Probe outside a durable Connect commit; persist the exact prepared settings
+ * inside the caller's authorized receipt transaction. Native enable uses this too. */
+export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   const item = await requireCatalogItem(
     input.db,
     input.workspaceId,
     input.settings,
     input.capabilityId,
   );
+  if (isReservedCodexAppsCatalogItem(item))
+    throw new HTTPException(422, {
+      message: "Codex Apps use the dedicated account designation flow",
+    });
   if (item.kind === "skill") {
     throw new HTTPException(409, {
       message: "Install Skills through the Skill library or source import flow",
@@ -303,14 +318,15 @@ export async function enableCapability(input: {
       );
     }
   }
-  return await enableCapabilityInstallation(input.db, {
+  const installation = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     capabilityId: item.id,
     kind: item.kind,
     config: installationConfig,
     metadata: installationMetadata,
-  });
+  };
+  return { commit: (db: Database) => enableCapabilityInstallation(db, installation) };
 }
 
 /**

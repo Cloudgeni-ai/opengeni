@@ -1646,15 +1646,16 @@ export function RootRouteComponent() {
   async function beginPersonalGitHubOAuth(workspaceId: string, reconnect: boolean): Promise<void> {
     const connection = personalGitHubStatus?.connection;
     try {
-      const result =
-        reconnect && connection
-          ? await client.reconnectPersonalGitHub(workspaceId, connection.id, {
-              returnPath: `/workspaces/${workspaceId}/capabilities`,
-            })
-          : await client.startPersonalGitHubOAuth(workspaceId, {
-              returnPath: `/workspaces/${workspaceId}/capabilities`,
-            });
-      window.location.assign(result.authorizationUrl);
+      const attempt = await client.beginConnect(workspaceId, {
+        providerId: "github-personal",
+        ownership: "personal",
+        returnUrl: window.location.href,
+        idempotencyKey: crypto.randomUUID(),
+        ...(reconnect && connection ? { reconnectAccountId: connection.id } : {}),
+      });
+      if (attempt.nextAction.type !== "authorize")
+        throw new Error("GitHub did not return an authorization link");
+      window.location.assign(attempt.nextAction.url);
     } catch (error) {
       toast.error("Couldn't open GitHub sign-in", {
         description: error instanceof Error ? error.message : String(error),

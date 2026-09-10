@@ -2302,6 +2302,7 @@ function approvalFixture(
     reviewedBaseSha?: string;
     discontinuousCompare?: boolean;
     mergeEvent?: Record<string, unknown> | null;
+    mergeEventTimestamp?: string;
     movingMainOverlap?: boolean;
     movingMainSourceExtra?: boolean;
     movingMainTreeTruncated?: "parent" | "source";
@@ -2382,7 +2383,7 @@ function approvalFixture(
             actor: merger,
             commit_id: mergeSha,
             commit_url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/commits/${mergeSha}`,
-            created_at: "2026-07-23T12:00:00Z",
+            created_at: options.mergeEventTimestamp ?? "2026-07-23T12:00:00Z",
           },
         ];
   let mainReads = 0;
@@ -3267,6 +3268,22 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("is not merged");
   });
 
+  test("accepts independently recorded merge event time but rejects malformed timestamps", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeEventTimestamp: "2026-07-23T12:00:01Z" }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeEventTimestamp: "not-a-timestamp" }).fetchImpl,
+      }),
+    ).rejects.toThrow("provider merge event timestamp");
+  });
+
   test("rejects an associated direct fast-forward with matching provider topology", async () => {
     await expect(
       verifyApprovedMerge({
@@ -4004,7 +4021,7 @@ describe("workflow contracts", () => {
     expect(shards.if).not.toContain("github.event_name == 'pull_request'");
     expect(shards.if).toContain("needs.plan.outputs.unit_count != '0'");
     expect(shards.strategy).toEqual({
-      "fail-fast": true,
+      "fail-fast": false,
       matrix: { include: "${{ fromJSON(needs.plan.outputs.unit_matrix) }}" },
     });
     const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
@@ -4109,7 +4126,7 @@ describe("workflow contracts", () => {
         "Browser account session-set acceptance",
         {
           lane: "accounts",
-          run: "bun test --max-concurrency=1 --timeout 180000 \\\n  ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \\\n  ./apps/api/test/managed-auth-session-sets.integration.test.ts\nbun scripts/run-browser-e2e.ts \\\n  ./test/e2e/browser-accounts-acceptance.e2e.ts\n",
+          run: 'bun test --max-concurrency=1 --timeout 180000 \\\n  ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \\\n  ./apps/api/test/managed-auth-session-sets.integration.test.ts\nif [ "$OPENGENI_ACCOUNT_BROWSER_ENGINE" = "chromium" ]; then\n  bun scripts/run-browser-e2e.ts ./test/e2e/browser-account-request-observation.browser.e2e.ts\nfi\nbun scripts/run-browser-e2e.ts \\\n  ./test/e2e/browser-accounts-acceptance.e2e.ts\n',
         },
       ],
       [
@@ -4314,7 +4331,7 @@ describe("workflow contracts", () => {
         ],
       },
       "Upload responsive knowledge-surface evidence": {
-        if: "${{ always() && matrix.lane == 'knowledge' }}",
+        if: "${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}",
         name: "responsive-knowledge-surface-evidence",
         path: [
           "/tmp/knowledge-surfaces-320-light-memory.png",

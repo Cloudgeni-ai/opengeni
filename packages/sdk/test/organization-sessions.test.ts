@@ -65,7 +65,7 @@ describe("OpenGeniClient organization sessions", () => {
     const result = await client.listOrganizationSessions("org-1", {
       limit: 25,
       cursor: "cur",
-      endUser: { source: "acme", id: "u 42" },
+      scopeSubjectId: "user:u-42",
       status: "idle",
     });
     expect(result).toEqual(page);
@@ -74,8 +74,7 @@ describe("OpenGeniClient organization sessions", () => {
     expect(Object.fromEntries(url.searchParams)).toEqual({
       limit: "25",
       cursor: "cur",
-      endUserSource: "acme",
-      endUserId: "u 42",
+      scopeSubjectId: "user:u-42",
       status: "idle",
     });
 

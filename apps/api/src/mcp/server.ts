@@ -3613,7 +3613,7 @@ function registerMemoryTools(
   // session's narrowest layer. A null scope is the pre-0426 workspace path.
   const agentScope: MemoryAgentScope = sessionMemory ?? {
     mode: "workspace",
-    endUserSubjectId: null,
+    userSubjectId: null,
     rootSessionId: null,
   };
   const writeScope = memoryWriteScopeForAgentScope(agentScope);
@@ -5157,12 +5157,12 @@ function registerWorkspaceOrchestrationTools(
           ),
         // The child's agent-access scope and end-user label are never model
         // choices: it inherits this session's exactly. Only the Memory
-        // selector may be narrowed here (workspace > user > session > off).
+        // selector may be narrowed here (workspace > user > off).
         memoryScope: z4
-          .enum(["workspace", "user", "session", "off"])
+          .enum(["workspace", "user", "off"])
           .optional()
           .describe(
-            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > session > off); off gives the child no Memory tools.",
+            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
           ),
         // Omission is the ordinary safe sharing path. Literal "shared" remains
         // available to advanced REST/SDK callers but is intentionally absent

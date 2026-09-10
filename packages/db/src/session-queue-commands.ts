@@ -1767,6 +1767,13 @@ export async function submitHumanPromptInTransaction(
     /** Trusted database-only admission seam. It runs only after a completed
      * operation replay has been ruled out; throwing rolls the prompt back. */
     beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    /** Backend-only authority capture, atomic with the newly accepted turn. */
+    captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
+    selectedHostMcpDelegations?: Array<{
+      serverId: string;
+      delegationId: string;
+      generation: number;
+    }>;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -1823,6 +1830,9 @@ export async function submitHumanPromptInTransaction(
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
+    ...(input.selectedHostMcpDelegations?.length
+      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
+      : {}),
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -2194,6 +2204,7 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  await input.captureTurnAuthority?.(db, turn.id);
   let committedTurn = turn;
   const personalResourceExpectedAuthorityEpoch =
     input.personalResourceAttachment?.expectedAuthorityEpoch;

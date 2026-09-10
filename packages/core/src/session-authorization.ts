@@ -8,7 +8,7 @@ import {
   type SessionAuthorizationOperation,
   type SessionAuthorizationSurface,
   type SessionAuthorizationTarget,
-  type SessionEndUser,
+  type SessionScopeSubjectId,
 } from "@opengeni/contracts";
 import {
   getSessionAuthorityProjection,
@@ -54,7 +54,7 @@ export type ResolvedSessionAuthorization = {
 /** The frozen agent-access facts of one session, as the pairwise rule sees them. */
 export type SessionAgentAccessFacts = {
   agentAccess: SessionAgentAccess;
-  endUser: SessionEndUser | null;
+  scopeSubjectId: SessionScopeSubjectId | null;
 };
 
 type ResolvedSessionAuthorizationActor = {
@@ -64,25 +64,27 @@ type ResolvedSessionAuthorizationActor = {
   callerAccess: SessionAgentAccessFacts | null;
 };
 
-function sameEndUser(left: SessionEndUser | null, right: SessionEndUser | null): boolean {
-  return left !== null && right !== null && left.source === right.source && left.id === right.id;
+function sameScopeSubject(
+  left: SessionScopeSubjectId | null,
+  right: SessionScopeSubjectId | null,
+): boolean {
+  return left !== null && right !== null && left === right;
 }
 
 /**
  * The agent-to-agent reach rule (migration 0427) for one caller/target pair
  * that live in DIFFERENT root trees. A caller always keeps its own tree, so
- * this is never consulted for same-root access. The most restrictive side
- * wins: a `session` side denies everything; a `user` side requires both
- * sessions to carry the same non-null end-user label; two `workspace` sides
- * are today's behaviour. Humans and API keys never pass through here.
+ * this is never consulted for same-root access. Only the caller's task scope
+ * restricts outgoing reach. The target's visibility and ownership remain
+ * independently enforced; its agent scope does not block incoming access.
  */
 export function agentAccessPermitsCrossTreeAccess(
   caller: SessionAgentAccessFacts,
   target: SessionAgentAccessFacts,
 ): boolean {
-  if (caller.agentAccess === "session" || target.agentAccess === "session") return false;
-  if (caller.agentAccess === "user" || target.agentAccess === "user") {
-    return sameEndUser(caller.endUser, target.endUser);
+  if (caller.agentAccess === "session") return false;
+  if (caller.agentAccess === "user") {
+    return sameScopeSubject(caller.scopeSubjectId, target.scopeSubjectId);
   }
   return true;
 }
@@ -262,16 +264,16 @@ export async function requireSessionAuthorization(
     if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
   }
   // Agent-access scope (migration 0427): an attempt always keeps its own root
-  // tree; across trees the most restrictive of the caller's and the target's
-  // declared reach wins. Both sides are read from durable session rows, never
-  // from the request, and an embedding-host port cannot widen this.
+  // tree; across trees only its own outgoing task scope restricts reach.
+  // User matching reads canonical target identity, not target task scope.
+  // Private ownership above and the host authorization below still apply.
   if (actor.kind === "agent_attempt" && target.rootSessionId !== actor.callerRootSessionId) {
     const callerAccess = resolvedActor.callerAccess;
     if (
       !callerAccess ||
       !agentAccessPermitsCrossTreeAccess(callerAccess, {
         agentAccess: authority.agentAccess,
-        endUser: authority.endUser,
+        scopeSubjectId: authority.scopeSubjectId,
       })
     ) {
       throw new SessionAuthorizationDeniedError("forbidden");
@@ -336,7 +338,7 @@ export async function requireSessionAuthorizationListScope(
       ? {
           callerRootSessionId: actor.callerRootSessionId,
           agentAccess: callerAccess.agentAccess,
-          endUser: callerAccess.endUser,
+          scopeSubjectId: callerAccess.scopeSubjectId,
         }
       : null;
   if (!port) return viewer ? agentAccessListScopeForViewer(viewer) : null;
@@ -442,6 +444,9 @@ async function resolveSessionAuthorizationActor(
         (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
     }),
     callerParentSessionId: callerSession.parentSessionId,
-    callerAccess: { agentAccess: callerSession.agentAccess, endUser: callerSession.endUser },
+    callerAccess: {
+      agentAccess: callerSession.agentAccess,
+      scopeSubjectId: callerSession.scopeSubjectId,
+    },
   };
 }

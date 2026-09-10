@@ -13,9 +13,10 @@ export type ChatAgentAccess = "session" | "user" | "workspace";
 
 /**
  * Memory scope for the session: which memories the agent reads and where it
- * saves. `false` disables Memory tools. Omitted follows `agentAccess`.
+ * saves. `false` disables Memory tools. Omitted follows user/workspace agent
+ * reach; session-only reach defaults to false. Task notes cover task-local data.
  */
-export type ChatMemory = "session" | "user" | "workspace" | false;
+export type ChatMemory = "user" | "workspace" | false;
 
 export type OpenGeniOptions = {
   /** Organization API key. Keep it on the server. */
@@ -39,10 +40,13 @@ export type ChatTarget =
   | { workspaceId: string; tenant?: undefined };
 
 export type ChatOptions = ChatTarget & {
-  /** Opaque end-user label inside the tenant. Required for `memory: "user"`. */
+  /** Host-authenticated external user; resolved through server-side asUser(). */
   user?: string | undefined;
   /** Stable conversation id; the session id is derived from it deterministically. */
   conversation: string;
+  /** Prefer the actual OpenGeni session ID for shared or existing conversations.
+   * The acting user is independent of the conversation's identity. */
+  sessionId?: string | undefined;
   /** Defaults to `"session"`: the agent sees only this conversation. */
   agentAccess?: ChatAgentAccess | undefined;
   memory?: ChatMemory | undefined;

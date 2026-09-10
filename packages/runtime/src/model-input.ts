@@ -49,7 +49,7 @@ export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) 
   return projected ? { ...modelData, input: projected } : modelData;
 };
 
-function stripProviderItemId(item: AgentInputItem): AgentInputItem {
+export function stripProviderItemId(item: AgentInputItem): AgentInputItem {
   if (!item || typeof item !== "object" || !("id" in item)) return item;
   const { id: _id, ...rest } = item as Record<string, unknown>;
   return rest as AgentInputItem;

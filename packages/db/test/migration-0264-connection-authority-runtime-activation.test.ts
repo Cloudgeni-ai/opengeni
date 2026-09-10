@@ -15,6 +15,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import { migrate } from "../src/migrate";
+import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationUrl = new URL(
   "../drizzle/0264_connection_authority_runtime_activation.sql",
@@ -112,12 +113,14 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${scheduledProducerMaterializationMigrationName}),
           (${scheduledInheritedToolAdmissionMigrationName})
       `;
+      await sql`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(blank.databaseUrl);
       // Current session adapters select the complete sessions row while this
       // fixture intentionally withholds 0402. Supply only its later columns
       // during fixture setup, then remove them before the ordered replay.
       await sql`
         alter table sessions
+        add column scope_subject_id text,
         add column input_wait_turn_id uuid,
         add column input_wait_until timestamptz,
         add column input_wait_reason text,
@@ -216,7 +219,7 @@ describe("migration 0264 connection authority runtime activation", () => {
       `;
       await sql`
         delete from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
@@ -272,6 +275,7 @@ describe("migration 0264 connection authority runtime activation", () => {
 
       await sql`
         alter table sessions
+        drop column scope_subject_id,
         drop column input_wait_turn_id,
         drop column input_wait_until,
         drop column input_wait_reason,
@@ -280,7 +284,7 @@ describe("migration 0264 connection authority runtime activation", () => {
       await migrate(blank.databaseUrl);
       const receipts = await sql<Array<{ name: string }>>`
         select name from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${scheduledConnectionAuthorityMigrationName},
           ${organizationMembershipLockOrderMigrationName},
@@ -315,6 +319,7 @@ describe("migration 0264 connection authority runtime activation", () => {
         scheduledSessionTargetIndexMigrationName,
         scheduledProducerMaterializationMigrationName,
         scheduledInheritedToolAdmissionMigrationName,
+        ...embeddingMigrationTail,
       ]);
     } finally {
       await sql.end({ timeout: 1 });

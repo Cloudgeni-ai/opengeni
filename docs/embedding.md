@@ -13,6 +13,28 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+### Skill reading in direct runtime hosts
+
+For direct `buildOpenGeniAgent` use, pass `skillActivations` to provide immutable
+Skill files. The runtime derives a bounded descriptor catalog and an eager
+in-memory `skill_read` from those same files, independently of compute backend.
+The reader supports default `SKILL.md`, explicit multiple `paths`, and
+`listFiles: true` inventory. It does not start a sandbox or install a Skill.
+
+Alternatively, a host that owns its catalog and reader supplies `skillCatalog`
+and its authorized `skill_read` through the tool gateway, as the stock worker
+does. An explicit catalog, including `[]`, prevents implicit runtime bundles or
+a duplicate reader. Do not combine that host-owned mode with `skillActivations`.
+The descriptor layer is rendered when the agent is constructed, not appended as
+a history message or rewritten by lazy tool discovery. See
+[turn-attempt catalog timing](run-lifecycle.md).
+
+The stock worker also supplies lazy management and filesystem checkout tools;
+direct runtime construction alone does not provision those workspace services.
+Repository Skill discovery remains a separate index of files already on disk.
+
+### Product UI
+
 **Host-rendered product UI.** A host that keeps its own visual shell can consume
 `@opengeni/react/session`. The subpath exposes the session event, composer,
 queue and control hooks plus pure timeline projection, without importing the

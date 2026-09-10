@@ -35,6 +35,7 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -408,6 +409,10 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     (pathname === "/v1/auth/get-session" ||
       pathname === "/v1/auth/session-set" ||
       pathname === "/v1/workspaces" ||
+      (pathname === "/v1/billing" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+          requestUrl.searchParams.get("accountId") ?? "",
+        )) ||
       pathname.startsWith("/v1/workspaces/"));
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
@@ -2852,6 +2857,26 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const billingRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
+    };
+    expect(requestFailureProblem(billingRead)).toBeNull();
+    expect(requestFailureProblem({ ...billingRead, method: "POST" })).toContain("POST");
+    expect(requestFailureProblem({ ...billingRead, actorEpoch: null })).toContain("actor=missing");
+    expect(requestFailureProblem({ ...billingRead, url: `${publicOrigin}/v1/billing` })).toContain(
+      "/v1/billing",
+    );
+    expect(
+      requestFailureProblem({
+        ...billingRead,
+        dispatchPhase: "initialization",
+        responsePhase: "initialization",
+      }),
+    ).toContain("/v1/billing");
+    expect(requestFailureProblem({ ...billingRead, failure: "NS_ERROR_NET_RESET" })).toContain(
+      "/v1/billing",
+    );
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
@@ -4118,6 +4143,11 @@ describe("provider-neutral browser account acceptance", () => {
         await captureResponsiveEvidence(context, engine);
       }
 
+      const stopRaceAuthorityObservation = await Promise.all(
+        [page, secondTab].map((observedPage) =>
+          observeChromiumNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
+        ),
+      );
       setBrowserPhase(pageProblems, "cross-tab-select-race");
       setBrowserPhase(secondTabProblems, "cross-tab-select-race");
       projection = await sessionSet(page);
@@ -4207,6 +4237,7 @@ describe("provider-neutral browser account acceptance", () => {
           oldWorkspaceId: alpha.workspaceId,
         }),
       ]);
+      await Promise.all(stopRaceAuthorityObservation.map((stop) => stop()));
 
       setBrowserPhase(pageProblems, "late-old-epoch-setup-beta-to-alpha");
       setBrowserPhase(secondTabProblems, "late-old-epoch-setup-beta-to-alpha");
@@ -4299,6 +4330,11 @@ describe("provider-neutral browser account acceptance", () => {
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${alpha.workspaceId}/sessions/${beta.sessionId}`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          // As on the full-document slot-revocation transition below, development
+          // StrictMode can mount these bounded reads twice. Only these exact
+          // post-selection fail-closed endpoints get the second receipt budget.
+          `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[cross-slot-deep-link] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
         ],
         engine === "chromium" || engine === "webkit"
@@ -4327,6 +4363,21 @@ describe("provider-neutral browser account acceptance", () => {
         replacementStartedAt: slotRevocationReloadStartedAt,
         workspaceId: beta.workspaceId,
       });
+      // A replacement document and a later re-authentication are separate
+      // mounts. Consume the exact denied metadata reads from the reload now,
+      // rather than accumulating both transitions in one allowance window.
+      await expectAndConsumeConsoleErrors(
+        page,
+        pageProblems,
+        [
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+        ],
+        [],
+      );
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -4347,6 +4398,14 @@ describe("provider-neutral browser account acceptance", () => {
         [
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          // WebKit can restore page visibility after closing the popup as well
+          // as remounting the actor. useSessionCapabilities renegotiates once
+          // on that page-live transition. Budget only this exact denied read.
+          ...(engine === "webkit"
+            ? [
+                `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+              ]
+            : []),
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,

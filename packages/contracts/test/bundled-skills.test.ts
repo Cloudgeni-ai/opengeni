@@ -62,13 +62,12 @@ test("bundle selection remains independent of session access and sandbox groupin
     initialMessage: "Run with scoped access",
     bundledSkillIds: [],
     agentAccess: "user",
-    endUser: { source: "product", id: "reader" },
     memoryScope: "off",
     sandbox: { groupId },
   });
   expect(request.bundledSkillIds).toEqual([]);
   expect(request.agentAccess).toBe("user");
-  expect(request.endUser).toEqual({ source: "product", id: "reader" });
+  expect(request.endUser).toBeUndefined();
   expect(request.memoryScope).toBe("off");
   expect(request.sandbox).toEqual({ groupId });
 });

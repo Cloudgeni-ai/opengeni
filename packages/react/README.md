@@ -24,6 +24,48 @@ ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
+## Embedded connections and Sites
+
+Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
+`ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
+`@opengeni/connect` controller per authenticated actor/workspace and dispose it
+when that scope changes. The controller uses your authenticated backend proxy;
+never place an organization key in browser props. Import
+`@opengeni/react/connect.css` for opt-in, scoped styles without Tailwind.
+
+```tsx
+import { ConnectPanel } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
+
+<ConnectPanel
+  controller={controller}
+  returnUrl={hostSelectedReturnUrl}
+  onAuthorize={hostAuthorizeFromClick}
+/>;
+```
+
+The host owns synchronous popup/full-redirect navigation and pending-attempt
+recovery. Backend state, not a popup message or URL query, proves completion.
+Operation installation uses explicit selection; OAuth success alone is not
+installation. Account disconnect requires an observed version and confirmation,
+revokes local OpenGeni access only, and never silently retries an unknown outcome.
+Provider readiness is deployment-dependent; use the server catalog rather than
+assuming every OAuth application or operator-managed provider is configured.
+
+Optional `@opengeni/react/sites` exports `SiteList`, `SiteDetail`, and `SiteClient`.
+Pass the public SDK client through your host proxy. `onOpen` owns list
+navigation. Authoring buttons and prompts belong to the host and use the ordinary
+session SDK; they are not part of the Site component API. `SiteDetail` reuses `PublishedHtmlArtifactFrame`, accepts
+an optional authenticated/filtered tool bridge, and removes the frame after
+read-authority refresh failure. Loaded Sites revalidate every 15 seconds;
+downloaded HTML cannot be recalled and every tool call still needs live authority.
+
+`canPublish` is only a presentation hint. Version-checked rollback/archive/restore
+remain subject to backend `artifacts:publish` permission. Sites stay workspace
+shared, even if a source session is private. See
+[`examples/embedded-product`](../../examples/embedded-product/README.md) for the
+runnable loopback host reference. Native route reuse and full visual acceptance
+are not implied by these optional package surfaces.
 ## Conversation UI
 
 Use `SessionConversation` for an existing session, or compose `MessageTimeline`

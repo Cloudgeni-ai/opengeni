@@ -8,7 +8,6 @@ import {
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   ScheduledTaskRunAcceptedExecution,
   SessionAgentAccess,
-  SessionEndUser,
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
@@ -2578,26 +2577,29 @@ async function replayScheduledTaskDispatch(input: {
  * facts the creating session projection exposed at task creation are set;
  * a null (or no longer valid) key leaves the generated session on its own
  * default. The field names are the session access-scope contract
- * (`agentAccess`, `endUser`, `memoryScope`) consumed by session create.
+ * (`agentAccess`, `scopeSubjectId`, `memoryScope`) consumed by session create.
  */
 function scheduledCreatorSessionPolicyInput(
   policy: {
     agentAccess: string | null;
-    endUser: { source: string; id: string } | null;
+    scopeSubjectId: string | null;
     memoryScope: string | null;
   } | null,
 ): {
   agentAccess?: SessionAgentAccess;
-  endUser?: SessionEndUser;
+  scopeSubjectId?: string;
   memoryScope?: SessionMemoryScope;
 } {
   if (!policy) return {};
   const agentAccess = SessionAgentAccess.safeParse(policy.agentAccess);
-  const endUser = SessionEndUser.safeParse(policy.endUser);
   const memoryScope = SessionMemoryScope.safeParse(policy.memoryScope);
   return {
     ...(agentAccess.success ? { agentAccess: agentAccess.data } : {}),
-    ...(endUser.success ? { endUser: endUser.data } : {}),
+    // This is a trusted DB admission input, not the public create payload.
+    // Preserve the immutable creator policy through scheduled materialization.
+    ...(policy.scopeSubjectId && /^(?:user:|external_user:).+/u.test(policy.scopeSubjectId)
+      ? { scopeSubjectId: policy.scopeSubjectId }
+      : {}),
     ...(memoryScope.success ? { memoryScope: memoryScope.data } : {}),
   };
 }

@@ -208,8 +208,8 @@ core instructions, preference guidance, and filesystem loader instructions.
 Native tool-bound, repository, and session-selected Skills already exist. Their
 readability does not imply editability. Preserve these sources during rollout;
 prefer one reader where bytes are available without a sandbox, but do not promise
-remote reads of repository files that only exist on a machine. Define any
-temporary filesystem-loader exception explicitly before retiring `load_skill`.
+remote reads of repository files that only exist on a machine. Repository
+discovery indexes those existing files without copying them.
 
 ### Frontmatter is the metadata authority
 

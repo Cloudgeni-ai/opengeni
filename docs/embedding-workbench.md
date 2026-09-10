@@ -174,7 +174,7 @@ being observed.
 | `surfaces` | built-in surface allowlist: `"changes"`, `"files"`, `"terminal"`, `"browser"`, `"desktop"` (`"desktop"` is the stable id of the Computer surface). Omit for all five. |
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
-| `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
+| `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench chooses **Changes for reviewable durable capture changes, else Files**. A pending signed capture manifest leaves the initial choice unresolved; metadata arriving before the manifest must not be mistaken for an empty capture. Default selection never triggers live Git work. The choice latches before real content paints, so later edits never steal the current tab. |
 | `openFileRequest` | a host request `{ path, line?, requestId }` that opens Files, passes the exact path to the selected session target, reveals its lazy tree ancestors, selects and scrolls the file, and optionally focuses a 1-based line. Change `requestId` to repeat the same open. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 

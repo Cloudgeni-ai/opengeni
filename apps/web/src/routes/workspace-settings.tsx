@@ -4,6 +4,7 @@ import { WorkspaceRuntimeControl } from "@/components/workspace-runtime-control"
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
 import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
+import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -476,6 +477,7 @@ function OperationalWorkspaceSettingsRoute({
             </section>
 
             <WorkspaceLearningAdministration workspaceId={workspaceId} />
+            <NativeIdentityLinkAccounts workspaceId={workspaceId} />
           </>
         ) : null}
 

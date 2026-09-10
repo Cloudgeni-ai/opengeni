@@ -297,7 +297,7 @@ export function buildDocumentsMcpServer(
   if (memoryScope?.mode === "off") return server;
   const memoryReadScope: MemoryAgentScope = memoryScope ?? {
     mode: "workspace",
-    endUserSubjectId: null,
+    userSubjectId: null,
     rootSessionId: null,
   };
 

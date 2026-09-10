@@ -157,6 +157,8 @@ export type MessageTimelineProps = {
    * a Reconnect button without a handler to run it.
    */
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   /**
    * Decide which durable authentication notices this timeline presents.
    * Defaults to showing every notice. Embedded hosts can suppress notices for
@@ -407,6 +409,7 @@ export function MessageTimeline({
   onOpenSession,
   onMemoryClick,
   onReconnect,
+  renderAuthNeeded,
   shouldRenderAuthNeeded,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
@@ -910,6 +913,7 @@ export function MessageTimeline({
         onOpenSession,
         onMemoryClick,
         onReconnect,
+        renderAuthNeeded,
         resolveProviderLogo,
         toolRegistry,
         loadRetainedScreenshot,
@@ -925,6 +929,7 @@ export function MessageTimeline({
       onMemoryClick,
       onOpenSession,
       onReconnect,
+      renderAuthNeeded,
       renderMessageActions,
       renderMessageText,
       resolveProviderLogo,
@@ -2309,6 +2314,7 @@ type TimelineGroupBehaviorProps = {
   onOpenSession: MessageTimelineProps["onOpenSession"];
   onMemoryClick: MessageTimelineProps["onMemoryClick"];
   onReconnect: MessageTimelineProps["onReconnect"];
+  renderAuthNeeded: MessageTimelineProps["renderAuthNeeded"];
   resolveProviderLogo: MessageTimelineProps["resolveProviderLogo"];
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot: MessageTimelineProps["loadRetainedScreenshot"];
@@ -2373,6 +2379,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onOpenSession,
   onMemoryClick,
   onReconnect,
+  renderAuthNeeded,
   resolveProviderLogo,
   toolRegistry,
   loadRetainedScreenshot,
@@ -2393,6 +2400,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
@@ -2550,6 +2559,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onOpenSession,
               onMemoryClick,
               onReconnect,
+              renderAuthNeeded,
               resolveProviderLogo,
               toolRegistry,
               loadRetainedScreenshot,
@@ -2565,6 +2575,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               onReconnect={onReconnect}
+              renderAuthNeeded={renderAuthNeeded}
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
@@ -2610,6 +2621,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           renderMessageActions={renderMessageActions}
           renderMessageText={renderMessageText}
           onReconnect={onReconnect}
+          renderAuthNeeded={renderAuthNeeded}
           resolveProviderLogo={resolveProviderLogo}
           onOpenSession={onOpenSession}
           loadVideoArtifactPlayback={loadVideoArtifactPlayback}
@@ -2862,6 +2874,7 @@ export function TimelineRow({
   renderMessageActions,
   renderMessageText,
   onReconnect,
+  renderAuthNeeded,
   resolveProviderLogo,
   onOpenSession,
   loadVideoArtifactPlayback,
@@ -2872,6 +2885,8 @@ export function TimelineRow({
     | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
     | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /** Host-owned inline connection setup. Return undefined to use the default recovery card. */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode | undefined) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
@@ -2915,11 +2930,13 @@ export function TimelineRow({
       return <CompactionRow item={item} />;
     case "auth-needed":
       return (
-        <AuthNeededRow
-          item={item}
-          onReconnect={onReconnect}
-          resolveProviderLogo={resolveProviderLogo}
-        />
+        renderAuthNeeded?.(item) ?? (
+          <AuthNeededRow
+            item={item}
+            onReconnect={onReconnect}
+            resolveProviderLogo={resolveProviderLogo}
+          />
+        )
       );
     default:
       return null;

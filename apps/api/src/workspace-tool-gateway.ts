@@ -21,6 +21,7 @@ import {
   ToolGatewayApprovalResponse,
   ToolGatewayDeclarationsResponse,
   type AccessGrant,
+  type McpGatewayCredentialAuthority,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -28,6 +29,9 @@ import {
 import {
   buildApiIntegrationMcpServers,
   hasPermission,
+  externalActorContinuationForAuthorization,
+  isVerifiedOrganizationServiceAuthorization,
+  externalContinuationCommitAuthorizer,
   requireResolvedAccessGrantAuthorization,
   resolveCodexAppsCredentialIdForRun,
   resolveWorkspaceCatalogSettings,
@@ -38,6 +42,10 @@ import {
 import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
+  buildHostGatewayConnectionTokenResolver,
+  lockActiveExternalOrganizationKey,
+  withAccountRls,
+  requireWorkspace,
   withCodexAppsRequestAuthorization,
   consumeToolGatewayApproval,
   getWorkspaceArtifact,
@@ -80,6 +88,7 @@ export type PreparedWorkspaceToolGateway = Pick<
 > & {
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
+  reauthorize?: () => Promise<void>;
 };
 
 type WorkspaceSiteToolContext = {
@@ -118,8 +127,19 @@ export function requireWorkspaceToolGatewayAuthorization(
     authorization,
     authorization.grant.workspaceId,
   );
+  if (isVerifiedOrganizationServiceAuthorization(authorization)) {
+    if (grantUsesAttemptScopedMcp(grant))
+      throw new HTTPException(403, {
+        message: "service tool access cannot carry attempt authority",
+      });
+    return grant;
+  }
   requireWorkspaceToolGatewayGrant(grant);
-  if (!authorization.canonicalManagedHumanSession && !authorization.canonicalLocalHumanSession) {
+  if (
+    !authorization.canonicalManagedHumanSession &&
+    !authorization.canonicalLocalHumanSession &&
+    !externalActorContinuationForAuthorization(authorization)
+  ) {
     throw new HTTPException(403, { message: "current-human tool access required" });
   }
   return grant;
@@ -130,7 +150,61 @@ export async function prepareWorkspaceToolGateway(
   authorization: AccessGrantAuthorization,
 ): Promise<PreparedWorkspaceToolGateway> {
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
-  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant);
+  const external = externalActorContinuationForAuthorization(authorization);
+  const reauthorizeExternal = externalContinuationCommitAuthorizer(authorization);
+  const service = isVerifiedOrganizationServiceAuthorization(authorization);
+  const scope = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+  };
+  const permissions = [...grant.permissions];
+  const reauthorize =
+    external || service
+      ? async () => {
+          await withAccountRls(routeDeps.db, scope.accountId, async (tx) => {
+            if (reauthorizeExternal) await reauthorizeExternal(tx);
+            else {
+              const live = await lockActiveExternalOrganizationKey(
+                tx,
+                scope.accountId,
+                scope.subjectId.slice("api_key:".length),
+              );
+              const workspace = await requireWorkspace(tx, scope.workspaceId);
+              if (
+                !live ||
+                permissions.some((permission) => !hasPermission(live, permission)) ||
+                workspace.accountId !== scope.accountId ||
+                workspace.kind !== "shared"
+              )
+                throw new HTTPException(403, { message: "service gateway authority changed" });
+            }
+          });
+        }
+      : undefined;
+  await reauthorize?.();
+  const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
+    routeDeps,
+    grant,
+    undefined,
+    reauthorize
+      ? {
+          authority: {
+            kind: external ? "external_user" : "organization_service",
+            subjectId: scope.subjectId,
+            permissions,
+          },
+          reauthorize,
+        }
+      : undefined,
+  );
+  try {
+    await reauthorize?.();
+  } catch (error) {
+    await prepared.close();
+    throw error;
+  }
+  return { ...prepared, ...(reauthorize ? { reauthorize } : {}) };
 }
 
 export async function prepareMcpOAuthWorkspaceToolGateway(
@@ -148,6 +222,15 @@ export async function prepareWorkspaceToolGatewayForGrant(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
+): Promise<PreparedWorkspaceToolGateway> {
+  return await prepareWorkspaceToolGatewayForGrantInternal(routeDeps, grant, allowedIdentities);
+}
+
+async function prepareWorkspaceToolGatewayForGrantInternal(
+  routeDeps: ApiRouteDeps,
+  grant: AccessGrant,
+  allowedIdentities?: readonly { serverId: string; toolName: string }[],
+  hostContext?: { authority: McpGatewayCredentialAuthority; reauthorize: () => Promise<void> },
 ): Promise<PreparedWorkspaceToolGateway> {
   const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
   const resolvedCatalog = await resolveWorkspaceCatalogSettings(
@@ -173,7 +256,24 @@ export async function prepareWorkspaceToolGatewayForGrant(
   const gatewaySettings = workspaceToolGatewaySettingsForGrant(settings, grant, allowedIdentities);
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
   const deps = { ...routeDeps, catalogSourceSettings, settings: gatewaySettings };
-  const resolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  const hostPort = routeDeps.connectionCredentials?.mcpGatewayCredentials;
+  const hostResolveConnection =
+    hostContext && hostPort
+      ? buildHostGatewayConnectionTokenResolver(
+          hostPort,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            authority: hostContext.authority,
+          },
+          hostContext.reauthorize,
+        )
+      : undefined;
+  const resolveConnection: typeof nativeResolveConnection = async (input) =>
+    input.connectionRef.authoritySource === "host" && hostResolveConnection
+      ? await hostResolveConnection(input)
+      : await nativeResolveConnection(input);
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
   ): Promise<ResolveConnectionCredentialResult> =>
@@ -208,7 +308,8 @@ export async function prepareWorkspaceToolGatewayForGrant(
                         routeDeps.db,
                         grant.workspaceId,
                         grant.metadata["sessionId"],
-                      )) ?? { mode: "off" as const, endUserSubjectId: null, rootSessionId: null })
+                        grant.metadata,
+                      )) ?? { mode: "off" as const, userSubjectId: null, rootSessionId: null })
                     : null,
               },
             ),
@@ -355,24 +456,27 @@ export function buildWorkspaceToolGatewayMcpServer(
     { name: "opengeni-tool-gateway", version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: callableEntries.map((entry) => ({
-      name: entry.modelName,
-      ...(entry.title ? { title: entry.title } : {}),
-      ...(entry.description ? { description: entry.description } : {}),
-      inputSchema: entry.inputSchema,
-      ...(entry.outputSchema ? { outputSchema: entry.outputSchema } : {}),
-      ...(entry.annotations ? { annotations: entry.annotations } : {}),
-      ...(entry.icons ? { icons: entry.icons } : {}),
-      _meta: {
-        "opengeni/identity": entry.identity,
-        "opengeni/path": entry.codemodePath,
-        "opengeni/source": entry.source,
-        "opengeni/approval": entry.approval,
-        "opengeni/catalogDigest": prepared.toolGatewayCatalog.digest,
-      },
-    })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    await prepared.reauthorize?.();
+    return {
+      tools: callableEntries.map((entry) => ({
+        name: entry.modelName,
+        ...(entry.title ? { title: entry.title } : {}),
+        ...(entry.description ? { description: entry.description } : {}),
+        inputSchema: entry.inputSchema,
+        ...(entry.outputSchema ? { outputSchema: entry.outputSchema } : {}),
+        ...(entry.annotations ? { annotations: entry.annotations } : {}),
+        ...(entry.icons ? { icons: entry.icons } : {}),
+        _meta: {
+          "opengeni/identity": entry.identity,
+          "opengeni/path": entry.codemodePath,
+          "opengeni/source": entry.source,
+          "opengeni/approval": entry.approval,
+          "opengeni/catalogDigest": prepared.toolGatewayCatalog.digest,
+        },
+      })),
+    };
+  });
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
     if (!entry) throw new ToolGatewayToolNotFoundError();
@@ -382,7 +486,8 @@ export function buildWorkspaceToolGatewayMcpServer(
       source: entry.source,
     });
     try {
-      const result = (await prepared.toolGateway.call(
+      await prepared.reauthorize?.();
+      const call = await prepared.toolGateway.prepareCall(
         {
           operationId: crypto.randomUUID(),
           catalogDigest: prepared.toolGatewayCatalog.digest,
@@ -391,7 +496,9 @@ export function buildWorkspaceToolGatewayMcpServer(
           caller: { kind: "mcp", subjectId: grant.subjectId },
         },
         { signal: extra.signal },
-      )) as CallToolResult;
+      );
+      await prepared.reauthorize?.();
+      const result = (await call.execute()) as CallToolResult;
       observation.end(result.isError ? "tool_error" : "ok");
       return result;
     } catch (error) {
@@ -433,6 +540,7 @@ export async function callWorkspaceToolGateway(
             identity: request.identity,
           }
         : null;
+    await prepared.reauthorize?.();
     if (siteContext) {
       if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
       await authorizeSiteTool(db, grant, siteContext);
@@ -450,6 +558,7 @@ export async function callWorkspaceToolGateway(
       },
       { transportMeta },
     );
+    await prepared.reauthorize?.();
     let approvalConfirmed = false;
     const approvalRequired = preparedCall.entry.approval === "human";
     if (approvalRequired && request.approvalToken && db) {
@@ -478,6 +587,7 @@ export async function callWorkspaceToolGateway(
             siteContext.siteVersionId,
           )
         : null;
+    await prepared.reauthorize?.();
     const result = await (origin
       ? withSiteSessionOrigin(origin, () => preparedCall.execute())
       : preparedCall.execute());
@@ -504,6 +614,7 @@ export async function approveWorkspaceToolGatewayCall(
   const request = ToolGatewayApprovalRequest.parse(input);
   let preparedCall: PreparedToolGatewayCall;
   try {
+    await prepared.reauthorize?.();
     preparedCall = await prepared.toolGateway.prepareCall(
       {
         operationId: request.operationId,
@@ -528,6 +639,7 @@ export async function approveWorkspaceToolGatewayCall(
   const approvalToken = `ogta_${randomBytes(32).toString("base64url")}`;
   const expiresAt = new Date(Date.now() + 5 * 60_000);
   try {
+    await prepared.reauthorize?.();
     await issueApproval(db, {
       tokenHash: hashOpaqueValue(approvalToken),
       accountId: grant.accountId,

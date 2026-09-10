@@ -1,3 +1,11 @@
+import type {
+  RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
+  WorkspaceArtifactDetailResponse,
+  WorkspaceArtifactListOptions,
+  WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
+} from "./workspace-artifacts";
 import type { CreateFeedbackRequest, Feedback, FeedbackSubmissionResponse } from "./feedback";
 import {
   OpenGeniApiContractMismatchError,
@@ -380,7 +388,7 @@ import type {
   UpdateSessionVisibilityResponse,
   UninstallPackRequest,
   UninstallPackResult,
-  SessionEndUser,
+  SessionScopeSubjectId,
   SessionEvent,
   SessionEventCompactResult,
   SessionEventCompactResultOptions,
@@ -593,14 +601,14 @@ function sessionListQuery(options: {
   originSiteId?: string;
   limit?: number;
   parentSessionId?: string | null;
-  endUser?: SessionEndUser;
+  scopeSubjectId?: SessionScopeSubjectId;
 }): Record<string, string> {
-  const { limit, parentSessionId, endUser } = options;
+  const { limit, parentSessionId, scopeSubjectId } = options;
   return {
     ...(options.originSiteId ? { originSiteId: options.originSiteId } : {}),
     ...(limit === undefined ? {} : { limit: String(limit) }),
     ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
-    ...(endUser === undefined ? {} : { endUserSource: endUser.source, endUserId: endUser.id }),
+    ...(scopeSubjectId === undefined ? {} : { scopeSubjectId }),
   };
 }
 
@@ -610,7 +618,7 @@ export type SessionListPageOptions = {
   limit?: number;
   parentSessionId?: string | null;
   /** Only sessions carrying this exact opaque end-user label. */
-  endUser?: SessionEndUser;
+  scopeSubjectId?: SessionScopeSubjectId;
   cursor?: string;
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
@@ -878,8 +886,9 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
 }
 
 export class OpenGeniClient {
+  protected externalActorHeader?: string;
   private readonly baseUrl: string;
-  private readonly options: OpenGeniClientOptions;
+  protected readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
   private readonly active = new Map<string, SingleFlightReadEntry>();
@@ -1128,7 +1137,7 @@ export class OpenGeniClient {
   ): Promise<CreateSessionResponse> {
     return await this.requestJson<CreateSessionResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions`,
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/sessions`,
       request,
     );
   }
@@ -1304,7 +1313,7 @@ export class OpenGeniClient {
       parentSessionId?: string | null;
       search?: string;
       /** Only sessions carrying this exact opaque end-user label. */
-      endUser?: SessionEndUser;
+      scopeSubjectId?: SessionScopeSubjectId;
     } = {},
   ): Promise<Session[]> {
     // Search and Site filtering use the pin-aware page endpoint. An older API silently
@@ -4820,6 +4829,152 @@ export class OpenGeniClient {
     return await this.requestJson<Workspace[]>("GET", "/v1/workspaces");
   }
 
+  /** Uses this client's fixed actor and standard contract/error/abort handling.
+   * Disconnect revokes OpenGeni connection access, not upstream provider consent. */
+
+  connectTransport(): import("@opengeni/connect").ConnectTransport {
+    const root = (workspaceId: string) =>
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/connect`;
+    return {
+      catalog: (workspaceId, options) =>
+        this.requestJson("GET", `${root(workspaceId)}/catalog`, undefined, undefined, options),
+      accounts: (workspaceId, options) =>
+        this.requestJson("GET", `${root(workspaceId)}/accounts`, undefined, undefined, options),
+      pending: (workspaceId, options) =>
+        this.requestJson("GET", `${root(workspaceId)}/attempts`, undefined, undefined, options),
+      begin: (workspaceId, input, options) =>
+        this.requestJson("POST", `${root(workspaceId)}/attempts`, input, undefined, options),
+      get: (workspaceId, id, options) =>
+        this.requestJson(
+          "GET",
+          `${root(workspaceId)}/attempts/${encodeURIComponent(id)}`,
+          undefined,
+          undefined,
+          options,
+        ),
+      advance: (workspaceId, id, input, options) =>
+        this.requestJson(
+          "POST",
+          `${root(workspaceId)}/attempts/${encodeURIComponent(id)}/advance`,
+          input,
+          undefined,
+          options,
+        ),
+      cancel: (workspaceId, id, input, options) =>
+        this.requestJson(
+          "POST",
+          `${root(workspaceId)}/attempts/${encodeURIComponent(id)}/cancel`,
+          input,
+          undefined,
+          options,
+        ),
+      disconnect: async (workspaceId, id, options) => {
+        if (id.startsWith("social:")) {
+          const connectionId = id.slice("social:".length);
+          if (!/^[0-9a-f-]{36}$/i.test(connectionId)) throw new Error("Invalid social account ID");
+          await this.disconnectSocialConnection(workspaceId, connectionId);
+          return;
+        }
+        if (id.startsWith("lens-registration:")) {
+          const registrationId = id.slice("lens-registration:".length);
+          if (
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(registrationId)
+          )
+            throw new Error("Invalid Lens registration ID");
+          await this.requestJson(
+            "DELETE",
+            `/v1/workspaces/${encodeURIComponent(workspaceId)}/pr-review/registrations/${registrationId}`,
+            undefined,
+            undefined,
+            options,
+          );
+          return;
+        }
+        if (id.startsWith("github-installation:")) {
+          const installationId = id.slice("github-installation:".length);
+          if (
+            !/^[1-9][0-9]*$/.test(installationId) ||
+            !Number.isSafeInteger(Number(installationId))
+          )
+            throw new Error("Invalid GitHub installation ID");
+          await this.requestJson(
+            "DELETE",
+            `/v1/workspaces/${encodeURIComponent(workspaceId)}/github/installations/${installationId}`,
+            undefined,
+            undefined,
+            options,
+          );
+          return;
+        }
+        const expectedVersion = options?.expectedVersion;
+        if (
+          expectedVersion !== undefined &&
+          (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1)
+        ) {
+          throw new Error("invalid expected connection version");
+        }
+        const query = expectedVersion === undefined ? "" : `?expectedVersion=${expectedVersion}`;
+        await this.requestJson(
+          "DELETE",
+          `/v1/workspaces/${encodeURIComponent(workspaceId)}/connections/${encodeURIComponent(id)}${query}`,
+          undefined,
+          undefined,
+          options,
+        );
+      },
+    };
+  }
+
+  /** Browse first-party Atlassian sources without choosing or starting sync. */
+  async browseAtlassianSources(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<import("@opengeni/contracts/atlassian").AtlassianBrowseResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/atlassian/${connectionId}/browse`,
+    );
+  }
+
+  async saveAtlassianSources(
+    workspaceId: string,
+    connectionId: string,
+    request: import("@opengeni/contracts/atlassian").SaveAtlassianSourcesRequest,
+  ): Promise<import("./types").ConnectionResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/atlassian/${connectionId}/source`,
+      request,
+    );
+  }
+
+  async setAtlassianLifecycle(
+    workspaceId: string,
+    connectionId: string,
+    request: import("@opengeni/contracts/atlassian").AtlassianLifecycleActionRequest,
+  ): Promise<import("./types").ConnectionResponse> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/connections/atlassian/${connectionId}/lifecycle`,
+      request,
+    );
+  }
+
+  /** Begin durable setup. Completion requirements are provider-specific. */
+  async beginConnect(
+    workspaceId: string,
+    request: {
+      providerId: string;
+      ownership: "personal" | "workspace";
+      returnUrl: string;
+      idempotencyKey: string;
+      reconnectAccountId?: string;
+      installationTarget?: import("@opengeni/contracts/connect").ConnectInstallationTarget;
+    },
+  ): Promise<import("@opengeni/contracts/connect").ConnectAttempt> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/connect/attempts`, request);
+  }
+
   async createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("POST", "/v1/workspaces", request);
   }
@@ -6634,6 +6789,84 @@ export class OpenGeniClient {
     );
   }
 
+  async listWorkspaceArtifacts(
+    workspaceId: string,
+    options: WorkspaceArtifactListOptions & { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactListResponse> {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.status) query.set("status", options.status);
+    if (options.sourceSessionId) query.set("sourceSessionId", options.sourceSessionId);
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return await this.requestJson<WorkspaceArtifactListResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts${suffix}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async getWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactDetailResponse> {
+    return await this.requestJson<WorkspaceArtifactDetailResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Display-only HTML delivery: do not download the retained source bundle to render a Site. */
+  async getWorkspaceArtifactHtml(
+    workspaceId: string,
+    artifactId: string,
+    options: { versionId: string; signal?: AbortSignal },
+  ): Promise<string> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/html`,
+      { versionId: options.versionId },
+      options,
+    );
+    return response.text();
+  }
+
+  async rollbackWorkspaceArtifact(
+    workspaceId: string,
+    artifactId: string,
+    request: RollbackWorkspaceArtifactRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  async setWorkspaceArtifactStatus(
+    workspaceId: string,
+    artifactId: string,
+    request: SetWorkspaceArtifactStatusRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
   /** Search the official MCP registry for installable capabilities. */
   async discoverMcpCapabilities(
     workspaceId: string,
@@ -7474,9 +7707,7 @@ export class OpenGeniClient {
       {
         ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
         ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
-        ...(options.endUser
-          ? { endUserSource: options.endUser.source, endUserId: options.endUser.id }
-          : {}),
+        ...(options.scopeSubjectId ? { scopeSubjectId: options.scopeSubjectId } : {}),
         ...(options.status === undefined ? {} : { status: options.status }),
       },
       { signal: options.signal },
@@ -7577,12 +7808,19 @@ export class OpenGeniClient {
   private headers(correlationId?: string): Record<string, string> {
     const extra =
       typeof this.options.headers === "function" ? this.options.headers() : this.options.headers;
-    return {
+    const headers: Record<string, string> = {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
+    if (this.externalActorHeader) {
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === "x-opengeni-external-actor") delete headers[key];
+      }
+      headers["x-opengeni-external-actor"] = this.externalActorHeader;
+    }
+    return headers;
   }
 
   private url(path: string, query: Record<string, string> = {}): string {
@@ -7989,6 +8227,9 @@ export class OpenGeniClient {
     const correlationId = crypto.randomUUID();
     const abort = requestAbortSignal(options);
     try {
+      if (abort.signal?.aborted) {
+        throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
+      }
       let response: FetchResponse;
       try {
         response = await awaitWithAbort(

@@ -208,19 +208,23 @@ describe("fail-closed change impact", () => {
       reason: "artifact runtime build/verification boundary",
     });
 
-    const skill = createImpactPlan([".agents/skills/opengeni-documents/SKILL.md"]);
+    const skill = createImpactPlan([
+      "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
+    ]);
     expect(skill.mode).toBe("focused");
     expect(skill.affectedPackages).toContain("@opengeni/runtime");
-    expect(skill.unitTests).toContain("scripts/sync-artifact-skills.test.ts");
+    expect(skill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
     expect(skill.reasons).toContainEqual({
-      path: ".agents/skills/opengeni-documents/SKILL.md",
+      path: "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
       reason: "bundled artifact skill source boundary",
     });
 
-    const siteSkill = createImpactPlan([".agents/skills/opengeni-sites/SKILL.md"]);
+    const siteSkill = createImpactPlan([
+      "packages/runtime/src/bundled_site_skills/opengeni-sites/SKILL.md",
+    ]);
     expect(siteSkill.mode).toBe("focused");
     expect(siteSkill.affectedPackages).toContain("@opengeni/runtime");
-    expect(siteSkill.unitTests).toContain("scripts/sync-artifact-skills.test.ts");
+    expect(siteSkill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
   });
 
   test("React artifact UI selects its browser and full-stack acceptance coverage", () => {
@@ -276,6 +280,8 @@ describe("fail-closed change impact", () => {
       "packages/react/src/accounts.tsx",
       "packages/sdk/src/accounts.ts",
       "test/e2e/browser-accounts-acceptance.e2e.ts",
+      "test/e2e/browser-account-request-observation.browser.e2e.ts",
+      "test/e2e/browser-account-request-observation.ts",
     ]) {
       expect(createImpactPlan([path]).browserAcceptanceLanes).toContain("accounts");
     }
@@ -288,6 +294,18 @@ describe("fail-closed change impact", () => {
     expect(plan.e2eTests).toEqual([]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
+  });
+
+  test("account request observation stays in the native accounts lane", () => {
+    const regression = "test/e2e/browser-account-request-observation.browser.e2e.ts";
+    const plan = createImpactPlan([regression]);
+    expect(plan.mode).toBe("focused");
+    expect(plan.browserAcceptanceLanes).toEqual(["accounts"]);
+    expect(plan.e2eTests).not.toContain(regression);
+    expect(discoverTestFiles().e2e).not.toContain(regression);
+    const helper = createImpactPlan(["test/e2e/browser-account-request-observation.ts"]);
+    expect(helper.mode).toBe("focused");
+    expect(helper.browserAcceptanceLanes).toContain("accounts");
   });
 
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
@@ -653,6 +671,46 @@ describe("workflow fail-closed contracts", () => {
         },
       ),
     ).toBe(true);
+  });
+
+  test("docs main pushes require image evidence but skip unselected tests", () => {
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "docs",
+      unit: 0,
+      integration: 0,
+      e2e: 0,
+      browser: 0,
+      artifactRuntime: true,
+      build: 0,
+      bakeImages: true,
+    };
+    const results = Object.fromEntries(
+      ["plan", "source-contracts", "artifact-runtime", "deployment", "images"].map((name) => [
+        name,
+        { result: "success" },
+      ]),
+    );
+    for (const name of [
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "package-contracts",
+    ]) {
+      results[name] = { result: "skipped" };
+    }
+    expect(requiredResult(results, options)).toBe(true);
+    for (const name of ["source-contracts", "artifact-runtime", "deployment", "images"]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+      }
+    }
+    expect(requiredResult({ ...results, "test-suite": { result: "failure" } }, options)).toBe(
+      false,
+    );
+    expect(requiredResult(results, { ...options, mode: "focused" })).toBe(false);
   });
 
   test("CI preserves trusted admission while planning candidate jobs from the exact head", () => {

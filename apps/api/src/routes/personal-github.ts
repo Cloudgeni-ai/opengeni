@@ -28,7 +28,10 @@ import {
   type PersonalGitHubRepositorySelectionState as DbPersonalGitHubRepositorySelectionState,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { assertPersonalConnectionOwnerPrincipal } from "../connection-ownership";
+import {
+  assertPersonalConnectionOwnerPrincipal,
+  requireLegacyOAuthActor,
+} from "../connection-ownership";
 import {
   completePersonalGitHubOAuthCallback,
   listPersonalGitHubConnections,
@@ -64,6 +67,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.post("/v1/workspaces/:workspaceId/connections/github/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireLegacyOAuthActor(access);
     assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
     const payload = PersonalGitHubOAuthStartRequest.parse(await c.req.json().catch(() => ({})));
     return c.json(
@@ -79,6 +83,7 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.post("/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireLegacyOAuthActor(access);
     assertPersonalConnectionOwnerPrincipal(access, "My GitHub account");
     const payload = PersonalGitHubOAuthStartRequest.omit({ connectionId: true }).parse(
       await c.req.json().catch(() => ({})),
@@ -288,6 +293,8 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       ...(state ? { state } : {}),
       ...(error ? { error } : {}),
     });
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 }

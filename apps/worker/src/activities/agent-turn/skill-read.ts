@@ -1,9 +1,8 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
-  assertSkillRelativePath,
+  listSkillPaths,
   PORTABLE_SKILL_MAX_FILES,
   readSkillFiles,
-  SKILL_READ_MAX_OUTPUT_BYTES,
   SKILL_READ_MAX_PATHS,
   type SkillTextFile,
 } from "@opengeni/runtime/skill-library";
@@ -74,7 +73,7 @@ export function createSkillReadAttemptToolDefinition(input: {
       const files = metadata ? metadata.files : (loaded as readonly SkillTextFile[]);
       const selected =
         args.listFiles === true
-          ? listSkillPaths(files)
+          ? listSkillPaths(files, PORTABLE_SKILL_MAX_FILES)
           : readSkillFiles(files, args.paths as string[] | undefined);
       const output = {
         ...(metadata
@@ -96,22 +95,4 @@ export function createSkillReadAttemptToolDefinition(input: {
       };
     },
   };
-}
-
-/** Inventory never reads or serializes file bodies, including the entry point. */
-function listSkillPaths(files: readonly SkillTextFile[]): { paths: string[] } {
-  if (files.length > PORTABLE_SKILL_MAX_FILES) {
-    throw new Error(`Skill inventory exceeds ${PORTABLE_SKILL_MAX_FILES} files.`);
-  }
-  const seen = new Set<string>();
-  for (const { path } of files) {
-    assertSkillRelativePath(path);
-    if (seen.has(path)) throw new Error(`Duplicate stored Skill path: ${path}`);
-    seen.add(path);
-  }
-  const result = { paths: [...seen].sort() };
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > SKILL_READ_MAX_OUTPUT_BYTES) {
-    throw new Error("Skill inventory exceeds the read output limit.");
-  }
-  return result;
 }

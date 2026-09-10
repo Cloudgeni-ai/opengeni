@@ -1,14 +1,28 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import {
+  ExternalActorSelection,
+  ExternalActorAttribution,
+  type ExternalActorContinuation,
+  type ExternalIdentity,
+} from "@opengeni/contracts/external-identities";
+import {
   verifyDelegatedAccessToken,
   type AccountGrant,
   type AccessContext,
   type AccessGrant,
-  type Permission,
+  Permission,
+  type Workspace,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
+  ensureExternalIdentity,
+  resolveExternalIdentityLink,
+  managedPersonalWorkspacePermissions,
+  nestedPostgresSqlState,
+  withWorkspaceSubjectRls,
+  withAccountRls,
+  listWorkspacesForSubject,
   findActiveApiKeyByHash,
   getWorkspaceGrant,
   requireWorkspace,
@@ -45,11 +59,102 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
 const canonicalLocalHumanContexts = new WeakSet<AccessContext>();
+const externalActorContexts = new WeakMap<
+  AccessContext,
+  {
+    identity: ExternalIdentity;
+    keyId: string;
+    permissions: Permission[];
+    linked?: NonNullable<Awaited<ReturnType<typeof resolveExternalIdentityLink>>>;
+  }
+>();
+function attributionForExternalContext(context: AccessContext): ExternalActorAttribution {
+  const external = externalActorContexts.get(context);
+  if (!external) throw new Error("Verified external context required");
+  return ExternalActorAttribution.parse({
+    accountId: external.identity.accountId,
+    authenticatingApiKeyId: external.keyId,
+    externalIdentityId: external.identity.id,
+    externalSubjectId: external.identity.subjectId,
+    externalAuthorizationRevision: external.identity.authorizationRevision,
+    effectiveSubjectId: context.subjectId,
+    actingMode: external.linked ? "linked_native" : "external",
+    ...(external.linked
+      ? { linkId: external.linked.link.id, linkRevision: external.linked.link.revision }
+      : {}),
+  });
+}
 const resolvedAccessGrantAuthorizations = new WeakSet<object>();
+const verifiedExternalAuthorizations = new WeakMap<
+  AccessGrantAuthorization,
+  {
+    grant: AccessGrant;
+    workspaceId: string;
+    identityReference: { externalId: string; source: string };
+    attribution: ExternalActorAttribution;
+  }
+>();
+
+/** Creation audit only, never an authentication or delegation token. Metadata
+ * claiming to be external is insufficient; the exact resolver proof is needed. */
+export function externalAttributionForAuthorization(
+  authorization: AccessGrantAuthorization | undefined,
+  grant: AccessGrant,
+): ExternalActorAttribution | null {
+  if (!authorization || authorization.grant !== grant) return null;
+  const verified = verifiedExternalAuthorizations.get(authorization);
+  if (
+    !verified ||
+    verified.grant !== grant ||
+    verified.workspaceId !== grant.workspaceId ||
+    verified.attribution.accountId !== grant.accountId ||
+    verified.attribution.effectiveSubjectId !== grant.subjectId
+  )
+    return null;
+  return structuredClone(verified.attribution);
+}
+
+export function externalActorContinuationForAuthorization(
+  authorization: AccessGrantAuthorization,
+): ExternalActorContinuation | null {
+  const actor = externalAttributionForAuthorization(authorization, authorization.grant);
+  const verified = verifiedExternalAuthorizations.get(authorization);
+  return actor && verified ? { actor, identity: { ...verified.identityReference } } : null;
+}
+
+/** Dedicated owning-user proof. External admission never sets the native
+ * cookie stamp. The resource/session layer still checks the exact owner. */
+export function hasVerifiedOwningUserAuthorization(
+  authorization: AccessGrantAuthorization,
+): boolean {
+  if (
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== authorization.grant.subjectId
+  )
+    return false;
+  return (
+    authorization.canonicalManagedHumanSession ||
+    externalAttributionForAuthorization(authorization, authorization.grant) !== null
+  );
+}
 const accountScopedApiKeyContexts = new WeakMap<
   AccessContext,
   Readonly<{ accountId: string; permissions: readonly Permission[] }>
 >();
+const verifiedOrganizationServiceAuthorizations = new WeakMap<
+  AccessGrantAuthorization,
+  AccessGrant
+>();
+
+/** Request-local organization service-key proof, not a principal-kind claim. */
+export function isVerifiedOrganizationServiceAuthorization(
+  authorization: AccessGrantAuthorization,
+): boolean {
+  return (
+    verifiedOrganizationServiceAuthorizations.has(authorization) &&
+    verifiedOrganizationServiceAuthorizations.get(authorization) === authorization.grant
+  );
+}
 
 const accountScopedApiKeyAccountPermissions = new Set<Permission>([
   "account:read",
@@ -118,6 +223,39 @@ export type AccessDeps = {
   managedAuth?: ManagedAuth | null;
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
 };
+
+/** null means this is not an authenticated external lane; [] means that lane
+ * has no readable inventory. Callers must not fall back from [] to service or
+ * bare-subject discovery. */
+export async function listExternalActorWorkspaces(
+  context: AccessContext,
+  deps: AccessDeps,
+): Promise<Workspace[] | null> {
+  const actor = externalActorContexts.get(context);
+  if (!actor) return null;
+  if (
+    !hasPermission(actor.permissions, "workspace:read") ||
+    (actor.linked && !hasPermission(actor.linked.link.permissions, "workspace:read"))
+  )
+    return [];
+  const candidates = await withAccountRls(deps.db, actor.identity.accountId, (tx) =>
+    listWorkspacesForSubject(tx, context.subjectId),
+  );
+  const authorized: Workspace[] = [];
+  const personal = await withAccountRls(deps.db, actor.identity.accountId, (tx) =>
+    requireWorkspace(tx, actor.linked?.personalWorkspaceId ?? actor.identity.personalWorkspaceId),
+  );
+  if (personal.accountId === actor.identity.accountId && personal.kind === "personal")
+    authorized.push(personal);
+  for (const workspace of candidates) {
+    if (workspace.accountId !== actor.identity.accountId || workspace.kind !== "shared") continue;
+    const grant = await withWorkspaceSubjectRls(deps.db, workspace.id, context.subjectId, (tx) =>
+      getWorkspaceGrant(tx, context.subjectId, workspace.id),
+    );
+    if (grant && hasPermission(grant.permissions, "workspace:read")) authorized.push(workspace);
+  }
+  return authorized;
+}
 
 export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
   let pending = accessContextByRequest.get(c.req.raw);
@@ -210,6 +348,25 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  if (
+    contextIntegrity &&
+    accountScopedApiKeyWorkspaceAuthority(context)?.accountId === grant.accountId &&
+    grant.principalKind === "api_key"
+  ) {
+    verifiedOrganizationServiceAuthorizations.set(authorization, grant);
+  }
+  const external = externalActorContexts.get(context);
+  if (external && contextIntegrity && grant.accountId === external.identity.accountId) {
+    verifiedExternalAuthorizations.set(authorization, {
+      grant,
+      workspaceId: grant.workspaceId,
+      identityReference: {
+        externalId: external.identity.externalId,
+        source: external.identity.source,
+      },
+      attribution: attributionForExternalContext(context),
+    });
+  }
   return authorization;
 }
 
@@ -345,6 +502,42 @@ async function accessGrantAuthorization(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
+  const external = externalActorContexts.get(context);
+  if (external) {
+    const grant: AccessGrant | null =
+      workspaceId ===
+      (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId)
+        ? {
+            accountId: external.identity.accountId,
+            workspaceId,
+            subjectId: context.subjectId,
+            principalKind: "human_session",
+            permissions: [...managedPersonalWorkspacePermissions],
+          }
+        : await withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
+            getWorkspaceGrant(tx, context.subjectId, workspaceId, {
+              principalKind: "human_session",
+            }),
+          );
+    if (!grant || grant.accountId !== external.identity.accountId) {
+      throw new HTTPException(403, { message: "external workspace access denied" });
+    }
+    // Intersect effective permissions using the existing wildcard/literal
+    // semantics on each side independently. Never return workspace:admin
+    // unless both sides hold it, and never infer literal secrets:read.
+    grant.permissions = Permission.options.filter(
+      (value) =>
+        hasPermission(grant.permissions, value) &&
+        hasPermission(external.permissions, value) &&
+        (!external.linked || hasPermission(external.linked.link.permissions, value)),
+    );
+    grant.metadata = {
+      ...grant.metadata,
+      externalActor: attributionForExternalContext(context),
+    };
+    if (permission) requirePermission(grant, permission);
+    return accessGrantAuthorizationFromContext(context, grant);
+  }
   const principalKind = hostedHumanSessionPrincipalKind(context);
   let grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
@@ -497,6 +690,14 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
+  if (c.req.header("x-opengeni-external-actor") !== undefined) {
+    if (deps.settings.productAccessMode === "local") {
+      throw new HTTPException(401, {
+        message: "external actors require organization key authentication",
+      });
+    }
+    return apiKeyAccessContext(c, deps, deps.settings.productAccessMode);
+  }
   if (deps.settings.productAccessMode === "local") {
     const delegated = await delegatedAccessContext(c, deps, "local");
     if (delegated) {
@@ -591,6 +792,59 @@ async function apiKeyAccessContext(
   const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(bearer));
   if (!apiKey) {
     return null;
+  }
+  const externalHeader = c.req.header("x-opengeni-external-actor");
+  if (externalHeader !== undefined) {
+    if (apiKey.workspaceId !== null || apiKey.credentialKind !== "organization") {
+      throw new HTTPException(403, { message: "external actors require an organization key" });
+    }
+    let selection: ExternalActorSelection;
+    try {
+      if (externalHeader.length > 16384) throw new Error("oversize");
+      selection = ExternalActorSelection.parse(JSON.parse(decodeURIComponent(externalHeader)));
+    } catch {
+      throw new HTTPException(400, { message: "invalid external actor selection" });
+    }
+    let identity: ExternalIdentity;
+    try {
+      identity = await ensureExternalIdentity(deps.db, {
+        accountId: apiKey.accountId,
+        ...selection.identity,
+      });
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "42501") {
+        throw new HTTPException(403, { message: "external identity is unavailable" });
+      }
+      throw new HTTPException(503, { message: "external identity authority is unavailable" });
+    }
+    const linked =
+      selection.mode === "linked_native"
+        ? await resolveExternalIdentityLink(deps.db, {
+            identity,
+            linkId: selection.linkId,
+            expectedRevision: selection.expectedLinkRevision,
+          })
+        : null;
+    if (selection.mode === "linked_native" && !linked)
+      throw new HTTPException(403, { message: "Native identity link is unavailable or changed" });
+    const effectiveSubjectId = linked?.link.nativeSubjectId ?? identity.subjectId;
+    const context: AccessContext = {
+      mode,
+      subjectId: effectiveSubjectId,
+      accountGrants: [
+        { accountId: identity.accountId, subjectId: effectiveSubjectId, permissions: [] },
+      ],
+      workspaceGrants: [],
+      defaultAccountId: identity.accountId,
+      defaultWorkspaceId: null,
+    };
+    externalActorContexts.set(context, {
+      identity,
+      keyId: apiKey.id,
+      permissions: [...apiKey.permissions],
+      ...(linked ? { linked } : {}),
+    });
+    return context;
   }
   const subjectId = `api_key:${apiKey.id}`;
   const accountPermissions = apiKey.workspaceId

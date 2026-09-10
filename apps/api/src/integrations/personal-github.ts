@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { requireConnectOwnerAuthority } from "./connect-authority";
 import { personalGitHubOAuthCallbackUrl, type Settings } from "@opengeni/config";
 import {
   PERSONAL_GITHUB_AUTHORIZATION_URL,
@@ -14,22 +16,24 @@ import {
   isPersonalGitHubConnection,
 } from "@opengeni/contracts/personal-github";
 import {
-  hasPermission,
+  externalActorContinuationForAuthorization,
   requireEnvironmentEncryption,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
+  claimConnectOperation,
+  finishConnectOperation,
+  getConnectAttempt,
+  type Database,
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   decryptEnvironmentValue,
   disconnectConnectionIdempotently,
   encryptEnvironmentValue,
   getConnectionMetadata,
-  getWorkspaceGrant,
   listConnectionsMetadata,
-  namedSubjectHasLiveWorkspaceAuthority,
   persistProviderOAuthConnection,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -53,6 +57,8 @@ const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
 const GITHUB_API_VERSION = "2022-11-28";
 
 type PersonalGitHubOAuthState = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -205,6 +211,7 @@ export async function startPersonalGitHubOAuth(
     workspaceId: string;
     connectionId?: string;
     returnPath?: string;
+    connectAttemptId?: string;
   },
 ) {
   const oauth = requirePersonalGitHubOAuthSettings(deps.settings);
@@ -232,6 +239,15 @@ export async function startPersonalGitHubOAuth(
     workspaceId: input.workspaceId,
     subjectId: grant.subjectId,
     kind: PERSONAL_GITHUB_OAUTH_STATE_KIND,
+    ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(externalActorContinuationForAuthorization(input.access)
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            key,
+            JSON.stringify(externalActorContinuationForAuthorization(input.access)),
+          ),
+        }
+      : {}),
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
     canonicalManagedHumanSession: input.access.canonicalManagedHumanSession,
     returnPath,
@@ -264,12 +280,35 @@ export async function completePersonalGitHubOAuthCallback(
     error?: string;
     requestUrl: string;
   },
-): Promise<{ redirectTo: string }> {
+): Promise<{ redirectTo: string; exactReturn?: boolean }> {
   const apiBaseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/u, "") ?? apiBaseUrl;
   let state: PersonalGitHubOAuthState | null = null;
+  let exactReturnUrl: string | undefined;
+  let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   try {
     state = readPersonalGitHubOAuthState(input.state, deps.settings);
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+      if (
+        stored.attempt.providerId !== "github-personal" ||
+        stored.attempt.ownership !== "personal"
+      )
+        throw new PersonalGitHubCallbackError("invalid_state");
+      exactReturnUrl = stored.returnUrl;
+      operation = {
+        attemptId: state.connectAttemptId,
+        operationId: `oauth:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state!).digest("hex"),
+      };
+      const claim = await claimConnectOperation(deps.db, state, {
+        ...operation,
+        expectedRevision: stored.attempt.revision,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+      });
+      if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
+    }
     await requirePersonalGitHubCallbackGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -280,6 +319,25 @@ export async function completePersonalGitHubOAuthCallback(
       now: new Date(),
     });
     if (!consumed) throw new PersonalGitHubCallbackError("state_replayed");
+    if (operation && (input.error || !input.code)) {
+      await finishConnectOperation(deps.db, state, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          state: input.error === "access_denied" ? "cancelled" : "failed",
+          nextAction: { type: "none" },
+          error: {
+            code: input.error ? "provider_denied" : "missing_code",
+            message: "Authorization was not completed. Start a new connection attempt.",
+            retryable: false,
+          },
+        }),
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
     if (input.error) throw new PersonalGitHubCallbackError("provider_denied");
     if (!input.code) throw new PersonalGitHubCallbackError("missing_code");
 
@@ -376,35 +434,73 @@ export async function completePersonalGitHubOAuthCallback(
         scope_parameter_supported: false,
       }),
     );
-    const connection = await persistProviderOAuthConnection(deps.db, {
-      accountId: state.accountId,
-      workspaceId: state.workspaceId,
-      subjectId: state.subjectId,
-      visibleToSubjectId: state.subjectId,
-      providerDomain: PERSONAL_GITHUB_PROVIDER_DOMAIN,
-      kind: "oauth2",
-      status: "active",
-      credentialEncrypted,
-      grantedScopes: token.scopes,
-      expiresAt: token.expiresAt,
-      metadata,
-      createdBySubjectId: state.subjectId,
-      updatedBySubjectId: state.subjectId,
-      credentialRole: PERSONAL_GITHUB_CREDENTIAL_ROLE,
-      providerFamily: PERSONAL_GITHUB_PROVIDER_FAMILY,
-      providerPrincipalId: identity.id,
-      requireLiveUserAuthority: true,
-      requiredLiveUserPermission: "connections:write",
-      allowCanonicalPersonalWorkspaceOwner: state.canonicalManagedHumanSession,
-      exclusiveProviderPrincipalPerOwner: true,
-      preserveExistingMetadataKeys: ["credentialBindingId", "connectedAt"],
-      ...(state.connectionId
-        ? {
-            requestedConnectionId: state.connectionId,
-            requestedConnectionVersion: state.connectionVersion,
-          }
-        : {}),
-    });
+    const acceptedState = state;
+    const persist = (tx: Database) => {
+      // Capture the validated immutable callback state for delayed persistence.
+      // eslint-disable-next-line no-shadow
+      const state = acceptedState;
+      return persistProviderOAuthConnection(tx, {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        subjectId: state.subjectId,
+        visibleToSubjectId: state.subjectId,
+        providerDomain: PERSONAL_GITHUB_PROVIDER_DOMAIN,
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted,
+        grantedScopes: token.scopes,
+        expiresAt: token.expiresAt,
+        metadata,
+        createdBySubjectId: state.subjectId,
+        updatedBySubjectId: state.subjectId,
+        credentialRole: PERSONAL_GITHUB_CREDENTIAL_ROLE,
+        providerFamily: PERSONAL_GITHUB_PROVIDER_FAMILY,
+        providerPrincipalId: identity.id,
+        requireLiveUserAuthority: true,
+        requiredLiveUserPermission: "connections:write",
+        // The external lane has passed its own owning-user proof; it does not
+        // impersonate a native login. Both use the same personal workspace anchor.
+        allowCanonicalPersonalWorkspaceOwner:
+          state.canonicalManagedHumanSession || Boolean(state.externalContinuation),
+        authorize: (locked) => requireConnectOwnerAuthority(locked, state, "connections:write"),
+        exclusiveProviderPrincipalPerOwner: true,
+        preserveExistingMetadataKeys: ["credentialBindingId", "connectedAt"],
+        ...(state.connectionId
+          ? {
+              requestedConnectionId: state.connectionId,
+              requestedConnectionVersion: state.connectionVersion,
+            }
+          : {}),
+      });
+    };
+    if (operation) {
+      await finishConnectOperation(deps.db, acceptedState, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+        commit: async (tx, current) => {
+          const connection = await persist(tx);
+          if (!connection) throw new PersonalGitHubCallbackError("connection_conflict");
+          return {
+            ...current,
+            revision: current.revision + 1,
+            state: "complete",
+            credentialsCommitted: true,
+            nextAction: { type: "none" },
+            account: {
+              id: connection.id,
+              version: connection.version,
+              providerId: "github-personal",
+              label: identity.login,
+              ownership: "personal",
+              status: "connected",
+            },
+          };
+        },
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
+    const connection = await persist(deps.db);
     if (!connection) throw new PersonalGitHubCallbackError("connection_conflict");
     return {
       redirectTo: personalGitHubCallbackReturnUrl(returnBaseUrl, state.returnPath, "success", {
@@ -412,6 +508,7 @@ export async function completePersonalGitHubOAuthCallback(
       }),
     };
   } catch (error) {
+    if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     return {
       redirectTo: personalGitHubCallbackReturnUrl(
         returnBaseUrl,
@@ -468,6 +565,21 @@ function readPersonalGitHubOAuthState(
     subjectId: requiredString(payload.subjectId),
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     canonicalManagedHumanSession: payload.canonicalManagedHumanSession === true,
+    ...(typeof payload.connectAttemptId === "string"
+      ? { connectAttemptId: payload.connectAttemptId }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     returnPath: personalGitHubReturnPath(workspaceId, requiredString(payload.returnPath)),
     encryptedPkceVerifier: requiredString(payload.encryptedPkceVerifier),
     oauthEnvironment: requiredString(payload.oauthEnvironment),
@@ -491,25 +603,7 @@ async function requirePersonalGitHubCallbackGrant(
   ) {
     throw new PersonalGitHubCallbackError("not_authorized");
   }
-  const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
-  if (
-    grant &&
-    grant.accountId === state.accountId &&
-    hasPermission(grant.permissions, "connections:write")
-  ) {
-    return;
-  }
-  if (
-    state.canonicalManagedHumanSession &&
-    (await namedSubjectHasLiveWorkspaceAuthority(deps.db, {
-      accountId: state.accountId,
-      workspaceId: state.workspaceId,
-      subjectId: state.subjectId,
-    }))
-  ) {
-    return;
-  }
-  throw new PersonalGitHubCallbackError("not_authorized");
+  await requireConnectOwnerAuthority(deps.db, state, "connections:write");
 }
 
 async function exchangePersonalGitHubAuthorizationCode(

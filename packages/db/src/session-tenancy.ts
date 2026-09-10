@@ -95,6 +95,7 @@ export type TransitionSessionVisibilityInput = {
   targetVisibility: SessionTenancyVisibility;
   expectedAuthorityEpoch: number;
   operationKey: string;
+  beforeCommit?: (tx: Database) => Promise<void>;
 };
 
 export type TransitionSessionVisibilityResult = {
@@ -124,6 +125,7 @@ export type ForkSessionContentInput = {
   operationKey: string;
   runtimeRequest?: ForkSessionRuntimeRequest;
   runtimeConfiguration?: ForkSessionRuntimeConfiguration;
+  beforeCommit?: (tx: Database) => Promise<void>;
 };
 
 export type ForkSessionRuntimeRequest = {
@@ -469,6 +471,7 @@ export async function transitionSessionVisibility(
         );
         const result = rows[0];
         if (!result) throw new Error("Session visibility transition returned no result");
+        await input.beforeCommit?.(scopedDb);
         return result;
       },
       undefined,
@@ -545,6 +548,7 @@ export async function forkSessionContent(
           );
           const result = rows[0];
           if (!result) throw new Error("Session fork returned no result");
+          await input.beforeCommit?.(scopedDb);
           return result;
         }
         const rows = await rawRows<ForkSessionContentResult>(
@@ -577,6 +581,7 @@ export async function forkSessionContent(
         );
         const result = rows[0];
         if (!result) throw new Error("Session fork returned no result");
+        await input.beforeCommit?.(scopedDb);
         return result;
       },
       undefined,
@@ -649,6 +654,7 @@ export async function replayAppliedSessionFork(
             ${runtimeDigest}
           )`,
           );
+          await input.beforeCommit?.(scopedDb);
           return rows[0] ?? null;
         }
         const rows = await rawRows<ForkSessionContentResult>(
@@ -678,6 +684,7 @@ export async function replayAppliedSessionFork(
           ${SESSION_TENANCY_ACTIVATION_VERSION}
         )`,
         );
+        await input.beforeCommit?.(scopedDb);
         return rows[0] ?? null;
       },
     );

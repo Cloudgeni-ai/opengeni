@@ -340,6 +340,12 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     if (!available) return;
     const { accountId, workspaceId, enrollmentId, sandboxId, bus } = await seedMachine();
     const idempotencyKey = crypto.randomUUID();
+    const capturedInitialTurns: Array<{ sessionId: string; turnId: string }> = [];
+    const hostSelection = {
+      serverId: "host-fixture",
+      delegationId: crypto.randomUUID(),
+      generation: 1,
+    };
     const createInput = {
       db,
       bus,
@@ -363,12 +369,19 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       metadata: {},
       firstPartyMcpTools: [],
       createIdempotencyKey: idempotencyKey,
+      selectedHostMcpDelegations: [hostSelection],
+      captureInitialTurnAuthority: async (_tx: unknown, sessionId: string, turnId: string) => {
+        capturedInitialTurns.push({ sessionId, turnId });
+      },
       seedTargetSandbox: {
         sandboxId,
         settings,
       },
     };
     const created = await createAndStartSessionWithOutcome(createInput);
+    expect(capturedInitialTurns).toEqual([
+      { sessionId: created.session.id, turnId: created.session.initialTurnId! },
+    ]);
     expect(created).toMatchObject({
       outcome: "created",
       replay: false,
@@ -378,6 +391,7 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     await admin`update enrollments set status = 'revoked' where id = ${enrollmentId}`;
 
     const replayed = await createAndStartSessionWithOutcome(createInput);
+    expect(capturedInitialTurns).toHaveLength(1);
     expect(replayed).toMatchObject({
       outcome: "repaired",
       replay: false,
@@ -393,6 +407,16 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       where workspace_id = ${workspaceId}
         and create_idempotency_key = ${idempotencyKey}`;
     expect(stored?.count).toBe(1);
+    for (const selection of [
+      [],
+      [{ ...hostSelection, generation: 2 }],
+      [{ ...hostSelection, delegationId: crypto.randomUUID() }],
+    ]) {
+      await expect(
+        createAndStartSessionWithOutcome({ ...createInput, selectedHostMcpDelegations: selection }),
+      ).rejects.toMatchObject({ name: "SessionCreateIdempotencyConflictError" });
+    }
+    expect(capturedInitialTurns).toHaveLength(1);
   }, 60_000);
 
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {

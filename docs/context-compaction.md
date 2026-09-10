@@ -335,3 +335,63 @@ one transaction without changing history. A failed, paused, recovered, or
 superseded attempt cannot lose the request or publish a current compaction
 result; only an authoritatively recorded terminal summarization failure consumes
 the request as described above.
+
+### Portable Responses identity regression
+
+Portable Responses checkpoints detach optional provider response-item `id`
+fields from messages, plaintext reasoning, function, shell, computer and patch
+calls/results, client-executed tool search, and hosted web search. Opaque
+reasoning is omitted during checkpoint preparation; retaining a dependent
+item's stored response id can otherwise make the provider require that omitted
+reasoning even with complete inline content. The request-local projection uses
+the normal inference strip primitive only for those types. The SDK reserves
+`providerData.id` on those shapes, so deleting it separately is unnecessary.
+Call/result correlation, payload ids, plaintext reasoning content and ordering
+remain intact. Tool search uses the SDK's correlation/execution readers for
+both top-level and `providerData` fields; an explicit server execution is kept.
+
+A universal strip is unsafe: Azure accepts inline web-search and plaintext
+reasoning without ids but rejects id-less file-search input with a missing-id
+validation error. Other hosted-tool ids and approval/program links remain
+intact. Normal inference and remote-v2 compaction retain their existing policies.
+Azure-profile checkpoints set `tool_choice: "none"`: empty tool schemas alone
+do not prevent that provider from returning a historical tool call instead of
+summary text. Other Responses transports keep their prior tool-choice behavior;
+tool-only responses still fail the existing empty-summary guard.
+
+The known missing-reasoning rejection is classified as
+`missing_required_reasoning_item` without retaining the provider message or its
+referenced item ids. Unknown provider messages remain excluded. Provider
+failures, incomplete provider responses (even with text), and empty summaries
+still fail closed without changing active history. A provider's completed status
+does not prove that a summary preserves every fact; the synthetic continuation
+check verifies representative facts and tool semantics, not exhaustive semantic
+equivalence. Original history remains archived by the existing checkpoint flow.
+
+Run `bun test packages/runtime/test/portable-compaction-identity.test.ts` for SDK
+wire coverage and `bun test scripts/operator/verify-portable-compaction.test.ts`
+for the operator/disposable PostgreSQL regression. The test omits its database
+case when PostgreSQL is unavailable locally; `OPENGENI_REQUIRE_REAL_DB=1` makes
+that absence fail in CI. The explicit `--live --durable` canary always requires
+PostgreSQL. Each caller owns and releases its disposable database, including
+when checkpoint verification or client cleanup fails. The operator project is
+part of CI typechecking; its source fixtures are formatted TypeScript rather
+than byte-exact fixture exemptions. Database settlement/fencing also remains
+covered by `apps/worker/test/context-compaction-activity.test.ts`.
+
+For live verification, configure Azure's base URL or endpoint/deployment and
+API key or AD token, then run `bun run verify:portable-compaction --live --durable`.
+All provider legs use the runtime's Azure client, including its authentication
+and API-version query handling. The kickoff must contain opaque reasoning and
+a dependent assistant message. Durable mode uses disposable PostgreSQL and the
+real fenced compaction activity, verifies unchanged archival, the committed
+checkpoint event and cleared token/request state, then supplies the reloaded
+checkpoint to a correlated tool call/result continuation. That continuation must
+recover an unpredictable receipt from an old tool result; the receipt is absent
+from retained user messages, system instructions and the verification prompt.
+The canary requires exactly one continuation call, preserves that request's
+complete prefix when supplying its result, and disables further tool selection
+for the final acknowledgement. It never reads or modifies a customer session.
+Omit `--durable` for provider-only verification;
+the receipt distinguishes the two modes. Locally authored assertion messages
+are visible; arbitrary provider errors and SDK causes remain content-free.

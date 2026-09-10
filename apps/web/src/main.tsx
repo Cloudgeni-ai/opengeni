@@ -3,6 +3,7 @@ import { AppearanceProvider } from "./lib/appearance";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
 import {
   availableSessionStorage,
   currentViteBuildId,
@@ -11,6 +12,7 @@ import {
 import "streamdown/styles.css";
 import "./styles.css";
 
+retainIdentityLinkContinuation(window);
 const preloadRecoveryStorage = availableSessionStorage(window);
 if (preloadRecoveryStorage) {
   installVitePreloadRecovery({
