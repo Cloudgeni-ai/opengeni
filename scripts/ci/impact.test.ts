@@ -280,6 +280,8 @@ describe("fail-closed change impact", () => {
       "packages/react/src/accounts.tsx",
       "packages/sdk/src/accounts.ts",
       "test/e2e/browser-accounts-acceptance.e2e.ts",
+      "test/e2e/browser-account-request-observation.browser.e2e.ts",
+      "test/e2e/browser-account-request-observation.ts",
     ]) {
       expect(createImpactPlan([path]).browserAcceptanceLanes).toContain("accounts");
     }
@@ -292,6 +294,18 @@ describe("fail-closed change impact", () => {
     expect(plan.e2eTests).toEqual([]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
+  });
+
+  test("account request observation stays in the native accounts lane", () => {
+    const regression = "test/e2e/browser-account-request-observation.browser.e2e.ts";
+    const plan = createImpactPlan([regression]);
+    expect(plan.mode).toBe("focused");
+    expect(plan.browserAcceptanceLanes).toEqual(["accounts"]);
+    expect(plan.e2eTests).not.toContain(regression);
+    expect(discoverTestFiles().e2e).not.toContain(regression);
+    const helper = createImpactPlan(["test/e2e/browser-account-request-observation.ts"]);
+    expect(helper.mode).toBe("focused");
+    expect(helper.browserAcceptanceLanes).toContain("accounts");
   });
 
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
