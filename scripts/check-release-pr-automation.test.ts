@@ -2302,6 +2302,7 @@ function approvalFixture(
     reviewedBaseSha?: string;
     discontinuousCompare?: boolean;
     mergeEvent?: Record<string, unknown> | null;
+    mergeEventTimestamp?: string;
     movingMainOverlap?: boolean;
     movingMainSourceExtra?: boolean;
     movingMainTreeTruncated?: "parent" | "source";
@@ -2382,7 +2383,7 @@ function approvalFixture(
             actor: merger,
             commit_id: mergeSha,
             commit_url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/commits/${mergeSha}`,
-            created_at: "2026-07-23T12:00:00Z",
+            created_at: options.mergeEventTimestamp ?? "2026-07-23T12:00:00Z",
           },
         ];
   let mainReads = 0;
@@ -3265,6 +3266,22 @@ describe("release approval provenance", () => {
         fetchImpl: approvalFixture({ pullState: "open", merged: false }).fetchImpl,
       }),
     ).rejects.toThrow("is not merged");
+  });
+
+  test("accepts independently recorded merge event time but rejects malformed timestamps", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeEventTimestamp: "2026-07-23T12:00:01Z" }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeEventTimestamp: "not-a-timestamp" }).fetchImpl,
+      }),
+    ).rejects.toThrow("provider merge event timestamp");
   });
 
   test("rejects an associated direct fast-forward with matching provider topology", async () => {

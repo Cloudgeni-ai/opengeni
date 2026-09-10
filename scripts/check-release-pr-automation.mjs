@@ -1946,10 +1946,9 @@ function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
     event.commit_url === repositoryApiUrl(`/commits/${sourceSha}`),
     "provider merge event commit URL changed",
   );
-  invariant(
-    assertTimestamp(event.created_at, "provider merge event timestamp") === pullIdentity.mergedAt,
-    "provider merge event timestamp differs from pull-request merge time",
-  );
+  // GitHub can record the timeline event a second after pull.merged_at.
+  // Bind identity to the exact commit and actor, not independently recorded clocks.
+  assertTimestamp(event.created_at, "provider merge event timestamp");
   assertIdentity(event.actor, pullIdentity.merger, "provider merge actor");
   assertString(event.node_id, "provider merge event node ID");
   const eventId = assertPositiveInteger(event.id, "provider merge event ID");
