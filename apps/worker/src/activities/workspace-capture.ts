@@ -663,13 +663,20 @@ async function runCapture(
   // dirty tree on every read-only turn. Instead we skip when the change surface
   // is byte-identical to the previous revision — "no new revision when nothing
   // changed" holds even with a persistently dirty tree, and content-addressed
-  // blobs dedupe within each capture. This preserves empty-turn revision behavior
+  // blobs dedupe against the latest retained capture. This preserves empty-turn revision behavior
   // while correctly handling a persistently dirty tree.
   // ── 3. after-images of touched files (size-gated), content-addressed ───────
   const files: WorkspaceCaptureFile[] = [];
   const blobKeys = new Set<string>();
   const captureId = crypto.randomUUID();
-  const storedKeys = new Set<string>();
+  // A predecessor GC plan keeps the latest revision's refs. Never reuse refs
+  // from older revisions: an already-issued delete may still target those.
+  const retainedRefs = retainedCaptureBlobRefs(
+    input.workspaceId,
+    input.sessionId,
+    prev?.blobKeys ?? [],
+  );
+  const storedKeys = new Set(retainedRefs.values());
   let totalBytes = 0;
   let tooLargeCount = 0;
   let binaryCount = 0;
@@ -732,7 +739,8 @@ async function runCapture(
     }
     const bytes = Buffer.from(read.content, "base64");
     const hash = sha256(bytes);
-    const contentRef = blobKey(input.workspaceId, input.sessionId, `${captureId}/${hash}`);
+    const contentRef =
+      retainedRefs.get(hash) ?? blobKey(input.workspaceId, input.sessionId, `${captureId}/${hash}`);
     if (read.isBinary) binaryCount += 1;
     if (!blobKeys.has(contentRef)) {
       totalBytes += bytes.byteLength;
@@ -780,7 +788,8 @@ async function runCapture(
 
   // ── 4. empty-turn gate (B3) ───────────────────────────────
   // Skip when the change surface is byte-identical to the previous revision.
-  // Each capture owns its keys: delayed GC cannot delete a successor's blobs.
+  // New writes use unique keys; reused refs belong to the latest retained revision.
+  // An unchanged dirty turn therefore performs no object-storage writes.
   // Each file is read once and its exact bytes are hashed and uploaded together;
   // peak memory remains one guarded file rather than the entire workspace.
   const fingerprint = changeFingerprint(repos, files);
@@ -885,8 +894,8 @@ async function runCapture(
   throwIfCaptureAborted(signal);
   if (!inserted) {
     // Lease superseded/released between capture and commit. Best-effort clean up
-    // the turn-keyed blobs we just PUT (content blobs may be shared with a
-    // surviving revision — leave them for the next GC); never throw.
+    // the turn-keyed blobs we just PUT. The finalizer also cleans newly owned
+    // content blobs, leaving reused refs untouched; never throw.
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
       labels: { result: "superseded" },
@@ -1103,9 +1112,25 @@ function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
-/** Content-addressed after-image blob key (shared across revisions → GC input). */
+/** Content-addressed after-image blob key, optionally in a unique capture namespace. */
 export function blobKey(workspaceId: string, sessionId: string, sha256Hex: string): string {
   return `workspace-captures/${workspaceId}/${sessionId}/blobs/${sha256Hex}`;
+}
+
+/** Only pass the latest retained revision's keys: older refs may be under deletion. */
+export function retainedCaptureBlobRefs(
+  workspaceId: string,
+  sessionId: string,
+  latestKeys: string[],
+): Map<string, string> {
+  const prefix = blobKey(workspaceId, sessionId, "");
+  const refs = new Map<string, string>();
+  for (const key of latestKeys) {
+    if (!key.startsWith(prefix)) continue;
+    const match = /^(?:[0-9a-f-]{36}\/)?([0-9a-f]{64})$/.exec(key.slice(prefix.length));
+    if (match?.[1]) refs.set(match[1], key);
+  }
+  return refs;
 }
 
 async function safeDelete(

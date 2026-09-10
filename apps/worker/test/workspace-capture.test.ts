@@ -37,6 +37,7 @@ import {
   PER_FILE_CONTENT_GUARD_BYTES,
   PER_FILE_DIFF_GUARD_BYTES,
   readCaptureRepository,
+  retainedCaptureBlobRefs,
   RESIDUE_DIRS,
   WHOLE_CAPTURE_GUARD_BYTES,
 } from "../src/activities/workspace-capture";
@@ -443,6 +444,41 @@ describe("workspace-capture — GC key-math", () => {
     manifestKey: `m/${id}`,
     treeIndexKey: `t/${id}`,
     blobKeys,
+  });
+
+  test("latest retained refs survive both delayed predecessor GC and successor GC", () => {
+    const unchangedHash = "a".repeat(64);
+    const staleHash = "b".repeat(64);
+    const latestKey = blobKey("ws", "sess", `${crypto.randomUUID()}/${unchangedHash}`);
+    const staleKey = blobKey("ws", "sess", `${crypto.randomUUID()}/${staleHash}`);
+    const latest = row("latest", [latestKey]);
+    const stale = row("stale", [staleKey]);
+    // This delete plan can remain in flight while a new turn begins.
+    const predecessorGc = computeWorkspaceCaptureGcPlan([latest, stale], 1);
+    const refs = retainedCaptureBlobRefs("ws", "sess", latest.blobKeys);
+    expect(refs.get(unchangedHash)).toBe(latestKey);
+    expect(refs.has(staleHash)).toBe(false);
+    expect(predecessorGc.deleteBlobKeys).toEqual([staleKey]);
+    // Reusing the latest key also keeps it alive when its original row expires.
+    const successor = row("successor", [...refs.values()]);
+    expect(computeWorkspaceCaptureGcPlan([successor, latest], 1).deleteBlobKeys).toEqual([]);
+  });
+
+  test("reuse recognizes legacy and namespaced hashes without adopting other sessions' keys", () => {
+    const legacyHash = "a".repeat(64);
+    const modernHash = "b".repeat(64);
+    const legacy = blobKey("ws", "sess", legacyHash);
+    const modern = blobKey("ws", "sess", `${crypto.randomUUID()}/${modernHash}`);
+    const refs = retainedCaptureBlobRefs("ws", "sess", [
+      legacy,
+      modern,
+      blobKey("ws", "other-session", "c".repeat(64)),
+      blobKey("ws", "sess", "not-a-content-hash"),
+    ]);
+    expect([...refs.entries()]).toEqual([
+      [legacyHash, legacy],
+      [modernHash, modern],
+    ]);
   });
 
   test("evicts revisions beyond keep-N and deletes their per-revision keys", () => {
