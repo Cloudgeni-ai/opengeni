@@ -660,7 +660,7 @@ describe("workflow fail-closed contracts", () => {
   });
 
   test("docs main pushes require image evidence but skip unselected tests", () => {
-    const options = {
+    const options: Parameters<typeof requiredResult>[1] = {
       event: "push",
       mode: "docs",
       unit: 0,
