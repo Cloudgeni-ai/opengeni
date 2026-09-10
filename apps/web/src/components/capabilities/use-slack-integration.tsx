@@ -11,7 +11,8 @@ import type {
   SlackChannelRoute,
   SlackReactionChannel,
 } from "@opengeni/sdk";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
 
 import type {
@@ -28,7 +29,6 @@ import { useSlackInstallationDiscovery } from "@/components/capabilities/use-sla
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
-import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
@@ -40,7 +40,6 @@ import {
 } from "@/lib/personal-slack";
 import {
   openGeniSlackBotConnections,
-  openGeniSlackBotInstallInput,
   openGeniSlackBotUiMetadata,
   preferredOpenGeniSlackBotConnection,
 } from "@/lib/slack-bot";
@@ -203,6 +202,14 @@ export function useSlackIntegration({
 }): IntegrationAdapter {
   const context = useAppContext();
   const client = context.client;
+  const connectTransport = useMemo(() => client.connectTransport(), [client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const completeConnect = useCallback(() => {
+    setConnectRequest(null);
+    void refresh()
+      .then(onRuntimeChanged)
+      .catch(() => toast.error("Connected, but Slack details could not be refreshed"));
+  }, [refresh, onRuntimeChanged]);
   const isAdmin = canManageSlackReactionSummon(context.accessContext, workspaceId);
   const canInstallBot = canInstallOpenGeniSlackBot(context.accessContext, workspaceId);
   const canManagePersonal = canWriteWorkspaceConnections(context.accessContext, workspaceId);
@@ -403,24 +410,15 @@ export function useSlackIntegration({
       });
       return;
     }
-    setPersonalBusy(true);
-    try {
-      const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(personalItem.id)}`;
-      const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-        ...target,
-        ...(personalConnection ? { connectionId: personalConnection.id } : {}),
-        returnPath,
-      });
-      if (!response.authorizationUrl) {
-        throw new Error("Slack did not return an authorization link.");
-      }
-      window.location.assign(response.authorizationUrl);
-    } catch (error) {
-      toast.error("Couldn't connect your Slack account", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setPersonalBusy(false);
-    }
+    setConnectRequest({
+      scope: { workspaceId, transport: connectTransport },
+      providerId: "slack-personal",
+      displayName: "your Slack account",
+      ownership: "personal",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+      ...(personalConnection ? { reconnectAccountId: personalConnection.id } : {}),
+    });
   }
 
   async function disconnectPersonal(): Promise<boolean> {
@@ -452,28 +450,15 @@ export function useSlackIntegration({
       return;
     }
     botOperationPending.current = true;
-    setBotBusy(true);
-    try {
-      const installation = await client.startOpenGeniSlackBotInstall(
-        workspaceId,
-        openGeniSlackBotInstallInput(botConnection, false),
-      );
-      window.location.assign(installation.authorizationUrl);
-    } catch (error) {
-      setInstallError({
-        workspaceId,
-        feedback: {
-          title: "Couldn't start Slack setup",
-          description: error instanceof Error ? error.message : "Try connecting again.",
-          retryable: true,
-        },
-      });
-      toast.error("Couldn't start the OpenGeni Slack installation", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setBotBusy(false);
-      botOperationPending.current = false;
-    }
+    setConnectRequest({
+      scope: { workspaceId, transport: connectTransport },
+      providerId: "slack-bot",
+      displayName: "Slack workspace bot",
+      ownership: "workspace",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+      ...(botConnection ? { reconnectAccountId: botConnection.id } : {}),
+    });
   }
 
   async function disconnectBot(): Promise<boolean> {
@@ -1096,6 +1081,21 @@ export function useSlackIntegration({
 
   const dialogs = (
     <>
+      {connectRequest && (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={workspaceId}
+          request={connectRequest}
+          onClose={() => {
+            botOperationPending.current = false;
+            setConnectRequest(null);
+          }}
+          onComplete={() => {
+            botOperationPending.current = false;
+            completeConnect();
+          }}
+        />
+      )}
       <ConfirmDialog
         open={personalDisconnectOpen}
         onOpenChange={setPersonalDisconnectOpen}

@@ -414,7 +414,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      # Finish independent shards so one failure cannot hide other regressions.
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
     steps:
@@ -818,6 +819,7 @@ jobs:
 
       - name: Responsive knowledge surfaces browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
+        id: knowledge_surfaces_browser
         timeout-minutes: 6
         env:
           # This gate traverses the public configured-principal API and must fail
@@ -893,7 +895,7 @@ jobs:
             /tmp/codex-quota-evidence/codex-quota-mobile-dark.png
 
       - name: Upload responsive knowledge-surface evidence
-        if: ${{ always() && matrix.lane == 'knowledge' }}
+        if: ${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: responsive-knowledge-surface-evidence
@@ -1022,6 +1024,11 @@ jobs:
           --output ci-profile/packages.json
           --timeout-seconds 1200
           -- bun scripts/ci/run-build-plan.ts --plan impact-plan.json
+
+      - name: Built embedding package exports
+        # Build-independent unit shards verify source exports; this job proves
+        # their actual emitted files using the canonical package build above.
+        run: OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES=1 bun test scripts/embedding-package-contract.test.ts
 
       - name: React Native Metro to Hermes session bundle
         run: bun run test:react-native-hermes-bundle

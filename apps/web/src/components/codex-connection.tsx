@@ -21,10 +21,10 @@ import type {
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
+import { pollDeviceAuthorization } from "@opengeni/connect";
+import { DeviceAuthorization } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
 import {
-  CheckIcon,
-  CopyIcon,
-  ExternalLinkIcon,
   Loader2Icon,
   RefreshCwIcon,
   TicketCheckIcon,
@@ -674,8 +674,6 @@ function resetBadgeTone(remainingMs: number | null): "urgent" | "soon" | "ok" {
   return "ok";
 }
 
-const CODE_COPIED_FEEDBACK_MS = 1600;
-
 type ClipboardModule = {
   copyTextToClipboard: (text: string) => Promise<boolean>;
 };
@@ -691,89 +689,19 @@ export function CodexDeviceCodePanel({
   verificationUri: string;
   loadClipboard?: () => Promise<ClipboardModule>;
 }) {
-  const [copied, setCopied] = useState(false);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const copyAttemptRef = useRef(0);
-
-  useEffect(() => {
-    copyAttemptRef.current += 1;
-    setCopied(false);
-    return () => {
-      copyAttemptRef.current += 1;
-      if (copiedTimerRef.current !== null) {
-        clearTimeout(copiedTimerRef.current);
-        copiedTimerRef.current = null;
-      }
-    };
-  }, [userCode]);
-
-  const copyCode = useCallback(async () => {
-    const attempt = ++copyAttemptRef.current;
-    if (copiedTimerRef.current !== null) {
-      clearTimeout(copiedTimerRef.current);
-      copiedTimerRef.current = null;
-    }
-    setCopied(false);
-
-    const { copyTextToClipboard } = await loadClipboard();
-    if (attempt !== copyAttemptRef.current) return;
-    const ok = await copyTextToClipboard(userCode);
-    if (attempt !== copyAttemptRef.current) return;
-    if (!ok) {
-      toast.error("Couldn't copy the code", {
-        description: "Copy it manually instead.",
-      });
-      return;
-    }
-    setCopied(true);
-    toast.success("Code copied");
-    if (copiedTimerRef.current !== null) {
-      clearTimeout(copiedTimerRef.current);
-    }
-    copiedTimerRef.current = setTimeout(() => {
-      if (attempt !== copyAttemptRef.current) return;
-      copiedTimerRef.current = null;
-      setCopied(false);
-    }, CODE_COPIED_FEEDBACK_MS);
-  }, [loadClipboard, userCode]);
-
   return (
-    <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
-      <div className="text-xs text-fg-muted">
-        Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you
-        navigate away.
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <code
-          data-codex-device-code=""
-          className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest"
-        >
-          {userCode}
-        </code>
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          aria-label={copied ? "Code copied" : "Copy code"}
-          onClick={() => void copyCode()}
-        >
-          {copied ? (
-            <CheckIcon className="size-3.5" aria-hidden="true" />
-          ) : (
-            <CopyIcon className="size-3.5" aria-hidden="true" />
-          )}
-          {copied ? "Copied" : "Copy code"}
-        </Button>
-        <Button asChild type="button" variant="secondary" size="sm">
-          <a href={verificationUri} target="_blank" rel="noopener noreferrer">
-            Open auth page <ExternalLinkIcon className="size-3.5" />
-          </a>
-        </Button>
-      </div>
-      <div className="flex items-center gap-2 text-xs text-fg-subtle">
-        <Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…
-      </div>
-    </div>
+    <DeviceAuthorization
+      userCode={userCode}
+      verificationUri={verificationUri}
+      loadClipboard={loadClipboard}
+      codeAttributes={{ "data-codex-device-code": "" }}
+      description="Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you navigate away."
+      onCopyResult={(copied) =>
+        copied
+          ? toast.success("Code copied")
+          : toast.error("Couldn't copy the code", { description: "Copy it manually instead." })
+      }
+    />
   );
 }
 
@@ -930,21 +858,37 @@ export function CodexSubscriptionsCardWithClient({
         verificationUri: start.verificationUri,
       });
       window.open(start.verificationUri, "_blank", "noopener,noreferrer");
-      const interval = Math.max(2, start.intervalSeconds) * 1000;
-      const poll = async (): Promise<void> => {
-        // Device authorization is server-side work. Keep polling after this
-        // settings card unmounts so navigating back to the workspace cannot
-        // strand an already-approved OpenAI grant. Only UI updates are gated
-        // by the component lifetime.
-        // The recursive poll runs detached via setTimeout, so a rejection here
-        // (a 500/502/400 from the poll route) would otherwise be swallowed,
-        // leaving the card stuck on "Waiting for authorization…" forever with no
-        // credential ever persisted. Catch it, surface a toast, and clear pending
-        // so the failure is visible and the user can retry.
-        let result: Awaited<ReturnType<typeof client.codexConnectPoll>>;
-        try {
-          result = await client.codexConnectPoll(workspaceId, start.state);
-        } catch (error) {
+      // Preserve server-side completion after this card unmounts, but bound it
+      // by the provider's 15-minute device window. Shared headless pacing has no
+      // UI dependency and never blindly retries an uncertain token exchange.
+      void pollDeviceAuthorization({
+        poll: () => client.codexConnectPoll(workspaceId, start.state),
+        expired: { status: "expired" } as Awaited<ReturnType<typeof client.codexConnectPoll>>,
+        initialIntervalSeconds: Math.max(2, start.intervalSeconds),
+        expiresAtMs: Date.now() + 15 * 60_000,
+        signal: new AbortController().signal,
+      })
+        .then(async (result) => {
+          if (!result) return;
+          if (result.status === "connected") {
+            recordOutcome("connected");
+            if (!cancelled.current) {
+              setPending(null);
+              toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
+              await refreshUsage();
+            }
+            return;
+          }
+          if (result.status === "expired") {
+            recordOutcome("expired");
+            if (!cancelled.current) {
+              setPending(null);
+              toast.error("The code expired before it was authorized. Try again.");
+            }
+            return;
+          }
+        })
+        .catch((error) => {
           recordOutcome("outcome_unknown");
           if (!cancelled.current) {
             setPending(null);
@@ -954,28 +898,7 @@ export function CodexSubscriptionsCardWithClient({
                 : "Failed to verify Codex authorization. Try again.",
             );
           }
-          return;
-        }
-        if (result.status === "connected") {
-          recordOutcome("connected");
-          if (!cancelled.current) {
-            setPending(null);
-            toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
-            await refreshUsage();
-          }
-          return;
-        }
-        if (result.status === "expired") {
-          recordOutcome("expired");
-          if (!cancelled.current) {
-            setPending(null);
-            toast.error("The code expired before it was authorized. Try again.");
-          }
-          return;
-        }
-        setTimeout(() => void poll(), interval);
-      };
-      setTimeout(() => void poll(), interval);
+        });
     } catch (error) {
       recordOutcome("outcome_unknown");
       setPending(null);

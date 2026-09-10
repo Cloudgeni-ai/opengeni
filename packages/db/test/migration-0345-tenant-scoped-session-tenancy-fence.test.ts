@@ -16,6 +16,7 @@ import {
   type DbClient,
 } from "../src";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
+import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationUrl = new URL(
   "../drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
@@ -264,6 +265,10 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
           ('0397_sandbox_deadline_rotation_preemption.sql'),
           ('0407_connected_command_tracking_retirement.sql')
       `);
+      // This intentionally incomplete historical fence graph cannot satisfy the
+      // later embedding migrations' exact predecessor-definition checks.
+      // Full-schema coverage above still applies the complete migration chain.
+      await setup`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(driftOwned.ownerUrl);
       const migration = await readFile(migrationUrl, "utf8");
       const sessionEventCursorMigration = await readFile(sessionEventCursorMigrationUrl, "utf8");

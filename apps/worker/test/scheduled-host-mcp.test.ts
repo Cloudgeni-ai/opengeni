@@ -1,0 +1,321 @@
+// opengeni:test-shared-postgres-exclusive
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import {
+  acquireOwnerMigratedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
+import {
+  createDb,
+  createWorkspace,
+  ensureExternalIdentity,
+  grantWorkspaceAccess,
+  createHostMcpBinding,
+  issueHostMcpDelegation,
+  createScheduledTask,
+  captureHostMcpTaskAuthorities,
+  claimSessionWorkForAttempt,
+  authorizeDirectHostMcpUse,
+  buildHostConnectionTokenResolver,
+  revokeHostMcpDelegation,
+  createSession,
+  initializeSessionStartAtomically,
+  inheritHostMcpTaskAuthoritiesFromAttempt,
+  getHostMcpTaskAuthorities,
+  type DbClient,
+} from "@opengeni/db";
+import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
+import type { ActivityServices } from "../src/activities/types";
+
+let shared: SharedTestDatabase | null;
+let client: DbClient;
+beforeAll(async () => {
+  const owned = await acquireOwnerMigratedTestDatabase("scheduled-host-mcp");
+  if (!owned) throw new Error("This host authority test requires PostgreSQL");
+  await migrate(owned.ownerUrl);
+  await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
+  const appUrl = new URL(owned.ownerUrl);
+  appUrl.username = "opengeni_app";
+  appUrl.password = owned.appPassword;
+  shared = { ...owned, appUrl: appUrl.toString() };
+  client = createDb(shared.appUrl);
+}, 180_000);
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+});
+
+test("scheduled host grants survive browser-independent dispatch in every run mode and revoke at physical use", async () => {
+  for (const runMode of ["new_session_per_run", "reusable_session", "existing_session"] as const) {
+    const [account] = await shared!
+      .admin`insert into managed_accounts (name) values ('scheduled host fixture') returning id`;
+    const workspace = await createWorkspace(client.db, {
+      accountId: account!.id,
+      name: "Host schedule",
+    });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: account!.id,
+      externalId: "product-owner",
+    });
+    await grantWorkspaceAccess(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace.id,
+      subjectId: identity.subjectId,
+      permissions: [
+        "sessions:read",
+        "sessions:create",
+        "sessions:control",
+        "connections:read",
+        "connections:write",
+        "scheduled_tasks:manage",
+        "scheduled_tasks:run",
+      ],
+    });
+    const owner = {
+      accountId: account!.id,
+      workspaceId: workspace.id,
+      subjectId: identity.subjectId,
+      authorizationRevision: identity.authorizationRevision,
+    };
+    const binding = await createHostMcpBinding(client.db, owner, {
+      operationId: crypto.randomUUID(),
+      definition: {
+        serverId: "product",
+        destinationUrl: "https://host.fixture.invalid/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "product-account",
+          providerDomain: "host.fixture.invalid",
+        },
+      },
+    });
+    const delegation = await issueHostMcpDelegation(client.db, owner, {
+      operationId: crypto.randomUUID(),
+      bindingId: binding.id,
+      expectedBindingGeneration: 1,
+      grant: {
+        scope: "user",
+        mode: "always",
+        context: "workspace_shared",
+        workspaceSharedAcknowledged: true,
+      },
+    });
+    const tools = [{ kind: "mcp" as const, id: "product" }];
+    const connectionRef = {
+      ...binding.definition.connectionRef,
+      hostBinding: { bindingId: binding.id, generation: 1 },
+    };
+    const mcpServer = {
+      id: "product",
+      url: binding.definition.destinationUrl,
+      transport: "streamable_http" as const,
+      connectionRef,
+    };
+    const target =
+      runMode === "existing_session"
+        ? await createSession(client.db, {
+            ...owner,
+            createdBy: { kind: "subject", subjectId: owner.subjectId },
+            initialMessage: "",
+            resources: [],
+            tools,
+            metadata: {},
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+            mcpServers: [mcpServer],
+          })
+        : null;
+    const task = await createScheduledTask(client.db, {
+      accountId: owner.accountId,
+      workspaceId: owner.workspaceId,
+      createdBy: { kind: "subject", subjectId: owner.subjectId },
+      name: "Read product data later",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode,
+      overlapPolicy: "allow_concurrent",
+      ...(target ? { targetSessionId: target.id } : {}),
+      agentConfig: { prompt: "Read product data", resources: [], tools, metadata: {} },
+      metadata: {},
+      captureHostAuthority: (tx, accepted) =>
+        captureHostMcpTaskAuthorities(tx, owner, accepted, [
+          {
+            delegationId: delegation.id,
+            generation: 1,
+            bindingId: binding.id,
+            bindingGeneration: 1,
+            definition: binding.definition,
+          },
+        ]),
+    });
+    const settings = testSettings({
+      databaseUrl: shared!.appUrl,
+      sandboxBackend: "none",
+      hostMcpAuthoritySourceAdmissionEnabled: true,
+      mcpServers: [mcpServer],
+    });
+    const activities = createScheduledTaskActivities(
+      async () =>
+        ({ settings, db: client.db, bus: new MemoryEventBus() }) as unknown as ActivityServices,
+    );
+    const dispatchInput = {
+      workspaceId: workspace.id,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey: crypto.randomUUID(),
+    };
+    const dispatched = await activities.dispatchScheduledTaskRun(dispatchInput);
+    expect(dispatched.action, JSON.stringify({ runMode, dispatched })).toBe(
+      target ? "signal" : "start",
+    );
+    if (dispatched.action !== "signal" && dispatched.action !== "start")
+      throw new Error(JSON.stringify(dispatched));
+    const replay = await activities.dispatchScheduledTaskRun(dispatchInput);
+    expect(replay.sessionId).toBe(dispatched.sessionId);
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspace.id, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    if (claim.action !== "claimed") throw new Error(JSON.stringify(claim));
+    const request = {
+      accountId: owner.accountId,
+      workspaceId: workspace.id,
+      sessionId: dispatched.sessionId,
+      rootSessionId: dispatched.sessionId,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+      initiator: claim.turn.initiator,
+      initiatorContext: claim.turn.initiatorContext,
+      surface: "model" as const,
+      serverId: "product",
+      destinationUrl: binding.definition.destinationUrl,
+      credentialTarget: "mcp" as const,
+      forceRefresh: false,
+      connectionRef,
+    };
+    expect(await authorizeDirectHostMcpUse(client.db, request)).toBe(true);
+    let renewals = 0;
+    const resolve = buildHostConnectionTokenResolver(
+      async () => {
+        renewals++;
+        return {
+          status: "ok",
+          accountId: owner.accountId,
+          workspaceId: workspace.id,
+          sessionId: dispatched.sessionId,
+          providerDomain: "host.fixture.invalid",
+          connectionId: "product-account",
+          headers: { Authorization: `Bearer synthetic-${renewals}` },
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      },
+      {
+        ...request,
+        authorizeDurableBinding: (candidate) => authorizeDirectHostMcpUse(client.db, candidate),
+      },
+    );
+    const credential = await resolve(request);
+    expect(credential.status).toBe("ok");
+    if (credential.status !== "ok") throw new Error("No scheduled host credential");
+    expect(await credential.authorizeProviderRequest?.()).toBe(true);
+    const sourceActor = {
+      type: "agent_attempt" as const,
+      sessionId: dispatched.sessionId,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    };
+    const derivative = await createScheduledTask(client.db, {
+      accountId: owner.accountId,
+      workspaceId: workspace.id,
+      createdByActor: sourceActor,
+      name: "Agent-created product reminder",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "Check again", resources: [], tools, metadata: {} },
+      metadata: {},
+      captureHostAuthority: (tx, accepted) =>
+        inheritHostMcpTaskAuthoritiesFromAttempt(tx, accepted, sourceActor, [
+          { bindingId: binding.id, bindingGeneration: 1, definition: binding.definition },
+        ]),
+    });
+    expect(
+      await getHostMcpTaskAuthorities(client.db, {
+        accountId: owner.accountId,
+        workspaceId: workspace.id,
+        taskId: derivative.id,
+        taskAuthorityRevision: derivative.authorityRevision,
+      }),
+    ).toHaveLength(1);
+    const child = await createSession(client.db, {
+      accountId: owner.accountId,
+      workspaceId: workspace.id,
+      parentSessionId: dispatched.sessionId,
+      initialMessage: "Read the same explicitly delegated account",
+      resources: [],
+      tools,
+      metadata: {},
+      model: claim.turn.model,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      mcpServers: [mcpServer],
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: dispatched.sessionId,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+      },
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: owner.accountId,
+      workspaceId: workspace.id,
+      sessionId: child.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const childAttemptId = crypto.randomUUID();
+    const childClaim = await claimSessionWorkForAttempt(client.db, workspace.id, {
+      sessionId: child.id,
+      workflowId: `session-${child.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: childAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(childClaim.action).toBe("claimed");
+    if (childClaim.action !== "claimed") throw new Error(JSON.stringify(childClaim));
+    const childRequest = {
+      ...request,
+      sessionId: child.id,
+      turnId: childClaim.turn.id,
+      attemptId: childAttemptId,
+      executionGeneration: childClaim.turn.executionGeneration,
+      initiator: childClaim.turn.initiator,
+      initiatorContext: childClaim.turn.initiatorContext,
+    };
+    expect(await authorizeDirectHostMcpUse(client.db, childRequest)).toBe(true);
+    await revokeHostMcpDelegation(client.db, owner, delegation.id, 1);
+    expect(await authorizeDirectHostMcpUse(client.db, childRequest)).toBe(false);
+    expect(await credential.authorizeProviderRequest?.()).toBe(false);
+    expect((await resolve(request)).status).not.toBe("ok");
+    expect(renewals).toBe(1);
+  }
+}, 60_000);

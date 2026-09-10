@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { McpCredentialsRequest, SessionTurn } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import type { Database, SessionTurnForExecution } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 
@@ -247,6 +247,8 @@ describe("connectionTokenResolverForTurn", () => {
       sessionId: "session-1",
       rootSessionId: "session-root",
       attemptId: "attempt-1",
+      getHostTurnForAttempt: async () =>
+        ({ id: "turn-1", executionGeneration: 1 }) as SessionTurnForExecution,
       turn: {
         id: "turn-1",
         executionGeneration: 1,

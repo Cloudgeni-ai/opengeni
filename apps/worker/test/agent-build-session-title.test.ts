@@ -13,6 +13,25 @@ import {
 } from "../src/activities/agent-turn/session-title";
 
 describe("shouldRequestMissingSessionTitle", () => {
+  test("an empty linked permission ceiling cannot promote or generate a title", () => {
+    const shouldRequestTitle = shouldRequestMissingSessionTitle({
+      title: null,
+      titleSource: null,
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions: [],
+    });
+    expect(shouldRequestTitle).toBe(false);
+    for (const parallelGenerationAvailable of [true, false]) {
+      expect(
+        sessionTitleToolPlan({
+          tools: [{ kind: "mcp", id: "opengeni" }],
+          selectedFirstPartyMcpTools: ["set_session_title"],
+          shouldRequestTitle,
+          parallelGenerationAvailable,
+        }),
+      ).toMatchObject({ promoteTitleTool: false, generateTitleInParallel: false });
+    }
+  });
   test("requests semantic titling while the durable title is absent or still the fallback", () => {
     expect(
       shouldRequestMissingSessionTitle({

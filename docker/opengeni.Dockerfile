@@ -9,6 +9,7 @@ COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
@@ -20,6 +21,7 @@ COPY packages/capabilities/package.json packages/capabilities/package.json
 COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/connect/package.json packages/connect/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json

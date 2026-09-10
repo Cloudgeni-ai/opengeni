@@ -1,6 +1,18 @@
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
 import {
+  HostMcpBindingDefinition,
+  HostMcpCreateSelections,
+  type HostMcpCreateSelection,
+} from "@opengeni/contracts/host-mcp-bindings";
+import {
+  captureDirectHostMcpAuthority,
+  HostMcpDelegationAuthorityError,
+  HostMcpBindingConflictError,
+  getHostMcpBinding,
+  getHostMcpDelegation,
+} from "@opengeni/db";
+import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
@@ -46,7 +58,7 @@ import {
   type Session,
   type SessionAgentAccess,
   type SessionCommandReceipt,
-  type SessionEndUser,
+  type SessionScopeSubjectId,
   type SessionMemoryScope,
   type SessionSkill,
   type SessionEvent,
@@ -133,6 +145,10 @@ import {
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import { externalCreationMetadata } from "./external-creation-attribution";
+import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
+import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
+import { prepareHostMcpOwnerAuthorization } from "../application/host-mcp-owner";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type {
   AcceptSessionUserMessageDependencies,
@@ -167,7 +183,7 @@ import {
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import {
-  requireCanonicalManagedHuman,
+  requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
 } from "../application/session-tenancy";
 import {
@@ -213,7 +229,7 @@ async function requireAtomicPersonalResourceAttachment(
     });
   }
   try {
-    requireCanonicalManagedHuman(authorization, workspaceId);
+    requireVerifiedOwningUser(authorization, workspaceId);
   } catch (error) {
     throw new HTTPException(403, {
       message: "Personal resources require the owning managed-human session.",
@@ -729,6 +745,13 @@ export async function createAndStartSessionWithOutcome(input: {
   /** Internal database-only composition seam. The exact session shell and this
    * linkage commit together before its first event/turn can be initialized. */
   beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
+  /** Backend-only accepted-work composition. Recheck live caller authority
+   * here before capturing; session-shell authorization may have happened in
+   * an earlier transaction. Called only for a newly inserted initial turn. */
+  captureInitialTurnAuthority?: (tx: Database, sessionId: string, turnId: string) => Promise<void>;
+  /** Internal replay identity; the verified caller must also capture authority.
+   * Supplying selection metadata alone never grants runtime use. */
+  selectedHostMcpDelegations?: HostMcpCreateSelection[];
   /** The custom workspace model was frozen by an earlier accepted boundary or
    * inherited from an existing session, so retirement must not invalidate it. */
   retainWorkspaceGatewayModel?: boolean;
@@ -801,7 +824,7 @@ export async function createAndStartSessionWithOutcome(input: {
   // (migration 0427), already resolved against the parent by the caller.
   // Omitted keeps the workspace defaults for internal lifecycle callers.
   agentAccess?: SessionAgentAccess;
-  endUser?: SessionEndUser | null;
+  scopeSubjectId?: SessionScopeSubjectId | null;
   memoryScope?: SessionMemoryScope;
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
@@ -1001,6 +1024,7 @@ export async function createAndStartSessionWithOutcome(input: {
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
+      selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
       createdByActor: input.createdByActor ?? null,
@@ -1018,7 +1042,7 @@ export async function createAndStartSessionWithOutcome(input: {
       instructions: input.instructions ?? null,
       policyRole: input.policyRole ?? null,
       ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-      ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
+      ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
       ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
@@ -1096,6 +1120,7 @@ export async function createAndStartSessionWithOutcome(input: {
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
       ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
       createdByActor: input.createdByActor ?? null,
       model: input.model,
@@ -1112,7 +1137,7 @@ export async function createAndStartSessionWithOutcome(input: {
       instructions: input.instructions ?? null,
       policyRole: input.policyRole ?? null,
       ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-      ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
+      ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
       ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       parentSessionId: input.parentSessionId ?? null,
       sandboxGroupId: input.sandboxGroupId ?? null,
@@ -1168,6 +1193,11 @@ async function finishStartSession(
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     initialMessage: string;
+    captureInitialTurnAuthority?: (
+      tx: Database,
+      sessionId: string,
+      turnId: string,
+    ) => Promise<void>;
     deferInitialTurn?: boolean;
     modelContext?: string | null;
     resources: ResourceRef[];
@@ -1253,6 +1283,12 @@ async function finishStartSession(
     accountId: session.accountId,
     workspaceId: session.workspaceId,
     sessionId: session.id,
+    ...(input.captureInitialTurnAuthority
+      ? {
+          captureInitialTurnAuthority: (tx: Database, turnId: string) =>
+            input.captureInitialTurnAuthority!(tx, session.id, turnId),
+        }
+      : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
     reasoningEffortFallback: input.reasoningEffort,
     turnExecutionPolicy: input.turnExecutionPolicy,
@@ -1500,6 +1536,8 @@ type PostUserMessageTurnInput = {
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+  captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
@@ -1706,6 +1744,12 @@ export async function postUserMessageTurn(
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+              ...(input.selectedHostMcpDelegations?.length
+                ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
+                : {}),
+              ...(input.captureTurnAuthority
+                ? { captureTurnAuthority: input.captureTurnAuthority }
+                : {}),
               ...(input.personalResourceAttachment
                 ? {
                     personalResourceAttachment: input.personalResourceAttachment,
@@ -1820,7 +1864,7 @@ export function resolveSessionCreateVisibility(input: {
 
 export type SessionCreateScope = {
   agentAccess: SessionAgentAccess;
-  endUser: SessionEndUser | null;
+  scopeSubjectId: SessionScopeSubjectId | null;
   memoryScope: SessionMemoryScope;
 };
 
@@ -1832,7 +1876,6 @@ const AGENT_ACCESS_WIDTH: Record<SessionAgentAccess, number> = {
 
 const MEMORY_SCOPE_WIDTH: Record<SessionMemoryScope, number> = {
   off: 0,
-  session: 1,
   user: 2,
   workspace: 3,
 };
@@ -1851,7 +1894,7 @@ export function resolveSessionCreateScope(input: {
   requested: {
     agentAccess: SessionAgentAccess;
     agentAccessProvided: boolean;
-    endUser: SessionEndUser | null;
+    scopeSubjectId: SessionScopeSubjectId | null;
     endUserProvided: boolean;
     memoryScope: SessionMemoryScope;
     memoryScopeProvided: boolean;
@@ -1863,7 +1906,7 @@ export function resolveSessionCreateScope(input: {
   if (!parent) {
     resolved = {
       agentAccess: requested.agentAccess,
-      endUser: requested.endUser,
+      scopeSubjectId: requested.scopeSubjectId,
       memoryScope: requested.memoryScope,
     };
   } else {
@@ -1875,10 +1918,9 @@ export function resolveSessionCreateScope(input: {
     }
     if (requested.endUserProvided) {
       const same =
-        requested.endUser !== null &&
-        parent.endUser !== null &&
-        requested.endUser.source === parent.endUser.source &&
-        requested.endUser.id === parent.endUser.id;
+        requested.scopeSubjectId !== null &&
+        parent.scopeSubjectId !== null &&
+        requested.scopeSubjectId === parent.scopeSubjectId;
       if (!same) {
         throw new HTTPException(403, {
           message: "child end-user label must equal the parent session label",
@@ -1891,10 +1933,10 @@ export function resolveSessionCreateScope(input: {
         message: "child memory scope may only narrow the parent session",
       });
     }
-    resolved = { agentAccess, endUser: parent.endUser, memoryScope };
+    resolved = { agentAccess, scopeSubjectId: parent.scopeSubjectId, memoryScope };
   }
-  if (resolved.memoryScope === "user" && resolved.endUser === null) {
-    throw new HTTPException(422, { message: 'memoryScope "user" requires an endUser label' });
+  if (resolved.memoryScope === "user" && resolved.scopeSubjectId === null) {
+    throw new HTTPException(422, { message: 'memoryScope "user" requires an authenticated user' });
   }
   return resolved;
 }
@@ -1972,6 +2014,26 @@ export async function createSessionForRequestWithOutcome(
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
   payload.metadata = sessionCreationMetadata(payload.metadata);
+  const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
+  const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
+  const hostSelections = payload.selectedHostMcpDelegations ?? [];
+  if (
+    hostSelections.length &&
+    (!authorization ||
+      authorization.grant.accountId !== grant.accountId ||
+      authorization.grant.subjectId !== grant.subjectId ||
+      authorization?.grant.workspaceId !== workspaceId ||
+      !hasPermission(authorization?.grant.permissions ?? [], "connections:read") ||
+      !hasPermission(grant.permissions, "connections:read") ||
+      grant.metadata?.["sessionId"] ||
+      payload.startMode === "realtime")
+  ) {
+    throw new HTTPException(403, {
+      message: "Host selection requires a verified direct owner and non-realtime start",
+    });
+  }
+  if (hostSelections.length)
+    prepareHostMcpOwnerAuthorization(authorization!, workspaceId, "connections:read");
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
@@ -2057,24 +2119,26 @@ export async function createSessionForRequestWithOutcome(
   // visibility: presence is read from the raw request because the Zod
   // defaults erase absent-vs-explicit, and the parent side comes from the
   // durable row rather than anything the caller sent.
+  const creationInitiator = creationInitiatorForGrant(grant);
+  const scopeUser =
+    creationInitiator.initiator?.kind === "subject" ? creationInitiator.initiator.subjectId : null;
   const sessionScope = resolveSessionCreateScope({
     requested: {
       agentAccess: payload.agentAccess,
       agentAccessProvided: hasOwnProperty(rawPayload, "agentAccess"),
-      endUser: payload.endUser ?? null,
-      endUserProvided: hasOwnProperty(rawPayload, "endUser"),
+      scopeSubjectId: scopeUser && /^(?:user:|external_user:)/u.test(scopeUser) ? scopeUser : null,
+      endUserProvided: false,
       memoryScope: payload.memoryScope,
       memoryScopeProvided: hasOwnProperty(rawPayload, "memoryScope"),
     },
     parent: parentAuthority
       ? {
           agentAccess: parentAuthority.agentAccess,
-          endUser: parentAuthority.endUser,
+          scopeSubjectId: parentAuthority.scopeSubjectId,
           memoryScope: parentAuthority.memoryScope,
         }
       : null,
   });
-  const creationInitiator = creationInitiatorForGrant(grant);
   const parentCallingTurn =
     parentSession && creationInitiator.actor
       ? await getSessionTurnForAttempt(
@@ -2116,6 +2180,7 @@ export async function createSessionForRequestWithOutcome(
           : {}),
         createIdempotencyKey: payload.idempotencyKey,
         selectedInstalledSkillIds: payload.installedSkillIds ?? [],
+        selectedHostMcpDelegations: hostSelections,
         ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
         visibility: effectiveVisibility,
         variableSetIds: payload.variableSetIds ?? [],
@@ -2375,6 +2440,15 @@ export async function createSessionForRequestWithOutcome(
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
+  const captureSelectedHostAuthority = prepareSelectedHostTurnAuthority(
+    runtimeSettings,
+    tools,
+    grant,
+    workspaceId,
+    hostSelections,
+    authorization,
+  );
+  const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, {
@@ -2975,7 +3049,21 @@ export async function createSessionForRequestWithOutcome(
       // create carries a derived OS; shared spawns inherit the exact parent box.
       ...(effectiveSandboxOs ? { sandboxOs: effectiveSandboxOs } : {}),
       sandboxGroupId,
-      metadata: payload.metadata,
+      metadata: creationMetadata ?? {},
+      ...(externalBeforeCreateCommit ? { beforeCreateCommit: externalBeforeCreateCommit } : {}),
+      selectedHostMcpDelegations: hostSelections,
+      ...(captureSelectedHostAuthority || captureLinkedAuthority
+        ? {
+            captureInitialTurnAuthority: async (
+              tx: Database,
+              sessionId: string,
+              turnId: string,
+            ) => {
+              await captureLinkedAuthority?.(tx, sessionId, turnId);
+              await captureSelectedHostAuthority?.(tx, sessionId, turnId);
+            },
+          }
+        : {}),
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
@@ -2996,7 +3084,7 @@ export async function createSessionForRequestWithOutcome(
       instructions: payload.instructions ?? null,
       policyRole: payload.policyRole ?? null,
       agentAccess: sessionScope.agentAccess,
-      endUser: sessionScope.endUser,
+      scopeSubjectId: sessionScope.scopeSubjectId,
       memoryScope: sessionScope.memoryScope,
       firstPartyMcpPermissions,
       firstPartyMcpTools,
@@ -3057,6 +3145,18 @@ export async function createSessionForRequestWithOutcome(
         { message: error.message, cause: error },
       );
     }
+    if (error instanceof HostMcpDelegationAuthorityError) {
+      throw new HTTPException(403, {
+        message: "Host delegation authority unavailable",
+        cause: error,
+      });
+    }
+    if (error instanceof HostMcpBindingConflictError) {
+      throw new HTTPException(409, {
+        message: "Host delegation selection conflicts",
+        cause: error,
+      });
+    }
     if (error instanceof AgentCommandAuthorityError) {
       throw new HTTPException(403, { message: error.message });
     }
@@ -3111,6 +3211,94 @@ export async function createSessionForRequest(
   ).session;
 }
 
+/** Snapshot the selected destination, then recheck live actor, binding and grant
+ * inside the transaction which accepts the turn. Neither selection nor a
+ * registered binding alone is execution authority. Shared by create/send/steer. */
+function prepareSelectedHostTurnAuthority(
+  settings: Settings,
+  tools: ToolRef[],
+  grant: AccessGrant,
+  workspaceId: string,
+  selections: HostMcpCreateSelection[],
+  authorization?: AccessGrantAuthorization,
+): ((tx: Database, sessionId: string, turnId: string) => Promise<void>) | undefined {
+  if (!selections.length) return undefined;
+  if (
+    !authorization ||
+    authorization.grant.accountId !== grant.accountId ||
+    authorization.grant.subjectId !== grant.subjectId ||
+    authorization?.grant.workspaceId !== workspaceId ||
+    !hasPermission(authorization?.grant.permissions ?? [], "connections:read") ||
+    !hasPermission(grant.permissions, "connections:read") ||
+    grant.metadata?.["sessionId"]
+  )
+    throw new HTTPException(403, {
+      message: "Host selection requires a verified direct owner",
+    });
+  const beforeCommit = prepareHostMcpOwnerAuthorization(
+    authorization,
+    workspaceId,
+    "connections:read",
+  );
+  const configs = new Map(
+    selections.map((selection) => {
+      const configured = settings.mcpServers.find((server) => server.id === selection.serverId);
+      if (
+        !configured ||
+        !tools.some((tool) => tool.kind === "mcp" && tool.id === selection.serverId) ||
+        configured.connectionRef?.authoritySource !== "host" ||
+        !configured.connectionRef.hostBinding ||
+        !configured.url
+      )
+        throw new HTTPException(422, {
+          message: "Host delegation must match a selected configured host server",
+        });
+      assertHostMcpAuthoritySourceAdmissionEnabled(settings, configured.connectionRef);
+      return [selection.serverId, structuredClone(configured)] as const;
+    }),
+  );
+  return async (tx, sessionId, turnId) => {
+    const owner = await beforeCommit(tx);
+    for (const selection of selections) {
+      const delegation = await getHostMcpDelegation(tx, owner, selection.delegationId);
+      const binding = delegation ? await getHostMcpBinding(tx, owner, delegation.bindingId) : null;
+      const configured = configs.get(selection.serverId)!;
+      const { hostBinding, ...connectionRef } = configured.connectionRef!;
+      const definition = HostMcpBindingDefinition.safeParse({
+        serverId: selection.serverId,
+        destinationUrl: configured.url,
+        connectionRef,
+      });
+      if (
+        !delegation ||
+        !binding ||
+        delegation.status !== "active" ||
+        binding.status !== "active" ||
+        !definition.success ||
+        delegation.generation !== selection.generation ||
+        binding.id !== hostBinding!.bindingId ||
+        binding.generation !== hostBinding!.generation ||
+        stableJson(definition.data) !== stableJson(binding.definition)
+      )
+        throw new HTTPException(403, { message: "Host delegation selection changed" });
+      try {
+        await captureDirectHostMcpAuthority(tx, owner, {
+          sessionId,
+          turnId,
+          delegationId: delegation.id,
+          expectedDelegationGeneration: selection.generation,
+        });
+      } catch (error) {
+        if (error instanceof HostMcpDelegationAuthorityError)
+          throw new HTTPException(403, { message: "Host delegation authority unavailable" });
+        if (error instanceof HostMcpBindingConflictError)
+          throw new HTTPException(409, { message: "Host delegation selection conflicts" });
+        throw error;
+      }
+    }
+  };
+}
+
 function sessionPromptBoundaryRequestHash(input: {
   delivery: "send" | "steer";
   controlEtag: string | null;
@@ -3126,6 +3314,7 @@ function sessionPromptBoundaryRequestHash(input: {
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
   connectionAuthorities?: McpConnectionAuthoritySelection[];
+  selectedHostMcpDelegations?: HostMcpCreateSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
 }): string {
@@ -3145,6 +3334,9 @@ function sessionPromptBoundaryRequestHash(input: {
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates,
     connectionAuthorities: input.connectionAuthorities ?? [],
+    ...(input.selectedHostMcpDelegations?.length
+      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
+      : {}),
     personalResourceAttachment: input.personalResourceAttachment ?? null,
     ...(input.commandActor.type === "service"
       ? {
@@ -3183,6 +3375,7 @@ export async function acceptSessionUserMessageWithOutcome(
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAuthorities?: McpConnectionAuthoritySelection[];
+    selectedHostMcpDelegations?: HostMcpCreateSelection[];
     delivery?: "send" | "steer";
     origin?: "human" | "operator";
     controlEtag?: string | null;
@@ -3200,6 +3393,24 @@ export async function acceptSessionUserMessageWithOutcome(
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
+  const hostSelections = HostMcpCreateSelections.parse(input.selectedHostMcpDelegations ?? []).sort(
+    (a, b) => (a.serverId < b.serverId ? -1 : a.serverId > b.serverId ? 1 : 0),
+  );
+  if (
+    hostSelections.length &&
+    (!input.authorization ||
+      input.authorization.grant.accountId !== grant.accountId ||
+      input.authorization.grant.subjectId !== grant.subjectId ||
+      input.authorization?.grant.workspaceId !== workspaceId ||
+      !hasPermission(input.authorization?.grant.permissions ?? [], "connections:read") ||
+      !hasPermission(grant.permissions, "connections:read") ||
+      grant.metadata?.["sessionId"])
+  )
+    throw new HTTPException(403, {
+      message: "Host selection requires a verified direct owner",
+    });
+  if (hostSelections.length)
+    prepareHostMcpOwnerAuthorization(input.authorization!, workspaceId, "connections:read");
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const delivery = input.delivery ?? "send";
   const source = delegatedServiceInitiator || input.origin === "operator" ? "api" : "user";
@@ -3237,6 +3448,7 @@ export async function acceptSessionUserMessageWithOutcome(
         latencyMode: input.latencyMode ?? null,
         source,
         mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+        selectedHostMcpDelegations: hostSelections,
         ...(input.connectionAuthorities
           ? { connectionAuthorities: input.connectionAuthorities }
           : {}),
@@ -3421,6 +3633,15 @@ export async function acceptSessionUserMessageWithOutcome(
           existingSession.firstPartyMcpPermissions.includes("connections:read")),
       ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
     });
+    const captureSelectedHostAuthority = prepareSelectedHostTurnAuthority(
+      runtimeSettings,
+      existingSession.tools,
+      grant,
+      workspaceId,
+      hostSelections,
+      input.authorization,
+    );
+    const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
       await postUserMessageTurn({
         db,
@@ -3442,6 +3663,15 @@ export async function acceptSessionUserMessageWithOutcome(
         turnExecutionPolicy,
         mcpCredentialUpdates,
         personalConnectionDelegations,
+        selectedHostMcpDelegations: hostSelections,
+        ...(captureSelectedHostAuthority || captureLinkedAuthority
+          ? {
+              captureTurnAuthority: async (tx: Database, turnId: string) => {
+                await captureLinkedAuthority?.(tx, sessionId, turnId);
+                await captureSelectedHostAuthority?.(tx, sessionId, turnId);
+              },
+            }
+          : {}),
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),

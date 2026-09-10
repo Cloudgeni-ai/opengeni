@@ -25,6 +25,7 @@ export async function performCapabilityAction(
     onComplete,
     onSkillRemoval,
     returnPathFor,
+    connectReturnUrl,
     redirect,
   }: {
     client: OpenGeniBrowserClient;
@@ -41,6 +42,9 @@ export async function performCapabilityAction(
       preview: SkillUninstallPreview;
     }) => void;
     returnPathFor: (id: string) => string;
+    /** Exact-return Connect surfaces; conversation cards retain their native
+     * callback parameters for completing session tool selection. */
+    connectReturnUrl?: string;
     redirect: (url: string) => void;
   },
   action: ConnectAction,
@@ -118,6 +122,19 @@ export async function performCapabilityAction(
   }
 
   if (action.type === "social_oauth" && plan.mode === "social_oauth") {
+    if (connectReturnUrl) {
+      const response = await client.beginConnect(workspaceId, {
+        providerId: action.provider,
+        ownership: action.ownership,
+        returnUrl: connectReturnUrl,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      if (response.nextAction.type !== "authorize") {
+        throw new Error("The provider did not return an authorization link.");
+      }
+      redirect(response.nextAction.url);
+      return;
+    }
     const returnPath = returnPathFor(item.id);
     const response = await client.startSocialOAuth(workspaceId, {
       provider: action.provider,

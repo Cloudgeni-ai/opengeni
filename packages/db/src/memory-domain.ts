@@ -282,7 +282,7 @@ export function isMemoryScopeApplicable(
 // its narrowest configured layer. `off` registers no Memory tools at all.
 // ---------------------------------------------------------------------------
 
-export type MemoryAgentScopeMode = "workspace" | "user" | "session" | "off";
+export type MemoryAgentScopeMode = "workspace" | "user" | "off";
 
 /**
  * The agent-side Memory selector resolved from one session row. The end-user
@@ -292,16 +292,16 @@ export type MemoryAgentScopeMode = "workspace" | "user" | "session" | "off";
  */
 export type MemoryAgentScope = {
   mode: MemoryAgentScopeMode;
-  endUserSubjectId: string | null;
+  userSubjectId: string | null;
   rootSessionId: string | null;
 };
 
 export const END_USER_MEMORY_SUBJECT_PREFIX = "end_user:v1:";
 
 /** The typed `user` selector for an opaque session end-user label. */
-export function endUserMemorySubjectId(endUser: { source: string; id: string }): string {
+export function endUserMemorySubjectId(scopeSubjectId: { source: string; id: string }): string {
   const digest = createHash("sha256")
-    .update(JSON.stringify([endUser.source, endUser.id]), "utf8")
+    .update(JSON.stringify([scopeSubjectId.source, scopeSubjectId.id]), "utf8")
     .digest("hex");
   return `${END_USER_MEMORY_SUBJECT_PREFIX}${digest}`;
 }
@@ -319,15 +319,10 @@ export function memoryWriteScopeForAgentScope(scope: MemoryAgentScope): MemorySc
     case "workspace":
       return { type: "workspace" };
     case "user":
-      if (!scope.endUserSubjectId) {
+      if (!scope.userSubjectId) {
         throw new Error("memory scope user requires an end-user subject id");
       }
-      return { type: "user", subjectId: scope.endUserSubjectId };
-    case "session":
-      if (!scope.rootSessionId) {
-        throw new Error("memory scope session requires a root session id");
-      }
-      return { type: "session", sessionId: scope.rootSessionId };
+      return { type: "user", subjectId: scope.userSubjectId };
   }
 }
 

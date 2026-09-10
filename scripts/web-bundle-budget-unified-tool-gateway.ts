@@ -39,6 +39,16 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // raw bytes; history anchoring and input handling measure 2,312,535.
   wholeKibEnvelope(2_312_535),
   // September 7: idle queue-offer chrome lifts the graph to 2,315,348.
+  // Pending organization-invitation chrome on the always-loaded rail footer
+  // added 2,032 bytes on that 2,312,535 baseline (2,314,567 on Linux/x64).
+  // Combined estimate after merging current main: 2,315,348 + 2,032 = 2,317,380.
+  wholeKibEnvelope(2_317_380),
+  // September 8, Bun 1.4 Linux/x64, embedding + main 45405585: 2,333,201
+  // bytes. Connect setup/identity consent stay lazy; organization embedding
+  // administration stays outside the browser client. This includes the native
+  // actor-aware transport and main's identified product-journey capture.
+  // Keep the measured envelope rather than relaxing startup/chunk/file limits.
+  wholeKibEnvelope(2_333_201),
   wholeKibEnvelope(2_315_348),
   // September 8: organization subscription SDK methods and connection-policy
   // contracts add 4,920 raw / 1,330 gzip bytes over e30c35f07 on macOS.
@@ -46,6 +56,10 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // graph measures 2,321,561 raw on macOS/Bun 1.3.14. Settings stay route-lazy;
   // retain all gzip, file-count, initial-load, and lazy-chunk ceilings.
   wholeKibEnvelope(2_321_561),
+  // Exact Linux/x64 Bun1.4 merge with main0c39126f's organization subscriptions
+  // and per-account model access: 2,345,266 raw bytes. Keep settings lazy and
+  // all startup, file-count and per-chunk caps unchanged.
+  wholeKibEnvelope(2_345_266),
   // Site-origin navigation and grouping: Bun 1.4 macOS/arm64 measures
   // 2,324,500 raw bytes. Splitting the tiny heading increases the graph to
   // 2,324,964 through shared chunk overhead, so retain synchronous rail UI.

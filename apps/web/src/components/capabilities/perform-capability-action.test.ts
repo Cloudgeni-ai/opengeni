@@ -55,6 +55,48 @@ const action = {
 };
 
 describe("shared capability connection lifecycle", () => {
+  test("preserves exact Connect returns and native conversation callback paths", async () => {
+    const social = CapabilityCatalogItem.parse({
+      ...item,
+      id: "api:x",
+      kind: "api",
+      surfaceType: "provider_integration",
+      metadata: { providerAdapter: "social", provider: "x" },
+    });
+    const beginConnect = mock(async () => ({
+      nextAction: { type: "authorize", url: "https://provider.example/connect" },
+    }));
+    const startSocialOAuth = mock(async () => ({
+      authorizationUrl: "https://provider.example/native",
+    }));
+    const h = harness({ beginConnect, startSocialOAuth });
+    const socialAction = {
+      type: "social_oauth" as const,
+      item: social,
+      provider: "x" as const,
+      ownership: "workspace" as const,
+    };
+    const returnUrl = "https://HOST.example/settings?x=%2f#integrations";
+    await performCapabilityAction(
+      { ...h.options, item: social, connectReturnUrl: returnUrl },
+      socialAction,
+    );
+    expect(beginConnect).toHaveBeenCalledWith("workspace", {
+      providerId: "x",
+      ownership: "workspace",
+      returnUrl,
+      idempotencyKey: expect.any(String),
+    });
+    expect(startSocialOAuth).not.toHaveBeenCalled();
+    expect(h.options.redirect).toHaveBeenLastCalledWith("https://provider.example/connect");
+    await performCapabilityAction({ ...h.options, item: social }, socialAction);
+    expect(startSocialOAuth).toHaveBeenCalledWith("workspace", {
+      provider: "x",
+      ownership: "workspace",
+      returnPath: h.options.returnPathFor(),
+    });
+    expect(h.options.redirect).toHaveBeenLastCalledWith("https://provider.example/native");
+  });
   test("enables using the server's canonical connection, never the form's domain", async () => {
     const h = harness();
     await performCapabilityAction(h.options, action);

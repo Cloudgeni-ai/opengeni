@@ -792,11 +792,27 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       });
   }
 
+  async function enableMcpThroughConnect(capabilityId: string) {
+    const attempt = await client.beginConnect(workspaceId, {
+      providerId: "mcp-install",
+      ownership: "workspace",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const completed = await client.connectTransport().advance(workspaceId, attempt.id, {
+      expectedRevision: attempt.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: { type: "credentials", values: { capabilityId } },
+    });
+    if (completed.state !== "complete" || !completed.integrationInstalled)
+      throw new Error("MCP setup did not complete. Reload connection setup before retrying.");
+  }
+
   async function quickEnable(item: CapabilityCatalogItem) {
     setBusyId(item.id);
     try {
       const persisted = await persistIfRegistry(item, false);
-      await client.enableCapability(workspaceId, persisted.id);
+      await enableMcpThroughConnect(persisted.id);
       await refresh();
       onRuntimeChanged();
       toast.success(`Enabled ${item.name}`);
@@ -912,6 +928,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           onRuntimeChanged,
           onComplete: () => setSelected(null),
           onSkillRemoval: setSkillRemoval,
+          connectReturnUrl: window.location.href,
           returnPathFor: (id) =>
             `${window.location.pathname}?connect_item=${encodeURIComponent(id)}`,
           redirect: (url) => window.location.assign(url),

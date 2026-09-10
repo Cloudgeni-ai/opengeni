@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
+import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
 const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
@@ -203,12 +204,14 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${scheduledProducerMaterializationMigrationName}),
           (${scheduledInheritedToolAdmissionMigrationName})
       `;
+      await sql`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(databaseUrl);
       // Current session adapters select the complete sessions row while this
       // fixture intentionally withholds 0402. Supply only its later columns
       // during fixture setup, then remove them before the ordered replay.
       await sql`
         alter table sessions
+        add column scope_subject_id text,
         add column input_wait_turn_id uuid,
         add column input_wait_until timestamptz,
         add column input_wait_reason text,
@@ -216,7 +219,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       `;
       await sql`
         delete from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
@@ -265,6 +268,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
 
       await sql`
         alter table sessions
+        drop column scope_subject_id,
         drop column input_wait_turn_id,
         drop column input_wait_until,
         drop column input_wait_reason,
@@ -274,7 +278,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       const receipts = await sql<Array<{ name: string }>>`
         select name
         from schema_migrations
-        where name in (
+        where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
@@ -317,6 +321,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         scheduledSessionTargetIndexMigrationName,
         scheduledProducerMaterializationMigrationName,
         scheduledInheritedToolAdmissionMigrationName,
+        ...embeddingMigrationTail,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

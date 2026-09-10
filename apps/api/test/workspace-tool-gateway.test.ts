@@ -234,6 +234,30 @@ describe("workspace tool gateway adapters", () => {
     }
   });
 
+  test("rechecks live authority after provider preflight and before invocation", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    let revoked = false;
+    const prepared = preparedGateway(calls, "human", {
+      onPreflight: () => {
+        revoked = true;
+      },
+    });
+    prepared.reauthorize = async () => {
+      if (revoked) throw new HTTPException(403, { message: "authority revoked" });
+    };
+    await expect(
+      callWorkspaceToolGateway(prepared, grant(), {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "SKU-1" },
+      }),
+    ).rejects.toThrow("authority revoked");
+    expect(revoked).toBe(true);
+    expect(calls).toHaveLength(0);
+    await prepared.close();
+  });
+
   test("publishes and executes the same callable catalog through MCP and HTTP", async () => {
     const calls: Array<{
       kind: string;

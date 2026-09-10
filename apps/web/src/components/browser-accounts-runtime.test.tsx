@@ -64,7 +64,7 @@ function invitation(targetEmail: string) {
     organizationName: "Northwind Research",
     targetEmail,
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
-    createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
+    createdAt: Date.now(),
   };
 }
 

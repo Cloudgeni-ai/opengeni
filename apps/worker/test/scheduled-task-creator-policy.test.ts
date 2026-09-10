@@ -151,7 +151,7 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     const task = await generatedTask(grant, {
       firstPartyMcpTools: ["set_session_title", "scheduled_tasks_list"],
       firstPartyMcpPermissions: ["sessions:read", "scheduled_tasks:manage"],
-      sessionPolicy: { agentAccess: null, endUser: null, memoryScope: null },
+      sessionPolicy: { agentAccess: null, scopeSubjectId: null, memoryScope: null },
     });
     const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
     expect(session.firstPartyMcpTools).toEqual(["set_session_title", "scheduled_tasks_list"]);

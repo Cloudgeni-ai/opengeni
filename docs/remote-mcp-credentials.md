@@ -1,0 +1,217 @@
+# Optional remote host MCP credentials
+
+Short runs may continue to supply inline, short-lived MCP headers. They do not
+require a callback service or renewable grant to the host API. Once those
+credentials expire, OpenGeni cannot manufacture renewed authority. A future
+scheduled run or a long agent that outlives the token needs renewable credentials
+or must stop for authentication. Native provider OAuth refresh remains separate.
+
+For a host-owned tool, the optional remote adapter implements the existing
+`ConnectionCredentialsPort.mcpCredentials` seam. Configure
+`OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON` on the API and workers as a JSON
+array of `{accountId, url, bearerToken, timeoutMs}`. Each organization may have
+one entry; the endpoint must use HTTPS and obey the existing outbound-network
+policy. The bearer authenticates OpenGeni to the resolver, not to the tool.
+Store this configuration in the deployment's secret manager, never browser
+configuration, session data, or a Skill.
+
+New host references require the existing fleet admission flag
+`OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED` and explicit
+`connectionRef.authoritySource: "host"`. This remote adapter does not capture
+native connections or reinterpret legacy markerless references. In-process host
+ports retain their existing behavior when `mcpAuthoritySource` is omitted.
+
+The opt-in `connectionRef.hostBinding: {bindingId, generation}` reference is
+stricter: the credential broker requires a backend-owned live binding validator.
+Binding ownership follows the effective organization member. In explicit
+`asLinkedUser` mode, create a separate native-owned binding: an external user's
+old binding does not transfer to the native user. Native membership revision and
+the revocable link revision are independent checks. Linked scheduled/child work
+retains both its exact selected binding and the link restriction at physical use.
+It validates before and after host resolution and returns the existing
+`authorizeProviderRequest` callback for transports to recheck immediately before
+each physical request. Every check uses the original immutable request snapshot;
+revocation or validator failure denies use even after credentials were resolved.
+The standalone broker does not add binding validation to references without
+`hostBinding`.
+
+Worker host execution has a separate local attempt-liveness check, including
+legacy opaque host references. The worker reads the canonical active-attempt
+projection and compares the accepted turn ID and execution generation before
+resolution, after resolution, and before each physical request. A stopped or
+superseded attempt denies use; a database outage fails closed as `refresh_failed`.
+This check does not depend on the original organization API key and does not
+establish durable delegation, owner membership, or binding authority. Native
+connection references retain their accepted-use authorization; inline credentials
+do not enter this host broker.
+
+Agent-attempt Codemode calls dispatch into the worker's prepared tool environment,
+so they share this worker resolver and attempt-liveness check; the API does not
+construct a second turn credential resolver. The shared worker resolver currently
+labels its credential context `surface: "model"`, including calls dispatched by
+Codemode. Hosts must not use that field to distinguish these two invocation paths.
+This differs from the explicit non-turn `workspace_gateway` callback below.
+
+The host binding registry stores immutable metadata and terminal revocation, not
+execution permission. The worker installs an accepted-work validator that requires
+an immutable captured snapshot and live membership/session/grant/binding checks.
+Direct external-user session creation captures these snapshots when explicitly
+selected. Scheduled runs and child/goal successors use separate exact capture
+paths below. Missing snapshots and request-time gateway durable references are denied.
+Do not infer scheduled or nested execution authority from registry ownership,
+session creator metadata, or the scheduler's technical identity.
+
+Internal host delegation persistence stores session-bound or reusable grants,
+the binding and owner revisions, shared-output acknowledgement, and terminal
+revocation. These rows contain no credential or API key. A grant alone is not an
+accepted-work snapshot; creating a row does not enable a workflow to execute.
+
+The internal direct-admission builder reads live owner membership, delegation,
+binding, session visibility/epoch and queued-turn provenance while holding locks
+through its capture callback. Wrong-owner, stale, revoked or already-claimed work
+is rejected. It must be called by a verified authority boundary inside canonical
+accepted-work persistence; it does not store a snapshot or authenticate an owner
+by itself. Direct create/send/steer boundaries authenticate and invoke it; task,
+child and causal resumption capture use their own canonical acceptance boundaries.
+
+`captureDirectHostMcpAuthority` now provides the internal persistence callback:
+the owner-scoped `host_mcp_turn_authorities` ledger stores one immutable canonical
+snapshot per turn/server. The insert guard reconstructs authority independently;
+replay cannot replace the selected delegation. Application privileges deny update
+and delete, and foreign keys block deletion/recreation of referenced metadata.
+Direct initial-turn admission calls this helper atomically with initial events. The worker's
+`authorizeDirectHostMcpUse` (historical internal name) consumes captured rows,
+rechecking exact attempt/generation, active external owner membership, workspace
+access, session visibility/epoch, delegation and binding generation, and complete
+credential destination/selection. It runs before and after credential resolution
+and before physical use. No original API key is required. No stored row means denial.
+
+Verified external owners use `POST /v1/workspaces/:workspaceId/host-mcp-delegations`
+with `{operationId, bindingId, expectedBindingGeneration, grant}`. The grant uses
+the native `scope: "user"`, `mode: "session" | "always"`, and visibility context;
+shared output requires explicit acknowledgement, and session mode requires the
+session ID and expected authority epoch. GET by delegation ID and POST to its
+`/revoke` subresource (with `expectedGeneration`) are owner-scoped. Reads require
+`connections:read`; mutations require `connections:write`. Unscoped service and
+linked-native callers are not admitted. The same live external proof is checked
+inside the persistence transaction. SDK methods are `issueHostMcpDelegation`,
+`getHostMcpDelegation`, and `revokeHostMcpDelegation` on the actor-bound client.
+
+Select grants in `createSession` using
+`selectedHostMcpDelegations: [{serverId, delegationId, generation}]`. This requires
+a verified direct external owner with session-create and connection-read access,
+an enabled host-authority fleet admission switch, and an explicitly selected MCP
+server whose configured URL and `connectionRef.hostBinding` exactly match the
+registered binding. It does not rewrite the server configuration or auto-select
+tools. The grant's visibility must match the new session. New-session admission
+practically uses an `always` grant; session-bound grants target existing sessions.
+Direct `sendMessage` and `steerMessage` accept the same explicit selection on
+each message, with session-control and connection-read authority. They capture
+under the new turn's acceptance transaction; omission grants no host authority
+to that turn. The configured server must already be selected in the session.
+
+The selected grants are part of keyed-create identity. Changing or omitting them
+on replay conflicts; successful replay does not recapture authority or revive a
+revoked grant. A failed capture leaves no initial turn, events, or authority row
+(a repairable keyed session shell may remain). Follow-up operation IDs similarly
+bind the canonical selection, and failed capture rolls back the prompt receipt,
+events and turn. Realtime initial capture remains unsupported.
+Same-session goal continuations and child-result resumptions use a separate
+causal capture path. Migration 0435 proves the consumed machine update names
+the exact source turn, matches the unchanged session epoch and visibility, and
+copies its immutable snapshot with only the new work/source identifiers changed.
+The worker rechecks owner, binding and grant generations at use. Revoked selections
+are omitted so the agent can resume to explain lost access without regaining it.
+Ordinary new human messages still require explicit selection. Inline credentials
+are unchanged, including their finite lifetime: no renewable authority is implied.
+
+### Scheduled and child work
+
+`createScheduledTask` and `updateScheduledTask` accept the same
+`selectedHostMcpDelegations` selection. Direct selection requires the verified
+external owner. It is frozen on the native task authority revision in
+`host_mcp_task_authorities`, without storing an API key or credential. Omission
+on update preserves the existing selection; an explicit empty array removes it
+from future revisions. Task edits, restore/rollback and first reusable-session
+materialization carry the exact selected generations through the native revision
+transition. They cannot reassign the owner or change a host account implicitly.
+
+Every accepted scheduled occurrence captures authority into its claimed turn.
+New-session-per-run, reusable-session and existing-session modes share the same
+validation. Generated sessions require `always` grants with shared-output
+acknowledgement. A session grant can target only its exact existing session and
+authority epoch. The captured scheduled origin remains attached through later
+continuations and children; physical use rechecks native scheduled-run authority
+as well as the host owner, binding and delegation. Credential renewal happens
+on demand through the configured host resolver, including without a browser or
+the original API key.
+
+Children inherit only an `always` grant selected by the exact spawning turn,
+and only for MCP servers selected by the child with unchanged visibility.
+Session-bound grants never cross into children. An agent-created scheduled task
+likewise derives only successor-eligible selections from its current accepted
+attempt; it cannot enumerate or borrow the creator's other accounts. The separate
+causal-human field is retained even when the initiating actor is the scheduler.
+
+### Request-time gateway
+
+Verified external-user and organization-service gateway admission can use the
+separate opt-in `mcpGatewayCredentials` port for explicit host references. The
+remote adapter implements this port. Native and MCP OAuth gateway callers retain
+their native resolver; an arbitrary access-grant object cannot enable the host
+path. The API rechecks its captured live key/identity/workspace authority before
+and after resolution and immediately before each physical provider request.
+
+`McpGatewayCredentialsRequest` uses `surface: "workspace_gateway"`, a request ID,
+account/workspace, and an `authority` object containing verified actor kind,
+subject ID, and effective permissions. It has no session, turn, attempt or
+generation fields. Hosts must authorize this context independently; never invent
+turn IDs or reuse another session's authority. The existing `mcpCredentials`
+callback receives only turn requests, so in-process hosts must explicitly opt in
+to the new callback. Explicit durable `hostBinding` references still fail closed
+in this path; this does not implement scheduled or nested execution delegation.
+
+Existing gateway approval filtering still applies. A generic credential-backed
+MCP tool requiring human approval is unavailable when its provider lacks a
+side-effect-free call preflight. The host credential callback does not supply
+that provider preflight or bypass the approval requirement.
+
+## Wire contract
+
+The adapter POSTs JSON `{version: 1, requestId, request}`. `request` is the existing
+`McpCredentialsRequest`: immutable account, workspace, session, root, turn,
+attempt, generation, initiator, binding, destination, tool, and refresh context.
+The host must authenticate the server and authorize the entire context against
+its current policy. An opaque connection ID is not authority. In particular,
+the host must deny revoked actors, expired delegations, and stale binding
+generations; changing a binding's principal/account/scope requires a new generation
+or a new immutable binding ID. Never trust the technical caller as a replacement
+for the accepted initiator.
+
+Return `{version: 1, requestId, destinationUrl, resolution}`. Copy `requestId`
+and the exact requested destination. `resolution` is the existing
+`McpCredentialResolution`, including mandatory organization/workspace/session
+echoes and matching connection/provider/scopes/resources. For `status: "ok"`,
+`expiresAt` is required and must be more than five seconds and no more than
+fifteen minutes in the future. Header and HTTP API placements are validated by
+the existing connection broker before use. Return `status: "auth_needed"`
+when authorization is unavailable; never substitute another account.
+
+For gateway calls, the same envelope carries `McpGatewayCredentialsRequest`.
+The resolution must echo `request.requestId` instead of `sessionId`; the outer
+envelope still echoes its own `requestId`. A turn-shaped response to a gateway
+request (or the reverse) is rejected. All connection, placement, expiry, size,
+network and concurrency restrictions remain the same.
+
+The default deadline is ten seconds (configurable from 100 ms to 30 seconds).
+Request context and response bytes are limited to 64 KiB. Redirects are not
+followed. Exact concurrent requests share one flight, with at most 128 flights
+per process. Successful credentials are not cached or persisted. Provider
+errors, invalid responses, oversized bodies, and timeouts return authentication
+needed without exposing response contents or secrets. No mutation replay policy
+is changed by this adapter.
+
+This transport does not itself establish external user identity or native-user
+links. The host remains responsible for live policy on host-owned bindings.
+End-to-end scheduler restart and real-provider conformance must be verified in
+a service-backed environment before claiming those flows validated.

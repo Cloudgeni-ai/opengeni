@@ -29,7 +29,11 @@ import {
   validateGitHubRepositorySelection,
   validateToolRefs,
 } from "../domain/resources";
-import { hasPermission } from "../access";
+import {
+  hasPermission,
+  externalAttributionForAuthorization,
+  type AccessGrantAuthorization,
+} from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
@@ -227,6 +231,7 @@ export async function saveActorNewSessionDraft(
    * the historical bare-membership fence.
    */
   canonicalManagedHumanSession = false,
+  externalAuthorization?: AccessGrantAuthorization,
 ): Promise<NewSessionDraftValue> {
   const input = SaveNewSessionDraftRequest.parse(rawInput);
   // The pre-marker client contract required `tools` and had no
@@ -280,7 +285,9 @@ export async function saveActorNewSessionDraft(
           // all, so the human-removal fence above must fall back to the
           // organization-membership pointer for them — and only for the
           // canonical managed-cookie session that owns it.
-          personalWorkspaceOwnerException: canonicalManagedHumanSession,
+          personalWorkspaceOwnerException:
+            canonicalManagedHumanSession ||
+            externalAttributionForAuthorization(externalAuthorization, grant) !== null,
         }),
       ),
     );

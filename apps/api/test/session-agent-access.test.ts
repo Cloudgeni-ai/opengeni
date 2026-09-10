@@ -5,7 +5,7 @@ import {
   type Permission,
   type Session,
   type SessionAuthorizationListScope,
-  type SessionEndUser,
+  type SessionScopeSubjectId,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -55,8 +55,8 @@ const AGENT_TOOLS = [
   "memory_search",
   "memory_save",
 ] as const;
-const u1: SessionEndUser = { source: "app", id: "u_1" };
-const u2: SessionEndUser = { source: "app", id: "u_2" };
+const u1: SessionScopeSubjectId = "user:u_1";
+const u2: SessionScopeSubjectId = "user:u_2";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -155,7 +155,20 @@ async function post(
 }
 
 async function createSession(f: Fixture, body: Record<string, unknown>): Promise<Session> {
-  const created = await post(f, f.humanBearer, body);
+  // Test identities are asserted by the trusted signing fixture, never by the body.
+  const { scopeSubjectId, ...payload } = body;
+  const bearer =
+    typeof scopeSubjectId === "string"
+      ? `Bearer ${await signDelegatedAccessToken(SECRET, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          subjectId: scopeSubjectId,
+          permissions: HUMAN_PERMISSIONS,
+          principalKind: "human_session",
+          exp: Math.floor(Date.now() / 1000) + 3_600,
+        })}`
+      : f.humanBearer;
+  const created = await post(f, bearer, payload);
   expect(created.status).toBe(202);
   return created.json as unknown as Session;
 }
@@ -217,6 +230,7 @@ async function agentServer(f: Fixture, attempt: Attempt) {
     client.db,
     f.workspaceId,
     attempt.sessionId,
+    attempt,
   );
   return buildOpenGeniMcpServer(f.deps, agentGrant(f, attempt), {
     workspaceMemoryEnabled: true,
@@ -344,27 +358,35 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     const f = await fixture();
     const created = await createSession(f, {
       agentAccess: "session",
-      endUser: u1,
-      memoryScope: "session",
+      scopeSubjectId: u1,
+      memoryScope: "off",
     });
-    expect(created).toMatchObject({ agentAccess: "session", endUser: u1, memoryScope: "session" });
+    expect(created).toMatchObject({
+      agentAccess: "session",
+      scopeSubjectId: u1,
+      memoryScope: "off",
+    });
     const plain = await createSession(f, {});
     expect(plain).toMatchObject({
       agentAccess: "workspace",
-      endUser: null,
+      scopeSubjectId: f.subjectId,
       memoryScope: "workspace",
     });
     const read = await httpGet(f, f.humanBearer, `/sessions/${created.id}`);
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({
       agentAccess: "session",
-      endUser: u1,
-      memoryScope: "session",
+      scopeSubjectId: u1,
+      memoryScope: "off",
     });
-    expect((await post(f, f.humanBearer, { memoryScope: "user" })).status).toBe(422);
-    expect((await post(f, f.humanBearer, { endUser: { source: "", id: "u_1" } })).status).toBe(422);
+    expect((await post(f, f.humanBearer, { memoryScope: "user" })).status).toBe(202);
+    expect((await post(f, f.humanBearer, { memoryScope: "session" })).status).toBe(422);
     expect(
-      (await post(f, f.humanBearer, { endUser: { source: "app", id: "u_1", extra: 1 } })).status,
+      (await post(f, f.humanBearer, { scopeSubjectId: { source: "", id: "u_1" } })).status,
+    ).toBe(422);
+    expect(
+      (await post(f, f.humanBearer, { scopeSubjectId: { source: "app", id: "u_1", extra: 1 } }))
+        .status,
     ).toBe(422);
     expect((await post(f, f.humanBearer, { agentAccess: "everyone" })).status).toBe(422);
   });
@@ -372,8 +394,8 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
   test("session-scoped trees are isolated from every peer and stay whole inside", async () => {
     if (!available) return;
     const f = await fixture();
-    const a = await createSession(f, { agentAccess: "session", endUser: u1 });
-    const b = await createSession(f, { agentAccess: "session", endUser: u1 });
+    const a = await createSession(f, { agentAccess: "session", scopeSubjectId: u1 });
+    const b = await createSession(f, { agentAccess: "session", scopeSubjectId: u1 });
     const c = await createSession(f, { agentAccess: "workspace" });
     const aAttempt = await liveAttempt(f, a.id);
     const bAttempt = await liveAttempt(f, b.id);
@@ -395,12 +417,12 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     expect((await httpGet(f, aBearer, `/sessions/${b.id}/queue`)).status).toBe(404);
     expect((await httpGet(f, aBearer, `/sessions/${c.id}/events`)).status).toBe(404);
 
-    // A workspace-scoped peer cannot read into a session-scoped tree either.
-    await expectDenied(callTool(cServer, "session_get", { sessionId: a.id }));
-    await expectDenied(callTool(cServer, "session_events", { sessionId: a.id }));
+    // An authorized workspace coordinator can inspect a narrowly scoped task.
+    await expectAllowed(callTool(cServer, "session_get", { sessionId: a.id }));
+    await expectAllowed(callTool(cServer, "session_events", { sessionId: a.id }));
     await expectAllowed(callTool(cServer, "session_get", { sessionId: c.id }));
     const cBearer = await agentBearer(f, cAttempt);
-    expect((await httpGet(f, cBearer, `/sessions/${a.id}/events`)).status).toBe(404);
+    expect((await httpGet(f, cBearer, `/sessions/${a.id}/events`)).status).toBe(200);
     expect((await httpGet(f, cBearer, `/sessions/${c.id}/events`)).status).toBe(200);
 
     // A's child inherits the scope, and the tree stays reachable both ways.
@@ -415,20 +437,20 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
       parentSessionId: a.id,
       rootSessionId: a.id,
       agentAccess: "session",
-      endUser: u1,
+      scopeSubjectId: u1,
       memoryScope: "workspace",
     });
     await expectAllowed(callTool(aServer, "session_get", { sessionId: childId }));
     const childServer = await agentServer(f, await liveAttempt(f, childId));
     await expectAllowed(callTool(childServer, "session_get", { sessionId: a.id }));
     await expectDenied(callTool(childServer, "session_get", { sessionId: b.id }));
-    await expectDenied(callTool(cServer, "session_get", { sessionId: childId }));
+    await expectAllowed(callTool(cServer, "session_get", { sessionId: childId }));
 
     // Discovery is fenced by the same rule, in MCP and HTTP alike.
     expect(await listedIds(aServer)).toEqual(new Set([a.id, childId]));
-    expect(await listedIds(cServer)).toEqual(new Set([c.id]));
+    expect(await listedIds(cServer)).toEqual(new Set([a.id, b.id, c.id, childId]));
     expect(await httpListedIds(f, aBearer)).toEqual(new Set([a.id, childId]));
-    expect(await httpListedIds(f, cBearer)).toEqual(new Set([c.id]));
+    expect(await httpListedIds(f, cBearer)).toEqual(new Set([a.id, b.id, c.id, childId]));
     // Humans keep the complete workspace list.
     expect(await httpListedIds(f, f.humanBearer)).toEqual(new Set([a.id, b.id, c.id, childId]));
     void bAttempt;
@@ -437,9 +459,9 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
   test("user-scoped sessions reach only sessions carrying the same end-user label", async () => {
     if (!available) return;
     const f = await fixture();
-    const user1 = await createSession(f, { agentAccess: "user", endUser: u1 });
-    const user2 = await createSession(f, { agentAccess: "user", endUser: u2 });
-    const shared1 = await createSession(f, { agentAccess: "workspace", endUser: u1 });
+    const user1 = await createSession(f, { agentAccess: "user", scopeSubjectId: u1 });
+    const user2 = await createSession(f, { agentAccess: "user", scopeSubjectId: u2 });
+    const shared1 = await createSession(f, { agentAccess: "workspace", scopeSubjectId: u1 });
     const shared0 = await createSession(f, { agentAccess: "workspace" });
     const user1Server = await agentServer(f, await liveAttempt(f, user1.id));
     const shared1Server = await agentServer(f, await liveAttempt(f, shared1.id));
@@ -450,22 +472,24 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     await expectDenied(callTool(user1Server, "session_get", { sessionId: user2.id }));
     await expectDenied(callTool(user1Server, "session_get", { sessionId: shared0.id }));
     await expectAllowed(callTool(shared1Server, "session_get", { sessionId: user1.id }));
-    await expectDenied(callTool(shared1Server, "session_get", { sessionId: user2.id }));
+    await expectAllowed(callTool(shared1Server, "session_get", { sessionId: user2.id }));
     await expectAllowed(callTool(shared1Server, "session_get", { sessionId: shared0.id }));
-    await expectDenied(callTool(shared0Server, "session_get", { sessionId: user1.id }));
+    await expectAllowed(callTool(shared0Server, "session_get", { sessionId: user1.id }));
     await expectAllowed(callTool(shared0Server, "session_get", { sessionId: shared1.id }));
 
     expect(await listedIds(user1Server)).toEqual(new Set([user1.id, shared1.id]));
-    expect(await listedIds(shared1Server)).toEqual(new Set([user1.id, shared1.id, shared0.id]));
-    expect(await listedIds(shared0Server)).toEqual(new Set([shared1.id, shared0.id]));
+    expect(await listedIds(shared1Server)).toEqual(
+      new Set([user1.id, user2.id, shared1.id, shared0.id]),
+    );
+    expect(await listedIds(shared0Server)).toEqual(
+      new Set([user1.id, user2.id, shared1.id, shared0.id]),
+    );
 
     // The human end-user filter is an exact pair.
-    expect(await httpListedIds(f, f.humanBearer, "?endUserSource=app&endUserId=u_1")).toEqual(
-      new Set([user1.id, shared1.id]),
-    );
-    expect(await httpListedIds(f, f.humanBearer, "?endUserSource=app&endUserId=u_9")).toEqual(
-      new Set(),
-    );
+    expect(
+      await httpListedIds(f, f.humanBearer, `?scopeSubjectId=${encodeURIComponent(u1)}`),
+    ).toEqual(new Set([user1.id, shared1.id]));
+    expect(await httpListedIds(f, f.humanBearer, "?scopeSubjectId=user:u_9")).toEqual(new Set());
     expect((await httpGet(f, f.humanBearer, "/sessions?endUserSource=app")).status).toBe(400);
     expect((await httpGet(f, f.humanBearer, "/sessions?endUserId=u_1")).status).toBe(400);
   });
@@ -475,8 +499,8 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     const f = await fixture();
     const parent = await createSession(f, {
       agentAccess: "user",
-      endUser: u1,
-      memoryScope: "session",
+      scopeSubjectId: u1,
+      memoryScope: "off",
     });
     const attempt = await liveAttempt(f, parent.id);
     const bearer = await agentBearer(f, attempt);
@@ -485,7 +509,7 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     expect(widenAccess.json).toMatchObject({
       error: { message: "child agent access may only narrow the parent session" },
     });
-    expect((await post(f, bearer, { endUser: u2 })).status).toBe(403);
+    expect((await post(f, bearer, { scopeSubjectId: u2 })).status).toBe(422);
     expect((await post(f, bearer, { memoryScope: "user" })).status).toBe(403);
     expect((await post(f, bearer, { memoryScope: "workspace" })).status).toBe(403);
     const inherited = await post(f, bearer, {});
@@ -493,14 +517,14 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     expect(inherited.json).toMatchObject({
       parentSessionId: parent.id,
       agentAccess: "user",
-      endUser: u1,
-      memoryScope: "session",
+      scopeSubjectId: u1,
+      memoryScope: "off",
     });
     const narrowed = await post(f, bearer, { agentAccess: "session", memoryScope: "off" });
     expect(narrowed.status).toBe(202);
     expect(narrowed.json).toMatchObject({
       agentAccess: "session",
-      endUser: u1,
+      scopeSubjectId: u1,
       memoryScope: "off",
     });
 
@@ -511,7 +535,11 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     const toolChild = (await (
       await httpGet(f, f.humanBearer, `/sessions/${viaTool.resource.id}`)
     ).json()) as Session;
-    expect(toolChild).toMatchObject({ agentAccess: "user", endUser: u1, memoryScope: "off" });
+    expect(toolChild).toMatchObject({
+      agentAccess: "user",
+      scopeSubjectId: u1,
+      memoryScope: "off",
+    });
     // The model surface cannot even name the parent-owned fields.
     const rejected = await callTool(server, "session_create", {
       initialMessage: "widened",
@@ -520,7 +548,7 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     expect(rejected.isError).toBe(true);
     const relabelled = await callTool(server, "session_create", {
       initialMessage: "relabelled",
-      endUser: u2,
+      scopeSubjectId: u2,
     });
     expect(relabelled.isError).toBe(true);
     const widenedMemory = await callTool(server, "session_create", {
@@ -533,7 +561,7 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
   test("memory tools follow the session's frozen memory scope", async () => {
     if (!available) return;
     const f = await fixture();
-    const treeOwner = await createSession(f, { memoryScope: "session" });
+    const treeOwner = await createSession(f, { memoryScope: "user" });
     const peer = await createSession(f, {});
     const silent = await createSession(f, { memoryScope: "off" });
     const ownerServer = await agentServer(f, await liveAttempt(f, treeOwner.id));
@@ -552,10 +580,10 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
         kind: "semantic",
       }),
     )) as { resource: { id: string } };
-    const [row] = await shared!.admin<Array<{ scopeType: string; scopeSessionId: string }>>`
-      select scope_type as "scopeType", scope_session_id as "scopeSessionId"
+    const [row] = await shared!.admin<Array<{ scopeType: string; scopeSubjectId: string }>>`
+      select scope_type as "scopeType", scope_subject_id as "scopeSubjectId"
       from knowledge_memories where id = ${saved.resource.id}`;
-    expect(row).toEqual({ scopeType: "session", scopeSessionId: treeOwner.id });
+    expect(row).toEqual({ scopeType: "user", scopeSubjectId: f.subjectId });
 
     const ownerResults = (await expectAllowed(
       callTool(ownerServer, "memory_search", { query: "quokka" }),

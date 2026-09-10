@@ -8,17 +8,12 @@ import type {
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
 } from "@opengeni/sdk";
-import {
-  CheckIcon,
-  SparklesIcon,
-  CopyIcon,
-  ExternalLinkIcon,
-  Loader2Icon,
-  Trash2Icon,
-} from "lucide-react";
+import { SparklesIcon, Loader2Icon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { DeviceAuthorization } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
 
 import { ModelConnectionSection } from "@/components/model-connection-section";
 import { Button } from "@/components/ui/button";
@@ -35,38 +30,12 @@ type PendingDeviceCode = {
 };
 
 export function SuperGrokDeviceCodePanel(props: PendingDeviceCode) {
-  const [copied, setCopied] = useState(false);
   return (
-    <div className="grid gap-3 rounded-lg border border-brand/30 bg-brand/5 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <code data-supergrok-device-code="" className="rounded bg-bg px-2 py-1 font-mono text-sm">
-          {props.userCode}
-        </code>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          aria-label={copied ? "Code copied" : "Copy code"}
-          onClick={() => {
-            void navigator.clipboard
-              .writeText(props.userCode)
-              .then(() => setCopied(true))
-              .catch(() => setCopied(false));
-          }}
-        >
-          {copied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
-          {copied ? "Copied" : "Copy code"}
-        </Button>
-        <Button asChild variant="outline" size="sm">
-          <a href={props.verificationUri} target="_blank" rel="noopener noreferrer">
-            Open xAI <ExternalLinkIcon className="size-3.5" />
-          </a>
-        </Button>
-      </div>
-      <p className="flex items-center gap-2 text-xs text-fg-subtle">
-        <Loader2Icon className="size-3.5 animate-spin" /> Waiting for xAI authorization…
-      </p>
-    </div>
+    <DeviceAuthorization
+      {...props}
+      providerLabel="xAI"
+      codeAttributes={{ "data-supergrok-device-code": "" }}
+    />
   );
 }
 

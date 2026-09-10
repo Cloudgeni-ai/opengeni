@@ -19,6 +19,7 @@ export type ScriptInput = { text: string; turnId: string; kind: "create" | "mess
 export type ContinuationInput = { type: string; payload: Record<string, unknown>; turnId: string };
 
 export type FakeServerOptions = {
+  authorizeSession?: ((user: string | null, sessionId: string) => boolean) | undefined;
   reply?: ((input: ScriptInput) => ScriptedEvent[]) | undefined;
   continuation?: ((input: ContinuationInput) => ScriptedEvent[]) | undefined;
   source?: string | undefined;
@@ -131,6 +132,18 @@ export function fakeServer(options: FakeServerOptions = {}): FakeServer {
     const workspaceId = parts[2] ?? "";
     const sessionId = parts[4];
     const tail = parts.slice(5).join("/");
+    const actorHeader = request.headers.get("x-opengeni-external-actor");
+    const externalUser = actorHeader
+      ? (JSON.parse(decodeURIComponent(actorHeader)) as { identity: { externalId: string } })
+          .identity.externalId
+      : null;
+    if (
+      sessionId &&
+      options.authorizeSession &&
+      !options.authorizeSession(externalUser, sessionId)
+    ) {
+      return json({ error: { code: "forbidden", message: "Session access denied" } }, 403);
+    }
 
     if (!sessionId) {
       if (request.method === "GET") {
@@ -153,7 +166,7 @@ export function fakeServer(options: FakeServerOptions = {}): FakeServer {
         createIdempotencyKey: body.idempotencyKey ?? null,
         lastSequence: 0,
         agentAccess: body.agentAccess ?? "workspace",
-        endUser: body.endUser ?? null,
+        scopeSubjectId: externalUser ? `external_user:${externalUser}` : null,
         memoryScope: body.memoryScope ?? "workspace",
         sandboxBackend: body.sandboxBackend ?? "docker",
       } as unknown as Session;

@@ -132,6 +132,10 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyIdentityLinkRoute = lazyRouteComponent(
+  () => import("@/routes/identity-link"),
+  "IdentityLinkRoute",
+);
 const LazyEditableArtifactRoute = lazyRouteComponent(
   () => import("@/routes/editable-artifact"),
   "EditableArtifactRoute",
@@ -160,6 +164,15 @@ const sessionDeepLinkRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "sessions/$sessionId",
   component: SessionDeepLink,
+});
+const identityLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "identity-links/$linkId",
+  validateSearch: (search: Record<string, unknown>): { organization?: string } =>
+    typeof search.organization === "string" && /^[0-9a-f-]{36}$/i.test(search.organization)
+      ? { organization: search.organization }
+      : {},
+  component: IdentityLink,
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every
 // checkout session's success_url/cancel_url; this top-level route forwards the
@@ -464,6 +477,7 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
+  identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
   ...(import.meta.env.DEV
@@ -699,6 +713,11 @@ function WorkspaceState() {
 
 function Artifacts() {
   return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+}
+function IdentityLink() {
+  const { linkId } = identityLinkRoute.useParams();
+  const { organization } = identityLinkRoute.useSearch();
+  return <LazyIdentityLinkRoute linkId={linkId} organizationId={organization} />;
 }
 
 function ArtifactDetail() {

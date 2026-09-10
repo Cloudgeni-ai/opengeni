@@ -1,4 +1,4 @@
-import { OpenGeniClient } from "../client";
+import { OpenGeniEmbeddingClient as OpenGeniClient } from "../embedding-client";
 import { OpenGeniApiError } from "../errors";
 import type { CreateSessionRequest, Session, SessionEvent } from "../types";
 import { ChatPendingFold, ChatTurnFold, asRecord, stringValue } from "./fold";
@@ -51,7 +51,7 @@ export class OpenGeni {
   readonly organizationId: string;
   readonly source: string;
   readonly sessions: {
-    /** Sessions of one tenant workspace, optionally filtered to one end user. */
+    /** Sessions visible to the selected canonical user, or explicit service caller. */
     list: (options: ChatSessionListOptions) => Promise<Session[]>;
   };
   private readonly workspaceName: ((tenant: string) => string) | undefined;
@@ -98,8 +98,9 @@ export class OpenGeni {
 
   /**
    * Address one conversation; the session is created lazily on the first send.
-   * With a `user`, the conversation id is namespaced to that user (a different
-   * user with the same conversation id reaches a different session).
+   * Identity selects authority, not the conversation address. Workspace
+   * membership must be provisioned by the host's explicit onboarding flow.
+   * Legacy user-namespaced conversations remain accessible by their session ID.
    */
   async chat(options: ChatOptions): Promise<Chat> {
     if (!options.conversation) throw new TypeError("chat() requires a conversation id.");
@@ -108,27 +109,22 @@ export class OpenGeni {
       options.memory === false
         ? "off"
         : options.memory === undefined
-          ? agentAccess
+          ? agentAccess === "session"
+            ? "off"
+            : agentAccess
           : options.memory;
     if (memoryScope === "user" && !options.user) {
       throw new OpenGeniChatError(
         "memory_scope_requires_user",
-        'memory: "user" requires a user label so memories can be scoped to that end user.',
+        'memory: "user" requires an authenticated product user.',
       );
     }
-    const endUser = options.user ? { source: this.source, id: options.user } : undefined;
+    const client = options.user
+      ? this.client.asUser(options.user, { source: this.source })
+      : this.client;
     const workspaceId = await this.workspaceId(options);
-    const sessionId = await chatSessionId(workspaceId, options.conversation, endUser);
-    const session = await this.findSession(workspaceId, sessionId);
-    // Reopening an existing session re-verifies the label it was created with.
-    // The tuple derivation already makes a collision impossible; this keeps a
-    // relabelled or hand-addressed session from crossing users regardless.
-    if (session && endUser && !sameEndUser(session.endUser ?? null, endUser)) {
-      throw new OpenGeniChatError(
-        "conversation_not_authorized",
-        "This conversation belongs to a different user.",
-      );
-    }
+    const sessionId = options.sessionId ?? (await chatSessionId(workspaceId, options.conversation));
+    const session = await this.findSession(client, workspaceId, sessionId);
     const buildCreate: BuildCreate = (text, importedHistory) => {
       const context =
         options.create?.modelContext === undefined && importedHistory
@@ -137,7 +133,6 @@ export class OpenGeni {
       return {
         agentAccess,
         memoryScope,
-        ...(endUser ? { endUser } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
         ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
         ...(options.skills !== undefined ? { skills: options.skills } : {}),
@@ -149,7 +144,7 @@ export class OpenGeni {
         idempotencyKey: chatIdempotencyKey(sessionId),
       };
     };
-    return new Chat(this, {
+    return new Chat(client, {
       workspaceId,
       sessionId,
       conversation: options.conversation,
@@ -159,29 +154,19 @@ export class OpenGeni {
   }
 
   /**
-   * Address an existing session by id (for example decoded from a response id).
-   * `user` is the end user the caller authenticated: the session must carry
-   * exactly that end-user label (`{ source, id }`) or the call throws
-   * `conversation_not_authorized`. Pass `null` only from trusted server code
-   * that vouches for the session itself; a session reached with `null` is not
-   * checked against any user.
+   * Address an existing session with native API authorization. The same shared
+   * session can be opened by different authorized users. Pass null only for an
+   * explicitly service-owned operation; the API still enforces service access.
    */
   async chatBySessionId(target: {
     workspaceId: string;
     sessionId: string;
     user: string | null;
   }): Promise<Chat> {
-    const session = await this.client.getSession(target.workspaceId, target.sessionId);
-    if (
-      target.user !== null &&
-      !sameEndUser(session.endUser ?? null, { source: this.source, id: target.user })
-    ) {
-      throw new OpenGeniChatError(
-        "conversation_not_authorized",
-        "This conversation belongs to a different user.",
-      );
-    }
-    return new Chat(this, {
+    const client =
+      target.user !== null ? this.client.asUser(target.user, { source: this.source }) : this.client;
+    const session = await client.getSession(target.workspaceId, target.sessionId);
+    return new Chat(client, {
       workspaceId: target.workspaceId,
       sessionId: target.sessionId,
       conversation: null,
@@ -190,9 +175,13 @@ export class OpenGeni {
     });
   }
 
-  private async findSession(workspaceId: string, sessionId: string): Promise<Session | null> {
+  private async findSession(
+    client: OpenGeniClient,
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<Session | null> {
     try {
-      return await this.client.getSession(workspaceId, sessionId);
+      return await client.getSession(workspaceId, sessionId);
     } catch (error) {
       if (error instanceof OpenGeniApiError && error.status === 404) return null;
       throw error;
@@ -201,13 +190,15 @@ export class OpenGeni {
 
   private async listSessions(options: ChatSessionListOptions): Promise<Session[]> {
     const workspaceId = await this.workspaceId(options);
-    return await this.client.requestJson<Session[]>(
+    const client = options.user
+      ? this.client.asUser(options.user, { source: this.source })
+      : this.client;
+    return await client.requestJson<Session[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.user ? { endUserSource: this.source, endUserId: options.user } : {}),
       },
     );
   }
@@ -224,7 +215,7 @@ export class Chat {
   private pendingTurnId: string | null = null;
 
   constructor(
-    private readonly og: OpenGeni,
+    private readonly client: OpenGeniClient,
     init: ChatInit,
   ) {
     this.workspaceId = init.workspaceId;
@@ -290,7 +281,7 @@ export class Chat {
     let lastAssistantTurn: string | null = null;
     let after = 0;
     while (true) {
-      const result = await this.og.client.listEventPage(this.workspaceId, this.sessionId, {
+      const result = await this.client.listEventPage(this.workspaceId, this.sessionId, {
         after,
         includeTypes: [
           "user.message",
@@ -354,7 +345,7 @@ export class Chat {
       if (!this.buildCreate) {
         throw new OpenGeniChatError("session_missing", "This session no longer exists.");
       }
-      const created = await this.og.client.createSession(
+      const created = await this.client.createSession(
         this.workspaceId,
         this.buildCreate(text, importedHistory),
       );
@@ -364,7 +355,7 @@ export class Chat {
       }
       // The idempotent create replayed an earlier session; deliver this message too.
     }
-    const event = await this.og.client.sendMessage(this.workspaceId, this.sessionId, text);
+    const event = await this.client.sendMessage(this.workspaceId, this.sessionId, text);
     return submittedFrom(event);
   }
 
@@ -373,27 +364,27 @@ export class Chat {
     importedHistory: ChatImportedMessage[] | undefined,
   ): Promise<SubmittedTurn> {
     if (!this.session) return await this.submit(text, importedHistory);
-    const result = await this.og.client.steerMessage(this.workspaceId, this.sessionId, text);
+    const result = await this.client.steerMessage(this.workspaceId, this.sessionId, text);
     return { after: result.accepted.sequence, turnId: result.turn.id ?? null };
   }
 
   private async submitResponse(input: ChatRespondInput): Promise<SubmittedTurn> {
     let event: SessionEvent;
     if ("decision" in input) {
-      event = await this.og.client.sendApprovalDecision(this.workspaceId, this.sessionId, {
+      event = await this.client.sendApprovalDecision(this.workspaceId, this.sessionId, {
         approvalId: input.requestId,
         decision: input.decision,
         ...(input.message !== undefined ? { message: input.message } : {}),
       });
     } else if ("answers" in input) {
-      event = await this.og.client.submitHumanInputResponse(
+      event = await this.client.submitHumanInputResponse(
         this.workspaceId,
         this.sessionId,
         input.requestId,
         { outcome: "answered", answers: input.answers },
       );
     } else {
-      event = await this.og.client.submitHumanInputResponse(
+      event = await this.client.submitHumanInputResponse(
         this.workspaceId,
         this.sessionId,
         input.requestId,
@@ -414,7 +405,7 @@ export class Chat {
     else signal?.addEventListener("abort", onAbort, { once: true });
     const fold = new ChatTurnFold(this.workspaceId, this.sessionId, submitted.turnId);
     try {
-      for await (const event of this.og.client.streamEvents(this.workspaceId, this.sessionId, {
+      for await (const event of this.client.streamEvents(this.workspaceId, this.sessionId, {
         after: submitted.after,
         signal: upstream.signal,
       })) {
@@ -507,11 +498,4 @@ function abortError(): Error {
   const error = new Error("The chat request was aborted.");
   error.name = "AbortError";
   return error;
-}
-
-function sameEndUser(
-  left: { source: string; id: string } | null,
-  right: { source: string; id: string },
-): boolean {
-  return left !== null && left.source === right.source && left.id === right.id;
 }

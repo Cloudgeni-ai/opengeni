@@ -72,7 +72,7 @@ function invitation(input: {
   status: "pending" | "accepted";
   revision: number;
 }) {
-  const timestamp = new Date(Date.now() + 60 * 60_000).toISOString();
+  const timestamp = new Date().toISOString();
   return {
     ...input,
     targetEmail: "member@example.test",

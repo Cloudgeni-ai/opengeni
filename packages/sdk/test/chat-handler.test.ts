@@ -62,10 +62,15 @@ describe("createChatHandler", () => {
     expect(response.status).toBe(200);
     const chunks = await collect(parseChatChunkStream(response.body!));
     expect(chunks.at(-1)).toMatchObject({ type: "done", reply: { text: "Hello" } });
-    expect(server.creates[0]!.requestedSessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_9", { source: "app", id: "u_42" }),
-    );
-    expect(server.creates[0]!.endUser).toEqual({ source: "app", id: "u_42" });
+    expect(server.creates[0]!.requestedSessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
+    expect(
+      JSON.parse(
+        decodeURIComponent(
+          server.requestsTo("POST", "/sessions")[0]!.headers["x-opengeni-external-actor"]!,
+        ),
+      ),
+    ).toEqual({ mode: "external", identity: { source: "app", externalId: "u_42" } });
+    expect(Object.hasOwn(server.creates[0]!, "endUser")).toBe(false);
 
     const missing = await handler(post({ message: "hi" }));
     expect(missing.status).toBe(400);
@@ -85,7 +90,7 @@ describe("createChatHandler", () => {
     expect(before.headers.get("Content-Type")).toContain("application/json");
     expect(await before.json()).toEqual({
       conversation: "c_9",
-      sessionId: await chatSessionId(WORKSPACE_ID, "c_9", { source: "app", id: "u_42" }),
+      sessionId: await chatSessionId(WORKSPACE_ID, "c_9"),
       created: false,
       messages: [],
       pending: [],
@@ -142,7 +147,14 @@ describe("createChatHandler", () => {
     const done = chunks.at(-1) as Extract<ChatChunk, { type: "done" }>;
     expect(done.reply.text).toBe("Hello");
     // Identity came from resolve, never from the body.
-    expect(server.creates[0]!.endUser).toEqual({ source: "app", id: "u_42" });
+    expect(
+      JSON.parse(
+        decodeURIComponent(
+          server.requestsTo("POST", "/sessions")[0]!.headers["x-opengeni-external-actor"]!,
+        ),
+      ),
+    ).toEqual({ mode: "external", identity: { source: "app", externalId: "u_42" } });
+    expect(Object.hasOwn(server.creates[0]!, "endUser")).toBe(false);
     expect(server.requestsTo("PUT", "/v1/workspaces/external")[0]!.json().externalId).toBe("acme");
   });
 
@@ -243,9 +255,7 @@ describe("openResolvedChat", () => {
       await openResolvedChat(server.og, { tenant: "acme", user: "u_42" }, "c_9"),
     );
     expect(scoped?.conversation).toBe("c_9");
-    expect(scoped?.sessionId).toBe(
-      await chatSessionId(WORKSPACE_ID, "c_9", { source: "app", id: "u_42" }),
-    );
+    expect(scoped?.sessionId).toBe(await chatSessionId(WORKSPACE_ID, "c_9"));
 
     const named = opened(
       await openResolvedChat(server.og, { tenant: "acme", conversation: "host" }, "c_9"),

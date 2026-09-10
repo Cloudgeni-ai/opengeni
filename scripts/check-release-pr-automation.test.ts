@@ -4004,7 +4004,7 @@ describe("workflow contracts", () => {
     expect(shards.if).not.toContain("github.event_name == 'pull_request'");
     expect(shards.if).toContain("needs.plan.outputs.unit_count != '0'");
     expect(shards.strategy).toEqual({
-      "fail-fast": true,
+      "fail-fast": false,
       matrix: { include: "${{ fromJSON(needs.plan.outputs.unit_matrix) }}" },
     });
     const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
@@ -4314,7 +4314,7 @@ describe("workflow contracts", () => {
         ],
       },
       "Upload responsive knowledge-surface evidence": {
-        if: "${{ always() && matrix.lane == 'knowledge' }}",
+        if: "${{ always() && matrix.lane == 'knowledge' && (steps.knowledge_surfaces_browser.outcome == 'success' || steps.knowledge_surfaces_browser.outcome == 'failure') }}",
         name: "responsive-knowledge-surface-evidence",
         path: [
           "/tmp/knowledge-surfaces-320-light-memory.png",

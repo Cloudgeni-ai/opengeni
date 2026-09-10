@@ -134,6 +134,7 @@ import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
+import { buildHostConnectionTokenResolver } from "../../db/src/connection-token-resolver";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
@@ -1921,6 +1922,33 @@ describe("runtime event normalization", () => {
       type: "image",
       image: { url: expect.stringMatching(/^data:image\/png;base64,/) },
     });
+  });
+
+  test("intrinsic filesystem tools recheck live attempt authority before touching the sandbox", async () => {
+    let live = true;
+    let reads = 0;
+    const [capability] = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport: false,
+      authorizeAttemptExecution: () => {
+        if (!live) throw new Error("Link revoked");
+      },
+    });
+    const bound = (capability as any).bind({
+      createEditor: () => ({}),
+      viewImage: async () => {
+        reads++;
+        return { type: "text", text: "fixture" };
+      },
+    });
+    const tool = bound.tools().find((value: { name?: string }) => value.name === "view_image");
+    expect(tool).toBeTruthy();
+    await tool.invoke(undefined, '{"path":"/tmp/fixture.png"}');
+    expect(reads).toBe(1);
+    live = false;
+    await expect(tool.invoke(undefined, '{"path":"/tmp/fixture.png"}')).rejects.toThrow(
+      "Link revoked",
+    );
+    expect(reads).toBe(1);
   });
 
   test("text-only models do not receive the filesystem view_image tool", () => {
@@ -7508,6 +7536,75 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("live execution fence rechecks a prepared call before consuming approval or executing tools", async () => {
+    let live = true;
+    let began = 0;
+    let executed = 0;
+    const prepared = await prepareAgentTools(testSettings(), [], {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      turnId: "44444444-4444-4444-8444-444444444444",
+      attemptId: "55555555-5555-4555-8555-555555555555",
+      executionGeneration: 1,
+      authorizeAttemptExecution: async () => {
+        if (!live) throw new Error("Link revoked");
+      },
+      attemptToolDefinitions: [
+        {
+          identity: { serverId: "fixture", toolName: "execute" },
+          modelName: "fixture__execute",
+          codemodePath: ["fixture", "execute"],
+          inputSchema: { type: "object", additionalProperties: false },
+          source: "interaction",
+          approval: "none",
+          lifecycle: {
+            prepare: async () => ({
+              begin: async () => {
+                began++;
+              },
+            }),
+          },
+          execute: async () => {
+            executed++;
+            return { content: [{ type: "text", text: "Executed" }] };
+          },
+        },
+      ],
+    });
+    try {
+      const call = await prepared.attemptToolEnvironment!.prepareCall({
+        operationId: crypto.randomUUID(),
+        catalogDigest: prepared.attemptToolCatalog!.digest,
+        identity: { serverId: "fixture", toolName: "execute" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+      expect(began).toBe(0);
+      live = false;
+      await expect(call.execute()).rejects.toThrow("Link revoked");
+      expect(began).toBe(0);
+      expect(executed).toBe(0);
+      live = true;
+      await call.execute();
+      expect(began).toBe(1);
+      expect(executed).toBe(1);
+      live = false;
+      await expect(
+        prepared.attemptToolEnvironment!.call({
+          operationId: crypto.randomUUID(),
+          catalogDigest: prepared.attemptToolCatalog!.digest,
+          identity: { serverId: "fixture", toolName: "execute" },
+          arguments: {},
+          caller: { kind: "codemode", subjectId: "agent:test" },
+        }),
+      ).rejects.toThrow("Link revoked");
+      expect(executed).toBe(1);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("projects in-process definitions through the same model and Codemode authority", async () => {
     const executions: string[] = [];
     const prepared = await prepareAgentTools(testSettings(), [], {
@@ -8145,6 +8242,89 @@ describe("runtime event normalization", () => {
       ).toBe(true);
     } finally {
       await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("durable host broker revocation at the physical MCP fence sends no provider request", async () => {
+    const mcp = startTestMcpServer();
+    const workspaceId = "44444444-4444-4444-8444-444444444444";
+    let checks = 0;
+    let credentialCalls = 0;
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const resolveCredential = buildHostConnectionTokenResolver(
+      async (request) => {
+        credentialCalls++;
+        return {
+          status: "ok",
+          accountId: request.accountId,
+          workspaceId: request.workspaceId,
+          sessionId: request.sessionId,
+          connectionId: "opaque-host-account",
+          providerDomain: request.connectionRef.providerDomain,
+          headers: { authorization: "Bearer synthetic-host-token" },
+        };
+      },
+      {
+        accountId: "55555555-5555-4555-8555-555555555555",
+        workspaceId,
+        sessionId: "session",
+        rootSessionId: "session",
+        turnId: "turn",
+        attemptId: "attempt",
+        executionGeneration: 1,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: {},
+        surface: "model",
+        // Admission and post-resolution checks pass; authority disappears before
+        // the transport sends the first byte. This seam does not grant schedules.
+        authorizeDurableBinding: async () => ++checks <= 2,
+      },
+    );
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "durable-host",
+              name: "Durable host fence",
+              url: mcp.url,
+              connectionRef: {
+                authoritySource: "host",
+                connectionId: "opaque-host-account",
+                providerDomain: new URL(mcp.url).hostname,
+                hostBinding: {
+                  bindingId: "ac94f59b-5a1e-4c56-a733-e5133b525b12",
+                  generation: 1,
+                },
+              },
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "durable-host" }],
+        {
+          workspaceId,
+          resolveCredential,
+          onAuthNeeded: (payload) => authNeeded.push(payload),
+        },
+      );
+      try {
+        expect(prepared.mcpServers).toHaveLength(0);
+        expect(checks).toBeGreaterThanOrEqual(3);
+        expect(credentialCalls).toBe(1);
+        expect(mcp.requests).toHaveLength(0);
+        expect(authNeeded).toContainEqual(
+          expect.objectContaining({
+            serverId: "durable-host",
+            authoritySource: "host",
+            reason: "personal_authority_unavailable",
+          }),
+        );
+      } finally {
+        await prepared.close();
+      }
+    } finally {
       mcp.close();
     }
   });

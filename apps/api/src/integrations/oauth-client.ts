@@ -9,22 +9,23 @@ import {
   type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
-import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
+import { requireEnvironmentEncryption } from "@opengeni/core";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
 import {
   consumeIntegrationOAuthStateNonce,
+  claimConnectOperation,
+  finishConnectOperation,
+  getConnectAttempt,
   createConnection,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
-  findActiveWorkspaceApiKeyById,
   getConnectionMetadata,
   getGlobalCatalogOAuthProfile,
-  getWorkspaceGrant,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   normalizeBearerScheme,
   replaceIntegrationOAuthClientIfCurrent,
-  resolveNamedManagedPersonalWorkspaceGrant,
   storeIntegrationOAuthClient,
   updateConnection,
   withDatabaseStatementTimeout,
@@ -59,6 +60,7 @@ import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
+import { requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
   DEPLOYMENT_MANAGED_CLIENTS,
@@ -93,6 +95,8 @@ type OAuthClientDeps = {
 };
 
 export type OAuthStartContext = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -108,6 +112,7 @@ export type OAuthStartContext = {
 
 export type OAuthCallbackResult = {
   redirectTo: string;
+  exactReturn?: boolean;
 };
 
 type WwwAuthenticateChallenge = McpOAuthChallenge;
@@ -124,6 +129,9 @@ type OAuthClientRegistration = {
 };
 
 type OAuthStatePayload = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
+  returnUrl?: string;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -329,6 +337,26 @@ async function startMcpOAuthWithinDeadline(
   deadline: OAuthStartDeadline,
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
+  const externalContinuation = context.externalContinuation
+    ? ExternalActorContinuation.parse(context.externalContinuation)
+    : undefined;
+  const returnUrl =
+    context.payload.returnUrl !== undefined
+      ? exactExternalReturnUrl(context.payload.returnUrl)
+      : undefined;
+  if (
+    (externalContinuation && !returnUrl) ||
+    (returnUrl && !externalContinuation && !context.connectAttemptId)
+  )
+    throw new HTTPException(422, {
+      message: "external MCP OAuth requires verified actor authority and a host returnUrl",
+    });
+  if (
+    externalContinuation &&
+    (externalContinuation.actor.accountId !== context.accountId ||
+      externalContinuation.actor.effectiveSubjectId !== context.subjectId)
+  )
+    throw new HTTPException(403, { message: "external OAuth actor mismatch" });
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
   const urlProfile = builtInOAuthProfileFor({ mcpUrl });
   const providerDomain =
@@ -415,6 +443,7 @@ async function startMcpOAuthWithinDeadline(
   );
   const key = requireEnvironmentEncryption(settings);
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
     accountId: context.accountId,
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
@@ -422,6 +451,15 @@ async function startMcpOAuthWithinDeadline(
     // Signed record that a live principal was checked; the callback has no
     // principal of its own and enforces exactly this decision.
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: context.personalOwnershipAllowed,
+    ...(externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            requireEnvironmentEncryption(settings),
+            JSON.stringify(externalContinuation),
+          ),
+        }
+      : {}),
+    ...(returnUrl ? { returnUrl } : {}),
     providerDomain,
     mcpUrl,
     resource,
@@ -589,6 +627,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
 ): Promise<OAuthCallbackResult> {
   const { db, settings, observability } = deps;
   let state: OAuthStatePayload | null = null;
+  let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   if (!input.state) {
     const error = new OAuthCallbackStageError(
       "state_verify",
@@ -605,6 +644,27 @@ async function completeMcpOAuthCallbackWithinDeadline(
   }
   try {
     state = readOAuthState(input.state, settings);
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(db, state, state.connectAttemptId);
+      if (
+        !["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) ||
+        stored.attempt.ownership !== state.ownership ||
+        stored.returnUrl !== state.returnUrl
+      )
+        throw new HTTPException(403, { message: "OAuth attempt mismatch" });
+      connectOperation = {
+        attemptId: state.connectAttemptId,
+        operationId: `oauth:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state).digest("hex"),
+      };
+      const claim = await claimConnectOperation(db, state, {
+        ...connectOperation,
+        expectedRevision: stored.attempt.revision,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+      });
+      if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
+    }
     // Fence state minted by an older deployment too: a rolling update must not
     // let a still-valid callback persist an ownership the target's profile no
     // longer allows (workspace-owned Gmail or hosted Slack, for example).
@@ -628,12 +688,28 @@ async function completeMcpOAuthCallbackWithinDeadline(
       );
     }
     if (!input.code) {
-      return {
-        redirectTo: callbackReturnPath(state.returnPath, "error", {
-          stage: "state_verify",
-          reason: "missing_code",
-        }),
-      };
+      if (connectOperation) {
+        await finishConnectOperation(db, state, {
+          ...connectOperation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          commit: async (_tx, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: "failed",
+            nextAction: { type: "none" },
+            error: {
+              code: "missing_code",
+              message: "Authorization was not completed. Start a new connection attempt.",
+              retryable: false,
+            },
+          }),
+        });
+      }
+      return callbackStateResult(state, "error", {
+        stage: "state_verify",
+        reason: "missing_code",
+      });
     }
     const consumed = await runCallbackDatabaseStage(
       deadline,
@@ -674,12 +750,10 @@ async function completeMcpOAuthCallbackWithinDeadline(
         ? error
         : new OAuthCallbackStageError("state_verify", "state_invalid", error);
     logOAuthCallbackFailure(observability, staged, state);
-    return {
-      redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", "error", {
-        stage: staged.stage,
-        reason: staged.reason,
-      }),
-    };
+    return callbackStateResult(state, "error", {
+      stage: staged.stage,
+      reason: staged.reason,
+    });
   }
 
   const ownerSubjectId = state.ownership === "personal" ? state.subjectId : null;
@@ -736,7 +810,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
-    const connection = await runCallbackDatabaseStage(deadline, "persist", db, async (scopedDb) => {
+    const persist = async (scopedDb: Database) => {
       await requireOAuthCallbackGrant(scopedDb, state!);
       return state!.connectionId
         ? await updateConnection(scopedDb, {
@@ -766,7 +840,41 @@ async function completeMcpOAuthCallbackWithinDeadline(
             metadata,
             createdBySubjectId: state.subjectId,
           });
-    });
+    };
+    if (connectOperation) {
+      await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>
+        finishConnectOperation(scopedDb, state!, {
+          ...connectOperation!,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection)
+              throw new HTTPException(409, {
+                message: "connection changed during OAuth reconnect",
+              });
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              completionRequirement: "connection",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: current.providerId,
+                label: state!.providerDomain,
+                ownership: current.ownership,
+                status: "connected",
+              },
+            };
+          },
+        }),
+      );
+      return { redirectTo: state.returnUrl!, exactReturn: true };
+    }
+    const connection = await runCallbackDatabaseStage(deadline, "persist", db, persist);
     if (!connection) {
       throw new HTTPException(409, {
         message: "connection changed during OAuth reconnect; start again",
@@ -776,27 +884,47 @@ async function completeMcpOAuthCallbackWithinDeadline(
     // the enable connectionRef straight from the redirect, without a listConnections
     // round-trip that could fail (transient, or a grant lacking connections:read)
     // and leave the connection created but the capability un-enabled.
-    return {
-      redirectTo: callbackReturnPath(state.returnPath, "success", {
-        connectionId: connection.id,
-        providerDomain: connection.providerDomain,
-        ownership: state.ownership,
-        ...(verification.metadata.status === "failed" ? { verification: "failed" } : {}),
-      }),
-    };
+    return callbackStateResult(state, "success", {
+      connectionId: connection.id,
+      providerDomain: connection.providerDomain,
+      ownership: state.ownership,
+      ...(verification.metadata.status === "failed" ? { verification: "failed" } : {}),
+    });
   } catch (error) {
     const staged =
       error instanceof OAuthCallbackStageError
         ? error
         : new OAuthCallbackStageError("persist", "persist_failed", error);
     logOAuthCallbackFailure(observability, staged, state);
-    return {
-      redirectTo: callbackReturnPath(state.returnPath, "error", {
-        stage: staged.stage,
-        reason: staged.reason,
-      }),
-    };
+    return callbackStateResult(state, "error", {
+      stage: staged.stage,
+      reason: staged.reason,
+    });
   }
+}
+
+function exactExternalReturnUrl(raw: string): string {
+  if (!raw || raw.length > 4096 || /[\u0000-\u0020\u007f]/.test(raw))
+    throw new HTTPException(422, { message: "invalid external OAuth returnUrl" });
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new HTTPException(422, { message: "invalid external OAuth returnUrl" });
+  }
+  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password)
+    throw new HTTPException(422, { message: "invalid external OAuth returnUrl" });
+  return raw;
+}
+
+function callbackStateResult(
+  state: OAuthStatePayload | null,
+  status: Parameters<typeof callbackReturnPath>[1],
+  details: Parameters<typeof callbackReturnPath>[2],
+): OAuthCallbackResult {
+  if ((state?.externalContinuation || state?.connectAttemptId) && state.returnUrl)
+    return { redirectTo: state.returnUrl, exactReturn: true };
+  return { redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", status, details) };
 }
 
 export function integrationBaseUrl(publicBaseUrl: string | undefined, requestUrl: string): string {
@@ -814,41 +942,7 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
 }
 
 async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
-  const membershipGrant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
-  const grant =
-    membershipGrant?.accountId === state.accountId
-      ? membershipGrant
-      : state.personalOwnerVerified
-        ? await resolveNamedManagedPersonalWorkspaceGrant(db, state)
-        : await apiKeyCallbackGrant(db, state);
-  if (
-    !grant ||
-    grant.accountId !== state.accountId ||
-    !hasPermission(grant.permissions, "connections:write")
-  ) {
-    throw new HTTPException(403, {
-      message: "OAuth subject no longer has permission to write this workspace connection",
-    });
-  }
-}
-
-async function apiKeyCallbackGrant(
-  db: Database,
-  state: OAuthStatePayload,
-): Promise<{ accountId: string; permissions: Parameters<typeof hasPermission>[0] } | null> {
-  const prefix = "api_key:";
-  if (!state.subjectId.startsWith(prefix)) {
-    return null;
-  }
-  const apiKey = await findActiveWorkspaceApiKeyById(db, {
-    accountId: state.accountId,
-    workspaceId: state.workspaceId,
-    apiKeyId: state.subjectId.slice(prefix.length),
-  });
-  if (!apiKey) {
-    return null;
-  }
-  return { accountId: apiKey.accountId, permissions: apiKey.permissions };
+  await requireConnectOwnerAuthority(db, state);
 }
 
 /** The hosted-Slack profile's origin pins, kept exported for its tests. */
@@ -1452,6 +1546,24 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     accountId: requiredString(payload.accountId, "state.accountId"),
     workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
     subjectId: requiredString(payload.subjectId, "state.subjectId"),
+    ...(stringValue(payload.encryptedExternalContinuation)
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                requiredString(payload.encryptedExternalContinuation, "state.externalContinuation"),
+              ),
+            ),
+          ),
+        }
+      : {}),
+    ...(payload.returnUrl !== undefined
+      ? { returnUrl: exactExternalReturnUrl(requiredString(payload.returnUrl, "state.returnUrl")) }
+      : {}),
+    ...(stringValue(payload.connectAttemptId)
+      ? { connectAttemptId: requiredString(payload.connectAttemptId, "state.connectAttemptId") }
+      : {}),
     // OAuth states minted before ownership was explicit were always personal.
     // Preserve that meaning for in-flight reconnects during a rolling deploy.
     ownership: connectionOwnership(payload.ownership) ?? "personal",

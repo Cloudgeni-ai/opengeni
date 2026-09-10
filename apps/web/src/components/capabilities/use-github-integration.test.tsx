@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { GitHubActionPoliciesResponse } from "@opengeni/sdk";
+import { OpenGeniClient, type GitHubActionPoliciesResponse } from "@opengeni/sdk";
 import type { AccessContext, GitHubAppInfo } from "@/types";
 import type { IntegrationChoiceOption, IntegrationViewModel } from "./integration-view-model";
 
@@ -11,7 +11,19 @@ const OTHER_WORKSPACE_ID = "44444444-4444-4444-8444-444444444444";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({ useAppContext: () => mutableContext.current }));
+mock.module("@/context", () => ({
+  useAppContext: () => {
+    const client = mutableContext.current.client as Record<string, unknown>;
+    client.connectTransport ??= () =>
+      new OpenGeniClient({
+        baseUrl: "http://localhost:3000",
+        fetch: async () => {
+          throw new Error("Unexpected Connect request in GitHub policy test");
+        },
+      }).connectTransport();
+    return mutableContext.current;
+  },
+}));
 
 const { useGitHubIntegration } = await import("./use-github-integration");
 

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
+import { OpenGeniClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -20,7 +21,17 @@ const PERSONAL_CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 // The adapter reads everything through the app context; swap it per case.
 const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({
-  useAppContext: () => mutableContext.current,
+  useAppContext: () => {
+    const client = mutableContext.current.client as Record<string, unknown>;
+    client.connectTransport ??= () =>
+      new OpenGeniClient({
+        baseUrl: "http://localhost:3000",
+        fetch: async () => {
+          throw new Error("Unexpected Connect request in Slack presentation test");
+        },
+      }).connectTransport();
+    return mutableContext.current;
+  },
 }));
 
 // Radix portals do not mount under happy-dom; render dialog frames inline so
@@ -147,9 +158,14 @@ async function renderAdapter({
   connections: ConnectionMetadata[];
   bindings: SlackInstallationBinding[];
   contextOverride?: Record<string, unknown>;
-}): Promise<{ model: IntegrationViewModel; unmount: () => Promise<void> }> {
+}): Promise<{
+  model: IntegrationViewModel;
+  dialogs: () => React.ReactNode;
+  unmount: () => Promise<void>;
+}> {
   mutableContext.current = contextOverride ?? appContext(permissions);
   let captured: IntegrationViewModel | null = null;
+  let dialogs: React.ReactNode;
   function Probe() {
     const adapter = useSlackIntegration({
       workspaceId: WORKSPACE_ID,
@@ -162,6 +178,7 @@ async function renderAdapter({
       onRuntimeChanged: () => {},
     });
     captured = adapter.model;
+    dialogs = adapter.dialogs;
     return null;
   }
   const container = document.createElement("div");
@@ -171,6 +188,7 @@ async function renderAdapter({
   if (!captured) throw new Error("Slack adapter model was not captured");
   return {
     model: captured,
+    dialogs: () => dialogs,
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -252,7 +270,15 @@ test("a sibling installation cannot hide the local bot's reconnect action", asyn
     expect(rendered.model.footer.kind).toBe("repair");
     expect(rendered.model.notice?.action?.label).toBe("Reconnect Slack");
     await act(async () => rendered.model.notice?.action?.onClick());
-    expect(install.mock.calls).toEqual([[WORKSPACE_ID, { connectionId: bot.id }]]);
+    // Reconnect now opens the common Connect setup; it must retain the exact
+    // local account, not start a sibling's legacy redirect flow.
+    expect(install).not.toHaveBeenCalled();
+    const fragment = rendered.dialogs() as React.ReactElement<{ children: React.ReactNode[] }>;
+    const setup = fragment.props.children[0] as React.ReactElement<{
+      request: { providerId: string; reconnectAccountId: string };
+    }>;
+    expect(setup.props.request.providerId).toBe("slack-bot");
+    expect(setup.props.request.reconnectAccountId).toBe(bot.id);
   } finally {
     await rendered.unmount();
     window.history.replaceState(null, "", "/");
