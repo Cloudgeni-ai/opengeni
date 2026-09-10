@@ -857,16 +857,8 @@ Human preferences require frozen causal identity. Command/timeout successors
 preserve immutable receipts, separate causal claims and live personal-grant
 admission; see [run lifecycle](run-lifecycle.md).
 
-`session_turns.initiating_human_subject_id` is a bounded, update-immutable
-causal-human selector, not standalone authorization. Agent-side generic
-workspace-artifact mutation (create, publish, rollback, archive, or restore) is
-one named consumer:
-service-initiated work must retain a causal human, the request must carry
-worker-signed exact attempt claims, and the database must revalidate their
-session/turn/attempt/execution generation, current live turn and attempt,
-selected artifact mutation tool, `artifacts:publish`, and absence of a pending
-interruption. Pure service work fails closed; direct human artifact API requests
-use their authenticated access grant.
+Artifact causal-human authority is capability-specific and fail-closed; see
+[run lifecycle](run-lifecycle.md) for its exact mutation fences.
 
 Tool disclosure is progressive, but authority is not. A tool may be eager or
 lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
