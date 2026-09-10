@@ -2,6 +2,7 @@ import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
+import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
@@ -66,7 +67,6 @@ import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionCommands } from "@/components/session/commands";
-import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import {
   SessionVariableSetPicker,
@@ -150,6 +150,11 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
+const NativeConnectSetup = lazy(() =>
+  import("@/components/capabilities/native-connect-setup").then((module) => ({
+    default: module.NativeConnectSetup,
+  })),
+);
 const LazySessionWaitStatus = lazy(() =>
   import("@/components/session/session-wait-status").then((module) => ({
     default: module.SessionWaitStatus,
@@ -163,6 +168,10 @@ const MessageForkDialog = lazy(() =>
 );
 
 const MessageActions = lazy(() => import("@/components/session/message-actions"));
+
+const SubagentTree = lazy(() =>
+  import("@/components/session/subagents").then((module) => ({ default: module.SubagentTree })),
+);
 
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
@@ -670,6 +679,8 @@ export function SessionRoute({
   // return to this session; api-key ones can't OAuth, so hand off to credential
   // re-entry on the capabilities sheet for that provider. Throwing bubbles a
   // calm inline error on the reconnect card.
+  const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
+  const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -680,6 +691,25 @@ export function SessionRoute({
         }
         window.location.assign(item.authorizationUrl);
         return;
+      }
+      if (item.connectionId) {
+        const { findConnectRecoveryAccount } = await import("@opengeni/connect");
+        const account = findConnectRecoveryAccount(
+          await reconnectTransport.accounts(workspaceId),
+          item.connectionId,
+        );
+        if (account) {
+          setReconnectRequest({
+            scope: { workspaceId, transport: reconnectTransport },
+            providerId: account.providerId,
+            ownership: account.ownership,
+            reconnectAccountId: account.id,
+            displayName: account.label,
+            returnUrl: window.location.href,
+            idempotencyKey: crypto.randomUUID(),
+          });
+          return;
+        }
       }
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
@@ -767,7 +797,13 @@ export function SessionRoute({
       }
       window.location.assign(response.authorizationUrl);
     },
-    [context.accessContext, context.client, context.workspaceCapabilityCatalog, workspaceId],
+    [
+      context.accessContext,
+      context.client,
+      context.workspaceCapabilityCatalog,
+      workspaceId,
+      reconnectTransport,
+    ],
   );
 
   // The workspace shell already needs the capability catalog for session tool
@@ -912,6 +948,22 @@ export function SessionRoute({
 
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      {reconnectRequest && (
+        <Suspense fallback={<LoadingPanel label="Opening connection setup" />}>
+          <NativeConnectSetup
+            transport={reconnectTransport}
+            workspaceId={workspaceId}
+            request={reconnectRequest}
+            onClose={() => setReconnectRequest(null)}
+            onComplete={() => {
+              setReconnectRequest(null);
+              toast.success("Connection updated", {
+                description: "New tool calls can use the updated connection.",
+              });
+            }}
+          />
+        </Suspense>
+      )}
       <SessionDock
         workspaceId={workspaceId}
         sessionId={sessionId}
@@ -2192,7 +2244,9 @@ function SessionChatPane(props: {
             agentsSignal={agentsSignal}
             agentsPanel={
               props.agentNodes.length > 0 ? (
-                <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+                <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                  <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+                </Suspense>
               ) : null
             }
           />

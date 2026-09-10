@@ -1,6 +1,8 @@
 import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
   beginConnectorActionExecution,
+  getExternalLinkTurnAuthorization,
+  getSessionTurnForAttempt,
   getWorkspaceVideoGenerationPolicy,
   listSkillDescriptors,
   completeConnectorActionExecution,
@@ -51,6 +53,7 @@ import {
   resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
+  hasPermission,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -60,7 +63,10 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
-import { type ToolAuthNeededPayload } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  type ToolAuthNeededPayload,
+} from "@opengeni/contracts";
 
 import {
   rollingSafeToolAuthNeededPayload,
@@ -508,6 +514,21 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         };
       })()
     : undefined;
+  const linkedAuthority = await getExternalLinkTurnAuthorization(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    },
+    turn.id,
+  );
+  if (linkedAuthority && !linkedAuthority.authorized)
+    throw new Error("Native identity link was revoked");
+  const effectiveFirstPartyPermissions = linkedAuthority
+    ? (session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter(
+        (permission) => hasPermission(linkedAuthority.permissions, permission),
+      )
+    : session.firstPartyMcpPermissions;
   const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
     runSettings,
     session.firstPartyMcpTools,
@@ -519,16 +540,21 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       title: session.title,
       titleSource: session.titleSource,
       firstPartyMcpTools: selectedFirstPartyMcpTools,
-      firstPartyMcpPermissions: session.firstPartyMcpPermissions,
+      firstPartyMcpPermissions: effectiveFirstPartyPermissions,
     }),
     parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
     selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
-    (!session.firstPartyMcpPermissions?.length ||
-      (session.firstPartyMcpPermissions.includes("artifacts:read") &&
-        session.firstPartyMcpPermissions.includes("artifacts:publish")));
+    hasPermission(
+      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
+      "artifacts:read",
+    ) &&
+    hasPermission(
+      [...(effectiveFirstPartyPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
+      "artifacts:publish",
+    );
   const googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[] =
     googleDrivePublicationTool && googleDrivePublicationTarget && googleDrivePublicationAllowed
       ? [
@@ -760,9 +786,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
       },
-      ...(session.firstPartyMcpPermissions?.length
-        ? { permissions: session.firstPartyMcpPermissions }
-        : {}),
+      ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
       selectedTools: selectedFirstPartyMcpTools,
       subjectId: "worker:first-party-mcp",
       subjectLabel: "OpenGeni worker",
@@ -852,6 +876,24 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
+        ...(linkedAuthority
+          ? {
+              authorizeAttemptExecution: async () => {
+                const current = await getSessionTurnForAttempt(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                  input.attemptId,
+                );
+                if (
+                  !current ||
+                  current.id !== turn.id ||
+                  current.executionGeneration !== attempt.executionGeneration
+                )
+                  throw new Error("The linked agent attempt is no longer authorized");
+              },
+            }
+          : {}),
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
         refreshOwnedCommand: async (commandId) => {
@@ -885,8 +927,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         },
         // Manager-style sessions carry a creation-validated permission set
         // for their first-party MCP token; null keeps the fixed default.
-        ...(session.firstPartyMcpPermissions?.length
-          ? { firstPartyPermissions: session.firstPartyMcpPermissions }
+        ...(effectiveFirstPartyPermissions
+          ? { firstPartyPermissions: effectiveFirstPartyPermissions }
           : {}),
         firstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
