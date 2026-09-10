@@ -1,5 +1,17 @@
 # @opengeni/runtime
 
+## 2.5.3
+
+### Patch Changes
+
+- e1a50ba: Spool Linux host-backed workspace archives through capture, object storage, and cold restore instead of materializing whole JSON/base64 payloads. Isolate each upload at a fresh physical locator and verify stored bytes without assuming conditional-PUT support. Preserve legacy locators, archive format, configured restore limits, and lease capture/publication authority; retain candidates after ambiguous publication outcomes.
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+  - @opengeni/codemode@0.5.6
+  - @opengeni/config@1.1.2
+  - @opengeni/sdk@5.0.5
+  - @opengeni/tool-gateway@0.1.7
+
 ## 2.5.2
 
 ### Patch Changes
