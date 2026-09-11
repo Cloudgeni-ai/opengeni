@@ -1537,9 +1537,9 @@ container images, the Helm chart, the Rust agent, and retained source identity.
 Package manifests, Changesets configuration, CI workflows, and release scripts
 own the exact closure and procedure. Web image assets compile natively for both CPU targets.
 
-Canonical commands and contribution rules are in
+Commands:
 [`../AGENTS.md`](../AGENTS.md) and [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
-Toolchain details are in [`toolchain.md`](toolchain.md).
+Toolchain: [`toolchain.md`](toolchain.md).
 
 ---
 
