@@ -1,5 +1,8 @@
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { StartupTimings, useStartupDetails, setStartupDetails } from "@opengeni/react/session-ui";
+import { buildTimeline } from "@opengeni/react";
+import { PreferenceToggleRow } from "@/components/transcription-settings";
 import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
@@ -46,6 +49,11 @@ export function SessionInspector(props: {
   connectionState: SessionEventsConnectionState;
   onReloadSession: () => Promise<void>;
 }) {
+  const startupDetails = useStartupDetails();
+  const startupPhases = useMemo(
+    () => buildTimeline(props.events).filter((item) => item.kind === "startup-phase"),
+    [props.events],
+  );
   const context = useAppContext();
   const navigate = useNavigate();
   const variableSets = useVariableSets({ workspaceId: props.session.workspaceId });
@@ -214,12 +222,29 @@ export function SessionInspector(props: {
             <TabsTrigger value="timeline" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Timeline
             </TabsTrigger>
+            <TabsTrigger value="startup" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
+              Startup
+            </TabsTrigger>
             <TabsTrigger value="raw" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Raw
             </TabsTrigger>
           </TabsList>
         </div>
 
+        <TabsContent value="startup" className="min-h-0 min-w-0 overflow-hidden">
+          <ScrollArea className="h-full min-w-0">
+            <div className="space-y-5 p-3">
+              <PreferenceToggleRow
+                label="Show startup details in chat"
+                description="Remembered in this browser. Timings are always recorded."
+                checked={startupDetails}
+                onToggle={() => setStartupDetails(!startupDetails)}
+                wrapDescription
+              />
+              <StartupTimings phases={startupPhases} />
+            </div>
+          </ScrollArea>
+        </TabsContent>
         <TabsContent value="overview" className="min-h-0 min-w-0 overflow-hidden">
           <ScrollArea className="h-full min-w-0">
             <div className="min-w-0 space-y-4 p-3">

@@ -43,3 +43,5 @@ export type {
   SessionChromeSignalTone,
 } from "./components/session-chrome";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
+export { StartupTimings } from "./timeline/startup-timings";
+export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
