@@ -368,7 +368,12 @@ export function SessionRoute({
   const failure = useMemo(
     () =>
       session && (session.status === "failed" || creditExhausted)
-        ? summarizeSessionFailure(events, session.status)
+        ? summarizeSessionFailure(
+            events,
+            session.status,
+            session.failureDiagnostics,
+            session.lastSequence,
+          )
         : null,
     [events, session, creditExhausted],
   );

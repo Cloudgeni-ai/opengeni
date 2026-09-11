@@ -1,3 +1,4 @@
+import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 import {
   connectionModelAllowed,
   getSessionGoal,
@@ -288,19 +289,22 @@ export async function selectCodexTurnCapacity(
         leases.codex.confirmedUntilMs !== null;
       if (leases.codex.held) leases.codex.startHeartbeat();
 
+      const selectionDiagnostics = providerTurn.effectiveCodexCredentialId
+        ? codexSelectionDiagnostics({
+            previousCredentialId: lockedSessionCodexState.lastCredentialId,
+            credentialId: providerTurn.effectiveCodexCredentialId,
+            reusedLease: leased.reused,
+            pinnedCredentialId: sessionPin,
+            pinSource: sessionPinSource,
+          })
+        : null;
       const actualOutcome = providerTurn.effectiveCodexCredentialId
         ? "selected"
         : rotationDecision.kind === "allCapped" || rotationDecision.kind === "allocatorDisabled"
           ? "waiting"
           : "none";
-      const actualReason = providerTurn.effectiveCodexCredentialId
-        ? leased.reused
-          ? "lease_reused"
-          : sessionPin === providerTurn.effectiveCodexCredentialId
-            ? "pin"
-            : rotationDecision.kind === "active" && rotationDecision.moved
-              ? "rotation"
-              : "active"
+      const actualReason = selectionDiagnostics
+        ? selectionDiagnostics.reason
         : rotationDecision.kind === "allCapped"
           ? "all_capped"
           : rotationDecision.kind === "allocatorDisabled"
@@ -698,26 +702,20 @@ export async function selectCodexTurnCapacity(
             input.sessionId,
             providerTurn.effectiveCodexCredentialId,
           );
-          const rotated = rotationDecision.kind === "active" && rotationDecision.moved;
-          await eventing.publish([
-            {
-              type: "codex.account.switched",
-              payload: {
-                fromAccountId: priorAccountId,
-                toAccountId: providerTurn.effectiveCodexCredentialId,
-                reason: rotated ? "rotation" : "manual",
+          if (priorAccountId !== null)
+            await eventing.publish([
+              {
+                type: "codex.account.switched",
+                payload: {
+                  fromAccountId: priorAccountId,
+                  toAccountId: providerTurn.effectiveCodexCredentialId,
+                  reason: selectionDiagnostics?.source === "manual_pin" ? "manual" : "automatic",
+                },
               },
-            },
-          ]);
+            ]);
         }
 
-        const selectionReason = leased.reused
-          ? "lease_reused"
-          : sessionPin === providerTurn.effectiveCodexCredentialId
-            ? "pin"
-            : rotationDecision.kind === "active" && rotationDecision.moved
-              ? "rotation"
-              : "active";
+        const selectionReason = selectionDiagnostics!.reason;
         observability.incrementCounter({
           name: "opengeni_codex_credential_selections_total",
           help: "Codex credential selections by strategy and reason.",
@@ -734,6 +732,9 @@ export async function selectCodexTurnCapacity(
               credentialId: providerTurn.effectiveCodexCredentialId,
               strategy: leased.rotationStrategy,
               reason: selectionReason,
+              transition: selectionDiagnostics!.transition,
+              source: selectionDiagnostics!.source,
+              previousCredentialId: priorAccountId,
               eligibleCount,
               connectedCount: leased.accounts.length,
               reused: leased.reused,

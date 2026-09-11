@@ -72,6 +72,7 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
   test("refreshes only after the durable post-selection event", () => {
     expect(isCodexAccountEvent({ type: "turn.started" })).toBe(false);
     expect(isCodexAccountEvent({ type: "codex.account.switched" })).toBe(true);
+    expect(isCodexAccountEvent({ type: "codex.credential.selected" })).toBe(true);
     expect(isCodexAccountEvent({ type: "codex.account.selection.changed" })).toBe(true);
     expect(isCodexAccountEvent({ type: "codex.capacity.waiting" })).toBe(true);
   });

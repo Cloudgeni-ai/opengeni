@@ -35195,6 +35195,96 @@ export async function listSessionsForSubject(
 }
 
 /** Read a session with the caller subject's personal pin projection. */
+/** Read failure evidence at the already-authorized detail cursor, never a browser page.
+ * Event rows are immutable; the sequence fence keeps these reads coherent even
+ * if another turn is accepted while the detail projection is being assembled.
+ * Keep this off fleet/list/worker reads. Existing type/turn indexes cover it.
+ */
+async function sessionFailureDiagnostics(
+  db: Database,
+  workspaceId: string,
+  session: { id: string; lastSequence: number; status: string },
+): Promise<Session["failureDiagnostics"]> {
+  if (session.status !== "failed") return null;
+  const scope = and(
+    eq(schema.sessionEvents.workspaceId, workspaceId),
+    eq(schema.sessionEvents.sessionId, session.id),
+    lte(schema.sessionEvents.sequence, session.lastSequence),
+    isNull(schema.sessionEvents.duplicateOfEventId),
+    or(
+      isNull(schema.sessionEvents.turnAssociation),
+      eq(schema.sessionEvents.turnAssociation, "current"),
+    ),
+  );
+  // Select only the semantic diagnostic fields; a large stack/trigger input
+  // must not make the entire failure disappear behind a generic preview.
+  // Six bounded strings + one bounded scalar keep each result under 40 KiB
+  // even for six-byte JSON-escaped control characters. Omission facts describe this read projection;
+  // stored events remain exact and the event id leads to full timeline evidence.
+  const diagnosticFields = ["error", "message", "detail", "lastRetryableError", "code", "status"];
+  const boundedFields = diagnosticFields.flatMap((field) => [
+    sql`${field}::text`,
+    sql`case
+    when jsonb_typeof(${schema.sessionEvents.payload}->${field}::text) = 'string'
+    then to_jsonb(left(${schema.sessionEvents.payload}->>${field}::text, 1024)) else 'null'::jsonb end`,
+  ]);
+  const projectedPayload = sql<unknown>`jsonb_build_object(
+    ${sql.join(boundedFields, sql`, `)},
+    'providerRecoveryCount', case when jsonb_typeof(${schema.sessionEvents.payload}->'providerRecoveryCount') = 'number'
+      and length((${schema.sessionEvents.payload}->'providerRecoveryCount')::text) <= 16
+      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end,
+    'projection', jsonb_build_object('fieldsOnly', true, 'fieldLimitChars', 1024,
+      'truncatedFields', coalesce((select jsonb_agg(field) from unnest(array['error','message','detail','lastRetryableError','code','status']) as field
+        where jsonb_typeof(${schema.sessionEvents.payload}->field) = 'string'
+          and length(${schema.sessionEvents.payload}->>field) > 1024), '[]'::jsonb)))`;
+  const latest = async (type: string) => {
+    const [row] = await db
+      .select({
+        id: schema.sessionEvents.id,
+        sequence: schema.sessionEvents.sequence,
+        turnId: schema.sessionEvents.turnId,
+        occurredAt: schema.sessionEvents.occurredAt,
+        payload: projectedPayload,
+      })
+      .from(schema.sessionEvents)
+      .where(and(scope, eq(schema.sessionEvents.type, type)))
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    return row ? { ...row, occurredAt: row.occurredAt.toISOString() } : null;
+  };
+  const turnFailure = await latest("turn.failed");
+  const latestStatus = await latest("session.status.changed");
+  const statusPayload = latestStatus?.payload as Record<string, unknown> | undefined;
+  // The session row and cursor are read under READ COMMITTED. A later
+  // committed revival can advance the cursor after the status row was read.
+  if (
+    latestStatus &&
+    (!turnFailure || latestStatus.sequence > turnFailure.sequence) &&
+    typeof statusPayload?.status === "string" &&
+    statusPayload.status !== "failed"
+  )
+    return null;
+  const preClaimFailure =
+    statusPayload?.status === "failed" && statusPayload.code === "pre_claim_failure"
+      ? latestStatus
+      : null;
+  const failure =
+    preClaimFailure &&
+    (!turnFailure ||
+      (preClaimFailure.sequence > turnFailure.sequence &&
+        (!preClaimFailure.turnId || preClaimFailure.turnId !== turnFailure.turnId)))
+      ? preClaimFailure
+      : turnFailure;
+  if (!failure) return null;
+  return {
+    eventId: failure.id,
+    sequence: failure.sequence,
+    turnId: failure.turnId ?? null,
+    occurredAt: failure.occurredAt,
+    payload: failure.payload,
+  };
+}
+
 export async function getSessionForSubject(
   db: Database,
   workspaceId: string,
@@ -35238,17 +35328,21 @@ export async function getSessionForSubject(
       sessionId,
     ]);
     const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
+    const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
-      await mapSessionWithControl(
-        scopedDb,
-        session,
-        mcpServers.get(sessionId) ?? [],
-        mapSessionPin(row.pin),
-        mapSessionAttention(session, row.pin),
-        mapSessionArchive(row.pin),
-        undefined,
-        { subjectId, activated: tenancyActivated },
-      ),
+      {
+        ...(await mapSessionWithControl(
+          scopedDb,
+          session,
+          mcpServers.get(sessionId) ?? [],
+          mapSessionPin(row.pin),
+          mapSessionAttention(session, row.pin),
+          mapSessionArchive(row.pin),
+          undefined,
+          { subjectId, activated: tenancyActivated },
+        )),
+        failureDiagnostics,
+      },
       relatedSessionAccess,
     );
   });
