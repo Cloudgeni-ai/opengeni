@@ -2,6 +2,7 @@
 "@opengeni/agent-proto": minor
 "@opengeni/runtime": minor
 "@opengeni/contracts": minor
+"@opengeni/sdk": minor
 "@opengeni/api-router": patch
 "@opengeni/worker-bundle": patch
 ---
