@@ -45,7 +45,7 @@ export default defineConfig({
               // Inspector changes must not pull account-management forms into
               // the direct-session graph through entry-aware chunk merging.
               name: "model-connection-settings",
-              test: /(?:components[\\/](?:codex-source-settings|connection-access-settings|model-connection-section|subscription-account-row|subscription-connect-action)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
+              test: /(?:components[\\/](?:codex-source-settings|connection-access-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
