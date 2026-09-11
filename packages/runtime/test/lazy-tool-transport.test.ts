@@ -933,12 +933,42 @@ describe("generic lazy tool dispatch", () => {
     ).toEqual(["interaction__browser_act"]);
   });
 
+  test("repository reader stays directly callable across every transport", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      const reader = firstPartyTool("repository_skill_read", "Read live repository guidance");
+      const agent = new Agent({
+        name: "repository-skills",
+        instructions: "Read repository guidance.",
+        model: "scripted",
+        tools: [reader],
+      });
+      const runtime = installLazyToolRuntime(agent, transport, new Set());
+      const visible = await agent.getAllTools(undefined as never);
+      const inner = new CapturingModel();
+      const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+      expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toContain(
+        "repository_skill_read",
+      );
+      expect(
+        visible.some(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "repository_skill_read",
+        ),
+      ).toBe(true);
+    }
+  });
+
   test("keeps the always-visible base set in the first request and out of search", async () => {
     const exec = firstPartyTool("exec_command", "Run a shell command in the sandbox");
     const stdin = firstPartyTool("write_stdin", "Write to a running command's stdin");
     const image = firstPartyTool("view_image", "Return an image from a sandbox path");
     const patch = firstPartyTool("apply_patch", "Apply a create, update, or delete file patch");
     const skillRead = firstPartyTool("skill_read", "Read Skill text without a sandbox");
+    const repositoryRead = firstPartyTool(
+      "repository_skill_read",
+      "Read live repository Skill files",
+    );
     const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
     const human = firstPartyTool(
       "request_human_input",
@@ -953,7 +983,18 @@ describe("generic lazy tool dispatch", () => {
       name: "lazy-test",
       instructions: "Use tools.",
       model: "scripted",
-      tools: [exec, stdin, image, patch, skillRead, skillSave, human, models, browser],
+      tools: [
+        exec,
+        stdin,
+        image,
+        patch,
+        skillRead,
+        repositoryRead,
+        skillSave,
+        human,
+        models,
+        browser,
+      ],
     });
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
     const visible = await agent.getAllTools(undefined as never);
@@ -968,6 +1009,7 @@ describe("generic lazy tool dispatch", () => {
       "view_image",
       "apply_patch",
       "skill_read",
+      "repository_skill_read",
       "request_human_input",
       "list_models",
       "tool_search",
@@ -980,6 +1022,7 @@ describe("generic lazy tool dispatch", () => {
       "view_image",
       "apply_patch",
       "skill_read",
+      "repository_skill_read",
       "request_human_input",
       "list_models",
     ]) {

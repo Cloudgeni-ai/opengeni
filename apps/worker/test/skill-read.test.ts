@@ -1,3 +1,6 @@
+import { buildOpenGeniAgent } from "@opengeni/runtime";
+import { testSettings } from "@opengeni/testing";
+import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { createSkillReadAttemptToolDefinition } from "../src/activities/agent-turn/skill-read";
@@ -13,6 +16,120 @@ const scope = {
 };
 
 describe("skill_read gateway definition", () => {
+  test("worker host catalog coexists with exact repository reader for real OpenGeni skills", async () => {
+    const names = ["opengeni", "opengeni-client"];
+    const markdown = new Map(
+      await Promise.all(
+        names.map(
+          async (name) =>
+            [
+              name,
+              await Bun.file(
+                new URL(`../../../.agents/skills/${name}/SKILL.md`, import.meta.url),
+              ).text(),
+            ] as const,
+        ),
+      ),
+    );
+    let allowed = true;
+    const authorize = async () => {
+      if (!allowed) throw new Error("attempt ended");
+    };
+    const managedReader = createSkillReadAttemptToolDefinition({
+      authorize,
+      load: async (skill) => {
+        if (skill !== "session:opengeni" && skill !== "opengeni")
+          throw new Error("Skill is not available in this session.");
+        return [{ path: "SKILL.md", content: "Selected session guidance" }];
+      },
+    });
+    const settings = testSettings({ sandboxBackend: "docker" });
+    const agent = buildOpenGeniAgent(
+      settings,
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/Cloudgeni-ai/opengeni.git",
+          ref: "main",
+          mountPath: "repos/opengeni",
+        },
+      ],
+      {
+        skillCatalog: [
+          {
+            id: "session:opengeni",
+            name: "opengeni",
+            description: "Explicitly selected session guidance",
+          },
+        ],
+        authorizeAttemptExecution: authorize,
+      },
+    );
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      listDir: async ({ path }: { path: string }) =>
+        path === ".agents/skills"
+          ? names.map((name) => ({ name, path: `${path}/${name}`, type: "dir" as const }))
+          : [{ name: "SKILL.md", path: `${path}/SKILL.md`, type: "file" as const }],
+      readFile: async ({ path }: { path: string }) => markdown.get(path.split("/").at(-2)!)!,
+    } as SandboxSessionLike;
+    const capability = (agent as unknown as { capabilities: Capability[] }).capabilities
+      .find((entry) => entry.type === "workspace-skills")!
+      .clone()
+      .bind(session);
+    const catalog = await capability.instructions(session.state.manifest);
+    const repositoryReader = capability
+      .tools()
+      .find((entry) => entry.type === "function" && entry.name === "repository_skill_read")!;
+    if (repositoryReader.type !== "function") throw new Error("missing repository reader");
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [managedReader],
+    });
+    // This is the incident's old route, and remains correctly unavailable to the managed reader.
+    await expect(
+      environment.callModel({
+        modelName: "skill_read",
+        arguments: { skill: "opengeni-client" },
+        subjectId: "agent:test",
+      }),
+    ).rejects.toThrow("not available");
+    for (const name of names) {
+      const skill = `repository:.agents/skills/${name}/SKILL.md`;
+      expect(catalog).toContain(skill);
+      expect(catalog).toContain('"reader":"repository_skill_read"');
+      const output = JSON.parse(
+        (await repositoryReader.invoke(undefined!, JSON.stringify({ skill }))) as string,
+      );
+      expect(output.files).toEqual([{ path: "SKILL.md", content: markdown.get(name) }]);
+    }
+    expect(catalog).not.toContain('"description":">-"');
+    const managed = await environment.callModel({
+      modelName: "skill_read",
+      arguments: { skill: "opengeni" },
+      subjectId: "agent:test",
+    });
+    expect(managed.structuredContent).toEqual({
+      files: [{ path: "SKILL.md", content: "Selected session guidance" }],
+    });
+    allowed = false;
+    await expect(
+      repositoryReader.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" }),
+      ),
+    ).rejects.toThrow("attempt ended");
+    const noSandbox = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      skillCatalog: [],
+    });
+    expect(
+      noSandbox.tools.some(
+        (entry) => entry.type === "function" && entry.name === "repository_skill_read",
+      ),
+    ).toBe(false);
+  });
+
   test("selected Projects reads exact packaged guidance without sandbox access; host [] excludes it", async () => {
     const markdown = await Bun.file(
       new URL(

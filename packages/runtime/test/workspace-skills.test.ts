@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
 
 import {
   Manifest,
@@ -15,9 +18,211 @@ import {
   recordModelPreparationMeasurement,
   withModelPreparationObserver,
 } from "../src/model-preparation-diagnostics";
-import { discoverWorkspaceSkills } from "../src/workspace-skills";
+import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
+  for (const [description, expected] of [
+    ["|-\n  First line.\n  Second line.", "First line.\nSecond line."],
+    [">-\n  First paragraph.\n\n  Second paragraph.", "First paragraph.\nSecond paragraph."],
+  ]) {
+    test(`capability preparation accepts multiline YAML ${description!.slice(0, 2)}`, async () => {
+      const markdown = `---\nname: example\ndescription: ${description}\n---\n# Guidance`;
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+        fakeSession({ ".agents/skills/example/SKILL.md": markdown }),
+      );
+      const instructions = await capability.instructions();
+      const descriptor = JSON.parse(
+        instructions!
+          .split("\n")
+          .find((line) => line.startsWith("- {"))!
+          .slice(2),
+      );
+      expect(descriptor.description).toBe(expected);
+      const reader = capability.tools()[0]!;
+      if (reader.type !== "function") throw new Error("missing reader");
+      const output = JSON.parse(
+        (await reader.invoke(undefined!, JSON.stringify({ skill: descriptor.id }))) as string,
+      );
+      expect(output.files[0].content).toBe(markdown);
+    });
+  }
+
+  test.skipIf(process.platform === "win32")(
+    "Unix-local discovery excludes symlink Skill entrypoints consistently with reading",
+    async () => {
+      const session = await new UnixLocalSandboxClient().create(
+        new Manifest({ root: "/workspace" }),
+      );
+      try {
+        const root = session.state.workspaceRootPath;
+        for (const name of ["ordinary", "linked"])
+          await mkdir(join(root, ".agents/skills", name), { recursive: true });
+        const markdown = "---\nname: linked\ndescription: Linked guidance.\n---\n# Linked";
+        await writeFile(join(root, "shared-skill.md"), markdown);
+        await symlink("../../../shared-skill.md", join(root, ".agents/skills/linked/SKILL.md"));
+        await writeFile(join(root, ".agents/skills/ordinary/SKILL.md"), "# Ordinary");
+        await symlink(
+          "../../../shared-skill.md",
+          join(root, ".agents/skills/ordinary/reference.md"),
+        );
+        // Actual adapter behavior: direct reads follow the symlink, listing marks it other.
+        expect(
+          new TextDecoder().decode(
+            await session.readFile({ path: ".agents/skills/linked/SKILL.md" }),
+          ),
+        ).toBe(markdown);
+        expect((await session.listDir({ path: ".agents/skills/linked" }))[0]?.type).toBe("other");
+        const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+          session,
+        );
+        const instructions = await capability.instructions();
+        expect(instructions).not.toContain('"name":"linked"');
+        expect(instructions).toContain('"name":"ordinary"');
+        const reader = capability.tools()[0]!;
+        if (reader.type !== "function") throw new Error("missing reader");
+        const call = (args: object) =>
+          reader.invoke(
+            undefined!,
+            JSON.stringify({ skill: "repository:.agents/skills/ordinary/SKILL.md", ...args }),
+          );
+        expect(JSON.parse((await call({ listFiles: true })) as string).paths).toEqual(["SKILL.md"]);
+        expect(JSON.parse((await call({})) as string).files[0].content).toBe("# Ordinary");
+        expect(await call({ paths: ["reference.md"] })).toContain("unavailable");
+      } finally {
+        await session.delete();
+      }
+    },
+  );
+
+  test("repository YAML descriptions preserve folded text", async () => {
+    const session = fakeSession({
+      ".agents/skills/opengeni/SKILL.md":
+        "---\nname: opengeni\ndescription: >-\n  Maintain OpenGeni\n  source code.\n---\n# Guidance",
+    });
+    const entries = await discoverWorkspaceSkills(session, [
+      { path: ".agents/skills", source: "repository" },
+    ]);
+    expect(entries[0]?.description).toBe("Maintain OpenGeni source code.");
+  });
+
+  test("advertised repository skills have an explicit live reader", async () => {
+    const session = fakeSession({
+      ".agents/skills/opengeni/SKILL.md":
+        "---\nname: opengeni\ndescription: Maintain OpenGeni.\n---\n# Guidance",
+    });
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+      session,
+    );
+    const instructions = await capability.instructions();
+    expect(instructions).toContain("repository_skill_read");
+    const tool = capability
+      .tools()
+      .find(
+        (candidate) => candidate.type === "function" && candidate.name === "repository_skill_read",
+      );
+    expect(tool).toBeDefined();
+    if (tool?.type !== "function") throw new Error("missing reader");
+    const result = JSON.parse(
+      (await tool.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/opengeni/SKILL.md" }),
+      )) as string,
+    );
+    expect(result.files[0].content).toContain("# Guidance");
+  });
+
+  test("repository reader uses exact paths, reads live content, and inventories without file bodies", async () => {
+    const session = fakeSession({
+      ".agents/skills/example/SKILL.md": "# Example",
+      ".agents/skills/example/references/readme.md": "original",
+    });
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }])
+      .bind(session)
+      .bindRunAs("agent");
+    await capability.instructions();
+    const read = session.readFile!;
+    const calls: string[] = [];
+    session.readFile = async (args) => {
+      expect(args.runAs).toBe("agent");
+      calls.push(args.path);
+      return args.path.endsWith("readme.md") ? "edited" : read(args);
+    };
+    const tool = capability.tools()[0]!;
+    if (tool.type !== "function") throw new Error("missing reader");
+    const skill = "repository:.agents/skills/example/SKILL.md";
+    const invoke = (args: object) => tool.invoke(undefined!, JSON.stringify({ skill, ...args }));
+    expect(JSON.parse((await invoke({ listFiles: true })) as string).paths).toEqual([
+      "SKILL.md",
+      "references/readme.md",
+    ]);
+    expect(calls).toEqual([]);
+    expect(JSON.parse((await invoke({ paths: ["references/readme.md"] })) as string).files).toEqual(
+      [{ path: "references/readme.md", content: "edited" }],
+    );
+    expect(calls).toEqual([".agents/skills/example/references/readme.md"]);
+    for (const args of [
+      { paths: ["../outside"] },
+      { paths: ["/etc/passwd"] },
+      { paths: ["SKILL.md", "SKILL.md"] },
+      { listFiles: true, paths: ["SKILL.md"] },
+      { skill: "example" },
+      { skill: "repository:other/SKILL.md" },
+    ]) {
+      expect(await invoke(args)).toContain("Error");
+    }
+    expect(calls).toHaveLength(1);
+    session.readFile = async () => "x".repeat(512 * 1024);
+    expect(await invoke({})).toContain("exceed");
+    // Inner file output fits exactly, but source metadata must also fit the final envelope.
+    const overhead = JSON.stringify({ files: [{ path: "SKILL.md", content: "" }] }).length;
+    session.readFile = async () => "x".repeat(512 * 1024 - overhead);
+    expect(await invoke({})).toContain("response exceeds");
+    session.listDir = async () => [];
+    expect(await invoke({})).toContain("unavailable");
+  });
+
+  test("repository tool authorization survives SDK clone and bind", async () => {
+    let authorized = true;
+    const caps = buildAgentCapabilities(testSettings(), [], {
+      workspaceSkillPaths: [{ path: ".agents/skills", source: "repository" }],
+      authorizeAttemptExecution: () => {
+        if (!authorized) throw new Error("attempt ended");
+      },
+      structuredToolTransport: false,
+    });
+    const original = caps.find((entry) => entry.type === "workspace-skills")!;
+    const bound = original
+      .clone()
+      .bind(fakeSession({ ".agents/skills/example/SKILL.md": "# Example" }));
+    const tool = bound
+      .tools()
+      .find((entry) => entry.type === "function" && entry.name === "repository_skill_read")!;
+    if (tool.type !== "function") throw new Error("missing reader");
+    await bound.instructions(new Manifest({ root: "/workspace" }));
+    expect(
+      await tool.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
+      ),
+    ).toContain("# Example");
+    authorized = false;
+    await expect(
+      tool.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/example/SKILL.md" }),
+      ),
+    ).rejects.toThrow("attempt ended");
+  });
+
+  test("rebound repository capability cannot reuse another sandbox's catalog", async () => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+      fakeSession({ ".agents/skills/example/SKILL.md": "# Example" }),
+    );
+    expect(await capability.instructions()).toContain("example");
+    const rebound = capability.clone().bind(fakeSession({}));
+    expect(await rebound.instructions(new Manifest({ root: "/workspace" }))).toBeNull();
+  });
+
   for (const Missing of [SandboxFilesystemNotFoundError, SandboxWorkspaceReadNotFoundError]) {
     test(`skips optional roots and SKILL.md with real ${Missing.name}`, async () => {
       const session = fakeSession({ ".agents/skills/example/SKILL.md": "# Example" });
@@ -257,7 +462,7 @@ description: Prepare a safe release.
       { path: ".agents/skills", source: ".agents/skills" },
     ]);
     expect(skills.map((entry) => entry.name)).toEqual(["deploy", "release"]);
-    expect(listed).toEqual([".agents/skills"]);
+    expect(listed).toEqual([".agents/skills", ".agents/skills/deploy", ".agents/skills/release"]);
     expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 

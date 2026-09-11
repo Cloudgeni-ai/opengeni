@@ -33,6 +33,8 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "apply_patch",
   // The server-backed reader needs neither sandbox setup nor tool search.
   "skill_read",
+  // Repository descriptors route to the live sandbox reader.
+  "repository_skill_read",
   "request_human_input",
   "list_models",
 ]);
