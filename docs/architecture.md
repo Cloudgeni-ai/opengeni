@@ -180,7 +180,7 @@ The similar-looking stores are not interchangeable:
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Knowledge is the canonical retrieval system after maintenance migration 0460.
+Knowledge is the canonical retrieval system after maintenance migration 0461.
 Original file bytes stay in object storage; exact source/finding/group revisions,
 pinned evidence, relationships, publication decisions and review receipts live
 in Postgres. Keyword and embedding indexes are rebuildable. The same schema

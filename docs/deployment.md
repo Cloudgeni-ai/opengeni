@@ -1,8 +1,8 @@
 # Deployment
 
-## Unified Knowledge cutover (0460)
+## Unified Knowledge cutover (0461)
 
-`0460_unified_knowledge.sql` is a maintenance migration. Stop every API,
+`0461_unified_knowledge.sql` is a maintenance migration. Stop every API,
 control worker and turn worker that uses the target database, then supply every
 runtime login through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. A live
 listed login aborts activation. Back up the database and its retained object
@@ -15,7 +15,7 @@ imports pending review work and converts pending text-only Skill proposals into
 valid folders. It freezes the retired Memory/learning writers and changes the
 runtime role/posture contract. Run `bun run db:provision-roles`, then
 `bun run db:assert-runtime-posture` before starting only the new API and workers.
-Never restart a pre-0460 runtime after commit. Rollback requires restoring the
+Never restart a pre-0461 runtime after commit. Rollback requires restoring the
 consistent pre-cutover backup with the matching old binary.
 
 Source schedules keep their ids, cadence, selected source and connector version,

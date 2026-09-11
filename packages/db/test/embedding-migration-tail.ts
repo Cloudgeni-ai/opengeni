@@ -27,5 +27,5 @@ export const embeddingMigrationTail = [
   // scheduled/host authority. It must not run while those prerequisites are
   // marked applied but deliberately absent in a historical cutover fixture.
   "0459_mcp_operations.sql",
-  "0460_unified_knowledge.sql",
+  "0461_unified_knowledge.sql",
 ];

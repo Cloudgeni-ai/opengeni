@@ -17,6 +17,8 @@ import {
   recordUsageEvent,
   registerHostExportConsumer,
   retireHostExportConsumer,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   resumeHostExportConsumer,
   type HostExportKind,
 } from "../src/index";
@@ -213,6 +215,22 @@ describe("durable host export (real PostgreSQL)", () => {
       idempotencyKey: `usage:test:${childStarted.turn!.id}`,
     });
 
+    const follower = `subject:follower:${crypto.randomUUID()}`;
+    const followup = await withWorkspaceSubjectSessionActivityRls(
+      app.db, active.grant.workspaceId!, active.subjectId, (db) =>
+        db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: active.grant.accountId, workspaceId: active.grant.workspaceId!,
+          sessionId: active.session.id, subjectId: active.subjectId,
+          actor: { type: "human", subjectId: active.subjectId },
+          operationKey: crypto.randomUUID(), delivery: "send", text: "follow up",
+          resources: [], reasoningEffortFallback: "medium", source: "user",
+        })),
+    );
+    const [unboundMessage] = await appendSessionEvents(app.db, active.grant.workspaceId!, active.session.id, [{
+      type: "user.message",
+      payload: { text: "unbound", initiator: { kind: "subject", subjectId: follower } },
+    }]);
+
     const eventBatch = await claim("session_event", "host-test-events");
     expect(eventBatch?.events.length).toBeGreaterThan(0);
     expect(eventBatch?.events.some((item) => item.event.id === delta?.id)).toBe(false);
@@ -226,6 +244,22 @@ describe("durable host export (real PostgreSQL)", () => {
       subjectId: active.subjectId,
       label: "User active",
     });
+    const initialMessageExport = eventBatch?.events.find(
+      (item) => item.event.sessionId === active.session.id && item.event.type === "user.message",
+    );
+    expect(initialMessageExport?.event.turnId).toBeNull();
+    expect(initialMessageExport?.initiator?.subjectId).toBe(active.subjectId);
+    expect(initialMessageExport?.origin).toBe("user");
+    const followupExport = eventBatch?.events.find((item) =>
+      item.event.type === "user.message" && (item.event.payload as { text?: string })?.text === "follow up",
+    );
+    expect(followup.turnId).toBeTruthy();
+    expect(followupExport?.event.turnId).toBeNull();
+    expect(followupExport?.initiator?.subjectId).toBe(active.subjectId);
+    expect(followupExport?.origin).toBe("user");
+    const unboundExport = eventBatch?.events.find((item) => item.event.id === unboundMessage!.id);
+    expect(unboundExport?.initiator).toBeNull();
+    expect(unboundExport?.origin).toBeNull();
     const createdExport = eventBatch?.events.find((item) => item.event.type === "session.created");
     expect(createdExport?.origin).toBeNull();
     expect(createdExport?.initiator?.subjectId).toBe(active.subjectId);

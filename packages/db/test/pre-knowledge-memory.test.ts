@@ -1,5 +1,5 @@
 // Historical schema coverage only. New runtime Knowledge coverage is in
-// unified-knowledge-postgres.test.ts and migration-0460-unified-knowledge.test.ts.
+// unified-knowledge-postgres.test.ts and migration-0461-unified-knowledge.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as dbSchema from "../src/schema";
 import {
@@ -37,7 +37,7 @@ describe("pre-knowledge Memory storage compatibility", () => {
     const owner = postgres(owned.ownerUrl, { max: 1 });
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES('0460_unified_knowledge.sql')`;
+      await owner`INSERT INTO schema_migrations(name) VALUES('0461_unified_knowledge.sql')`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();

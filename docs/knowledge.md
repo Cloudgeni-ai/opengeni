@@ -1,6 +1,6 @@
 # Knowledge and Agent learning
 
-Knowledge is the durable retrieval system from maintenance migration **0460**.
+Knowledge is the durable retrieval system from maintenance migration **0461**.
 It replaces agent Memory and the separate reviewed Knowledge authoring lane.
 Conversation history and temporary task notes keep their existing jobs.
 
@@ -194,7 +194,7 @@ publication lifecycles in the adjacent review UI.
 
 ## Cutover and historical compatibility
 
-0460 requires a stopped old runtime. Its owner-run conversion preserves exact
+0461 requires a stopped old runtime. Its owner-run conversion preserves exact
 legacy Memory content and IDs, restrictive scopes, source versions, provenance,
 relationships and lifecycle evidence. Resolved legacy sources and claims become
 canonical source/finding/group records. Unresolved authority does not become a
@@ -222,7 +222,7 @@ downloads and entry/history reads retain their ordinary permission checks.
 
 - Contracts: `packages/contracts/src/knowledge-entries.ts`, `agent-learning.ts`,
   `agent-instruction-changes.ts`.
-- Persistence and lifecycle: `packages/db/drizzle/0460_unified_knowledge.sql`,
+- Persistence and lifecycle: `packages/db/drizzle/0461_unified_knowledge.sql`,
   `packages/db/src/knowledge-entries.ts`, `knowledge-migration.ts`,
   `knowledge-document-preparation.ts`, `knowledge-indexing.ts`.
 - Host authority, source preparation and search: `packages/core/src/domain/knowledge*.ts`

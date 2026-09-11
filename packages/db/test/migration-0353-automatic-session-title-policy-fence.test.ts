@@ -989,7 +989,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // autonomy policy tables/functions, the 0400 model-context snapshot table,
     // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
     // the 0429 message-boundary fork overload,
-    // the 0433 unified Skill tables/lifecycle capability, and the 0460 protected
+    // the 0433 unified Skill tables/lifecycle capability, and the 0461 protected
     // MCP operation ledger/command capability (which grants no direct DML).
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this

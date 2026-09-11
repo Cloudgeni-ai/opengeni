@@ -49,7 +49,7 @@ import {
 import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 
-const migration = "0460_unified_knowledge.sql";
+const migration = "0461_unified_knowledge.sql";
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
 let app: ReturnType<typeof createDb>;
@@ -637,7 +637,7 @@ test("converts source schedules into ordinary agent revisions without changing s
   expect(state).toEqual({ lease_id: null, pending_wake_count: 0, buffered_wake: false });
 });
 
-describe("0460 owner-role conversion", () => {
+describe("0461 owner-role conversion", () => {
   test("revokes every old Memory writer after conversion", async () => {
     const rows = await owned!.admin`SELECT
       has_table_privilege('opengeni_app','knowledge_memories','INSERT,UPDATE,DELETE') AS can_write,

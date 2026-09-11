@@ -1,6 +1,6 @@
 # Agent Knowledge overview (Workspace State projection)
 
-> **After migration 0460:** Workspace State now projects bounded published Knowledge metadata from `knowledge_entries`. Old document/base/Memory aggregate fields and the old overview UI are retired. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+> **After migration 0461:** Workspace State now projects bounded published Knowledge metadata from `knowledge_entries`. Old document/base/Memory aggregate fields and the old overview UI are retired. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
 
 The user-facing **Agent Knowledge** page is a small map of what agents can follow
 or find in the current workspace. The Workspace State projection supplies its

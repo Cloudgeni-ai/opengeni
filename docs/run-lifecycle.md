@@ -496,7 +496,7 @@ Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
 chat or scheduled-run context. Child work and replacement attempts reuse their
 producer's accepted policy. Legacy `memoryEnabled` opt-outs are converted to the
-Knowledge setting; the old setting cannot be changed after 0460.
+Knowledge setting; the old setting cannot be changed after 0461.
 
 Retained Knowledge is retrieval context. It is not ambient conversation memory
 or behavioral authority. Explicit `view: "needs_review"` lets agents inspect and correct unapproved proposals without activating them. Normal search excludes pending revisions; source ACLs,

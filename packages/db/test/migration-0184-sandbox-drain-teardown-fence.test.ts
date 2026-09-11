@@ -57,7 +57,7 @@ const withheldMigrationNames = [
   // and validates scheduled/host authority withheld above. Replay it only once
   // those actual prerequisites exist; do not weaken its production checks.
   "0459_mcp_operations.sql",
-  "0460_unified_knowledge.sql",
+  "0461_unified_knowledge.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

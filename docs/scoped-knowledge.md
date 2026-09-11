@@ -1,6 +1,6 @@
 # Scoped knowledge provenance foundation
 
-> **After migration 0460:** Provider/source/object/version and ACL records still bound connector retention. The separate entity/claim authoring lane is historical; canonical Knowledge entries own new retained content and relationships. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+> **After migration 0461:** Provider/source/object/version and ACL records still bound connector retention. The separate entity/claim authoring lane is historical; canonical Knowledge entries own new retained content and relationships. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
 
 This internal, provider-neutral persistence foundation records durable
 source/version provenance and normalized claims. It is **not** a connector,

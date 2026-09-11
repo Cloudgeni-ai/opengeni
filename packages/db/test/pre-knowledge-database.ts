@@ -4,7 +4,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 /** Historical migration proofs run against the last schema that owned Memory.
- * Current-runtime denial and conversion are exercised by migration-0460 and
+ * Current-runtime denial and conversion are exercised by migration-0461 and
  * unified-knowledge-postgres; never disable retirement triggers in those tests. */
 export async function acquirePreKnowledgeTestDatabase(
   label: string,
@@ -14,9 +14,9 @@ export async function acquirePreKnowledgeTestDatabase(
   const admin = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
   try {
     await admin`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-    await admin`INSERT INTO schema_migrations(name) VALUES ('0460_unified_knowledge.sql')`;
+    await admin`INSERT INTO schema_migrations(name) VALUES ('0461_unified_knowledge.sql')`;
     await migrate(blank.databaseUrl);
-    await admin`DELETE FROM schema_migrations WHERE name='0460_unified_knowledge.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0461_unified_knowledge.sql'`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");
     await provisionRoles(blank.databaseUrl, {

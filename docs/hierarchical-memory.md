@@ -1,6 +1,6 @@
 # Historical Memory storage
 
-Maintenance migration 0460 replaces the former Memory retrieval and authoring
+Maintenance migration 0461 replaces the former Memory retrieval and authoring
 system with [Knowledge and Agent learning](knowledge.md). Use that document for
 all new integrations, agent tools, storage, review and UI behavior.
 
