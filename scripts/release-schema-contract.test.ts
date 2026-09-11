@@ -203,6 +203,9 @@ describe("release schema contract", () => {
     const skillReviewWireCompatibility = completeSourceContract.migrations.some(
       (migration) => migration.path === "0458_skill_review_wire_compatibility.sql",
     );
+    const hostMessageAttribution = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0460_host_export_message_attribution.sql",
+    );
     const mcpOperations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0459_mcp_operations.sql",
     );
@@ -254,6 +257,7 @@ describe("release schema contract", () => {
         (socialConnectionVersions ? 1 : 0) +
         (canonicalSessionScopeSubject ? 1 : 0) +
         (skillReviewWireCompatibility ? 1 : 0) +
+        (hostMessageAttribution ? 1 : 0) +
         (mcpOperations ? 1 : 0) +
         437 +
         (unobservableDrain ? 1 : 0) +
@@ -264,7 +268,9 @@ describe("release schema contract", () => {
         (retainedProviderCommands ? 1 : 0) +
         (unifiedSkillLifecycle ? 1 : 0) +
         (skillChatConfirmation ? 1 : 0),
-      latestMigration: mcpOperations
+      latestMigration: hostMessageAttribution
+        ? "0460_host_export_message_attribution.sql"
+        : mcpOperations
         ? "0459_mcp_operations.sql"
         : skillReviewWireCompatibility
           ? "0458_skill_review_wire_compatibility.sql"
@@ -329,7 +335,7 @@ describe("release schema contract", () => {
                                                                     : "0428_scheduled_task_creator_policy.sql",
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0459_mcp_operations.sql",
+      path: "0460_host_export_message_attribution.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1421,6 +1427,7 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const unfilteredSourceContract = await buildCompleteSchemaContract();
     let completeSourceContract = await contractWithoutMigrations([
+      "0460_host_export_message_attribution.sql",
       "0459_mcp_operations.sql",
       "0458_skill_review_wire_compatibility.sql",
       "0437_organization_scoped_external_workspaces.sql",
@@ -1696,6 +1703,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0460_host_export_message_attribution.sql",
       "0459_mcp_operations.sql",
       "0458_skill_review_wire_compatibility.sql",
       "0437_organization_scoped_external_workspaces.sql",
@@ -4619,6 +4627,7 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
   directories.push(directory);
   const excluded = new Set([
     ...excludedPaths,
+    "0460_host_export_message_attribution.sql",
     "0397_sandbox_deadline_rotation_preemption.sql",
     "0429_message_boundary_session_forks.sql",
     "0430_session_personal_variable_set_continuations.sql",
