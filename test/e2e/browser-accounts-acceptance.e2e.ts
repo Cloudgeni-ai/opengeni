@@ -859,7 +859,9 @@ function observeBrowser(page: Page): BrowserProblems {
     // the strict failure ledger. This tracker prevents a full-document goto
     // from tearing down background finite reads from the just-selected actor.
     const isFiniteApiRead =
-      request.method() === "GET" &&
+      (request.method() === "GET" ||
+        (request.method() === "POST" &&
+          /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))) &&
       pathname.startsWith("/v1/") &&
       !pathname.endsWith("/stream") &&
       !pathname.includes("/live-events/stream");

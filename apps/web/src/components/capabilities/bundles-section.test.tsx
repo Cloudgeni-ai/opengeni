@@ -32,8 +32,17 @@ describe("BundlesSection", () => {
     ] as const) {
       const rendered = await renderSection({ query });
       try {
-        expect(rowIds(rendered.container)).toEqual([expected]);
-        expect(count(rendered.container)).toBe("1 results");
+        if (expected.startsWith("plugin:")) {
+          expect(
+            rendered.container
+              .querySelector("[data-installed-plugin]")
+              ?.getAttribute("data-installed-plugin"),
+          ).toBe("example/research");
+          expect(rowIds(rendered.container)).toEqual([]);
+        } else {
+          expect(rowIds(rendered.container)).toEqual([expected]);
+          expect(count(rendered.container)).toBe("1 results");
+        }
         expect(rendered.container.querySelector('input[type="search"]')).toBeNull();
       } finally {
         await rendered.unmount();
@@ -50,26 +59,27 @@ describe("BundlesSection", () => {
       await rendered.unmount();
     }
   });
-  test("lists every provenance through one uniform row under one heading", async () => {
+  test("lists skills and workflow templates alongside installed plugins", async () => {
     const rendered = await renderSection();
     try {
       const heading = rendered.container.querySelector("#bundles-heading");
       expect(heading?.textContent).toBe("Skills & plugins");
-      expect(rendered.container.textContent).toContain("Install tools and skills together.");
+      expect(rendered.container.textContent).toContain(
+        "Skills and connections installed together.",
+      );
 
       const rows = rowIds(rendered.container);
       expect(rows).toEqual([
         "pack:infra-ops",
-        "plugin:example/research",
         "imported:skill:release-operator-abc123",
         "skill:terraform",
       ]);
-      // Every one of them is the same component, and the aria-label overrides
-      // the visible line inside the button, so the taxonomy the row shows is
-      // spoken between the name and the state rather than lost.
+      // Skill and template rows preserve their provenance in the accessible name.
+      expect(rendered.container.querySelector("[data-installed-plugin]")?.textContent).toContain(
+        "Research suite",
+      );
       expect(rowNames(rendered.container)).toEqual([
         "Infrastructure operations. Workflow template, registered in this workspace. Not installed",
-        "Research suite. Plugin, imported from source. Installed",
         "release-operator. Skill, imported from source. Installed",
         "Terraform. Skill, curated by OpenGeni. Installed",
       ]);
@@ -98,7 +108,8 @@ describe("BundlesSection", () => {
   test("reports how much of the bundle list the search is showing", async () => {
     const rendered = await renderSection();
     try {
-      expect(count(rendered.container)).toBe("4 results");
+      expect(count(rendered.container)).toBe("3 results");
+      expect(rendered.container.querySelectorAll("[data-installed-plugin]")).toHaveLength(1);
     } finally {
       await rendered.unmount();
     }
@@ -156,13 +167,12 @@ describe("BundlesSection", () => {
   });
 
   test("the source import and manifest registration entry points stay reachable", async () => {
-    const rendered = await renderSection();
+    const rendered = await renderSection({ section: "plugins" });
     try {
       const labels = [...rendered.container.querySelectorAll("button")].map(
         (candidate) => candidate.textContent ?? "",
       );
-      expect(labels.some((label) => label.includes("Import Skill"))).toBe(true);
-      expect(labels.some((label) => label.includes("Install Plugin"))).toBe(true);
+      expect(labels.some((label) => label.includes("Import plugin"))).toBe(true);
       expect(labels.some((label) => label.includes("Add workflow template"))).toBe(true);
     } finally {
       await rendered.unmount();
@@ -177,7 +187,7 @@ describe("BundlesSection", () => {
       );
       // Every header action is a workspace-administrator action; none of them
       // may sit live directly under the sentence that says so.
-      for (const label of ["Import Skill", "Install Plugin", "Add workflow template"]) {
+      for (const label of ["Import plugin", "Add workflow template"]) {
         const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
           candidate.textContent?.includes(label),
         );
@@ -267,6 +277,9 @@ async function render(element: ReactNode) {
 function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   if (failed) {
     return {
+      listCapabilities: async () => ({ items: [] }),
+      searchPublicSkills: async () => ({ items: [] }),
+      discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
       listInstalledSkills: async () => {
         throw new Error("network is down");
       },
@@ -276,6 +289,9 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
     } as unknown as OpenGeniBrowserClient;
   }
   return {
+    listCapabilities: async () => ({ items: [] }),
+    searchPublicSkills: async () => ({ items: [] }),
+    discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
   } as unknown as OpenGeniBrowserClient;

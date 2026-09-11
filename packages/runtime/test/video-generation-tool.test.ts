@@ -47,7 +47,7 @@ describe("video generation runtime surface", () => {
       ((agent as unknown as { tools: Array<{ name: string }> }).tools ?? []).map(
         (tool) => tool.name,
       );
-    expect(names(disabled)).toEqual([]);
+    expect(names(disabled)).toEqual(["skill_read"]);
     expect(names(enabled)).toEqual([
       "get_video_generation_capabilities",
       "generate_video",

@@ -47,7 +47,6 @@ import {
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
-import { PluginDiscovery } from "@/components/capabilities/plugin-discovery";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { SkillsPanel } from "./skills-panel";
@@ -1653,21 +1652,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 </p>
               ) : null}
             </div>
-            {searchingAll ? (
-              <div className="capability-search-section">
-                <PluginDiscovery
-                  onOpenConnection={(item) => openItem(item, false, true)}
-                  client={client}
-                  workspaceId={workspaceId}
-                  query={query}
-                  canManage={canManageSkills}
-                  onChanged={() => {
-                    void refresh();
-                    onRuntimeChanged();
-                  }}
-                />
-              </div>
-            ) : null}
             <div
               className={searchingAll ? "capability-search-section" : undefined}
               hidden={!searchingAll && activeTab !== "skills"}
@@ -1702,7 +1686,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                   search?.focus({ preventScroll: true });
                 }}
                 importSkillRef={importSkillRef}
-                section={searchingAll ? "skills" : activeTab === "skills" ? "skills" : "plugins"}
+                section={searchingAll ? "all" : activeTab === "skills" ? "skills" : "plugins"}
                 query={query}
                 client={client}
                 workspaceId={workspaceId}

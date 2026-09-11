@@ -116,7 +116,7 @@ describe("session-first rail density", () => {
     const rendered = await render(<PrimaryNav />);
     try {
       expect(rendered.container.textContent).toContain("For you");
-      expect(rendered.container.textContent).toContain("Plugins");
+      expect(rendered.container.textContent).toContain("Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         4,
       );
@@ -188,7 +188,7 @@ describe("session-first rail density", () => {
       const disclosure = moreDisclosure(rendered.container);
       expect(disclosure.getAttribute("aria-expanded")).toBe("false");
       expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("More, current section Plugins");
+      expect(disclosure.getAttribute("aria-label")).toBe("More, current section Capabilities");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         0,
       );

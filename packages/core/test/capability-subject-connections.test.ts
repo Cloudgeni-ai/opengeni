@@ -229,7 +229,7 @@ describe("subject-owned capability connection references", () => {
     });
   });
 
-  test("keeps native runtime surfaces out of the catalog and marks external config as managed", async () => {
+  test("keeps native and uninstalled library Skills out of the catalog and marks external config as managed", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const catalog = await buildCapabilityCatalog({
@@ -262,18 +262,8 @@ describe("subject-owned capability connection references", () => {
     ]) {
       expect(ids.has(nativeId)).toBe(false);
     }
-    expect(catalog.items.find((item) => item.id === "skill:terraform-style-guide")).toMatchObject({
-      source: "library",
-      enabled: false,
-      lifecycle: { status: "available", readiness: "setup_required" },
-      actions: ["install", "inspect"],
-    });
-    expect(catalog.items.find((item) => item.id === "skill:social-media-marketing")).toMatchObject({
-      source: "library",
-      enabled: false,
-      lifecycle: { status: "available", readiness: "setup_required" },
-      actions: ["install", "inspect"],
-    });
+    expect(ids.has("skill:terraform-style-guide")).toBe(false);
+    expect(ids.has("skill:social-media-marketing")).toBe(false);
     expect(catalog.items.find((item) => item.id === "mcp:team-search")).toMatchObject({
       source: "configured",
       enabled: true,

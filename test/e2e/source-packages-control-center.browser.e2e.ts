@@ -90,15 +90,15 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      await page.getByRole("button", { name: "Import Skill" }).first().click();
+      await page.getByRole("button", { name: "New skill", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Import from URL" }).click();
       let dialog = page.getByRole("dialog");
       await dialog.getByLabel("GitHub or skills.sh URL").fill(skillUrl);
       await dialog.getByRole("button", { name: "Detect and preview" }).click();
-      await expectText(dialog, "Immutable Skill preview ready");
-      await expectText(dialog, "Pinned commit");
-      await expectText(dialog, "Review 2 immutable files");
+      await expectText(dialog, "release-operator");
+      await expectText(dialog, "Included files · 2");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
-      await dialog.getByRole("button", { name: "Install this Skill" }).click();
+      await dialog.getByRole("button", { name: "Install", exact: true }).click();
 
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await expectVisible(skillRow);
@@ -111,11 +111,12 @@ describe("Bundles section browser acceptance", () => {
         expectedContentSha256: "b".repeat(64),
       });
 
-      await page.getByRole("button", { name: "Install Plugin" }).first().click();
+      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      await page.getByRole("button", { name: "Import plugin", exact: true }).click();
       dialog = page.getByRole("dialog");
       await dialog.getByLabel("Plugin manifest URL").fill(pluginUrl);
       await dialog.getByRole("button", { name: "Detect and preview" }).click();
-      await expectText(dialog, "Immutable Plugin bill of materials ready");
+      await expectText(dialog, "Plugin ready to review");
       await expectText(dialog, "Manifest digest");
       await expectText(dialog, "Choose an exact Connection for Linear");
 
@@ -129,25 +130,26 @@ describe("Bundles section browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.getByRole("button", { name: "Install this Plugin" }).click();
 
-      const pluginRow = page.locator(`[data-integration-row="plugin:${pluginKey}"]`);
+      const pluginRow = page.locator(`[data-installed-plugin="${pluginKey}"]`);
       await expectVisible(pluginRow);
       await expectText(pluginRow, "Research suite");
-      await expectText(pluginRow, "Plugin · Imported from source");
+      await expectText(pluginRow, "Installed");
       expect(state.pluginPreviewRequests).toHaveLength(2);
       expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests[0]).toMatchObject({
         url: pluginUrl,
         bindings: { linear: { connectionId: financeConnectionId } },
       });
-      // One Bundles section, one search, and a row for every kind in it.
-      await expectVisible(page.getByRole("heading", { name: "Bundles" }));
-      const search = page.getByLabel("Search all plugins");
+      // Search spans installed Skills and Plugins, retaining their management actions.
+      await page.getByRole("tab", { name: "Skills", exact: true }).click();
+      await expectVisible(page.getByRole("heading", { name: "Your skills" }));
+      const search = page.getByLabel("Search capabilities");
       await search.fill("research");
       await expectVisible(pluginRow);
       await expectHidden(skillRow);
       await search.fill("");
       await expectVisible(skillRow);
-      await assertAccessibleAndBounded(page, '[aria-labelledby="bundles-heading"]');
+      await assertAccessibleAndBounded(page, '[data-workspace-scroll-owner="self-managed"]');
       await page.screenshot({
         path: `${evidenceDir}install-desktop-light.png`,
         fullPage: true,
@@ -166,7 +168,7 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const pluginRow = page.locator(`[data-integration-row="plugin:${pluginKey}"]`);
+      const pluginRow = page.locator(`[data-installed-plugin="${pluginKey}"]`);
       await openBundleSheet(page, `plugin:${pluginKey}`);
       await page
         .locator('[data-integration-sheet="bundle-plugin-example/research"]')
@@ -201,6 +203,7 @@ describe("Bundles section browser acceptance", () => {
         expectedInstallationVersion: 3,
       });
 
+      await page.getByRole("tab", { name: "Skills", exact: true }).click();
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await openBundleSheet(page, `imported:${skillCapabilityId}`);
       await page
@@ -239,13 +242,10 @@ describe("Bundles section browser acceptance", () => {
     try {
       await installApi(page, state);
       await openCapabilities(page);
-      await expectText(
-        page.locator('[aria-labelledby="bundles-heading"]'),
-        "Workspace administrators can install, update, and remove Bundles",
-      );
-      expect(await page.getByRole("button", { name: "Import Skill" }).first().isDisabled()).toBe(
-        true,
-      );
+      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      expect(
+        await page.getByRole("button", { name: "Import plugin", exact: true }).isDisabled(),
+      ).toBe(true);
       // A viewer who cannot act is told so, rather than shown buttons that do
       // nothing when pressed.
       await openBundleSheet(page, `plugin:${pluginKey}`);
@@ -257,8 +257,8 @@ describe("Bundles section browser acceptance", () => {
       expect(await pluginSheet.getByRole("button", { name: "Review update" }).count()).toBe(0);
       await page.keyboard.press("Escape");
       await expectHidden(pluginSheet);
-      await assertAccessibleAndBounded(page, '[aria-labelledby="bundles-heading"]');
-      await page.locator('[aria-labelledby="bundles-heading"]').scrollIntoViewIfNeeded();
+      await assertAccessibleAndBounded(page, '[aria-label="Plugins"]');
+      await page.locator('[aria-label="Plugins"]').scrollIntoViewIfNeeded();
       await page.screenshot({
         path: `${evidenceDir}permission-mobile-dark.png`,
         fullPage: true,
@@ -280,14 +280,14 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      const packRow = page.locator(`[data-integration-row="pack:${packId}"]`);
+      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+      await page.locator("summary", { hasText: "Workflow templates" }).click();
+      const packRow = page.locator(`[data-workflow-template="pack:${packId}"]`);
       await expectVisible(packRow);
       await expectText(packRow, "Pack · Registered in this workspace");
       // Provenance is read from the catalog row, never assumed to be OpenGeni's.
       expect((await packRow.textContent()) ?? "").not.toContain("Curated by OpenGeni");
-      expect(await packRow.locator("> button").getAttribute("aria-label")).toBe(
-        "Infrastructure operations. Pack, registered in this workspace. Installed",
-      );
+      await expectText(packRow, "Installed");
 
       await openBundleSheet(page, `pack:${packId}`);
       const dialog = page.locator(`[data-pack-dialog="${packId}"]`);
@@ -348,11 +348,26 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
-  await expectVisible(page.getByRole("heading", { name: "Bundles" }));
+  await page.getByRole("tab", { name: "Skills", exact: true }).click();
+  await expectVisible(page.getByRole("heading", { name: "Your skills" }));
 }
 
 async function openBundleSheet(page: Page, rowId: string): Promise<void> {
-  await page.locator(`[data-integration-row="${rowId}"] > button`).first().click();
+  if (rowId.startsWith("plugin:")) {
+    await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+    await page.locator(`[data-installed-plugin="${rowId.slice(7)}"]`).click();
+  } else if (rowId.startsWith("pack:")) {
+    await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+    const templates = page
+      .locator("details")
+      .filter({ has: page.locator("summary", { hasText: "Workflow templates" }) });
+    if (!(await templates.evaluate((element) => (element as HTMLDetailsElement).open)))
+      await templates.locator("summary").click();
+    await page.locator(`[data-workflow-template="${rowId}"]`).click();
+  } else {
+    await page.getByRole("tab", { name: "Skills", exact: true }).click();
+    await page.locator(`[data-integration-row="${rowId}"] > button`).first().click();
+  }
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {
@@ -372,6 +387,15 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({
+        provider: "skills_sh",
+        query: url.searchParams.get("q"),
+        items: [],
+        nextCursor: null,
+      });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json(capabilityCatalog(state));
     }
@@ -552,7 +576,9 @@ function access(canManage: boolean) {
         permissions,
       },
     ],
-    workspaceGrants: [{ workspaceId, accountId, subjectId, permissions }],
+    workspaceGrants: [
+      { workspaceId, accountId, subjectId, permissions, principalKind: "human_session" },
+    ],
     defaultAccountId: accountId,
     defaultWorkspaceId: workspaceId,
   };

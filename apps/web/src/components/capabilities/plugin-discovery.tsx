@@ -17,9 +17,11 @@ export function PluginDiscovery({
   canManage = false,
   onChanged,
   onOpenConnection,
+  onOpenInstalled,
   installedPlugins = EMPTY_PLUGINS,
 }: {
   installedPlugins?: PluginInstallationSummary[];
+  onOpenInstalled?: (plugin: PluginInstallationSummary) => boolean;
   onOpenConnection?: (item: CapabilityCatalogItem) => void;
   canManage?: boolean;
   onChanged?: () => void;
@@ -95,6 +97,7 @@ export function PluginDiscovery({
     }
   }
   async function openInstalled(plugin: PluginInstallationSummary) {
+    if (onOpenInstalled?.(plugin)) return;
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     try {
       const item = await client.getInstalledPluginDetails(workspaceId, plugin.pluginKey);
@@ -154,6 +157,7 @@ export function PluginDiscovery({
               .map((plugin) => (
                 <button
                   key={plugin.pluginKey}
+                  data-installed-plugin={plugin.pluginKey}
                   type="button"
                   className="og-plugin-discovery-row"
                   onClick={() => void openInstalled(plugin)}
