@@ -2078,6 +2078,7 @@ name = "opengeni-agent-platform"
 version = "0.1.18"
 dependencies = [
  "async-trait",
+ "blake3",
  "command-group",
  "image",
  "nix 0.29.0",
@@ -2086,10 +2087,12 @@ dependencies = [
  "opengeni-agent-proto",
  "portable-pty",
  "prost",
+ "rustix 1.1.4",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
  "x11rb",
  "xattr",
 ]

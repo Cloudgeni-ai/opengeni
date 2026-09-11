@@ -636,6 +636,46 @@ organization access and defaults to personal. Organization publication is
 available only to account administrators. Machines and Rigs display the
 resulting scope in their list cards so wider publication is never implicit.
 
+## Large file edits
+
+The editor uses transactional transfers for large text edits when the exact live
+agent advertises `transactional_fs_write`. This is separate from `op_stream`;
+older agents retain their existing single-message write behavior. An outbound
+message-size rejection is reported as a request-size fault, not an offline
+machine, and does not prove that earlier operations failed.
+
+Transfers stage bounded chunks privately, verify the intended BLAKE3 digest and
+byte count, and publish only after the expected destination state is checked.
+Every transfer request is reauthorized against the same physical connection.
+An ambiguous acknowledgment triggers one read-only query of the exact operation,
+never a replay of the edit. A lost operation after agent restart remains unknown;
+inspect the destination before submitting another edit.
+If that query confirms the abandoned transfer is still running, the caller
+cancels only that exact operation through the same authorization checks. A commit
+racing cancellation retains its verified receipt. Lost cancellation responses or
+lost authority do not prove cleanup: private staging may remain until the link
+ends, and a process crash may leave an orphan. There is no automatic sweep or
+adoption of unknown transfers.
+
+The initial native implementation supports ordinary Linux regular files with
+existing parent directories. It fails closed on unsupported symlinks, hard links,
+ownership, special modes, and extended metadata rather than silently discarding
+their semantics. Transactional editing does not implement `runAs` impersonation.
+Expected-base checks detect observed changes but are not a filesystem
+compare-and-swap against unrelated concurrent writers.
+
+An edit with `moveTo` replaces the destination and then verifies and removes the
+source on the same authorized connection. This is **not an atomic move**. If
+source cleanup cannot be verified, the tool reports that the destination was
+verified but cleanup remains uncertain; it does not replay the move. Inspect
+both paths before retrying.
+The source check and subsequent deletion are not conditional deletion; unrelated
+writers can still change the source between those steps. This is not a
+metadata-preserving filesystem rename.
+
+Deploy matching protocol/runtime packages and a compatible native agent before
+expecting transactional support. Changing transport limits is not required.
+
 ## Revoke / detach
 
 - **Reject a pending enrollment** at the approve page:

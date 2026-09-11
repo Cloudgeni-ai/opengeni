@@ -16172,6 +16172,7 @@ export const MachineRuntimeCapabilities = z.object({
   browserBridge: z.boolean(),
   operationResourcePolicy: z.boolean(),
   operationCpuQuota: z.boolean(),
+  transactionalFsWrite: z.boolean().default(false),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 

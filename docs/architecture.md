@@ -1437,10 +1437,10 @@ holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
-Desktop/browser capability is layered on a compute target. The stock desktop
-image and browser daemon are separate from the ordinary headless image and
-control-plane release lifecycle. Connected Machine desktop and terminal data
-use the relay, while command authority remains in the control plane.
+Desktop/browser capabilities layer onto compute; their images and daemons have
+separate release lifecycles. Desktop/terminal data use the relay; authority remains
+in the control plane. Large edits use capability-gated transactional transfers,
+verified receipts, and no blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,

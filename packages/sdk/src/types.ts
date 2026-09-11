@@ -8033,6 +8033,7 @@ export type MachineRuntimeCapabilities = {
   browserBridge: boolean;
   operationResourcePolicy: boolean;
   operationCpuQuota: boolean;
+  transactionalFsWrite: boolean;
 };
 
 export type MachineUpdateStatus =
