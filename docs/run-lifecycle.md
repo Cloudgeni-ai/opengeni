@@ -875,7 +875,10 @@ sandbox capability reads current files in place, including referenced text and
 bounded file inventories. Configured `skill_read` stays sandbox-free and does
 not resolve repository names. Identifiers cannot silently switch between these
 sources, even when names match. Repository metadata uses the same YAML parser as
-portable Skills. The repository index is fixed for the bound capability; reads
+portable Skills, retaining multiline description text in the JSON descriptor.
+Discovery, inventories, and reading accept ordinary files and directories;
+symlink Skill entrypoints are excluded because portable filesystem APIs cannot
+prove target containment. The repository index is fixed for the bound capability; reads
 observe live edits or report missing files, and rebinding refreshes discovery.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox

@@ -247,6 +247,18 @@ async function discoverWorkspaceSkillsUnmeasured(
       const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
       let markdown: string;
       try {
+        // Match reader/inventory eligibility: symlink entrypoints are not
+        // advertised because the portable filesystem API cannot prove containment.
+        const skillEntries = await session.listDir({
+          path: entry.path,
+          ...(runAs ? { runAs } : {}),
+        });
+        if (
+          !skillEntries.some(
+            (candidate) => candidate.name === SKILL_FILE && candidate.type === "file",
+          )
+        )
+          continue;
         const content = await session.readFile({
           path: skillMarkdownPath,
           ...(runAs ? { runAs } : {}),
@@ -264,7 +276,7 @@ async function discoverWorkspaceSkillsUnmeasured(
       const key = name.toLowerCase();
       if (shadowedNames.has(key)) continue;
       const description = frontmatter.description?.trim() || "No description provided.";
-      if (description.length > 2_048 || /[\r\n]/.test(description)) {
+      if (description.length > 2_048) {
         throw new Error(`Repository skill "${name}" has an invalid description`);
       }
       if (reservedNames.has(key)) {

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
 
 import {
   Manifest,
@@ -18,6 +21,79 @@ import {
 import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
+  for (const [description, expected] of [
+    ["|-\n  First line.\n  Second line.", "First line.\nSecond line."],
+    [">-\n  First paragraph.\n\n  Second paragraph.", "First paragraph.\nSecond paragraph."],
+  ]) {
+    test(`capability preparation accepts multiline YAML ${description!.slice(0, 2)}`, async () => {
+      const markdown = `---\nname: example\ndescription: ${description}\n---\n# Guidance`;
+      const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+        fakeSession({ ".agents/skills/example/SKILL.md": markdown }),
+      );
+      const instructions = await capability.instructions();
+      const descriptor = JSON.parse(
+        instructions!
+          .split("\n")
+          .find((line) => line.startsWith("- {"))!
+          .slice(2),
+      );
+      expect(descriptor.description).toBe(expected);
+      const reader = capability.tools()[0]!;
+      if (reader.type !== "function") throw new Error("missing reader");
+      const output = JSON.parse(
+        (await reader.invoke(undefined!, JSON.stringify({ skill: descriptor.id }))) as string,
+      );
+      expect(output.files[0].content).toBe(markdown);
+    });
+  }
+
+  test.skipIf(process.platform === "win32")(
+    "Unix-local discovery excludes symlink Skill entrypoints consistently with reading",
+    async () => {
+      const session = await new UnixLocalSandboxClient().create(
+        new Manifest({ root: "/workspace" }),
+      );
+      try {
+        const root = session.state.workspaceRootPath;
+        for (const name of ["ordinary", "linked"])
+          await mkdir(join(root, ".agents/skills", name), { recursive: true });
+        const markdown = "---\nname: linked\ndescription: Linked guidance.\n---\n# Linked";
+        await writeFile(join(root, "shared-skill.md"), markdown);
+        await symlink("../../../shared-skill.md", join(root, ".agents/skills/linked/SKILL.md"));
+        await writeFile(join(root, ".agents/skills/ordinary/SKILL.md"), "# Ordinary");
+        await symlink(
+          "../../../shared-skill.md",
+          join(root, ".agents/skills/ordinary/reference.md"),
+        );
+        // Actual adapter behavior: direct reads follow the symlink, listing marks it other.
+        expect(
+          new TextDecoder().decode(
+            await session.readFile({ path: ".agents/skills/linked/SKILL.md" }),
+          ),
+        ).toBe(markdown);
+        expect((await session.listDir({ path: ".agents/skills/linked" }))[0]?.type).toBe("other");
+        const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
+          session,
+        );
+        const instructions = await capability.instructions();
+        expect(instructions).not.toContain('"name":"linked"');
+        expect(instructions).toContain('"name":"ordinary"');
+        const reader = capability.tools()[0]!;
+        if (reader.type !== "function") throw new Error("missing reader");
+        const call = (args: object) =>
+          reader.invoke(
+            undefined!,
+            JSON.stringify({ skill: "repository:.agents/skills/ordinary/SKILL.md", ...args }),
+          );
+        expect(JSON.parse((await call({ listFiles: true })) as string).paths).toEqual(["SKILL.md"]);
+        expect(JSON.parse((await call({})) as string).files[0].content).toBe("# Ordinary");
+        expect(await call({ paths: ["reference.md"] })).toContain("unavailable");
+      } finally {
+        await session.delete();
+      }
+    },
+  );
+
   test("repository YAML descriptions preserve folded text", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni/SKILL.md":
@@ -386,7 +462,7 @@ description: Prepare a safe release.
       { path: ".agents/skills", source: ".agents/skills" },
     ]);
     expect(skills.map((entry) => entry.name)).toEqual(["deploy", "release"]);
-    expect(listed).toEqual([".agents/skills"]);
+    expect(listed).toEqual([".agents/skills", ".agents/skills/deploy", ".agents/skills/release"]);
     expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 
