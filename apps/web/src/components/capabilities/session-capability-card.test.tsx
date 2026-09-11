@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
+import { sessionAuthRecommendation } from "./session-auth-recommendation";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
@@ -106,7 +107,7 @@ afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
-async function render(personalAccount = false) {
+async function render(personalAccount = false, missingGrant = false) {
   personal = personalAccount;
   enabled = personalAccount;
   connections = personalAccount ? [{ ...row, subjectId: "owner", authorityId: "authority" }] : [];
@@ -117,8 +118,23 @@ async function render(personalAccount = false) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
+  const notice = missingGrant
+    ? sessionAuthRecommendation(
+        {
+          ...item,
+          capability: undefined,
+          serverId: "example",
+          connectionId: null,
+          authoritySource: null,
+          reason: "personal_authority_unavailable",
+        },
+        (await context.client.listCapabilities()).items as CapabilityCatalogItem[],
+      )!
+    : item;
   await act(async () =>
-    root.render(<SessionCapabilityCard item={item} workspaceId="workspace" sessionId="session" />),
+    root.render(
+      <SessionCapabilityCard item={notice} workspaceId="workspace" sessionId="session" />,
+    ),
   );
   return {
     container,
@@ -169,7 +185,9 @@ describe("conversation connection card", () => {
     await h.close();
   });
   test("a personal account requires explicit shared-results consent before completion", async () => {
-    const h = await render(true);
+    const h = await render(true, true);
+    expect(h.container.textContent).toContain("Review permission to use your personal account");
+    expect(issueUserResourceGrant).not.toHaveBeenCalled();
     await act(async () => button(h.container, "Connect Example").click());
     const use = button(h.container, "Use in this");
     expect(use.disabled).toBe(true);

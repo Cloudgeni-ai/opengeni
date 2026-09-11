@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  enableCapabilityInstallation,
+  upsertCapabilityCatalogItem,
+  persistAttemptToolCatalog,
   bootstrapWorkspace,
   createDb,
   createSession,
@@ -147,6 +151,125 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       expect(installationCount?.count).toBe(0);
     } finally {
       await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+  test("enabled personal Gmail requires consent unless this exact attempt exposes its tools", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    const capabilityId = "mcp:gmail-consent-test";
+    const serverId = "gmail-consent-test";
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Gmail consent test",
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      authModel: "credential_ref",
+      metadata: { mcpServerId: serverId },
+    });
+    await enableCapabilityInstallation(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok" } },
+      config: {
+        connectionRef: {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      },
+    });
+    for (const exposed of ["none", "other-server", serverId]) {
+      const attempt = await seedAttempt();
+      if (exposed !== "none") {
+        await persistAttemptToolCatalog(
+          client.db,
+          createAttemptToolEnvironment({
+            scope: {
+              ...attempt,
+              accountId: workspace.accountId,
+              workspaceId: workspace.workspaceId,
+            },
+            generation: 1,
+            definitions: [
+              {
+                identity: { serverId: exposed, toolName: "list_labels" },
+                modelName: `${exposed}__list_labels`,
+                description: "List labels",
+                inputSchema: { type: "object" },
+                source: "mcp",
+                approval: "none",
+                execute: async () => ({ content: [] }),
+              },
+            ],
+          }).catalog,
+        );
+      }
+      const bus = new MemoryEventBus();
+      const agentGrant: AccessGrant = {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      };
+      const server = buildOpenGeniMcpServer(
+        { settings: testSettings(), db: client.db, bus } as ApiRouteDeps,
+        agentGrant,
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "gmail-consent-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      try {
+        const search = await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query: "Gmail consent test" },
+        });
+        expect(search.isError).not.toBe(true);
+        const body = mcpJson(search) as {
+          matches: Array<{
+            capabilityId: string;
+            setup: { status: string; action: string | null };
+          }>;
+        };
+        expect(
+          body.matches.find((entry) => entry.capabilityId === capabilityId)?.setup,
+        ).toMatchObject({
+          status: exposed === serverId ? "ready" : "authorization_required",
+          action: exposed === serverId ? null : "connect",
+        });
+        const request = await mcp.callTool({
+          name: "capability_authorization_request",
+          arguments: { capabilityId, rationale: "Read the requested Gmail labels." },
+        });
+        expect(request.isError).not.toBe(true);
+        expect(mcpJson(request)).toMatchObject({
+          status: exposed === serverId ? "ready" : "authorization_requested",
+        });
+        const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
+        const notices = events.filter((event) => event.type === "tool.auth_needed");
+        expect(notices).toHaveLength(exposed === serverId ? 0 : 1);
+        if (exposed !== serverId)
+          expect(notices[0]).toMatchObject({
+            turnId: attempt.turnId,
+            turnAttemptId: attempt.attemptId,
+            payload: { serverId, capability: { id: capabilityId, action: "connect" } },
+          });
+        const [grants] = await shared.admin<
+          { count: number }[]
+        >`select count(*)::int as count from organization_user_resource_grants where workspace_id=${workspace.workspaceId}`;
+        expect(grants?.count).toBe(0);
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
     }
   }, 60_000);
 });
