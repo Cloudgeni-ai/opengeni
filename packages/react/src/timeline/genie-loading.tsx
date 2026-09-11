@@ -1,13 +1,6 @@
 import { ThinkingOrb } from "thinking-orbs";
 import { useThemeType } from "../lib/use-theme-type";
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useState,
-  type ReactNode,
-  type ComponentProps,
-} from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 export type GenieLoadingRenderProps = {
   startedAt: string;
@@ -19,7 +12,21 @@ export type GenieLoadingOptions = {
   /** Replace the visual while preserving SDK loading visibility and transitions. */
   render?: (props: GenieLoadingRenderProps) => ReactNode;
   phrases?: readonly string[];
-  orb?: Pick<ComponentProps<typeof ThinkingOrb>, "state" | "size" | "speed">;
+  /** Public options stay independent of the renderer's declaration layout. */
+  orb?: {
+    state?:
+      | "working"
+      | "searching"
+      | "solving"
+      | "listening"
+      | "connecting"
+      | "weaving"
+      | "composing"
+      | "breathing"
+      | "shaping";
+    size?: 64 | 20;
+    speed?: number;
+  };
 };
 export const GenieLoadingOptionsContext = createContext<GenieLoadingOptions | undefined>(undefined);
 
