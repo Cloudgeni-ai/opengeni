@@ -782,7 +782,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       const openBatch = async (title: string) =>
         batches
           .filter({ hasText: title })
-          .getByRole("button", { name: /^Review \d+ changes?$/ })
+          .getByRole("button", { name: /^Review \d+ items?$/ })
           .click();
       await openBatch("Review acceptance Acme");
       const dialog = page.getByRole("dialog");

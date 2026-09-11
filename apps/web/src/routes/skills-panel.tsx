@@ -13,6 +13,12 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext, type AppContextValue } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
+const SCOPE_LABEL: Record<SkillScope, string> = {
+  workspace: "Workspace",
+  organization: "Company",
+  user: "Only me",
+};
+
 /** Both product destinations use this catalog and the same folder write API. */
 export function SkillsPanel({
   workspaceId,
@@ -261,24 +267,18 @@ export function SkillsPanelContent({
 
   return (
     <section aria-label="Skills" className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Skills</h2>
-          <p className="text-sm text-fg-subtle">
-            Installed and authored instructions, with one file history.
-          </p>
-        </div>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         <div className="flex flex-wrap gap-2">
           {([personalWorkspace ? "user" : "workspace", "organization"] as const)
             .filter(canManage)
             .map((scope) => (
               <Button
                 key={scope}
-                variant="outline"
+                variant={scope === "organization" ? "outline" : "default"}
                 disabled={busy}
                 onClick={() => navigate(() => create(scope))}
               >
-                New {scope === "organization" ? "organization " : ""}Skill
+                New {scope === "organization" ? "company " : ""}Skill
               </Button>
             ))}
         </div>
@@ -314,9 +314,9 @@ export function SkillsPanelContent({
             disabled={busy}
             onClick={() => navigate(() => void open(skill.id))}
           >
-            {skill.title || skill.stableKey} · {skill.scope}
+            {skill.title || skill.stableKey} · {SCOPE_LABEL[skill.scope]}
             {skill.status !== "active" ? ` · ${skill.status}` : ""}
-            {skill.pendingRevisionIds.length ? " · pending changes" : ""}
+            {skill.pendingRevisionIds.length ? " · needs review" : ""}
           </Button>
         ))}
         {nextCursor ? (
@@ -328,14 +328,10 @@ export function SkillsPanelContent({
       {record ? (
         <div className="space-y-4">
           <p className="text-xs text-fg-subtle">
-            {record.source
-              ? "Installed Skill · workspace edits preserve the upstream source"
-              : "Authored Skill"}{" "}
-            · {record.scope}
+            {record.source ? "Installed Skill" : "Authored Skill"} · {SCOPE_LABEL[record.scope]}
           </p>
           <p className="text-sm text-muted-foreground">
-            Edit the name and description in SKILL.md frontmatter. The Skill index is updated from
-            that file when this revision becomes active.
+            Edit the name and description in SKILL.md.
           </p>
           {history.length ? (
             <label className="block text-sm">

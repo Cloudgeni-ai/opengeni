@@ -393,11 +393,9 @@ export function KnowledgeBrowser({
               </option>
             ))}
           </Select>
-          <p className="text-xs text-fg-muted">
-            {kind === "all"
-              ? "Agents choose a type to describe the content. All types are searchable together."
-              : KNOWLEDGE_KIND_HELP[kind]}
-          </p>
+          {kind !== "all" ? (
+            <p className="text-xs text-fg-muted">{KNOWLEDGE_KIND_HELP[kind]}</p>
+          ) : null}
         </div>
       ) : null}
       {group ? (
@@ -465,9 +463,6 @@ export function KnowledgeBrowser({
                     </h2>
                   </div>
                 )}
-                <p className="text-sm text-fg-muted">
-                  Review proposed changes before adding them to your knowledge.
-                </p>
                 {!reviewGroup && canEdit ? (
                   <KnowledgeReviewGroups
                     workspaceId={workspaceId}
@@ -495,7 +490,7 @@ export function KnowledgeBrowser({
                       size="sm"
                       onClick={() => setBulkReview((value) => !value)}
                     >
-                      {bulkReview ? "Hide selection" : "Select changes"}
+                      {bulkReview ? "Hide selection" : "Select items"}
                     </Button>
                   </div>
                 ) : null}
@@ -549,8 +544,7 @@ export function KnowledgeBrowser({
             ) : null}
             {treeView && tab === "published" ? (
               <section aria-label="Knowledge tree" className="grid min-w-0 gap-2">
-                <div className="flex min-w-0 items-center justify-between gap-2">
-                  <p className="text-xs text-fg-subtle">Collections and entries</p>
+                <div className="flex min-w-0 items-center justify-end gap-2">
                   {canEdit && (scope !== "organization" || canWriteOrganization) ? (
                     <Button variant="ghost" size="sm" onClick={() => startCreating("group")}>
                       <PlusIcon className="size-4" />

@@ -214,8 +214,8 @@ export function AgentKnowledgePrompt({
       </label>
       <p className="text-xs leading-5 text-fg-subtle">
         {kind === "company_profile"
-          ? "OpenGeni will help you update the organization identity using its configured review setting."
-          : "OpenGeni will save the result using your Agent learning settings. Pending changes appear in Needs review."}
+          ? "Uses your organization’s review setting."
+          : "Uses your Agent learning settings."}
       </p>
       {modelSelection ? (
         <p className="text-xs leading-5 text-fg-subtle" role="status">

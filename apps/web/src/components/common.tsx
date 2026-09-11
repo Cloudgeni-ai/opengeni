@@ -131,7 +131,7 @@ export function CopyableMono({ value }: { value: string }) {
 export function PageHeader(props: {
   icon: ReactNode;
   title: string;
-  description: string;
+  description?: string;
   actions?: ReactNode;
   className?: string;
 }) {
@@ -147,7 +147,9 @@ export function PageHeader(props: {
           <span className="text-brand">{props.icon}</span>
           {props.title}
         </h1>
-        <p className="mt-1 text-sm leading-5 text-fg-muted">{props.description}</p>
+        {props.description ? (
+          <p className="mt-1 text-sm leading-5 text-fg-muted">{props.description}</p>
+        ) : null}
       </div>
       {props.actions ? (
         <div className="flex min-w-0 flex-wrap items-center gap-2">{props.actions}</div>

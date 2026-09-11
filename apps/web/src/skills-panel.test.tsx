@@ -118,9 +118,7 @@ test("Skills list loads metadata first and saves the full edited folder without 
     const saved = calls.find((call) => call.method === "save")!.request as Record<string, unknown>;
     expect(saved).not.toHaveProperty("title");
     expect(saved).not.toHaveProperty("description");
-    expect(view.container.textContent).toContain(
-      "Edit the name and description in SKILL.md frontmatter",
-    );
+    expect(view.container.textContent).toContain("Edit the name and description in SKILL.md.");
   } finally {
     await view.dispose();
   }

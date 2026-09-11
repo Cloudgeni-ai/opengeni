@@ -1184,9 +1184,9 @@ export function FocusedInstructions({
         ) : (
           <p className="mt-3 text-xs leading-5 text-fg-muted">
             {personalWorkspace && !canEdit
-              ? "No personal workspace instruction is active. Editing becomes available with the personal-policy authority."
+              ? "No personal instructions have been set."
               : canEdit
-                ? "No workspace instruction is active yet. Tell OpenGeni what agents should always do, or add a concise instruction manually below."
+                ? "No instructions yet. Describe what agents should always do, or add instructions manually."
                 : "No workspace instruction is active yet. A workspace administrator can add one."}
           </p>
         )}
@@ -1218,9 +1218,8 @@ export function FocusedInstructions({
               </label>
               <p className="text-xs leading-5 text-fg-subtle">
                 {personalWorkspace
-                  ? "These instructions are included automatically only for agents working in your personal workspace."
-                  : "These instructions are included automatically for agents working in this workspace."}{" "}
-                Changes are versioned and can be audited or rolled back.
+                  ? "Applies to agents in your personal workspace."
+                  : "Applies to every agent in this workspace."}
               </p>
               {!canEdit ? (
                 <p className="text-xs text-status-waiting">
@@ -1259,7 +1258,7 @@ export function FocusedInstructions({
           }
         >
           {personalWorkspace
-            ? "You can see the instruction currently applied here. Personal Skills and Knowledge are available now; editing this personal instruction needs the upcoming personal-policy authority."
+            ? "You can view the current instructions, but personal instruction editing is not available yet."
             : "You can see the instruction currently applied here. A workspace administrator can change it."}
         </Notice>
       )}
@@ -1309,15 +1308,6 @@ function WorkspaceBehaviorPanel({
 
   return (
     <>
-      <p className="mb-5 text-sm text-fg-muted">
-        {view === "instructions"
-          ? personalWorkspace
-            ? "View the always-on guidance currently applied in your personal workspace."
-            : "Set the concise, always-on guidance for agents in this workspace."
-          : personalWorkspace
-            ? "Manage your personal Skills and other Skills available here."
-            : "Create reusable instructions agents can fetch when relevant."}
-      </p>
       <div>
         {loading && !state ? <WorkspaceStateLoading /> : null}
         {error && !state ? (

@@ -105,7 +105,7 @@ export function KnowledgeReviewGroups({
             </div>
           </div>
           <Button variant="outline" size="sm" onClick={() => onSelect(batch)}>
-            Review {batch.pendingCount} {batch.pendingCount === 1 ? "change" : "changes"}
+            Review {batch.pendingCount} {batch.pendingCount === 1 ? "item" : "items"}
           </Button>
         </div>
       ))}

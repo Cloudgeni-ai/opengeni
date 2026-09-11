@@ -189,17 +189,34 @@ export function KnowledgeFilesPanel({ workspaceId, authorityKind }: KnowledgeFil
           void upload(event.dataTransfer.files);
         }}
       >
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold">
-              {scope === "organization" ? "Company reference material" : "File library"}
-            </h2>
-            <p className="mt-1 max-w-xl text-sm leading-6 text-fg-muted">
-              {scope === "organization"
-                ? "Documents and other source material available across your company."
-                : "Files uploaded here or in chats. Open a file to read it and see what agents have learned from it."}
-            </p>
-          </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <Select
+            className="w-auto min-w-40"
+            aria-label="File and source scope"
+            value={scope}
+            disabled={uploading || Boolean(authorityKind)}
+            onChange={(event) => {
+              setScope(event.target.value as DocumentAuthorityKind);
+              setSelectedFile(null);
+            }}
+          >
+            <option value="workspace">Workspace files</option>
+            <option value="personal">Only my files</option>
+            {authorityKind === "organization" ? (
+              <option value="organization">Company</option>
+            ) : null}
+          </Select>
+          <div className="flex-1" />
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Refresh files"
+            title="Refresh files"
+            disabled={busy || uploading}
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            <RefreshCwIcon className="size-4" />
+          </Button>
           {canUpload && (scope !== "organization" || canWriteOrganization) ? (
             <>
               <input
@@ -220,34 +237,6 @@ export function KnowledgeFilesPanel({ workspaceId, authorityKind }: KnowledgeFil
               </Button>
             </>
           ) : null}
-        </div>
-        <div className="flex items-center justify-between gap-3">
-          <Select
-            className="w-auto min-w-40"
-            aria-label="File and source scope"
-            value={scope}
-            disabled={uploading || Boolean(authorityKind)}
-            onChange={(event) => {
-              setScope(event.target.value as DocumentAuthorityKind);
-              setSelectedFile(null);
-            }}
-          >
-            <option value="workspace">Workspace files</option>
-            <option value="personal">Only my files</option>
-            {authorityKind === "organization" ? (
-              <option value="organization">Company</option>
-            ) : null}
-          </Select>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Refresh files"
-            title="Refresh files"
-            disabled={busy || uploading}
-            onClick={() => setRefresh((value) => value + 1)}
-          >
-            <RefreshCwIcon className="size-4" />
-          </Button>
         </div>
         {error ? (
           <p role="alert" className="text-sm text-status-error">

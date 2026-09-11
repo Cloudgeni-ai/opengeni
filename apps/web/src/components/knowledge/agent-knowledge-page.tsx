@@ -4,8 +4,6 @@ import type { ReactNode } from "react";
 import { PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useAppContext } from "@/context";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
 
 export type AgentKnowledgeSection = "knowledge" | "files" | "instructions" | "skills";
 
@@ -20,20 +18,12 @@ export function AgentKnowledgePage({
   children: ReactNode;
 }) {
   const navigate = useNavigate();
-  const context = useAppContext();
-  const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
-  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   return (
     <ContentPage width="standard">
       <PageHeader
         className="border-0 pb-0"
         icon={<BrainCircuitIcon className="size-4" />}
         title="Agent Knowledge"
-        description={
-          personal
-            ? "Your saved knowledge, files, and guidance for agents."
-            : "Saved knowledge, files, and guidance for agents in this workspace."
-        }
       />
       <Tabs
         className="mt-7 min-w-0 gap-7"

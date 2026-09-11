@@ -39,6 +39,14 @@ revision history and refer to the exact prior revision. Organization or
 reclassification changes use the same service and policy, including when a
 scheduled agent proposes better grouping.
 
+Across Knowledge, Files, Instructions and Skills, the UI leads with content and
+controls. Headings and tabs provide context; do not repeat them in introductory
+paragraphs or narrate implementation details. Keep explanations beside decisions
+that need them (scope, publication settings and editing), and retain actionable
+empty, error and permission states. Use “items” for review counts because a batch
+can contain new entries, edits, collections or archival requests. Do not claim
+that agents cannot read pending content: explicit unapproved reads remain supported.
+
 ## Ownership and access
 
 Personal and workspace Knowledge share all content and lifecycle capabilities.

@@ -86,7 +86,7 @@ test("opens the selected run's changes and paginates without losing its first gr
     expect(container.textContent).toContain("Customer feedback");
     expect(container.textContent).toContain("Scheduled run");
     const review = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Review 4 changes",
+      (button) => button.textContent === "Review 4 items",
     )!;
     await act(async () => review.click());
     expect(selected).toHaveBeenCalledWith(batch);

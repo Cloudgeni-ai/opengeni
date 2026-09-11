@@ -12,7 +12,7 @@ export const KNOWLEDGE_KIND_LABEL: Record<KnowledgeEntryKind, string> = {
 
 export const KNOWLEDGE_KIND_HELP: Record<KnowledgeEntryKind, string> = {
   source: "Saved original text, such as a contract passage or Slack conversation.",
-  fact: "A specific claim, such as a customer's renewal date. This label does not mean it has been verified.",
+  fact: "A specific detail, such as a customer's renewal date.",
   decision: "A choice that was made, with its reasoning when available.",
   requirement: "Something a customer, product, or system needs to do.",
   incident: "A problem or failure, including its cause, fix, and outcome when known.",
