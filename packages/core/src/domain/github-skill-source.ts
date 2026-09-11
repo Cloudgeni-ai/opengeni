@@ -2,7 +2,11 @@ import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import type { GitHubSkillSourceClient, GitHubSkillTreeEntry } from "./skill-imports";
 import { pinnedFetch, readResponseJsonBounded, readResponseTextBounded } from "@opengeni/network";
-import { PORTABLE_SKILL_MAX_FILES, PORTABLE_SKILL_MAX_TOTAL_BYTES, type SkillLibraryFile } from "@opengeni/runtime/skill-library";
+import {
+  PORTABLE_SKILL_MAX_FILES,
+  PORTABLE_SKILL_MAX_TOTAL_BYTES,
+  type SkillLibraryFile,
+} from "@opengeni/runtime/skill-library";
 
 const githubApiBase = "https://api.github.com";
 const githubRequestTimeoutMs = 15_000;
@@ -26,14 +30,22 @@ export function createGitHubSkillSourceClient(
     if (existing) return existing;
     const task = readJson(path, maxBytes, label).then((payload) => {
       if (cache.size >= 128) cache.delete(cache.keys().next().value!);
-      cache.set(path, { payload, expires: Date.now() + (path.includes("/commits/") ? 60_000 : 3_600_000) });
+      cache.set(path, {
+        payload,
+        expires: Date.now() + (path.includes("/commits/") ? 60_000 : 3_600_000),
+      });
       return payload;
     });
     pending.set(path, task);
-    try { return await task; } finally { pending.delete(path); }
+    try {
+      return await task;
+    } finally {
+      pending.delete(path);
+    }
   };
   return {
-    downloadSnapshot: (owner, repository, slug) => downloadSkillSnapshot(settings, owner, repository, slug),
+    downloadSnapshot: (owner, repository, slug) =>
+      downloadSkillSnapshot(settings, owner, repository, slug),
     resolveCommit: async (owner, repository, ref) => {
       const payload = recordValue(
         await requestJson(
@@ -126,23 +138,39 @@ async function downloadSkillSnapshot(
   if (!response.ok) {
     await response.body?.cancel();
     throw new HTTPException(response.status === 429 ? 429 : 422, {
-      message: response.status === 429
-        ? "skills.sh is busy. Try again shortly."
-        : response.status === 404
-          ? "This skill has no downloadable snapshot. Import its GitHub folder URL instead."
-          : "Could not download this skill from skills.sh. Try again shortly.",
+      message:
+        response.status === 429
+          ? "skills.sh is busy. Try again shortly."
+          : response.status === 404
+            ? "This skill has no downloadable snapshot. Import its GitHub folder URL instead."
+            : "Could not download this skill from skills.sh. Try again shortly.",
     });
   }
   // JSON escaping may expand the text payload. Artifact validation below applies
   // the stricter limits to decoded files, paths, and total content size.
-  const payload = recordValue(await readResponseJsonBounded(
-    response, PORTABLE_SKILL_MAX_TOTAL_BYTES * 6 + 128_000, "Skill download", { signal },
-  ), "Skill download");
-  if (!Array.isArray(payload.files) || payload.files.length === 0 || payload.files.length > PORTABLE_SKILL_MAX_FILES) {
+  const payload = recordValue(
+    await readResponseJsonBounded(
+      response,
+      PORTABLE_SKILL_MAX_TOTAL_BYTES * 6 + 128_000,
+      "Skill download",
+      { signal },
+    ),
+    "Skill download",
+  );
+  if (
+    !Array.isArray(payload.files) ||
+    payload.files.length === 0 ||
+    payload.files.length > PORTABLE_SKILL_MAX_FILES
+  ) {
     throw new HTTPException(422, { message: "The downloaded skill has an invalid file list" });
   }
   return payload.files.map((file) => {
-    if (!file || typeof file !== "object" || typeof file.path !== "string" || typeof file.contents !== "string") {
+    if (
+      !file ||
+      typeof file !== "object" ||
+      typeof file.path !== "string" ||
+      typeof file.contents !== "string"
+    ) {
       throw new HTTPException(422, { message: "The downloaded skill contains an invalid file" });
     }
     return { path: file.path, content: file.contents };
@@ -176,7 +204,10 @@ async function githubJson(
       await readResponseTextBounded(response, 8_192, `${label} error`).catch(() => undefined);
       if (response.status === 404) throw new Error(`${label} was not found or is not public`);
       if (response.status === 403 || response.status === 429) {
-        throw new HTTPException(429, { message: "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets." });
+        throw new HTTPException(429, {
+          message:
+            "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets.",
+        });
       }
       throw new Error(`${label} failed with HTTP ${response.status}`);
     }

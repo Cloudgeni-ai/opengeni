@@ -6,6 +6,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { BundlesSection } from "./bundles-section";
+import { PluginDiscovery } from "./plugin-discovery";
 import type {
   CapabilityCatalogItem,
   CapabilityPack,
@@ -55,7 +56,9 @@ describe("BundlesSection", () => {
     try {
       const heading = rendered.container.querySelector("#bundles-heading");
       expect(heading?.textContent).toBe("Skills & plugins");
-      expect(rendered.container.textContent).toContain("Install tools and skills together.");
+      expect(rendered.container.textContent).toContain(
+        "Skills and connections installed together.",
+      );
 
       const rows = rowIds(rendered.container);
       expect(rows).toEqual([
@@ -155,15 +158,55 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("the source import and manifest registration entry points stay reachable", async () => {
-    const rendered = await renderSection();
+  test("plugin import and manifest registration entry points stay reachable", async () => {
+    const rendered = await renderSection({ section: "plugins" });
     try {
       const labels = [...rendered.container.querySelectorAll("button")].map(
         (candidate) => candidate.textContent ?? "",
       );
-      expect(labels.some((label) => label.includes("Import Skill"))).toBe(true);
-      expect(labels.some((label) => label.includes("Install Plugin"))).toBe(true);
+      expect(labels.some((label) => label.includes("Import plugin"))).toBe(true);
       expect(labels.some((label) => label.includes("Add workflow template"))).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an installed plugin card loads its exact installed identity before management", async () => {
+    const getInstalledPluginDetails = mock(async (_workspaceId: string, _pluginKey: string) => ({
+      id: "example:research",
+      name: "research",
+      displayName: "Research suite",
+      description: "Research tools",
+      longDescription: "Research tools",
+      provider: "custom",
+      category: null,
+      logoUrl: null,
+      darkLogoUrl: null,
+      sourceUrl: installedPlugin().sourceUrl,
+      author: null,
+      version: "2.0.0",
+      skills: [],
+      mcpServers: [],
+      components: [],
+      installation: "installed",
+    }));
+    const rendered = await render(
+      <PluginDiscovery
+        client={Object.assign(stubClient(false), { getInstalledPluginDetails })}
+        workspaceId="00000000-0000-4000-8000-000000000001"
+        query=""
+        installedPlugins={[installedPlugin()]}
+      />,
+    );
+    try {
+      const card = rendered.container.querySelector<HTMLButtonElement>(".og-plugin-discovery-row");
+      expect(card?.textContent).toContain("Research suite");
+      await act(async () => card!.click());
+      expect(getInstalledPluginDetails).toHaveBeenCalledTimes(1);
+      expect(getInstalledPluginDetails).toHaveBeenCalledWith(
+        "00000000-0000-4000-8000-000000000001",
+        "example/research",
+      );
     } finally {
       await rendered.unmount();
     }
@@ -177,7 +220,7 @@ describe("BundlesSection", () => {
       );
       // Every header action is a workspace-administrator action; none of them
       // may sit live directly under the sentence that says so.
-      for (const label of ["Import Skill", "Install Plugin", "Add workflow template"]) {
+      for (const label of ["Import plugin", "Add workflow template"]) {
         const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
           candidate.textContent?.includes(label),
         );
@@ -267,6 +310,8 @@ async function render(element: ReactNode) {
 function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   if (failed) {
     return {
+      listCapabilities: async () => ({ items: [], installations: [] }),
+      discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
       listInstalledSkills: async () => {
         throw new Error("network is down");
       },
@@ -277,6 +322,8 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   }
   return {
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
+    listCapabilities: async () => ({ items: empty ? [] : catalogItems(), installations: [] }),
+    discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
   } as unknown as OpenGeniBrowserClient;
 }

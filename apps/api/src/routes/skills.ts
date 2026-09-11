@@ -58,9 +58,12 @@ export function registerSkillRoutes(
     } catch (error) {
       if (!(error instanceof PublicSkillSearchError)) throw error;
       if (error.retryAfterSeconds) c.header("Retry-After", String(error.retryAfterSeconds));
-      throw new HTTPException(error.code === "invalid_query" ? 422 : error.code === "rate_limited" ? 429 : 503, {
-        message: "Skill search is unavailable. Please try again.",
-      });
+      throw new HTTPException(
+        error.code === "invalid_query" ? 422 : error.code === "rate_limited" ? 429 : 503,
+        {
+          message: "Skill search is unavailable. Please try again.",
+        },
+      );
     }
   });
 
@@ -180,8 +183,7 @@ export function registerSkillRoutes(
       resolved.preview.contentSha256 !== payload.expectedContentSha256
     ) {
       throw new HTTPException(409, {
-        message:
-          "The skill changed after preview. Review its contents again before installing.",
+        message: "The skill changed after preview. Review its contents again before installing.",
       });
     }
     const fileSummaryByPath = new Map(
