@@ -20,3 +20,14 @@ export const KNOWLEDGE_KIND_HELP: Record<KnowledgeEntryKind, string> = {
   group:
     "Related knowledge collected around a customer, product, system, or subject. Entries can appear in several collections without being copied.",
 };
+
+export const KNOWLEDGE_SOURCE_LABEL: Record<string, string> = {
+  file: "File",
+  slack: "Slack",
+  conversation: "Conversation",
+  repository: "Codebase",
+  web: "Web",
+  connector: "Connected source",
+  manual: "Added directly",
+  task_note: "Task note",
+};

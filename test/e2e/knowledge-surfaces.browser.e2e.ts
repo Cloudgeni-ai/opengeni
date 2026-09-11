@@ -73,9 +73,8 @@ const knowledgeTexts = knowledgeTopics.map(
     `Knowledge entry ${String(index + 1).padStart(2, "0")}: ${topic} is a distinct durable record that remains reachable through the shared page scroll owner. ` +
     `Fixture marker KNOWLEDGE_ENTRY_${String(index + 1).padStart(2, "0")}_${topic.replaceAll(" ", "_")} proves the keyboard-operable content wraps without widening the viewport.`,
 );
-// The API returns entries newest-first, so the first created record is the
-// bottom-most working-set card in the rendered list.
-const tailKnowledgeText = knowledgeTexts[0]!;
+// The tree orders loaded entries by title; entry 20 is the last fixture row.
+const tailKnowledgeText = unbrokenKnowledgeText;
 
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
@@ -270,7 +269,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             } else if (surface === "memory") {
               await expectContentPageScrollAndFocus(
                 page,
-                page.getByRole("button", { name: "Retained entry 01", exact: true }),
+                page.getByRole("button", { name: "Retained entry 20", exact: true }),
               );
             }
             if (surface === matrixCase.screenshotSurface) {
@@ -485,8 +484,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         for (const destination of ["Knowledge", "Files", "Instructions", "Skills"]) {
           await page.getByRole("tab", { name: destination, exact: true }).waitFor();
         }
-        await page.getByRole("heading", { name: "Collections", exact: true }).waitFor();
-        await page.getByRole("heading", { name: "Knowledge entries", exact: true }).waitFor();
+        await page.getByRole("tree", { name: "Knowledge", exact: true }).waitFor();
         expect(await page.getByRole("button", { name: "Inspect", exact: true }).count()).toBe(0);
         await setTheme(page, matrixCase.theme);
         await expectNoPageOverflow(page);
@@ -507,6 +505,104 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       }
     }
   }, 120_000);
+
+  test("browses nested collections in place, opens entries and searches across collapsed folders", async () => {
+    const context = await configuredContext(
+      browser,
+      { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
+      browserTestSettings.sandboxSelfhostedEnabled,
+    );
+    try {
+      const page = await context.newPage();
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      await page.evaluate(
+        async ({ apiBaseUrl: targetApiBaseUrl, workspaceId: targetWorkspaceId }) => {
+          async function save(title: string, kind: "note" | "group", groupIds: string[] = []) {
+            const entryId = crypto.randomUUID();
+            const response = await fetch(
+              `${targetApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/knowledge/entries`,
+              {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  operationId: crypto.randomUUID(),
+                  entryId,
+                  expectedVersion: 0,
+                  entry: { title, kind, content: `${title} description`, groupIds },
+                }),
+              },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return entryId;
+          }
+          const acme = await save("Acme tree", "group");
+          const contracts = await save("Contracts tree", "group", [acme]);
+          const billing = await save("Billing tree", "group");
+          await save("Nested renewal", "note", [contracts, billing]);
+        },
+        { apiBaseUrl, workspaceId },
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
+      const tree = page.getByRole("tree", { name: "Knowledge", exact: true });
+      await tree.getByRole("button", { name: "Acme tree", exact: true }).waitFor();
+      expect(await tree.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
+        0,
+      );
+      await tree.getByRole("treeitem", { name: "Acme tree", exact: true }).focus();
+      await page.keyboard.press("ArrowRight");
+      await tree.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
+      await tree.getByRole("button", { name: "Contracts tree", exact: true }).click();
+      await tree.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
+      await tree.getByRole("button", { name: "Billing tree", exact: true }).click();
+      await tree.getByRole("button", { name: "Nested renewal", exact: true }).nth(1).waitFor();
+      expect(await tree.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
+        2,
+      );
+      await tree.getByRole("button", { name: "Nested renewal", exact: true }).first().click();
+      await page
+        .getByRole("dialog")
+        .getByText("Nested renewal description", { exact: true })
+        .waitFor();
+      await page.keyboard.press("Escape");
+      await tree.getByRole("button", { name: "Actions for Contracts tree", exact: true }).click();
+      await page.getByRole("menuitem", { name: "New collection here", exact: true }).click();
+      await page
+        .getByRole("dialog")
+        .getByRole("textbox", { name: "Title", exact: true })
+        .fill("Signed contracts tree");
+      await page
+        .getByRole("dialog")
+        .getByRole("textbox", { name: "Content", exact: true })
+        .fill("Final agreements");
+      await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+      await page.getByRole("dialog").waitFor({ state: "hidden" });
+      await tree.getByRole("button", { name: "Signed contracts tree", exact: true }).waitFor();
+      await expectNoAxeViolations(page, "[data-slot='content-page']", "nested-knowledge-tree");
+      await expectNoPageOverflow(page);
+      await page.setViewportSize({ width: 375, height: 812 });
+      await expectNoPageOverflow(page);
+      await expectNoAxeViolations(
+        page,
+        "[data-slot='content-page']",
+        "nested-knowledge-tree-mobile",
+      );
+      await page
+        .getByRole("textbox", { name: "Search knowledge", exact: true })
+        .fill("Nested renewal");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await page
+        .getByRole("region", { name: "Search results", exact: true })
+        .getByRole("button", { name: "Nested renewal", exact: true })
+        .waitFor();
+      expect(await page.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
+        1,
+      );
+      expect(unexpectedDiagnostics(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
 
   async function exerciseTruthfulStates(
     page: Page,
@@ -531,7 +627,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await requested;
     await page.getByText("Loading knowledge…", { exact: true }).waitFor();
     release();
-    await page.getByText(activeKnowledgeText, { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Retained entry 19", exact: true }).waitFor();
     await page.unroute(pattern, delayed);
     let failRequests = true;
     const failing = async (route: Route) => {
@@ -548,14 +644,14 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.getByRole("alert").waitFor();
     failRequests = false;
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    await page.getByText(activeKnowledgeText, { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Retained entry 19", exact: true }).waitFor();
     await page.unroute(pattern, failing);
     await page.getByRole("tab", { name: "Archived", exact: true }).click();
     await page.getByText("No archived knowledge.", { exact: true }).waitFor();
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await page.getByText("Keep your files here", { exact: true }).waitFor();
     await page.getByRole("tab", { name: "Knowledge", exact: true }).click();
-    await page.getByText(activeKnowledgeText, { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Retained entry 19", exact: true }).waitFor();
   }
 
   async function exerciseKeyboardAndDisclosure(
@@ -614,7 +710,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     ).toBe(false);
 
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "memory", fixtures));
-    const card = page.getByRole("button", { name: "Retained entry 01", exact: true });
+    const card = page.getByRole("button", { name: "Retained entry 20", exact: true });
     await card.focus();
     await page.keyboard.press("Enter");
     await page.getByRole("dialog").waitFor();
@@ -931,7 +1027,7 @@ async function openSurface(
     await page.getByText("Keep your files here", { exact: true }).waitFor();
     expect(await page.getByRole("button", { name: "Add text", exact: true }).count()).toBe(0);
   } else {
-    await page.getByRole("button", { name: "Retained entry 01", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Retained entry 20", exact: true }).waitFor();
   }
 }
 

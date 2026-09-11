@@ -1,6 +1,6 @@
 # Unified Knowledge and agent learning
 
-Status: implemented in the unified Knowledge change, tracked by OPE-478.
+Status: implemented in the unified Knowledge change.
 Product decisions were agreed on 10 September 2026. The current runtime map and
 cutover contract are in [Knowledge](../knowledge.md) and
 [deployment](../deployment.md).

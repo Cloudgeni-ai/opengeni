@@ -895,6 +895,118 @@ describe("unified Knowledge storage", () => {
     expect(await getKnowledgeOriginalFile(client.db, stranger, source.receipt.entryId)).toBeNull();
   });
 
+  test("tree roots page independently of nested members and preserve scope and archive visibility", async () => {
+    const f = await fixture();
+    const create = (
+      title: string,
+      kind: "group" | "note",
+      groupIds: string[] = [],
+      scope: "workspace" | "personal" = "workspace",
+    ) =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        scope,
+        entry: { title, kind, content: `${title} description`, groupIds },
+      });
+    const company = await create("Acme", "group");
+    const contracts = await create("Contracts", "group", [company.entryId]);
+    const product = await create("Billing", "group");
+    const finding = await create("Renewal", "note", [contracts.entryId, product.entryId]);
+    const personal = await create("Personal preparation", "note", [company.entryId], "personal");
+    const loose = await create("Unfiled", "note");
+    const ids = (page: Awaited<ReturnType<typeof listKnowledgeEntries>>) =>
+      page.entries.map((entry) => entry.id).sort();
+    const roots = await listKnowledgeEntries(client.db, f.human, { rootOnly: true, limit: 2 });
+    const rest = await listKnowledgeEntries(client.db, f.human, {
+      rootOnly: true,
+      limit: 2,
+      cursor: roots.nextCursor!,
+    });
+    expect([...ids(roots), ...ids(rest)].sort()).toEqual(
+      [company.entryId, product.entryId, loose.entryId].sort(),
+    );
+    expect(rest.nextCursor).toBeNull();
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { groupId: company.entryId })),
+    ).toEqual([contracts.entryId, personal.entryId].sort());
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { groupId: contracts.entryId })),
+    ).toEqual([finding.entryId]);
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { groupId: product.entryId })),
+    ).toEqual([finding.entryId]);
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { rootOnly: true, scope: "personal" })),
+    ).toEqual([personal.entryId]);
+    expect(
+      ids(await listKnowledgeEntries(client.db, f.human, { query: "Renewal", mode: "keyword" })),
+    ).toEqual([finding.entryId]);
+    await archiveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: company.entryId,
+      expectedVersion: company.version,
+    });
+    expect(ids(await listKnowledgeEntries(client.db, f.human, { rootOnly: true }))).toEqual(
+      [contracts.entryId, product.entryId, loose.entryId, personal.entryId].sort(),
+    );
+  });
+
+  test("collection cycles are rejected across published, proposed and restored membership", async () => {
+    const f = await fixture();
+    const create = (title: string, groupIds: string[] = []) =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: { title, kind: "group", content: title, groupIds },
+      });
+    const a = await create("Acme");
+    const b = await create("Contracts", [a.entryId]);
+    const c = await create("Renewals", [b.entryId]);
+    const move = (
+      context: KnowledgeContext,
+      entryId: string,
+      expectedVersion: number,
+      groupIds: string[],
+    ) =>
+      saveKnowledgeEntry(client.db, context, {
+        operationId: crypto.randomUUID(),
+        entryId,
+        expectedVersion,
+        entry: { title: "Moved collection", kind: "group", content: "Nested knowledge", groupIds },
+      });
+    await fails(move(f.human, a.entryId, a.version, [c.entryId]), "22023");
+    const free = await move(f.human, b.entryId, b.version, []);
+    const { agent } = await attempt(f, "review_first");
+    const proposal = await move(agent, a.entryId, a.version, [c.entryId]);
+    expect(proposal.outcome).toBe("pending");
+    // The proposed A -> C -> B path must block a competing B -> A move.
+    await fails(move(f.human, b.entryId, free.version, [a.entryId]), "22023");
+    const rejected = await reviewKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: a.entryId,
+      revisionId: proposal.revisionId,
+      expectedVersion: proposal.version,
+      decision: "reject",
+    });
+    await move(f.human, b.entryId, free.version, [a.entryId]);
+    // Restoring that now-circular rejected proposal rechecks current parents.
+    await fails(
+      restoreKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: a.entryId,
+        revisionId: proposal.revisionId,
+        expectedVersion: rejected.version,
+      }),
+      "22023",
+    );
+    expect(
+      (await getKnowledgeEntry(client.db, f.human, a.entryId))?.revision.entry.groupIds,
+    ).toEqual([]);
+  });
+
   test("retired groups and relationships disappear from discovery without erasing the entry", async () => {
     const f = await fixture();
     const group = await saveKnowledgeEntry(client.db, f.human, {

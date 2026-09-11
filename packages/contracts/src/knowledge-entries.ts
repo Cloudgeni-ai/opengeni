@@ -249,6 +249,8 @@ export const KnowledgeEntryListRequest = z
     mode: z.enum(["hybrid", "keyword", "vector"]).default("hybrid"),
     scope: KnowledgeEntryScope.optional(),
     groupId: z.uuid().optional(),
+    /** Top-level entries with no visible collection in the selected scope. */
+    rootOnly: z.boolean().optional(),
     fileId: z.uuid().optional(),
     kind: KnowledgeEntryKind.optional(),
     view: z.enum(["published", "needs_review", "archived", "rejected"]).default("published"),

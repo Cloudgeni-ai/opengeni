@@ -12,14 +12,7 @@ import type {
   KnowledgeReviewBatch,
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import {
-  ArrowLeftIcon,
-  FileTextIcon,
-  FolderIcon,
-  PlusIcon,
-  SearchIcon,
-  SlidersHorizontalIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, PlusIcon, SearchIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,23 +34,17 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { BehaviorReviews } from "./behavior-reviews";
-import { KNOWLEDGE_KIND_LABEL as KIND, KNOWLEDGE_KIND_HELP } from "./knowledge-labels";
-import { KnowledgeCard } from "./knowledge-card";
+import {
+  KNOWLEDGE_KIND_LABEL as KIND,
+  KNOWLEDGE_KIND_HELP,
+  KNOWLEDGE_SOURCE_LABEL as SOURCE,
+} from "./knowledge-labels";
+import { KnowledgeTree, KnowledgeRow, type KnowledgeCollection } from "./knowledge-tree";
 import { FormDisclosure } from "@/components/ui/form-disclosure";
 
-const SOURCE: Record<string, string> = {
-  file: "File",
-  slack: "Slack",
-  conversation: "Conversation",
-  repository: "Codebase",
-  web: "Web",
-  connector: "Connected source",
-  manual: "Added directly",
-  task_note: "Task note",
-};
 type View = "published" | "needs_review" | "archived" | "rejected";
 type Selection = { id: string; revisionId?: string; view?: View };
 const message = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
@@ -89,6 +76,10 @@ export function KnowledgeBrowser({
 }) {
   const context = useAppContext();
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
+  const workspace = context.workspaces.find((item) => item.id === workspaceId);
+  const canWriteOrganization = Boolean(
+    workspace && hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
+  );
   const [reviewGroup, setReviewGroup] = useState<KnowledgeReviewBatch | null>(null);
   const [view, setView] = useState<View>("published");
   const [scope, setScope] = useState<KnowledgeEntryScope | "all">(
@@ -108,16 +99,20 @@ export function KnowledgeBrowser({
     focusEntryId ? { id: focusEntryId } : null,
   );
   const [creating, setCreating] = useState<"note" | "group" | null>(null);
+  const [createParent, setCreateParent] = useState<KnowledgeCollection | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [copying, setCopying] = useState<KnowledgeEntryRecord | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const treeView = view === "published" && !sourceOnly && !fileFilter && !search && kind === "all";
+  const createScope =
+    createParent?.scope ?? (scope === "all" ? (personal ? "personal" : "workspace") : scope);
   const request: KnowledgeEntryListRequest = {
     view,
     limit: 50,
     ...(scope !== "all" ? { scope } : {}),
     ...(sourceOnly ? { kind: "source" as const } : kind !== "all" ? { kind } : {}),
-    ...(group ? { groupId: group.id } : {}),
+    ...(group ? { groupId: group.id } : treeView ? { rootOnly: true } : {}),
     ...(fileFilter ? { fileId: fileFilter } : {}),
     ...(search ? { query: search } : {}),
     ...(view === "needs_review" && reviewGroup ? { reviewBatchId: reviewGroup.id } : {}),
@@ -168,7 +163,10 @@ export function KnowledgeBrowser({
       context.ownsWorkspaceInvocation(workspaceId, invocation);
     setLoading(true);
     try {
-      const result = await context.client.listKnowledgeEntries(workspaceId, { ...request, cursor });
+      const result = await context.client.listKnowledgeEntries(workspaceId, {
+        ...request,
+        cursor,
+      });
       if (isCurrent()) {
         setEntries((prior) => [...prior, ...result.entries]);
         setCursor(result.nextCursor);
@@ -201,17 +199,14 @@ export function KnowledgeBrowser({
       setBusy(false);
     }
   }
-  const collections = entries.filter((entry) => entry.revision.kind === "group");
-  const knowledge = entries.filter((entry) => entry.revision.kind !== "group");
   function renderEntry(entry: KnowledgeEntrySummary, tab: View) {
-    const collection = entry.revision.kind === "group";
     return (
-      <div key={entry.id} className="flex min-w-0 items-stretch gap-3">
+      <div key={entry.id} className="flex min-w-0 items-center gap-2">
         {tab === "needs_review" && canEdit ? (
           <input
             type="checkbox"
             aria-label={`Select ${entry.revision.title}`}
-            className="mt-6 size-4 shrink-0"
+            className="ml-2 size-4 shrink-0"
             checked={selected.has(entry.id)}
             disabled={busy || (!selected.has(entry.id) && selected.size >= 100)}
             onChange={(event) => {
@@ -224,36 +219,23 @@ export function KnowledgeBrowser({
             }}
           />
         ) : null}
-        <KnowledgeCard
-          title={entry.revision.title}
-          description={entry.excerpts[0]?.text ?? entry.revision.preview}
-          variant={collection ? "collection" : "entry"}
-          icon={
-            collection ? <FolderIcon className="size-5" /> : <FileTextIcon className="size-4" />
+        <KnowledgeRow
+          entry={entry}
+          description={
+            search
+              ? (entry.excerpts[0]?.text ?? entry.revision.preview)
+              : entry.revision.kind === "group"
+                ? entry.revision.preview
+                : undefined
           }
-          metadata={
-            <>
-              {entry.revision.kind === "source" ? <span>Reference material</span> : null}
-              {entry.revision.sourceKind ? <span>{SOURCE[entry.revision.sourceKind]}</span> : null}
-              <span>
-                {entry.scope === "personal"
-                  ? "Only me"
-                  : entry.scope === "organization"
-                    ? "Company"
-                    : "Workspace"}
-              </span>
-              {entry.revision.change === "archive" ? <span>Archive requested</span> : null}
-              <span>{relativeTimeLabel(entry.updatedAt)}</span>
-            </>
-          }
-          onClick={() =>
-            collection && tab === "published"
-              ? openGroup({ id: entry.id, title: entry.revision.title })
-              : setSelection({ id: entry.id, view: tab })
-          }
+          onClick={() => setSelection({ id: entry.id, view: tab })}
         />
       </div>
     );
+  }
+  function startCreating(entryKind: "note" | "group", parent: KnowledgeCollection | null = null) {
+    setCreateParent(parent);
+    setCreating(entryKind);
   }
   function openGroup(entry: { id: string; title: string }) {
     setGroup(entry);
@@ -330,8 +312,8 @@ export function KnowledgeBrowser({
             <SlidersHorizontalIcon className="size-4" />
           </Button>
         ) : null}
-        {canEdit && !sourceOnly ? (
-          <Button className="pointer-coarse:min-h-10" onClick={() => setCreating("note")}>
+        {canEdit && !sourceOnly && (scope !== "organization" || canWriteOrganization) ? (
+          <Button className="pointer-coarse:min-h-10" onClick={() => startCreating("note")}>
             <PlusIcon className="size-4" />
             Add knowledge
           </Button>
@@ -483,58 +465,37 @@ export function KnowledgeBrowser({
                 </Button>
               </p>
             ) : null}
-            <div className="grid gap-8">
-              {collections.length ||
-              (tab === "published" &&
-                !sourceOnly &&
-                !group &&
-                !fileFilter &&
-                !search &&
-                kind === "all") ? (
-                <section aria-label="Collections" className="grid gap-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h2 className="text-sm font-semibold">
-                        {group ? "Related collections" : "Collections"}
-                      </h2>
-                      <p className="mt-1 text-sm text-fg-muted">
-                        Related knowledge, organized by customer, product, or system.
-                      </p>
-                    </div>
-                    {canEdit && tab === "published" ? (
-                      <Button variant="ghost" size="sm" onClick={() => setCreating("group")}>
-                        <PlusIcon className="size-4" />
-                        New collection
-                      </Button>
-                    ) : null}
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {collections.map((entry) => renderEntry(entry, tab))}
-                  </div>
-                  {!collections.length && !loading ? (
-                    <p className="text-sm text-fg-subtle">
-                      {canEdit
-                        ? "Create a collection to keep related entries together."
-                        : "No collections yet."}
-                    </p>
+            {treeView && tab === "published" ? (
+              <section aria-label="Knowledge tree" className="grid min-w-0 gap-2">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <p className="text-xs text-fg-subtle">Collections and entries</p>
+                  {canEdit && (scope !== "organization" || canWriteOrganization) ? (
+                    <Button variant="ghost" size="sm" onClick={() => startCreating("group")}>
+                      <PlusIcon className="size-4" />
+                      New collection
+                    </Button>
                   ) : null}
-                </section>
-              ) : null}
-              {knowledge.length ? (
-                <section aria-label="Knowledge entries" className="grid gap-3">
-                  <h2 className="text-sm font-semibold">
-                    {sourceOnly
-                      ? "Reference material"
-                      : group
-                        ? "In this collection"
-                        : "Knowledge entries"}
-                  </h2>
-                  <div className="grid gap-3">
-                    {knowledge.map((entry) => renderEntry(entry, tab))}
-                  </div>
-                </section>
-              ) : null}
-            </div>
+                </div>
+                <KnowledgeTree
+                  key={`${workspaceId}:${requestKey}`}
+                  workspaceId={workspaceId}
+                  entries={entries}
+                  scope={scope === "all" ? undefined : scope}
+                  refresh={refresh}
+                  canEdit={canEdit}
+                  canWriteOrganization={canWriteOrganization}
+                  onOpen={(entry) => setSelection({ id: entry.id, view: "published" })}
+                  onCreate={startCreating}
+                />
+              </section>
+            ) : entries.length ? (
+              <section
+                aria-label={search ? "Search results" : "Knowledge entries"}
+                className="min-w-0 rounded-lg border border-border/60 p-1.5"
+              >
+                {entries.map((entry) => renderEntry(entry, tab))}
+              </section>
+            ) : null}
             {loading ? (
               <p role="status" className="py-6 text-sm text-fg-muted">
                 Loading knowledge…
@@ -607,29 +568,30 @@ export function KnowledgeBrowser({
           <DialogHeader>
             <DialogTitle>{creating === "group" ? "New collection" : "Add knowledge"}</DialogTitle>
             <DialogDescription>
+              {createParent ? `In ${createParent.title}. ` : ""}
               {creating === "group"
                 ? "Collect related knowledge about a customer, product, system, or subject."
                 : "Write what is useful to remember. You can organize or correct it later."}
             </DialogDescription>
           </DialogHeader>
           <KnowledgeEditor
-            key={creating}
+            key={`${creating}:${createParent?.id ?? group?.id ?? "root"}`}
             workspaceId={workspaceId}
-            scope={scope === "all" ? (personal ? "personal" : "workspace") : scope}
+            scope={createScope}
             initial={{
               title: "",
               kind: creating ?? "note",
               content: "",
               evidence: [],
               relationships: [],
-              groupIds: group ? [group.id] : [],
+              groupIds: createParent ? [createParent.id] : group ? [group.id] : [],
             }}
             onSave={async (entry) => {
               await context.client.saveKnowledgeEntry(workspaceId, {
                 operationId: crypto.randomUUID(),
                 entryId: crypto.randomUUID(),
                 expectedVersion: 0,
-                scope: scope === "all" ? (personal ? "personal" : "workspace") : scope,
+                scope: createScope,
                 entry,
               });
               setCreating(null);
@@ -951,7 +913,10 @@ function KnowledgeInspector(props: {
                       id={evidence.entryId}
                       revisionId={evidence.revisionId}
                       onClick={() =>
-                        props.onOpen({ id: evidence.entryId, revisionId: evidence.revisionId })
+                        props.onOpen({
+                          id: evidence.entryId,
+                          revisionId: evidence.revisionId,
+                        })
                       }
                     />
                     {evidence.location.page ? (
@@ -1105,7 +1070,12 @@ function KnowledgeInspector(props: {
                   <button
                     key={item.revision.id}
                     className="text-left text-sm text-fg-muted hover:text-fg"
-                    onClick={() => props.onOpen({ id: item.id, revisionId: item.revision.id })}
+                    onClick={() =>
+                      props.onOpen({
+                        id: item.id,
+                        revisionId: item.revision.id,
+                      })
+                    }
                   >
                     Revision {item.revision.number} · {item.revision.outcome} ·{" "}
                     {relativeTimeLabel(item.revision.createdAt)}
@@ -1253,7 +1223,10 @@ function KnowledgeEditor(props: {
             value={draft.kind}
             disabled={busy || draft.kind === "source"}
             onChange={(event) =>
-              setDraft({ ...draft, kind: event.target.value as KnowledgeEntryKind })
+              setDraft({
+                ...draft,
+                kind: event.target.value as KnowledgeEntryKind,
+              })
             }
           >
             {Object.entries(KIND)

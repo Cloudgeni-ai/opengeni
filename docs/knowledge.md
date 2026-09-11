@@ -83,15 +83,22 @@ original copies with one Upload action. Opening a file shows its preview, extrac
 text and a link to related Knowledge. Readable source text stays attached to its
 original and in canonical Knowledge; there is no competing Add text form.
 
-The Knowledge page separates collection cards from knowledge entry cards. Each
-card opens directly with mouse or keyboard; a collection opens its members, and
-an entry opens its content and evidence. Both sections retain the same server
-search and pagination. The list emphasizes titles, content and origin. Detailed types are
-available through an optional filter and entry details; manual authoring starts
-with title and text. The UI calls groups **collections** and the general `note`
-kind **General knowledge**. A collection brings together entries about a customer,
-product, system or subject without copying them. It is an organizing object,
-not a competing content type or storage authority.
+The Knowledge page uses a compact expandable tree. Collections appear as folders
+with one-line descriptions; entries open their content and evidence on click.
+Collections can nest and an entry can appear in several collections without
+copying it. Collection menus provide details and creation within that collection.
+Arrow keys navigate, expand and collapse folders. Search and review use compact
+flat results so matching entries remain discoverable regardless of their parents.
+
+The root list uses `rootOnly` before server pagination; each expanded collection
+pages its direct members using `groupId`. A parent outside the selected scope,
+archived parent, or inaccessible parent does not hide an accessible child from
+the root. Published and outstanding pending membership edges are checked for
+cycles under the publication lock, including at approval and restoration.
+Detailed entry types remain in the optional filter and entry details. Manual
+authoring starts with title and text. The UI calls groups **collections** and the
+general `note` kind **General knowledge**. Collections organize entries without
+granting access or becoming a separate storage authority.
 
 Agents choose the closest type based on content: fact for a specific claim,
 decision for an adopted choice, requirement for a need, incident for a problem

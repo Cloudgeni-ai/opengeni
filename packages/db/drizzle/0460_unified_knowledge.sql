@@ -1307,6 +1307,17 @@ BEGIN
           AND EXISTS(SELECT 1 FROM knowledge_entries g WHERE g.account_id=p_account AND g.id=l.target_entry_id
             AND NOT g.archived AND knowledge_revision_visible(p_account,g.id,
               CASE WHEN pending THEN g.latest_revision_id ELSE g.published_revision_id END,pending))))
+      -- Filter before pagination. A hidden, archived, or out-of-scope parent must
+      -- never strand an otherwise readable entry outside the tree.
+      AND (NOT coalesce((p_request->>'rootOnly')::boolean,false) OR NOT EXISTS(
+        SELECT 1 FROM knowledge_entry_links l
+        JOIN knowledge_entries g ON g.account_id=l.account_id AND g.id=l.target_entry_id
+        JOIN knowledge_entry_revisions gr ON gr.account_id=g.account_id AND gr.entry_id=g.id
+          AND gr.id=CASE WHEN pending THEN g.latest_revision_id ELSE g.published_revision_id END
+        WHERE l.account_id=e.account_id AND l.entry_id=e.id AND l.revision_id=r.id AND l.relation='group'
+          AND NOT g.archived AND gr.body->>'kind'='group'
+          AND (NOT(p_request ? 'scope') OR g.scope=p_request->>'scope')
+          AND knowledge_revision_visible(p_account,g.id,gr.id,pending)))
       AND (NOT(p_request ? 'beforeRevision') OR r.number<(p_request->>'beforeRevision')::integer)
       AND (knowledge_entry_read.actor->>'kind'='human' AND knowledge_entry_read.actor->>'review'='true'
         OR (pending AND knowledge_entry_read.actor->>'kind'='agent')
@@ -1845,6 +1856,20 @@ BEGIN
       WHERE r.account_id=p_account AND r.entry_id=target.id AND r.id=target_revision AND r.body->>'kind'='group') THEN
       RAISE EXCEPTION 'Knowledge membership requires a group' USING ERRCODE='22023';
     END IF;
+    -- Membership follows collection identities, not the revision originally
+    -- linked. Check both published and outstanding proposed parents so that
+    -- independently reviewed moves cannot later close a cycle. Publication
+    -- and proposals share the account publication lock.
+    IF link.relation='group' AND p_body->>'kind'='group' AND EXISTS(
+      WITH RECURSIVE parents(id) AS (
+        SELECT target.id UNION SELECT l.target_entry_id FROM parents
+        JOIN knowledge_entries g ON g.account_id=p_account AND g.id=parents.id AND NOT g.archived
+        JOIN knowledge_entry_links l ON l.account_id=g.account_id AND l.entry_id=g.id AND l.relation='group'
+          AND (l.revision_id=g.published_revision_id OR (l.revision_id=g.latest_revision_id AND EXISTS(
+            SELECT 1 FROM knowledge_entry_decisions d WHERE d.account_id=g.account_id AND d.entry_id=g.id
+              AND d.revision_id=g.latest_revision_id AND d.version=g.version AND d.outcome='pending')))
+      ) SELECT 1 FROM parents WHERE id=source.id
+    ) THEN RAISE EXCEPTION 'Knowledge collections cannot contain a cycle' USING ERRCODE='22023'; END IF;
     IF link.relation='evidence' AND EXISTS(
       WITH RECURSIVE refs(id,rev) AS (
         SELECT target.id,target_revision UNION SELECT l.target_entry_id,l.target_revision_id FROM refs
