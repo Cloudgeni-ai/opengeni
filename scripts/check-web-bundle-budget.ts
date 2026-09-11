@@ -469,10 +469,14 @@ const effectiveBudgets = {
     // Bun 1.4 macOS/arm64, base e1a50bae5b is 2,348,286 raw / 655,699 gzip;
     // candidate is 2,368,385 / 663,198 with lazy settings and Knowledge pages.
     // Bound the measured +20,099 raw / +7,499 gzip delta only.
-    wholeKibEnvelope(2_368_385),
+    // The actual merge with main 5ef34cf500 is 2,370,837 raw / 664,028
+    // gzip (32 files); preserve the measured integrated raw envelope too.
+    wholeKibEnvelope(2_370_837),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Same unified Knowledge measurement documented in the raw bound above.
+    wholeKibEnvelope(663_198, 1.5 * kib),
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
     // Untouched main 0f3dc9a02 measures 640,863 gzip bytes on macOS/arm64;
     // the instruction-save head measures 640,920 locally and 640,937 in the
@@ -507,7 +511,6 @@ const effectiveBudgets = {
     // Linux/x64 Bun 1.4. Restore the established 1.5 KiB platform-skew
     // envelope; all other caps stay unchanged.
     wholeKibEnvelope(653_717, 1.5 * kib),
-    wholeKibEnvelope(663_198, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
