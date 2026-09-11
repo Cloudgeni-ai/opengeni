@@ -4,7 +4,7 @@ import { act } from "react";
 import { sessionAuthRecommendation } from "./session-auth-recommendation";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
-import type { AuthNeededItem } from "@opengeni/react";
+import { buildTimeline, type AuthNeededItem } from "@opengeni/react";
 
 const catalogItem = CapabilityCatalogItem.parse({
   id: "example",
@@ -118,19 +118,60 @@ async function render(personalAccount = false, missingGrant = false) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  const notice = missingGrant
-    ? sessionAuthRecommendation(
-        {
-          ...item,
-          capability: undefined,
+  let notice = item;
+  if (missingGrant) {
+    const startupEvents = [
+      {
+        id: "startup-auth",
+        workspaceId: "workspace",
+        sessionId: "session",
+        turnId: "turn",
+        turnAttemptId: "attempt",
+        sequence: 1,
+        type: "tool.auth_needed",
+        occurredAt: "2026-09-11T00:00:00.000Z",
+        payload: {
           serverId: "example",
-          connectionId: null,
-          authoritySource: null,
+          providerDomain: "api.example.com",
           reason: "personal_authority_unavailable",
         },
-        (await context.client.listCapabilities()).items as CapabilityCatalogItem[],
-      )!
-    : item;
+      },
+    ];
+    expect(buildTimeline(startupEvents)).toEqual([]);
+    const requested = buildTimeline([
+      ...startupEvents,
+      {
+        ...startupEvents[0]!,
+        id: "requested-auth",
+        sequence: 2,
+        payload: {
+          serverId: "example",
+          toolName: "capability_authorization_request",
+          providerDomain: "api.example.com",
+          reason: "missing_connection",
+          capability: {
+            id: "example",
+            name: "Example",
+            kind: "mcp",
+            source: "manual",
+            action: "connect",
+            rationale: "Review permission to use your personal account for this request.",
+            requiredVariables: [],
+          },
+        },
+      },
+    ]);
+    const auth = requested.find((entry) => entry.kind === "auth-needed");
+    expect(auth).toBeDefined();
+    if (!auth) throw new Error("Requested authorization event was lost from the timeline");
+    const recommendation = sessionAuthRecommendation(
+      auth,
+      (await context.client.listCapabilities()).items as CapabilityCatalogItem[],
+    );
+    expect(recommendation).toBeDefined();
+    if (!recommendation) throw new Error("Requested authorization did not resolve to consent");
+    notice = recommendation;
+  }
   await act(async () =>
     root.render(
       <SessionCapabilityCard item={notice} workspaceId="workspace" sessionId="session" />,

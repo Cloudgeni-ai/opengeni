@@ -261,7 +261,12 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
           expect(notices[0]).toMatchObject({
             turnId: attempt.turnId,
             turnAttemptId: attempt.attemptId,
-            payload: { serverId, capability: { id: capabilityId, action: "connect" } },
+            payload: {
+              serverId,
+              toolName: "capability_authorization_request",
+              reason: "missing_connection",
+              capability: { id: capabilityId, action: "connect" },
+            },
           });
         const [grants] = await shared.admin<
           { count: number }[]

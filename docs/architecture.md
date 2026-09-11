@@ -1664,7 +1664,7 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 authorization. Forms share `performCapabilityAction` and human-authorized
 Connection API. OAuth never replays tools; `attachSessionCapability` preserves
 selection through CAS. Skills retain workspace scope and reviewed hashes.
-Gmail failures prompt review; discovery checks attempt tools for readiness.
+Gmail startup failures remain diagnostic; discovery checks tools and requests consent.
 Personal MCP use requires an owner-issued exact-session grant, with shared-results
 acknowledgement for shared conversations. The composer restores only active grants
 matching visibility and authority epoch; credentials alone grant no use.
