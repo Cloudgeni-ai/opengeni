@@ -2,7 +2,6 @@ import {
   AlertTriangleIcon,
   ArrowLeftIcon,
   CheckCircle2Icon,
-  FileCode2Icon,
   Loader2Icon,
   PackageCheckIcon,
   PuzzleIcon,
@@ -438,19 +437,6 @@ function PreviewReady({ title }: { title: string }) {
   );
 }
 
-function Warnings({ warnings }: { warnings: string[] }) {
-  return (
-    <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
-      <h3 className="text-xs font-semibold text-fg">Review warnings</h3>
-      <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5 text-fg-muted">
-        {warnings.map((warning) => (
-          <li key={warning}>{warning}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 function KindChoice({
   selected,
   icon,
@@ -519,10 +505,4 @@ function factValue(value: unknown): string {
 
 function humanize(value: string): string {
   return value.replace(/([a-z])([A-Z])/g, "$1 $2").replaceAll("_", " ");
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

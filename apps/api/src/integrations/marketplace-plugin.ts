@@ -4,8 +4,8 @@ import { HTTPException } from "hono/http-exception";
 
 /** Adapt only indexed portable components. Never silently drop required components. */
 export function marketplacePlugin(url: string) {
-  const source = snapshot.sources.find(source => source.entries.some(item => item.sourceUrl === url));
-  const item = source?.entries.find(item => item.sourceUrl === url);
+  const source = snapshot.sources.find(candidate => candidate.entries.some(item => item.sourceUrl === url));
+  const item = source?.entries.find(candidate => candidate.sourceUrl === url);
   if (!item || !source) return null;
   if (!item.skills || !item.mcpServers) throw new HTTPException(422, { message: "This external plugin must be indexed before it can be installed." });
   const servers = item.mcpServers.filter(server => pluginMcpUnavailableReason(server) === null).map((server, index) => ({ id: "marketplace-" + source.provider + "-" + item.name + "-" + index, name: server.name, url: server.endpoint!, cacheToolsList: true }));

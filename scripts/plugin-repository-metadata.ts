@@ -22,8 +22,8 @@ async function load(repository: string, revision: string) {
       const process = Bun.spawn(["tar", ...args], { stdout: "pipe", stderr: "pipe" });
       const timer = setTimeout(() => process.kill(), 15000);
       try {
-        const reader = process.stdout.getReader(); const parts: Uint8Array[] = []; let total = 0;
-        try { while (true) { const part = await reader.read(); if (part.done) break; total += part.value.length; if (total > 8 * 1024 * 1024) { process.kill(); throw Error("Archive metadata exceeds limit"); } parts.push(part.value); } } finally { await reader.cancel(); }
+        const outputReader = process.stdout.getReader(); const parts: Uint8Array[] = []; let total = 0;
+        try { while (true) { const part = await outputReader.read(); if (part.done) break; total += part.value.length; if (total > 8 * 1024 * 1024) { process.kill(); throw Error("Archive metadata exceeds limit"); } parts.push(part.value); } } finally { await outputReader.cancel(); }
         const output = await new Blob(parts).text();
         if (await process.exited !== 0) throw Error("Could not read plugin archive");
         if (output.length > 8 * 1024 * 1024) throw Error("Archive metadata exceeds limit");

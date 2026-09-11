@@ -7443,7 +7443,7 @@ export type PluginInstallationSummary = {
   description: string;
   category: string;
   tags: string[];
-  logoUrl?: string | null;
+  logoUrl?: string | null | undefined;
   sourceUrl: string | null;
   manifestDigest: string;
   installationVersion: number;

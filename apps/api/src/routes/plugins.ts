@@ -106,8 +106,8 @@ export function registerPluginRoutes(
     return c.json(
       ListInstalledPluginsResponse.parse({
         plugins: (await listInstalledPluginPackages(deps.db, workspaceId)).map(plugin => {
-          const source = pluginSnapshot.sources.find(source => plugin.pluginKey.startsWith("marketplace/" + source.provider + "/"));
-          const entry = source?.entries.find(entry => plugin.pluginKey === "marketplace/" + source!.provider + "/" + entry.name);
+          const source = pluginSnapshot.sources.find(candidate => plugin.pluginKey.startsWith("marketplace/" + candidate.provider + "/"));
+          const entry = source?.entries.find(candidate => plugin.pluginKey === "marketplace/" + source!.provider + "/" + candidate.name);
           return { ...plugin, logoUrl: plugin.logoUrl ?? entry?.logoUrl ?? null };
         }),
       }),
@@ -130,7 +130,7 @@ export function registerPluginRoutes(
       skills: members.filter(member => member.kind === "skill").map(member => ({ name: decodeURIComponent(member.url.split("/").filter(Boolean).at(-2) ?? member.key), sourceUrl: member.url })),
       mcpServers: members.filter(member => member.kind === "mcp").map(member => {
         const bom = Array.isArray(stored.bom) ? stored.bom.find((entry: any) => entry.key === member.key) : null;
-        const item = catalog.items.find(item => item.id === bom?.capabilityId);
+        const item = catalog.items.find(candidate => candidate.id === bom?.capabilityId);
         return { name: item?.name ?? member.serverId, transport: item?.transport ?? "http", endpoint: item?.endpointUrl ?? null };
       }), components: [...new Set(members.map(member => member.kind === "skill" ? "skills" : member.kind))], installation: "installed",
     });

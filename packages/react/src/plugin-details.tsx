@@ -7,8 +7,10 @@ const componentLabels: Record<string, string> = {
   hooks: "Hooks", agents: "Agents", commands: "Commands", lsp: "Language servers",
 };
 
+const EMPTY_CONNECTIONS: Record<string, boolean> = {};
+
 /** Embeddable plugin overview. Hosts own the dialog and installation actions. */
-export function PluginDetails({ item, onInstall, busy = false, installed = false, error, connections = {}, onConnect }: { item: PluginDiscoveryItem; onInstall?: () => void; busy?: boolean; installed?: boolean; error?: string | null; connections?: Record<string, boolean>; onConnect?: (server: { name: string; endpoint: string | null }) => void }) {
+export function PluginDetails({ item, onInstall, busy = false, installed = false, error, connections = EMPTY_CONNECTIONS, onConnect }: { item: PluginDiscoveryItem; onInstall?: () => void; busy?: boolean; installed?: boolean; error?: string | null; connections?: Record<string, boolean>; onConnect?: (server: { name: string; endpoint: string | null }) => void }) {
   const supported = (server: NonNullable<PluginDiscoveryItem["mcpServers"]>[number]) => pluginMcpUnavailableReason(server) === null;
   const contentsUnknown = item.skills == null || item.mcpServers == null;
   const installableCount = (item.skills?.length ?? 0) + (item.mcpServers?.filter(supported).length ?? 0);

@@ -26,7 +26,9 @@ export function SkillDiscovery(props: SkillDiscoveryProps) {
   </section>;
 }
 
-function DiscoveryResults({ client, workspaceId, query, canManage, onImport, installedSkills = [] }: SkillDiscoveryProps) {
+const EMPTY_INSTALLED_SKILLS: NonNullable<SkillDiscoveryProps["installedSkills"]> = [];
+
+function DiscoveryResults({ client, workspaceId, query, canManage, onImport, installedSkills = EMPTY_INSTALLED_SKILLS }: SkillDiscoveryProps) {
   const [result, setResult] = useState<SkillDiscoveryPage | null>(null);
   const [loading, setLoading] = useState(query.length >= 2);
   const [error, setError] = useState(false);

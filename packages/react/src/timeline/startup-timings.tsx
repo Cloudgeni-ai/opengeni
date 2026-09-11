@@ -21,12 +21,12 @@ export function StartupTimings({ phases }: { phases: StartupPhaseItem[] }) {
     byTurn.set(phase.turnId, group);
   }
   const turns = [...byTurn.entries()]
-    .map(([turnId, phases]) => ({
+    .map(([turnId, turnPhases]) => ({
       turnId,
-      phases,
-      startedAt: phases.reduce(
+      phases: turnPhases,
+      startedAt: turnPhases.reduce(
         (earliest, phase) => (phase.startedAt < earliest ? phase.startedAt : earliest),
-        phases[0]!.startedAt,
+        turnPhases[0]!.startedAt,
       ),
     }))
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
@@ -113,9 +113,9 @@ function StartupTurn({
               </tr>
             </thead>
             <tbody>
-              {phases.map((phase, index) => (
+              {phases.map((phase) => (
                 <tr
-                  key={`${phase.id}:${index}`}
+                  key={phase.id}
                   className="border-b border-og-border/40"
                   title={`Turn: ${phase.turnId ?? "unknown"} · Started: ${phase.startedAt}`}
                 >

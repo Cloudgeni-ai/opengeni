@@ -5,7 +5,9 @@ import type { PluginDiscoveryItem } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 
-export function PluginDiscovery({ client, workspaceId, query, canManage = false, onChanged, onOpenConnection, installedPlugins = [] }: { installedPlugins?: PluginInstallationSummary[]; onOpenConnection?: (item: CapabilityCatalogItem) => void; canManage?: boolean; onChanged?: () => void; client: OpenGeniBrowserClient; workspaceId: string; query: string }) {
+const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
+
+export function PluginDiscovery({ client, workspaceId, query, canManage = false, onChanged, onOpenConnection, installedPlugins = EMPTY_INSTALLED_PLUGINS }: { installedPlugins?: PluginInstallationSummary[]; onOpenConnection?: (item: CapabilityCatalogItem) => void; canManage?: boolean; onChanged?: () => void; client: OpenGeniBrowserClient; workspaceId: string; query: string }) {
   const [selected, setSelected] = useState<PluginDiscoveryItem | null>(null);
   const [connections, setConnections] = useState<CapabilityCatalogItem[]>([]);
   useEffect(() => { let active = true; void client.listCapabilities(workspaceId).then(page => { if (active) setConnections(page.items); }).catch(() => { if (active) setError("Could not load connection status."); }); return () => { active = false; }; }, [client, workspaceId, selected?.id]);
