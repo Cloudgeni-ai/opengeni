@@ -18,6 +18,9 @@ export type CodexFleetActualDecisionV1 = {
   candidateKey: string | null;
   reason:
     | "lease_reused"
+    | "affinity_reused"
+    | "assigned"
+    | "switched"
     | "pin"
     | "rotation"
     | "active"

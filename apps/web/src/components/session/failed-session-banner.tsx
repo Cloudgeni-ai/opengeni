@@ -112,15 +112,13 @@ export function FailedSessionBanner({
             <span className="text-fg-muted">No failure detail was recorded.</span>
           )}
           <div className="mt-1 text-xs text-fg-muted">
-            {failure.recoveryCount > 0 ? (
+            {failure.consecutiveRecoveryCount !== null && failure.consecutiveRecoveryCount > 0 ? (
               <>
-                {failure.recoveryCount} same-turn recovery attempt
-                {failure.recoveryCount === 1 ? "" : "s"} occurred before this failure.{" "}
+                {failure.consecutiveRecoveryCount} consecutive automatic retr
+                {failure.consecutiveRecoveryCount === 1 ? "y" : "ies"} failed before stopping.{" "}
               </>
             ) : null}
-            {failure.failedTurnCount > 1 ? (
-              <>{failure.failedTurnCount} turns have failed in this session. </>
-            ) : null}
+            {failure.detailsTruncated ? "Some error details are shortened. " : null}
             {failure.safetyRefusal
               ? "The conversation history is preserved. Automatic retries are stopped."
               : "The conversation history is preserved — send a message to revive the session and keep working."}

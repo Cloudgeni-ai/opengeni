@@ -12324,6 +12324,17 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: z.string().uuid(),
     accountId: z.string().uuid(),
     status: SessionStatus,
+    /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
+    failureDiagnostics: z
+      .object({
+        eventId: z.string().uuid(),
+        sequence: z.number().int().nonnegative(),
+        turnId: z.string().uuid().nullable(),
+        occurredAt: z.string(),
+        payload: z.unknown(),
+      })
+      .nullable()
+      .optional(),
     /** Additive list projection. Detail reads may omit it. */
     backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
     /** Current non-deleted schedules targeting this session, including paused schedules. */

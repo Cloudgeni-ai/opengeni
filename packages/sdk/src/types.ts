@@ -1348,6 +1348,17 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
+  failureDiagnostics?:
+    | {
+        eventId: string;
+        sequence: number;
+        turnId: string | null;
+        occurredAt: string;
+        payload: unknown;
+      }
+    | null
+    | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;

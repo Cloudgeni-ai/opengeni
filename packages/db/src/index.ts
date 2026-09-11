@@ -1,3 +1,5 @@
+import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
+export { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 import {
   latestStartedSessionTurnQuery,
   withLatestStartedSessionPolicy,
@@ -399,6 +401,8 @@ import {
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import {
   projectSessionMcpProgressText,
+  projectSessionTextPrefix,
+  sessionTextStoragePrefixChars,
   SESSION_MCP_PROGRESS_STORAGE_CHARS,
   sessionMcpProgressScalarIsEncodedSql,
 } from "./session-mcp-progress";
@@ -29660,6 +29664,114 @@ export async function setSessionCodexPin(
 }
 
 /** Written by the worker at the turn boundary; drives the in-session indicator. */
+/** Commit observed assignment and its events together under the exact live attempt.
+ * Allocation still uses its frozen policy snapshot; this is observation only.
+ * Replays return the same receipt and never manufacture a second switch.
+ */
+export async function recordSessionCodexSelectionForTurnAttempt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    credentialId: string;
+    strategy: string;
+    reusedLease: boolean;
+    pinnedCredentialId: string | null;
+    pinSource: "manual" | "policy" | null;
+    eligibleCount: number;
+    connectedCount: number;
+  },
+): Promise<{ events: SessionEvent[]; diagnostics: ReturnType<typeof codexSelectionDiagnostics> }> {
+  return await withWorkspaceSessionEventActivityRls(db, input.workspaceId, true, async (tx) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      sessionLock: "no_key_update",
+    });
+    if (!fence.allowed || !fence.session) throw new CodexCredentialLeaseAttemptFencedError();
+    const key = `opengeni:codex-selection:${input.attemptId}`;
+    const prior = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          inArray(schema.sessionEvents.clientEventId, [key, `${key}:switch`]),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    if (prior.length) {
+      const receipt = prior.find((event) => event.type === "codex.credential.selected");
+      if (!receipt) throw new Error("Codex selection receipt missing");
+      const payload = sessionEventPayloadRecord(receipt.payload, receipt.payloadCodecVersion);
+      if (payload.credentialId !== input.credentialId)
+        throw new Error("An attempt cannot record two different Codex selections");
+      return {
+        events: prior.map(mapEvent),
+        diagnostics: {
+          transition: payload.transition,
+          source: payload.source,
+          reason: payload.reason,
+        } as ReturnType<typeof codexSelectionDiagnostics>,
+      };
+    }
+    const previousCredentialId = fence.session.codexLastCredentialId;
+    const diagnostics = codexSelectionDiagnostics({ ...input, previousCredentialId });
+    const events: AppendEventInput[] = [];
+    if (previousCredentialId !== null && previousCredentialId !== input.credentialId) {
+      events.push({
+        type: "codex.account.switched",
+        clientEventId: `${key}:switch`,
+        payload: {
+          fromAccountId: previousCredentialId,
+          toAccountId: input.credentialId,
+          reason: diagnostics.source === "manual_pin" ? "manual" : "rotation",
+        },
+      });
+    }
+    events.push({
+      type: "codex.credential.selected",
+      clientEventId: key,
+      payload: {
+        credentialId: input.credentialId,
+        strategy: input.strategy,
+        ...diagnostics,
+        previousCredentialId,
+        eligibleCount: input.eligibleCount,
+        connectedCount: input.connectedCount,
+        reused: input.reusedLease,
+      },
+    });
+    await tx
+      .update(schema.sessions)
+      .set({ codexLastCredentialId: input.credentialId })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      );
+    const appended = await appendSessionEventsForTurnAttempt(
+      tx,
+      input.workspaceId,
+      input.sessionId,
+      input.turnId,
+      input.executionGeneration,
+      input.attemptId,
+      events,
+    );
+    if (!appended.accepted) throw new CodexCredentialLeaseAttemptFencedError();
+    return { events: appended.events, diagnostics };
+  });
+}
+
 export async function recordSessionActiveCodexCredential(
   db: Database,
   workspaceId: string,
@@ -35195,6 +35307,120 @@ export async function listSessionsForSubject(
 }
 
 /** Read a session with the caller subject's personal pin projection. */
+/** Read failure evidence at the already-authorized detail cursor, never a browser page.
+ * Event rows are immutable; the sequence fence keeps these reads coherent even
+ * if another turn is accepted while the detail projection is being assembled.
+ * Keep this off fleet/list/worker reads. Existing type/turn indexes cover it.
+ */
+async function sessionFailureDiagnostics(
+  db: Database,
+  workspaceId: string,
+  session: { id: string; lastSequence: number; status: string },
+): Promise<Session["failureDiagnostics"]> {
+  if (session.status !== "failed") return null;
+  const scope = and(
+    eq(schema.sessionEvents.workspaceId, workspaceId),
+    eq(schema.sessionEvents.sessionId, session.id),
+    lte(schema.sessionEvents.sequence, session.lastSequence),
+    isNull(schema.sessionEvents.duplicateOfEventId),
+    or(
+      isNull(schema.sessionEvents.turnAssociation),
+      eq(schema.sessionEvents.turnAssociation, "current"),
+    ),
+  );
+  // Transfer only codec-aware prefixes. Cutting an encoded storage scalar
+  // directly would show base64 rather than the accepted logical error text.
+  const maxChars = 1024;
+  const storageChars = sessionTextStoragePrefixChars(maxChars);
+  const diagnosticFields = ["error", "message", "detail", "lastRetryableError", "code", "status"];
+  const boundedFields = diagnosticFields.flatMap((field) => {
+    const scalar = sql`case when jsonb_typeof(${schema.sessionEvents.payload}->${field}::text) = 'string'
+      then ${schema.sessionEvents.payload}->>${field}::text else null end`;
+    return [
+      sql`${field}::text`,
+      sql`jsonb_build_object(
+      'prefix', left(${scalar}, ${storageChars}), 'chars', char_length(${scalar}),
+      'encoded', ${sessionMcpProgressScalarIsEncodedSql(scalar, schema.sessionEvents.payloadCodecVersion)})`,
+    ];
+  });
+  const projectedPayload = sql<Record<string, unknown>>`jsonb_build_object(
+    ${sql.join(boundedFields, sql`, `)},
+    'providerRecoveryCount', case when jsonb_typeof(${schema.sessionEvents.payload}->'providerRecoveryCount') = 'number'
+      and length((${schema.sessionEvents.payload}->'providerRecoveryCount')::text) <= 16
+      then ${schema.sessionEvents.payload}->'providerRecoveryCount' else 'null'::jsonb end)`;
+  const latest = async (type: string) => {
+    const [row] = await db
+      .select({
+        id: schema.sessionEvents.id,
+        sequence: schema.sessionEvents.sequence,
+        turnId: schema.sessionEvents.turnId,
+        occurredAt: schema.sessionEvents.occurredAt,
+        codecVersion: schema.sessionEvents.payloadCodecVersion,
+        payload: projectedPayload,
+      })
+      .from(schema.sessionEvents)
+      .where(and(scope, eq(schema.sessionEvents.type, type)))
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!row) return null;
+    const payload: Record<string, unknown> = {
+      providerRecoveryCount: row.payload.providerRecoveryCount,
+    };
+    const truncatedFields: string[] = [];
+    for (const field of diagnosticFields) {
+      const stored = row.payload[field] as {
+        prefix: string | null;
+        chars: number | null;
+        encoded: boolean;
+      };
+      const projected = projectSessionTextPrefix(
+        stored.prefix,
+        stored.chars,
+        row.codecVersion,
+        stored.encoded,
+        maxChars,
+      );
+      payload[field] = projected.text;
+      if (projected.textTruncated || (projected.originalChars ?? 0) > maxChars)
+        truncatedFields.push(field);
+    }
+    // Six 1024-character logical strings remain below 40KiB even when JSON
+    // escapes every character as six bytes. Stored values remain untouched.
+    payload.projection = { fieldsOnly: true, fieldLimitChars: maxChars, truncatedFields };
+    return { ...row, payload, occurredAt: row.occurredAt.toISOString() };
+  };
+  const turnFailure = await latest("turn.failed");
+  const latestStatus = await latest("session.status.changed");
+  const statusPayload = latestStatus?.payload as Record<string, unknown> | undefined;
+  // Do not associate an earlier failure with a later recorded revival.
+  if (
+    latestStatus &&
+    (!turnFailure || latestStatus.sequence > turnFailure.sequence) &&
+    typeof statusPayload?.status === "string" &&
+    statusPayload.status !== "failed"
+  )
+    return null;
+  const preClaimFailure =
+    statusPayload?.status === "failed" && statusPayload.code === "pre_claim_failure"
+      ? latestStatus
+      : null;
+  const failure =
+    preClaimFailure &&
+    (!turnFailure ||
+      (preClaimFailure.sequence > turnFailure.sequence &&
+        (!preClaimFailure.turnId || preClaimFailure.turnId !== turnFailure.turnId)))
+      ? preClaimFailure
+      : turnFailure;
+  if (!failure) return null;
+  return {
+    eventId: failure.id,
+    sequence: failure.sequence,
+    turnId: failure.turnId ?? null,
+    occurredAt: failure.occurredAt,
+    payload: failure.payload,
+  };
+}
+
 export async function getSessionForSubject(
   db: Database,
   workspaceId: string,
@@ -35204,8 +35430,22 @@ export async function getSessionForSubject(
 ): Promise<Session | null> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ session: schema.sessions, pin: schema.sessionPins })
+      .select({
+        session: schema.sessions,
+        pin: schema.sessionPins,
+        cursor: schema.sessionEventCursors,
+      })
       .from(schema.sessions)
+      // Status and replay cursor must share one statement snapshot. Otherwise a
+      // concurrent revival can pair an old failed row with a new running cursor,
+      // causing the browser to skip the very event that would refresh its status.
+      .leftJoin(
+        schema.sessionEventCursors,
+        and(
+          eq(schema.sessionEventCursors.workspaceId, schema.sessions.workspaceId),
+          eq(schema.sessionEventCursors.sessionId, schema.sessions.id),
+        ),
+      )
       .leftJoin(
         schema.sessionPins,
         and(
@@ -35230,25 +35470,40 @@ export async function getSessionForSubject(
       )
       .limit(1);
     if (!row) return null;
-    const [session] = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, [
-      row.session,
-    ]);
+    if (
+      !row.cursor ||
+      row.cursor.accountId !== row.session.accountId ||
+      row.cursor.lastSequence < row.session.lastSequence
+    ) {
+      throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
+    }
+    const [session] = await withLatestStartedSessionPolicy(
+      scopedDb,
+      workspaceId,
+      await withCurrentSessionInputWait(scopedDb, workspaceId, [
+        { ...row.session, lastSequence: row.cursor.lastSequence },
+      ]),
+    );
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
     const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
+    const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
-      await mapSessionWithControl(
-        scopedDb,
-        session,
-        mcpServers.get(sessionId) ?? [],
-        mapSessionPin(row.pin),
-        mapSessionAttention(session, row.pin),
-        mapSessionArchive(row.pin),
-        undefined,
-        { subjectId, activated: tenancyActivated },
-      ),
+      {
+        ...(await mapSessionWithControl(
+          scopedDb,
+          session,
+          mcpServers.get(sessionId) ?? [],
+          mapSessionPin(row.pin),
+          mapSessionAttention(session, row.pin),
+          mapSessionArchive(row.pin),
+          undefined,
+          { subjectId, activated: tenancyActivated },
+        )),
+        failureDiagnostics,
+      },
       relatedSessionAccess,
     );
   });

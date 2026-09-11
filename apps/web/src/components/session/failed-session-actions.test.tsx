@@ -157,8 +157,7 @@ test("credit exhaustion retains model selection without offering automatic Conti
         failure={{
           reason: "No credits available",
           failedAt: null,
-          recoveryCount: 0,
-          failedTurnCount: 1,
+          consecutiveRecoveryCount: null,
         }}
         actions={{
           onContinue: async () => true,
@@ -195,8 +194,7 @@ test("credit exhaustion hides administrative recovery links from ordinary member
         failure={{
           reason: "No credits available",
           failedAt: null,
-          recoveryCount: 0,
-          failedTurnCount: 1,
+          consecutiveRecoveryCount: null,
         }}
         actions={{
           onContinue: async () => true,

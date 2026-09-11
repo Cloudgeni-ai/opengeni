@@ -11,8 +11,12 @@ export const SESSION_MCP_PROGRESS_CHARS = 600;
 // so a prefix cannot split the last delivered surrogate pair. Eight base64
 // characters encode three complete UTF-16 units, so a cut encoded prefix is
 // independently decodable by the canonical codec (no partial bytes/units).
-export const SESSION_MCP_PROGRESS_STORAGE_CHARS =
-  LOSSLESS_JSON_STRING_PREFIX.length + Math.ceil(((SESSION_MCP_PROGRESS_CHARS + 1) * 2) / 3) * 8;
+export function sessionTextStoragePrefixChars(maxChars: number): number {
+  return LOSSLESS_JSON_STRING_PREFIX.length + Math.ceil(((maxChars + 1) * 2) / 3) * 8;
+}
+export const SESSION_MCP_PROGRESS_STORAGE_CHARS = sessionTextStoragePrefixChars(
+  SESSION_MCP_PROGRESS_CHARS,
+);
 
 // Match the canonical decoder's nonempty, round-tripping base64 of an even
 // byte count. Each 8-character block is 6 bytes. The final block contributes
@@ -38,12 +42,13 @@ export function sessionMcpProgressScalarIsEncodedSql(
   )`;
 }
 
-/** Project only the selected scalar, never the rest of a goal.progress payload. */
-export function projectSessionMcpProgressText(
+/** Project only the selected scalar, never the rest of its event payload. */
+export function projectSessionTextPrefix(
   storedPrefix: string | null,
   storedChars: number | null,
   codecVersion: number | null,
   scalarIsEncoded: boolean,
+  maxChars: number,
 ): { text: string | null; originalChars: number | null; textTruncated?: true } {
   if (storedPrefix === null) return { text: null, originalChars: null };
   const decoded = scalarIsEncoded
@@ -60,8 +65,24 @@ export function projectSessionMcpProgressText(
       ? storedChars
       : chars.length;
   return {
-    text: chars.slice(0, SESSION_MCP_PROGRESS_CHARS).join(""),
+    text: chars.slice(0, maxChars).join(""),
     originalChars,
     ...(encodedPrefixWasCut ? { textTruncated: true } : {}),
   };
+}
+
+/** Existing MCP progress budget, using the shared logical-text prefix projection. */
+export function projectSessionMcpProgressText(
+  storedPrefix: string | null,
+  storedChars: number | null,
+  codecVersion: number | null,
+  scalarIsEncoded: boolean,
+): { text: string | null; originalChars: number | null; textTruncated?: true } {
+  return projectSessionTextPrefix(
+    storedPrefix,
+    storedChars,
+    codecVersion,
+    scalarIsEncoded,
+    SESSION_MCP_PROGRESS_CHARS,
+  );
 }
