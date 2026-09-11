@@ -953,6 +953,17 @@ Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
 registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
+Accepted `user.message` events intentionally have no direct turn ID. Migration
+`0460_host_export_message_attribution.sql` derives export initiator and origin
+from the exact same-account/workspace/session turn whose `trigger_event_id`
+references the message, after the accepting transaction commits its turn. It
+never derives sender authority from payload fields or the session creator.
+An unbound event stays unattributed. The event's own turn ID and the existing
+immutable export rows/checkpoints are unchanged; downstream historical
+attribution repair is a separate operator action. Analytics consumers must expose
+unattributed coverage instead of equating missing identity with zero messages.
+
+
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
 its own business store without polling tenant routes or treating NATS as a durable log. This surface
 is optional. With no registered consumer, both export gates default to false and source transactions
