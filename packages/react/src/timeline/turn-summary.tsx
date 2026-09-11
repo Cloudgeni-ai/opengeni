@@ -571,9 +571,14 @@ function createTurnSummaryContext(
 const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze([
   {
     id: "steps",
-    summarize: ({ items }) => ({
-      content: `${items.length} ${items.length === 1 ? "step" : "steps"}`,
-    }),
+    summarize: ({ items }) => {
+      const count = items.filter((item) => item.kind !== "startup-phase").length;
+      return count
+        ? { content: `${count} ${count === 1 ? "step" : "steps"}` }
+        : items.length
+          ? { content: "Preparation" }
+          : null;
+    },
   },
   {
     id: "files",

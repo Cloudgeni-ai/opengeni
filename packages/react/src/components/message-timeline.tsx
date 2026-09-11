@@ -1,4 +1,6 @@
+import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
+import { useStartupDetails } from "../timeline/startup-preference";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -26,7 +28,7 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
   Component,
@@ -191,6 +193,7 @@ export type MessageTimelineProps = {
    */
   computeLabel?: string | null | undefined;
   /** Customize collapsed turn facets for this timeline instance. */
+  genieLoading?: GenieLoadingOptions | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
@@ -417,6 +420,7 @@ export function MessageTimeline({
   loadRetainedArtifact,
   loadVideoArtifactPlayback,
   computeLabel = null,
+  genieLoading,
   turnSummary,
   autoFollow = true,
   onAnnotate,
@@ -590,6 +594,20 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
   const groups = useStableTimelineGroupKeys(allGroups, !bulkRender);
+  const turnsWithOutput = useMemo(
+    () =>
+      new Set(
+        resolvedItems.flatMap((item) =>
+          "turnId" in item &&
+          item.turnId &&
+          (item.kind === "tool-call" ||
+            ((item.kind === "agent-message" || item.kind === "reasoning") && item.text.trim()))
+            ? [item.turnId]
+            : [],
+        ),
+      ),
+    [resolvedItems],
+  );
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
@@ -919,6 +937,7 @@ export function MessageTimeline({
         loadRetainedScreenshot,
         loadRetainedArtifact,
         loadVideoArtifactPlayback,
+        genieLoading,
         turnSummary,
       },
     }),
@@ -934,6 +953,7 @@ export function MessageTimeline({
       renderMessageText,
       resolveProviderLogo,
       toolRegistry,
+      genieLoading,
       turnSummary,
       userMessageDisclosureContext,
     ],
@@ -2007,6 +2027,12 @@ export function MessageTimeline({
                                 groupKey={key}
                                 group={group}
                                 nextGroup={groups[index + 1]?.group}
+                                startupDismissed={
+                                  group.kind === "activity" &&
+                                  group.items.some(
+                                    (item) => item.turnId && turnsWithOutput.has(item.turnId),
+                                  )
+                                }
                                 entranceEnabled={entranceEnabled}
                                 liveEntranceEnabled={
                                   group.kind === "activity" ? !bulkRender : undefined
@@ -2178,7 +2204,21 @@ function useStableTimelineGroupKeys(
         // Retain only same-kind matches. Activity → turn wrap must NOT keep the
         // activity chip's React key: that reused a collapsed TurnSummary and
         // skipped the settle beat (insta-collapse / content flash).
-        if (previous && previous.group.kind === group.kind && !usedKeys.has(previous.key)) {
+        const startupCompletion =
+          previous?.group.kind === "activity" &&
+          previous.group.items.every((item) => item.kind === "startup-phase") &&
+          group.kind === "turn" &&
+          group.outcome === "complete" &&
+          group.groups.every(
+            (child) =>
+              child.kind === "activity" &&
+              child.items.every((item) => item.kind === "startup-phase"),
+          );
+        if (
+          previous &&
+          (previous.group.kind === group.kind || startupCompletion) &&
+          !usedKeys.has(previous.key)
+        ) {
           retainedGroup = previous;
           break;
         }
@@ -2298,6 +2338,7 @@ type TimelineGroupEntryProps = {
   groupKey: string;
   group: TimelineGroup;
   nextGroup?: TimelineGroup | undefined;
+  startupDismissed: boolean;
   entranceEnabled: boolean;
   liveEntranceEnabled?: boolean | undefined;
   context: TimelineGroupEntryContext;
@@ -2320,6 +2361,7 @@ type TimelineGroupBehaviorProps = {
   loadRetainedScreenshot: MessageTimelineProps["loadRetainedScreenshot"];
   loadRetainedArtifact: MessageTimelineProps["loadRetainedArtifact"];
   loadVideoArtifactPlayback: MessageTimelineProps["loadVideoArtifactPlayback"];
+  genieLoading: MessageTimelineProps["genieLoading"];
   turnSummary: MessageTimelineProps["turnSummary"];
 };
 
@@ -2332,10 +2374,12 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
   groupKey,
   group,
   nextGroup,
+  startupDismissed,
   entranceEnabled,
   liveEntranceEnabled,
   context,
 }: TimelineGroupEntryProps) {
+  const reducedMotion = useReducedMotion();
   const { behavior, userMessageDisclosureContext } = context;
   const contextCompactionCount =
     group.kind === "turn"
@@ -2347,23 +2391,41 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         ? 1
         : 0;
   return (
-    <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
-      <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
-        <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
-          <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
-            <TimelineGroupView
-              {...behavior}
-              group={group}
-              foldLiveCluster={isAgentProgress(nextGroup)}
-              trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
-              contextCompactionCount={
-                contextCompactionCount > 0 ? contextCompactionCount : undefined
-              }
-            />
-          </UserMessageDisclosureProvider>
-        </TimelineGroupRenderBoundary>
-      </EntranceAnimationProvider>
-    </div>
+    <GenieLoadingOptionsContext.Provider value={behavior.genieLoading}>
+      <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
+        <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
+          <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
+            <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
+              <AnimatePresence initial={false}>
+                <motion.div
+                  key={
+                    !startupDismissed &&
+                    group.kind === "activity" &&
+                    group.items.every((item) => item.kind === "startup-phase")
+                      ? "preparation"
+                      : "content"
+                  }
+                  initial={false}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: reducedMotion ? 0 : 0.2 }}
+                >
+                  <TimelineGroupView
+                    {...behavior}
+                    group={group}
+                    foldLiveCluster={isAgentProgress(nextGroup)}
+                    startupDismissed={startupDismissed}
+                    trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+                    contextCompactionCount={
+                      contextCompactionCount > 0 ? contextCompactionCount : undefined
+                    }
+                  />
+                </motion.div>
+              </AnimatePresence>
+            </UserMessageDisclosureProvider>
+          </TimelineGroupRenderBoundary>
+        </EntranceAnimationProvider>
+      </div>
+    </GenieLoadingOptionsContext.Provider>
   );
 });
 
@@ -2389,6 +2451,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   insideTurn = false,
   nestClusterChips = false,
   foldLiveCluster = false,
+  startupDismissed = false,
   trailingAgentText,
   contextCompactionCount,
 }: {
@@ -2412,6 +2475,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
       behind a neutral chip — the one place activity without an outcome still
       folds, bounding the DOM of days-long autonomous turns. */
   foldLiveCluster?: boolean;
+  startupDismissed?: boolean;
   /** Rendering inside an expanded turn group: the outer chip already owns the
       failure surface, so nested chips stay tinted but quiet (no repeated
       failure text, no auto-open) — one loud error, N calm sub-expands. */
@@ -2432,6 +2496,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   /** Secondary chip facet when this fold sits next to a compaction landmark. */
   contextCompactionCount?: number | undefined;
 }) {
+  const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
   const settleChrome = useTurnSettleOpen();
   const foldMemory = useFoldMemory();
@@ -2463,6 +2528,26 @@ const TimelineGroupView = memo(function TimelineGroupView({
     group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
   switch (group.kind) {
     case "activity":
+      // Preparation is one quiet surface, not a fold with eight technical steps.
+      if (
+        !startupDetails &&
+        !insideTurn &&
+        !group.outcome &&
+        group.items.every((item) => item.kind === "startup-phase")
+      ) {
+        return (
+          <ActivityRail
+            items={group.items}
+            startupActive={!startupDismissed && !foldLiveCluster}
+            bare
+            toolRegistry={toolRegistry}
+            onOpenSession={onOpenSession}
+            onMemoryClick={onMemoryClick}
+            loadRetainedScreenshot={loadRetainedScreenshot}
+            loadRetainedArtifact={loadRetainedArtifact}
+          />
+        );
+      }
       if (insideTurn) {
         // Nested chips whenever the parent has ≥2 clusters. During outer settle
         // chrome they stay force-open so structure is visible and height stays
@@ -2542,6 +2627,18 @@ const TimelineGroupView = memo(function TimelineGroupView({
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
+      if (
+        !startupDetails &&
+        group.outcome === "complete" &&
+        group.groups.every(
+          (child) =>
+            child.kind === "activity" &&
+            child.items.every(
+              (item) => item.kind === "startup-phase" && item.status === "complete",
+            ),
+        )
+      )
+        return <ActivityRail items={activityItems} startupActive={false} bare />;
       // Second-layer chips only when there are natural multi-cluster seams —
       // otherwise the outer turn chip alone is enough ("N steps" wrapping one
       // more "N steps" was the redundant double fold).
@@ -2727,7 +2824,7 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
   return (
     next.kind === "activity" ||
     next.kind === "turn" ||
-    (next.kind === "item" && next.item.kind === "agent-message")
+    (next.kind === "item" && next.item.kind === "agent-message" && next.item.text.trim().length > 0)
   );
 }
 

@@ -49,6 +49,12 @@ services:
       POSTGRES_USER: opengeni
       POSTGRES_PWD: opengeni
       POSTGRES_SEEDS: postgres
+      # All four Temporal services share this local Postgres with the app.
+      # Production-sized defaults can exhaust its 100 connection slots.
+      SQL_MAX_CONNS: "5"
+      SQL_MAX_IDLE_CONNS: "5"
+      SQL_VIS_MAX_CONNS: "2"
+      SQL_VIS_MAX_IDLE_CONNS: "2"
       BIND_ON_IP: 0.0.0.0
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
     depends_on:
