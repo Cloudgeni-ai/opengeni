@@ -341,14 +341,14 @@ export async function getKnowledgeEntry(
   entryId: string,
   options: {
     revisionId?: string | undefined;
-    view?: "published" | "needs_review" | "archived" | undefined;
+    view?: "published" | "needs_review" | "archived" | "rejected" | undefined;
   } = {},
 ): Promise<KnowledgeEntryRecord | null> {
   const request = z
     .object({
       entryId: z.uuid(),
       revisionId: z.uuid().optional(),
-      view: z.enum(["published", "needs_review", "archived"]).optional(),
+      view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
     })
     .strict()
     .parse({ entryId, ...options });
@@ -497,7 +497,7 @@ async function manageLearning(
 export async function getAgentLearningSettings(
   db: Database,
   context: KnowledgeContext,
-  scope: "workspace" | "personal",
+  scope: "workspace" | "personal" | "context",
   source?: AgentLearningContext,
 ) {
   return SettingsRecord.parse(

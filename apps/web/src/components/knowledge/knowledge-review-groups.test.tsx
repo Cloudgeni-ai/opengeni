@@ -209,3 +209,61 @@ test("an outstanding workspace save cannot replace the personal settings shown a
     container.remove();
   }
 });
+
+test("late pagination from workspace review never enters the personal review list", async () => {
+  list.mockReset();
+  list.mockResolvedValueOnce({ batches: [batch], nextCursor: "old-page" });
+  let resolveOld!: (value: KnowledgeReviewBatchListResponse) => void;
+  list.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+  );
+  const personal = {
+    ...batch,
+    id: crypto.randomUUID(),
+    title: "Personal review",
+    scope: "personal" as const,
+  };
+  list.mockResolvedValueOnce({ batches: [personal], nextCursor: null });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <KnowledgeReviewGroups
+          workspaceId="workspace-a"
+          scope="workspace"
+          refresh={0}
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    await act(async () =>
+      [...container.querySelectorAll("button")]
+        .find((b) => b.textContent === "More review groups")!
+        .click(),
+    );
+    await act(async () =>
+      root.render(
+        <KnowledgeReviewGroups
+          workspaceId="workspace-a"
+          scope="personal"
+          refresh={0}
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    await act(async () =>
+      resolveOld({ batches: [{ ...batch, title: "Late workspace result" }], nextCursor: "stale" }),
+    );
+    expect(container.textContent).toContain("Personal review");
+    expect(container.textContent).not.toContain("Late workspace result");
+    expect(container.textContent).not.toContain("More review groups");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

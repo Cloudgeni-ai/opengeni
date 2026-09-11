@@ -46,7 +46,7 @@ privacy, and per-chat mapping for hard same-user chat isolation. Personal
 workspaces are excluded and must never be used as a default fallback. Persist
 the returned opaque workspace ID and pass the exact product-selected Skills
 inline in `CreateSessionRequest.skills` for every product-created session;
-there is no organization-wide Skill inheritance. Turning workspace Memory off
+there is no organization-wide Skill inheritance. Turning Knowledge authoring off
 does not isolate sessions.
 Each submitted Skill contains `files` with a valid `SKILL.md`. Its YAML
 frontmatter owns the name and description used in the agent's initial index;

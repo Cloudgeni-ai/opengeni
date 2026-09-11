@@ -40,15 +40,15 @@ const lastVariableName = longVariableNames[longVariableNames.length - 1]!;
 const longVariableSetName =
   `Responsive production variable set ${"with long context ".repeat(6)}`.slice(0, 120);
 const longBaseName = `Long document base ${"inspectable-title-".repeat(7)}`;
-const activeMemoryText =
-  "Active memory: keep responsive knowledge surfaces compact, deeply inspectable, and keyboard operable. " +
+const activeKnowledgeText =
+  "Saved knowledge: keep responsive knowledge surfaces compact, deeply inspectable, and keyboard operable. " +
   "This intentionally long record proves ordinary prose wraps without hiding the durable fact. ".repeat(
     4,
   );
-const unbrokenMemoryText = `Overflow sentinel ${"unbrokenresponsiveknowledge".repeat(18)}`;
-const proposedMemoryText =
-  "Proposed memory awaiting a human decision with approve and reject controls.";
-const workingMemoryTopics = [
+const unbrokenKnowledgeText = `Overflow sentinel ${"unbrokenresponsiveknowledge".repeat(18)}`;
+const proposedKnowledgeText =
+  "Proposed knowledge awaiting a human decision with approve and reject controls.";
+const knowledgeTopics = [
   "alpha river mapping",
   "bravo basalt inventory",
   "charlie cedar pruning",
@@ -68,14 +68,14 @@ const workingMemoryTopics = [
   "quebec quartz cataloging",
   "romeo railway maintenance",
 ] as const;
-const workingMemoryTexts = workingMemoryTopics.map(
+const knowledgeTexts = knowledgeTopics.map(
   (topic, index) =>
-    `Working set memory ${String(index + 1).padStart(2, "0")}: ${topic} is a distinct durable record that remains reachable through the shared page scroll owner. ` +
-    `Fixture marker WORKING_MEMORY_${String(index + 1).padStart(2, "0")}_${topic.replaceAll(" ", "_")} proves the keyboard-operable content wraps without widening the viewport.`,
+    `Knowledge entry ${String(index + 1).padStart(2, "0")}: ${topic} is a distinct durable record that remains reachable through the shared page scroll owner. ` +
+    `Fixture marker KNOWLEDGE_ENTRY_${String(index + 1).padStart(2, "0")}_${topic.replaceAll(" ", "_")} proves the keyboard-operable content wraps without widening the viewport.`,
 );
-// The API returns memories newest-first, so the first created record is the
+// The API returns entries newest-first, so the first created record is the
 // bottom-most working-set card in the rendered list.
-const tailWorkingMemoryText = workingMemoryTexts[0]!;
+const tailKnowledgeText = knowledgeTexts[0]!;
 
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
@@ -94,7 +94,7 @@ const workflowClient: SessionWorkflowClient = {
 // may return 404. The API route and enabled/disabled behavior are covered by
 // apps/api/test/machines-routes.test.ts.
 const browserTestSettings = testSettings({
-  productAccessMode: "configured",
+  productAccessMode: "local",
   delegationSecret: undefined,
   environmentsEncryptionKey: Buffer.alloc(32, 15).toString("base64"),
   documentEmbeddingProvider: "deterministic",
@@ -170,7 +170,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await shared?.release();
   }, 60_000);
 
-  test("ships first-class, responsive, accessible variable sets, documents, and memory", async () => {
+  test("ships responsive, accessible variable sets, files, and unified Knowledge", async () => {
     const bootstrap = await configuredContext(
       browser,
       {
@@ -257,19 +257,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             if (matrixCase.hasTouch) {
               await expectOwnedTouchTargets(page, surface);
             }
-            if (matrixCase.label === "desktop") {
-              if (surface === "documents") {
-                // Documents remains in the session rail, whose single
-                // Settings entry opens the persistent management shell.
-                const settingsNav = page.getByRole("navigation", { name: "Settings" });
-                await settingsNav.getByRole("link", { name: "Settings", exact: true }).waitFor();
-              } else {
-                // Managed workspace pages share a persistent destination rail.
-                await page
-                  .getByRole("navigation", { name: "Knowledge" })
-                  .getByRole("link", { name: "Memory", exact: true })
-                  .waitFor();
-              }
+            if (matrixCase.label === "desktop" && surface !== "variable-sets") {
+              for (const name of ["Knowledge", "Files", "Instructions", "Skills"])
+                await page.getByRole("tab", { name, exact: true }).waitFor();
             }
             if (surface === "variable-sets") {
               await ensureVariableSetExpanded(page);
@@ -280,9 +270,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             } else if (surface === "memory") {
               await expectContentPageScrollAndFocus(
                 page,
-                page
-                  .locator(`[data-memory-id="${fixtures.tailMemoryId}"]`)
-                  .getByRole("button", { name: "Memory actions" }),
+                page.getByRole("button", { name: "Retained entry 01", exact: true }),
               );
             }
             if (surface === matrixCase.screenshotSurface) {
@@ -340,6 +328,118 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
   }, 120_000);
 
+  test("scheduled learning changes remain drafts until Save and Cancel discards them", async () => {
+    const context = await configuredContext(
+      browser,
+      { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
+      false,
+    );
+    try {
+      const page = await context.newPage();
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const task = await page.evaluate(
+        async ({ apiBaseUrl: apiUrl, workspaceId: workspace }) => {
+          const response = await fetch(`${apiUrl}/v1/workspaces/${workspace}/scheduled-tasks`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              name: "Review ingestion",
+              status: "paused",
+              schedule: { type: "manual" },
+              agentConfig: { prompt: "Read useful updates" },
+            }),
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return (await response.json()) as { id: string; name: string };
+        },
+        { apiBaseUrl, workspaceId },
+      );
+      const read = () =>
+        page.evaluate(
+          async ({ apiBaseUrl: apiUrl, workspaceId: workspace, taskId }) => {
+            const response = await fetch(
+              `${apiUrl}/v1/workspaces/${workspace}/agent-learning/read`,
+              {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  scope: "workspace",
+                  source: { kind: "scheduled_task", id: taskId },
+                }),
+              },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return (await response.json()) as { version: number; settings: Record<string, string> };
+          },
+          { apiBaseUrl, workspaceId, taskId: task.id },
+        );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/schedules`);
+      await page.getByRole("button", { name: /^View all/ }).click();
+      const card = page.locator(`[data-scheduled-task-id="${task.id}"]`);
+      const edit = async () => {
+        await card.getByRole("button", { name: `More actions for ${task.name}` }).click();
+        await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+        await card.getByRole("button", { name: /^Agent learning/ }).click();
+        await card.getByRole("combobox", { name: "Knowledge", exact: true }).waitFor();
+      };
+      await edit();
+      await card
+        .getByRole("combobox", { name: "Knowledge", exact: true })
+        .selectOption("review_first");
+      expect((await read()).settings).toEqual({});
+      await card.getByRole("button", { name: "Cancel", exact: true }).click();
+      expect((await read()).settings).toEqual({});
+      await edit();
+      expect(
+        await card.getByRole("combobox", { name: "Knowledge", exact: true }).inputValue(),
+      ).toBe("inherit");
+      await card
+        .getByRole("combobox", { name: "Knowledge", exact: true })
+        .selectOption("review_first");
+      await card.getByRole("button", { name: "Save changes", exact: true }).click();
+      await card
+        .getByRole("button", { name: "Save changes", exact: true })
+        .waitFor({ state: "hidden" });
+      expect((await read()).settings).toEqual({ knowledge: "review_first" });
+      const savedPolicy = await read();
+      const settingsPattern = /\/agent-learning\/read$/;
+      await page.route(settingsPattern, async (route) => {
+        if (route.request().postDataJSON()?.scope === "context")
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ message: "Learning settings unavailable" }),
+          });
+        else await route.continue();
+      });
+      await card.getByRole("button", { name: `More actions for ${task.name}` }).click();
+      await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+      await card.getByRole("button", { name: /^Agent learning/ }).click();
+      await card
+        .getByText("Learning settings are unavailable. You can still save other task changes.", {
+          exact: false,
+        })
+        .waitFor();
+      await card.getByPlaceholder("Daily infrastructure review").fill("Renamed ingestion");
+      const submitted = page.waitForRequest(
+        (request) =>
+          request.method() === "PATCH" && request.url().endsWith(`/scheduled-tasks/${task.id}`),
+      );
+      await card.getByRole("button", { name: "Save changes", exact: true }).click();
+      expect((await submitted).postDataJSON().agentLearning).toBeUndefined();
+      await card
+        .getByRole("button", { name: "Save changes", exact: true })
+        .waitFor({ state: "hidden" });
+      await card.getByText("Renamed ingestion", { exact: true }).waitFor();
+      await page.unroute(settingsPattern);
+      expect(await read()).toEqual(savedPolicy);
+      expect(unexpectedDiagnostics(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
   test("keeps the Agent Knowledge overview truthful across responsive breakpoints", async () => {
     const bootstrap = await configuredContext(
       browser,
@@ -382,13 +482,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         await page
           .getByRole("heading", { level: 1, name: "Agent Knowledge", exact: true })
           .waitFor();
-        await page.getByRole("heading", { level: 2, name: "How agents work" }).waitFor();
-        await page.getByRole("heading", { level: 2, name: "What agents can find" }).waitFor();
-        for (const destination of ["Workspace instructions", "Skills", "Documents", "Memory"]) {
-          await page.getByRole("heading", { level: 3, name: destination, exact: true }).waitFor();
+        for (const destination of ["Knowledge", "Files", "Instructions", "Skills"]) {
+          await page.getByRole("tab", { name: destination, exact: true }).waitFor();
         }
-        expect(await page.getByRole("heading", { name: "Needs attention" }).count()).toBe(0);
-        expect(await page.getByRole("button", { name: "Export OKF", exact: true }).count()).toBe(0);
+        await page.getByRole("heading", { name: "Collections", exact: true }).waitFor();
+        await page.getByRole("heading", { name: "Knowledge entries", exact: true }).waitFor();
+        expect(await page.getByRole("button", { name: "Inspect", exact: true }).count()).toBe(0);
         await setTheme(page, matrixCase.theme);
         await expectNoPageOverflow(page);
         await expectNoAxeViolations(
@@ -414,60 +513,49 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     workspaceId: string,
     fixtures: SeededFixtures,
   ): Promise<void> {
-    // Loading is observed while a genuine list request is held, then the same
-    // request continues to the real backend and resolves into the empty state.
-    const basesPattern = new RegExp(`/v1/workspaces/${workspaceId}/document-bases(?:\\?.*)?$`);
-    let releaseBases!: () => void;
-    let sawBasesRequest!: () => void;
-    const basesGate = new Promise<void>((resolve) => {
-      releaseBases = resolve;
+    const pattern = new RegExp(`/v1/workspaces/${workspaceId}/knowledge/entries/search(?:\\?.*)?$`);
+    let release!: () => void, observed!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    const basesRequest = new Promise<void>((resolve) => {
-      sawBasesRequest = resolve;
+    const requested = new Promise<void>((resolve) => {
+      observed = resolve;
     });
-    const delayedBases = async (route: Route) => {
-      sawBasesRequest();
-      await basesGate;
+    const delayed = async (route: Route) => {
+      observed();
+      await gate;
       await route.continue();
     };
-    await page.route(basesPattern, delayedBases);
-    await page.goto(surfaceUrl(webBaseUrl, workspaceId, "documents", fixtures));
-    await basesRequest;
-    await page.getByText("Loading documents", { exact: true }).waitFor();
-    releaseBases();
-    await page.getByText("No documents yet", { exact: true }).waitFor();
-    await page.unroute(basesPattern, delayedBases);
-    expect(await page.getByRole("heading", { name: "Working set" }).count()).toBe(0);
-
-    // A single injected transport failure proves the honest Memory error and
-    // retry state. Retry is then allowed through to the same real API data.
-    const memoryListPattern = new RegExp(
-      `/v1/workspaces/${workspaceId}/knowledge/memories(?:\\?.*)?$`,
-    );
-    let failMemoryRequests = true;
-    const failMemory = async (route: Route) => {
-      if (failMemoryRequests && route.request().method() === "GET") {
+    await page.route(pattern, delayed);
+    await page.goto(surfaceUrl(webBaseUrl, workspaceId, "memory", fixtures));
+    await requested;
+    await page.getByText("Loading knowledge…", { exact: true }).waitFor();
+    release();
+    await page.getByText(activeKnowledgeText, { exact: true }).waitFor();
+    await page.unroute(pattern, delayed);
+    let failRequests = true;
+    const failing = async (route: Route) => {
+      if (failRequests)
         await route.fulfill({
           status: 503,
           contentType: "application/json",
           body: JSON.stringify({ message: "Intentional knowledge-list failure" }),
         });
-        return;
-      }
-      await route.continue();
+      else await route.continue();
     };
-    await page.route(memoryListPattern, failMemory);
-    await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/memory`);
-    await page.getByText("Couldn't load memory", { exact: true }).waitFor();
-    failMemoryRequests = false;
-    await page.getByRole("button", { name: "Retry", exact: true }).click();
-    await page.getByText(activeMemoryText, { exact: true }).waitFor();
-    await page.unroute(memoryListPattern, failMemory);
-
-    // Archived is deliberately empty; this must not be confused with loading
-    // or the failed state above.
-    await page.getByRole("combobox", { name: "Memory status" }).selectOption("archived");
-    await page.getByText("No archived memory.", { exact: true }).waitFor();
+    await page.route(pattern, failing);
+    await page.reload();
+    await page.getByRole("alert").waitFor();
+    failRequests = false;
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await page.getByText(activeKnowledgeText, { exact: true }).waitFor();
+    await page.unroute(pattern, failing);
+    await page.getByRole("tab", { name: "Archived", exact: true }).click();
+    await page.getByText("No archived knowledge.", { exact: true }).waitFor();
+    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    await page.getByText("Keep your files here", { exact: true }).waitFor();
+    await page.getByRole("tab", { name: "Knowledge", exact: true }).click();
+    await page.getByText(activeKnowledgeText, { exact: true }).waitFor();
   }
 
   async function exerciseKeyboardAndDisclosure(
@@ -475,21 +563,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     workspaceId: string,
     fixtures: SeededFixtures,
   ): Promise<void> {
-    // Memory was previously embedded in Documents. Existing copied links and
-    // bookmarks must migrate to the first-class surface without losing focus.
-    await page.goto(
-      `${webBaseUrl}/workspaces/${workspaceId}/documents?memory=${fixtures.proposedMemoryId}`,
-    );
-    await page.waitForURL(
-      `${webBaseUrl}/workspaces/${workspaceId}/memory?memory=${fixtures.proposedMemoryId}`,
-    );
-    await page.getByRole("heading", { level: 1, name: "Memory", exact: true }).waitFor();
-    const focusedMemory = page.locator(
-      `[data-memory-id="${fixtures.proposedMemoryId}"][data-highlighted="true"]`,
-    );
-    await focusedMemory.waitFor();
-    expect(await focusedMemory.textContent()).toContain(proposedMemoryText);
-
+    // Historical URLs still open the same persistent Knowledge navigation.
+    await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/memory`);
+    await page.getByRole("heading", { level: 1, name: "Agent Knowledge", exact: true }).waitFor();
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "variable-sets", fixtures));
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
     const manage = page.getByRole("button", {
@@ -538,26 +614,25 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     ).toBe(false);
 
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "memory", fixtures));
-    await page.getByText(proposedMemoryText, { exact: true }).waitFor();
-    await page.getByRole("button", { name: "Approve", exact: true }).waitFor();
-    await page.getByRole("button", { name: "Reject", exact: true }).waitFor();
-    const addMemory = page.getByRole("button", { name: "Add memory", exact: true });
-    await addMemory.focus();
+    const card = page.getByRole("button", { name: "Retained entry 01", exact: true });
+    await card.focus();
     await page.keyboard.press("Enter");
-    expect(await addMemory.getAttribute("aria-expanded")).toBe("true");
-    const memoryText = page.getByRole("textbox", { name: "Memory text" });
-    await memoryText.waitFor();
-    expect(await memoryText.evaluate((element) => document.activeElement === element)).toBe(true);
-    await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await openSurface(page, webBaseUrl, workspaceId, fixtures, "memory", {
-      focusMemory: false,
-    });
-    await expectContentPageScrollAndFocus(
-      page,
-      page
-        .locator(`[data-memory-id="${fixtures.tailMemoryId}"]`)
-        .getByRole("button", { name: "Memory actions" }),
-    );
+    await page.getByRole("dialog").waitFor();
+    await page.getByRole("dialog").getByText(tailKnowledgeText, { exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Add knowledge", exact: true }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("textbox", { name: "Title", exact: true })
+      .fill("Browser-created knowledge");
+    await page
+      .getByRole("dialog")
+      .getByRole("textbox", { name: "Content", exact: true })
+      .fill("A useful finding entered by a person.");
+    await page.getByRole("dialog").getByRole("button", { name: "Save", exact: true }).click();
+    await page.getByRole("dialog").waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "Browser-created knowledge", exact: true }).waitFor();
+    await expectContentPageScrollAndFocus(page, card);
     await expectNoPageOverflow(page);
   }
 });
@@ -590,6 +665,7 @@ async function configuredContext(
   sandboxSelfhostedEnabled: boolean,
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
+  context.setDefaultTimeout(15_000);
   const problems: string[] = [];
   const expectedMachines404Urls = new Set<string>();
   diagnostics.set(context, problems);
@@ -616,7 +692,11 @@ async function configuredContext(
       );
       return;
     }
-    if (response.status() === 503 && /\/knowledge\/memories$/.test(url.pathname)) return;
+    if (
+      response.status() === 503 &&
+      /\/(knowledge\/entries\/search|agent-learning\/read)$/.test(url.pathname)
+    )
+      return;
     if (
       isExpectedDisabledMachinesResponse(
         { status: response.status(), method: response.request().method(), url: response.url() },
@@ -633,7 +713,7 @@ async function configuredContext(
   context.on("console", (message) => {
     if (message.type() !== "error") return;
     // HTTP failures are recorded with their URL by the response listener. The
-    // only allowed 503 is the explicit Memory error-state fixture above.
+    // only allowed 503 is the explicit error-state fixture above.
     if (
       message.text() ===
       "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"
@@ -693,10 +773,6 @@ async function seedKnowledgeSurfaces(
         return (await response.json()) as T;
       }
 
-      await request(`/v1/workspaces/${targetWorkspaceId}/settings`, {
-        method: "PATCH",
-        body: JSON.stringify({ memoryEnabled: true }),
-      });
       await request(`/v1/workspaces/${targetWorkspaceId}/variable-sets`, {
         method: "POST",
         body: JSON.stringify({
@@ -709,39 +785,30 @@ async function seedKnowledgeSurfaces(
           })),
         }),
       });
-      for (const name of [fixture.longBaseName, "Empty document base"]) {
-        await request(`/v1/workspaces/${targetWorkspaceId}/document-bases`, {
-          method: "POST",
-          body: JSON.stringify({ name }),
-        });
-      }
       const memoryIds: string[] = [];
       for (const text of [
-        ...fixture.workingMemoryTexts,
-        fixture.activeMemoryText,
-        fixture.unbrokenMemoryText,
+        ...fixture.knowledgeTexts,
+        fixture.activeKnowledgeText,
+        fixture.unbrokenKnowledgeText,
       ]) {
-        const created = await request<{ id: string }>(
-          `/v1/workspaces/${targetWorkspaceId}/knowledge/memories`,
-          {
-            method: "POST",
-            body: JSON.stringify({ status: "active", kind: "semantic", text, confidence: 0.9 }),
-          },
-        );
-        memoryIds.push(created.id);
-      }
-      const proposed = await request<{ id: string }>(
-        `/v1/workspaces/${targetWorkspaceId}/knowledge/memories`,
-        {
+        const id = crypto.randomUUID();
+        await request(`/v1/workspaces/${targetWorkspaceId}/knowledge/entries`, {
           method: "POST",
           body: JSON.stringify({
-            status: "proposed",
-            kind: "decision",
-            text: fixture.proposedMemoryText,
-            confidence: 0.75,
+            operationId: crypto.randomUUID(),
+            entryId: id,
+            expectedVersion: 0,
+            scope: "workspace",
+            entry: {
+              kind: "note",
+              title: `Retained entry ${String(memoryIds.length + 1).padStart(2, "0")}`,
+              content: text,
+            },
           }),
-        },
-      );
+        });
+        memoryIds.push(id);
+      }
+      const proposed = { id: memoryIds[0]! };
       return { proposedMemoryId: proposed.id, tailMemoryId: memoryIds[0]! };
     },
     {
@@ -752,10 +819,10 @@ async function seedKnowledgeSurfaces(
         longVariableNames,
         longVariableSetName,
         longBaseName,
-        activeMemoryText,
-        unbrokenMemoryText,
-        proposedMemoryText,
-        workingMemoryTexts,
+        activeKnowledgeText,
+        unbrokenKnowledgeText,
+        proposedKnowledgeText,
+        knowledgeTexts,
       },
     },
   );
@@ -832,8 +899,14 @@ function surfaceUrl(
   surface: Surface,
   fixtures: SeededFixtures,
 ): string {
-  const search = surface === "memory" ? `?memory=${fixtures.proposedMemoryId}` : "";
-  return `${baseUrl}/workspaces/${workspaceId}/${surface}${search}`;
+  void fixtures;
+  const suffix =
+    surface === "variable-sets"
+      ? "variable-sets"
+      : surface === "documents"
+        ? "state?view=files"
+        : "state";
+  return `${baseUrl}/workspaces/${workspaceId}/${suffix}`;
 }
 
 async function openSurface(
@@ -849,32 +922,16 @@ async function openSurface(
       ? `${baseUrl}/workspaces/${workspaceId}/memory`
       : surfaceUrl(baseUrl, workspaceId, surface, fixtures);
   await page.goto(url);
-  const heading =
-    surface === "variable-sets"
-      ? "Variable sets"
-      : surface === "documents"
-        ? "Documents"
-        : "Memory";
+  const heading = surface === "variable-sets" ? "Variable sets" : "Agent Knowledge";
   await page.getByRole("heading", { level: 1, name: heading, exact: true }).waitFor();
   if (surface === "variable-sets") {
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
     await ensureVariableSetExpanded(page);
   } else if (surface === "documents") {
-    await page.getByText("No documents yet", { exact: true }).waitFor();
-    const search = page.getByRole("complementary", { name: "Search", exact: true });
-    await search.waitFor();
-    await search.getByRole("textbox", { name: "Search indexed documents", exact: true }).waitFor();
-    expect(await page.getByRole("complementary", { name: "Collections (optional)" }).count()).toBe(
-      0,
-    );
-    expect(await search.getByRole("textbox", { name: "ACL tags", exact: true }).count()).toBe(0);
-    expect(await page.getByRole("heading", { name: "Working set" }).count()).toBe(0);
+    await page.getByText("Keep your files here", { exact: true }).waitFor();
+    expect(await page.getByRole("button", { name: "Add text", exact: true }).count()).toBe(0);
   } else {
-    await page
-      .getByText(options.focusMemory === false ? tailWorkingMemoryText : proposedMemoryText, {
-        exact: true,
-      })
-      .waitFor();
+    await page.getByRole("button", { name: "Retained entry 01", exact: true }).waitFor();
   }
 }
 
@@ -1031,14 +1088,11 @@ async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<vo
     surface === "variable-sets"
       ? [
           page.getByRole("button", { name: "New variable set", exact: true }),
-          page.getByRole("button", { name: /^(Show|Hide) variables for / }),
+          page.getByRole("button", { name: /^(Manage|Hide) variables for / }),
         ]
       : surface === "documents"
-        ? [
-            page.getByRole("button", { name: "Choose files", exact: true }),
-            page.getByRole("combobox", { name: "Drop authority", exact: true }),
-          ]
-        : [page.getByRole("button", { name: "Add memory", exact: true })];
+        ? [] // This fixture has no object store, so file uploads are correctly unavailable.
+        : [page.getByRole("button", { name: "Add knowledge", exact: true })];
   for (const target of targets) {
     const box = await target.boundingBox();
     expect(box).not.toBeNull();

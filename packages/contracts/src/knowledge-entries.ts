@@ -251,7 +251,7 @@ export const KnowledgeEntryListRequest = z
     groupId: z.uuid().optional(),
     fileId: z.uuid().optional(),
     kind: KnowledgeEntryKind.optional(),
-    view: z.enum(["published", "needs_review", "archived"]).default("published"),
+    view: z.enum(["published", "needs_review", "archived", "rejected"]).default("published"),
     sessionId: z.uuid().optional(),
     reviewBatchId: z.uuid().optional(),
     cursor: z.string().min(1).max(2048).optional(),

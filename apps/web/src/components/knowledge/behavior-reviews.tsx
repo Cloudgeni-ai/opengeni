@@ -1,5 +1,10 @@
-import type { AgentInstructionReviewItem, SkillRecord, SkillSummary } from "@opengeni/sdk";
-import { useEffect, useState } from "react";
+import type {
+  AgentInstructionReviewItem,
+  KnowledgeEntryScope,
+  SkillRecord,
+  SkillSummary,
+} from "@opengeni/sdk";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,7 +18,23 @@ import { useAppContext } from "@/context";
 import { canManageWorkspaceSettings, hasAccountPermission } from "@/lib/permissions";
 
 /** Behavioral content keeps its native revision authority but shares the review surface. */
-export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
+export function BehaviorReviews(props: { workspaceId: string; scope?: KnowledgeEntryScope }) {
+  return <BehaviorReviewList key={`${props.workspaceId}:${props.scope ?? "all"}`} {...props} />;
+}
+function BehaviorReviewList({
+  workspaceId,
+  scope,
+}: {
+  workspaceId: string;
+  scope?: KnowledgeEntryScope;
+}) {
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
   const context = useAppContext();
   const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
   const canManage = canManageWorkspaceSettings(
@@ -45,7 +66,7 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
     setSkillCursor(null);
     setError(null);
     void Promise.allSettled([
-      canManage
+      canManage && (!scope || scope === "workspace")
         ? context.client.listAgentInstructionReviews(workspaceId)
         : Promise.resolve({ entries: [], nextCursor: null }),
       context.client.listWorkspaceSkills(workspaceId, { limit: 100 }),
@@ -67,7 +88,7 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
     return () => {
       current = false;
     };
-  }, [context.client, workspaceId, canManage, refresh]);
+  }, [context.client, workspaceId, canManage, scope, refresh]);
   async function more(kind: "instructions" | "skills") {
     setBusy(true);
     setError(null);
@@ -77,6 +98,7 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
           workspaceId,
           instructionCursor,
         );
+        if (!active.current) return;
         setInstructions((prior) => [...prior, ...page.entries]);
         setInstructionCursor(page.nextCursor);
       } else if (skillCursor) {
@@ -84,6 +106,7 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
           cursor: skillCursor,
           limit: 100,
         });
+        if (!active.current) return;
         setSkills((prior) => [...prior, ...page.skills]);
         setSkillCursor(page.nextCursor);
       }
@@ -126,7 +149,10 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
     }
   }
   const pendingSkills = skills.filter(
-    (item) => item.pendingRevisionIds.length && canReviewSkill(item),
+    (item) =>
+      item.pendingRevisionIds.length &&
+      canReviewSkill(item) &&
+      (!scope || item.scope === (scope === "personal" ? "user" : scope)),
   );
   if (!instructions.length && !pendingSkills.length && !error && !instructionCursor && !skillCursor)
     return null;
@@ -156,7 +182,14 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
           <div key={item.id} className="flex items-center gap-3 py-3">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">{item.title ?? item.stableKey}</p>
-              <MetaChip>Skill</MetaChip>
+              <MetaChip>
+                Skill ·{" "}
+                {item.scope === "user"
+                  ? "Only me"
+                  : item.scope === "organization"
+                    ? "Company"
+                    : "Workspace"}
+              </MetaChip>
             </div>
             <Button
               variant="outline"
@@ -167,7 +200,9 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
                 setError(null);
                 void context.client
                   .readWorkspaceSkill(workspaceId, item.id, item.pendingRevisionIds[0])
-                  .then(setSkill)
+                  .then((value) => {
+                    if (active.current) setSkill(value);
+                  })
                   .catch((reason) => setError(errorText(reason)))
                   .finally(() => setBusy(false));
               }}
@@ -200,7 +235,13 @@ export function BehaviorReviews({ workspaceId }: { workspaceId: string }) {
           <DialogHeader>
             <DialogTitle>{skill?.title ?? "Review workspace instruction"}</DialogTitle>
             <DialogDescription>
-              Approval makes this exact revision available to agents.
+              Approval makes this exact revision available to agents in{" "}
+              {skill?.scope === "user"
+                ? "your personal space"
+                : skill?.scope === "organization"
+                  ? "the company"
+                  : "this workspace"}
+              .
             </DialogDescription>
           </DialogHeader>
           {instruction ? (

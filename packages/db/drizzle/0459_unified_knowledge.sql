@@ -652,8 +652,10 @@ CREATE FUNCTION knowledge_index_revision(p_account uuid,p_entry uuid,p_revision 
 RETURNS void LANGUAGE sql SET search_path FROM CURRENT AS $$
   INSERT INTO knowledge_entry_search(account_id,entry_id,revision_id,chunk_index,search_vector)
   SELECT p_account,p_entry,p_revision,(n/14000)::integer,
-    to_tsvector('simple',substring(p_text FROM n+1 FOR 16000))
+    setweight(to_tsvector('simple',r.body->>'title'),'A') ||
+      setweight(to_tsvector('simple',substring(p_text FROM n+1 FOR 16000)),'B')
   FROM generate_series(0,greatest(length(p_text)-1,0),14000) n
+  JOIN knowledge_entry_revisions r ON r.account_id=p_account AND r.entry_id=p_entry AND r.id=p_revision
 $$;
 
 CREATE FUNCTION knowledge_reject_history_mutation() RETURNS trigger
@@ -806,12 +808,12 @@ BEGIN
   ELSE
     IF t.source IN ('goal','system') THEN
       SELECT prior.id INTO producer FROM session_system_updates u
-        JOIN session_turns prior ON prior.id=CASE WHEN u.kind='goal_continuation'
+        JOIN session_turns prior ON prior.id=CASE WHEN u.kind IN ('goal_continuation','background_command_result','session_wait_timeout')
           THEN (u.lineage->>'causalTurnId')::uuid ELSE (u.lineage->>'parentTurnId')::uuid END
           AND prior.account_id=p_account AND prior.workspace_id=p_workspace AND prior.session_id=s.id
         WHERE u.account_id=p_account AND u.workspace_id=p_workspace AND u.session_id=s.id
           AND u.delivered_turn_id=t.id AND u.state='delivered' AND u.delivered_history_item_id IS NOT NULL
-          AND u.kind IN ('goal_continuation','child_terminal_result','child_requires_action','child_requires_action_resolved',
+          AND u.kind IN ('goal_continuation','background_command_result','session_wait_timeout','child_terminal_result','child_requires_action','child_requires_action_resolved',
             'child_paused','child_waiting_capacity','child_progress')
           AND prior.created_at<t.created_at
         ORDER BY prior.position DESC LIMIT 1;
@@ -1027,7 +1029,11 @@ BEGIN
   -- Serialize publications and reference validation within an organization.
   -- No organization row is locked after a workspace: this key has no FK path.
   PERFORM pg_advisory_xact_lock(hashtextextended('knowledge-publication:'||p_account,0));
-  fingerprint:=encode(sha256(convert_to(jsonb_build_array(p_actor,p_request)::text,'UTF8')),'hex');
+  -- Authenticate the live attempt above, but bind retries to logical work.
+  -- Recovery changes the physical attempt, never the operation's session/turn.
+  fingerprint:=encode(sha256(convert_to(jsonb_build_array(
+    CASE WHEN p_actor->>'kind'='agent' THEN p_actor-'attemptId'-'executionGeneration' ELSE p_actor END,
+    p_request)::text,'UTF8')),'hex');
   SELECT * INTO prior FROM knowledge_entry_operations o WHERE o.account_id=p_account AND o.operation_id=knowledge_entry_apply.operation_id;
   IF FOUND THEN
     IF prior.request_hash<>fingerprint OR prior.origin_workspace_id<>p_workspace THEN
@@ -1224,8 +1230,13 @@ BEGIN
     RETURN result;
   END IF;
 
-  IF (pending OR operation='history') AND (actor->>'kind'<>'human' OR actor->>'review' IS DISTINCT FROM 'true') THEN
-    RAISE EXCEPTION 'Pending Knowledge and history require human review access' USING ERRCODE='42501';
+  IF (operation='history' OR p_request->>'view'='rejected')
+    AND (actor->>'kind'<>'human' OR actor->>'review' IS DISTINCT FROM 'true') THEN
+    RAISE EXCEPTION 'Knowledge history requires human review access' USING ERRCODE='42501';
+  END IF;
+  IF pending AND actor->>'kind'<>'agent'
+    AND (actor->>'kind'<>'human' OR actor->>'review' IS DISTINCT FROM 'true') THEN
+    RAISE EXCEPTION 'Pending Knowledge requires a live agent or human reviewer' USING ERRCODE='42501';
   END IF;
   IF p_request->>'view'='archived' AND actor->>'kind'<>'human' THEN
     RAISE EXCEPTION 'Archived Knowledge is a human management view' USING ERRCODE='42501';
@@ -1268,6 +1279,7 @@ BEGIN
     JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.entry_id=e.id
       AND (operation='history' OR r.id=CASE WHEN p_request ? 'revisionId' THEN (p_request->>'revisionId')::uuid
         WHEN pending THEN e.latest_revision_id
+        WHEN p_request->>'view'='rejected' THEN e.latest_revision_id
         WHEN p_request->>'view'='archived' THEN coalesce(e.published_revision_id,e.latest_revision_id)
         ELSE e.published_revision_id END)
     LEFT JOIN LATERAL (SELECT outcome FROM knowledge_entry_decisions v WHERE v.account_id=e.account_id
@@ -1275,7 +1287,9 @@ BEGIN
     WHERE e.account_id=p_account AND knowledge_scope_visible(e)
       AND (operation='history' OR (p_request ? 'revisionId' AND knowledge_entry_read.actor->>'kind'='human' AND knowledge_entry_read.actor->>'review'='true')
         OR e.archived=coalesce(p_request->>'view'='archived',false))
-      AND (NOT pending OR (d.outcome='pending' AND (knowledge_entry_read.actor->'writeScopes') ? e.scope))
+      AND (NOT pending OR (d.outcome='pending' AND r.id=e.latest_revision_id
+        AND (knowledge_entry_read.actor->>'kind'='agent' OR (knowledge_entry_read.actor->'writeScopes') ? e.scope)))
+      AND (p_request->>'view' IS DISTINCT FROM 'rejected' OR d.outcome='rejected')
       AND (NOT(p_request ? 'scope') OR e.scope=p_request->>'scope')
       AND (NOT(p_request ? 'entryId') OR e.id=(p_request->>'entryId')::uuid)
       AND (NOT(p_request ? 'kind') OR r.body->>'kind'=p_request->>'kind')
@@ -1291,19 +1305,21 @@ BEGIN
         WHERE l.account_id=e.account_id AND l.entry_id=e.id AND l.revision_id=r.id
           AND l.relation='group' AND l.target_entry_id=(p_request->>'groupId')::uuid
           AND EXISTS(SELECT 1 FROM knowledge_entries g WHERE g.account_id=p_account AND g.id=l.target_entry_id
-            AND NOT g.archived AND knowledge_revision_visible(p_account,g.id,g.published_revision_id,false))))
+            AND NOT g.archived AND knowledge_revision_visible(p_account,g.id,
+              CASE WHEN pending THEN g.latest_revision_id ELSE g.published_revision_id END,pending))))
       AND (NOT(p_request ? 'beforeRevision') OR r.number<(p_request->>'beforeRevision')::integer)
       AND (knowledge_entry_read.actor->>'kind'='human' AND knowledge_entry_read.actor->>'review'='true'
+        OR (pending AND knowledge_entry_read.actor->>'kind'='agent')
         OR EXISTS(SELECT 1 FROM knowledge_entry_decisions v WHERE v.account_id=e.account_id
           AND v.entry_id=e.id AND v.revision_id=r.id AND v.outcome='published'))
       AND knowledge_revision_visible(p_account,e.id,r.id,
-        knowledge_entry_read.actor->>'kind'='human' AND knowledge_entry_read.actor->>'review'='true')
+        pending OR (knowledge_entry_read.actor->>'kind'='human' AND knowledge_entry_read.actor->>'review'='true'))
   ), scored AS (
     SELECT c.*,coalesce(lex.score,0) AS keyword_score,coalesce(semantic.similarity,0) AS similarity,
       CASE WHEN coalesce(p_request->>'query','')='' THEN 0
         WHEN coalesce(p_request->>'mode','hybrid')='vector' THEN coalesce(semantic.similarity,0)
         WHEN coalesce(p_request->>'mode','hybrid')='keyword' THEN coalesce(lex.score/(1+lex.score),0)
-        ELSE (CASE WHEN coalesce(lex.score,0)>0 THEN 1 ELSE 0 END)+coalesce(semantic.similarity,0) END AS score,
+        ELSE coalesce(lex.score/(1+lex.score),0)+coalesce(semantic.similarity,0) END AS score,
       CASE WHEN semantic.keyword_match OR semantic.similarity>=0.2 THEN
         jsonb_build_array(jsonb_build_object('field',semantic.field,'start',semantic.start_offset,'end',semantic.end_offset,
           'text',semantic.text,'codecVersion',semantic.text_codec_version)) ELSE '[]'::jsonb END AS excerpts
@@ -1576,6 +1592,13 @@ DECLARE actor jsonb; owner text; subject text; context_key text:=coalesce(p_requ
   request_hash text; operation_id uuid:=(p_request->>'operationId')::uuid; result jsonb;
 BEGIN
   actor:=knowledge_resolve_actor(p_account,p_workspace,p_actor);
+  -- Read-only contextual scope discovery uses the same exact authority check as
+  -- writes. A bounded UI session picker is never the source of owner identity.
+  IF actor->>'kind'='human' AND p_request->>'operation'='read' AND scope_value='context' THEN
+    IF knowledge_learning_context_visible(p_account,p_workspace,actor->>'subjectId','workspace',context_key) THEN scope_value:='workspace';
+    ELSIF knowledge_learning_context_visible(p_account,p_workspace,actor->>'subjectId','personal',context_key) THEN scope_value:='personal';
+    ELSE RAISE EXCEPTION 'Agent learning context is unavailable' USING ERRCODE='42501'; END IF;
+  END IF;
   IF actor->>'kind'<>'human' OR scope_value NOT IN ('workspace','personal') THEN
     RAISE EXCEPTION 'Only humans configure Agent learning' USING ERRCODE='42501';
   END IF;
@@ -1924,7 +1947,9 @@ BEGIN
   IF operation_id IS NULL OR operation NOT IN ('save','approve','reject') OR length(btrim(p_request->>'reason')) NOT BETWEEN 1 AND 4096 THEN
     RAISE EXCEPTION 'Invalid instruction change' USING ERRCODE='22023';
   END IF;
-  fingerprint:=encode(sha256(convert_to(jsonb_build_array(p_actor,p_request)::text,'UTF8')),'hex');
+  fingerprint:=encode(sha256(convert_to(jsonb_build_array(
+    CASE WHEN p_actor->>'kind'='agent' THEN p_actor-'attemptId'-'executionGeneration' ELSE p_actor END,
+    p_request)::text,'UTF8')),'hex');
   SELECT * INTO prior FROM agent_instruction_operations op WHERE op.account_id=p_account AND op.operation_id=instruction_change.operation_id;
   IF FOUND THEN
     IF prior.request_hash<>fingerprint OR prior.origin_workspace_id<>p_workspace THEN

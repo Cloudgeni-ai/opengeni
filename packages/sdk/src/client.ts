@@ -6484,7 +6484,7 @@ export class OpenGeniClient {
     entryId: string,
     options: {
       revisionId?: string;
-      view?: "published" | "needs_review" | "archived";
+      view?: "published" | "needs_review" | "archived" | "rejected";
     } = {},
   ): Promise<KnowledgeEntryRecord> {
     const query = new URLSearchParams(options).toString();
@@ -6494,7 +6494,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Exact agent-attempt source preparation; chat uploads use this automatically. */
+  /** Open the original file associated with an accessible retained source revision. */
   async createKnowledgeFileDownloadUrl(
     workspaceId: string,
     entryId: string,
@@ -6594,7 +6594,7 @@ export class OpenGeniClient {
 
   async getAgentLearningSettings(
     workspaceId: string,
-    scope: "workspace" | "personal",
+    scope: "workspace" | "personal" | "context",
     source?: AgentLearningContext,
   ): Promise<AgentLearningSettingsRecord> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/agent-learning/read`, {

@@ -48,11 +48,12 @@ import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 
 const ReadSettings = z
   .object({
-    scope: z.enum(["workspace", "personal"]).default("workspace"),
+    scope: z.enum(["workspace", "personal", "context"]).default("workspace"),
     source: AgentLearningContext.optional(),
   })
   .strict();
 const WriteSettings = ReadSettings.extend({
+  scope: z.enum(["workspace", "personal"]).default("workspace"),
   operationId: z.uuid(),
   expectedVersion: z.number().int().nonnegative(),
   settings: AgentLearningOverridePatch,
@@ -255,7 +256,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       const options = z
         .object({
           revisionId: Id.optional(),
-          view: z.enum(["published", "needs_review", "archived"]).optional(),
+          view: z.enum(["published", "needs_review", "archived", "rejected"]).optional(),
         })
         .strict()
         .parse(c.req.query());
@@ -303,9 +304,27 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
 
   const learning = "/v1/workspaces/:workspaceId/agent-learning";
+  async function instructionReviewContext(
+    c: Context,
+    context: Awaited<ReturnType<typeof knowledgeContextForAccess>>,
+  ) {
+    if (context.actor.kind !== "human")
+      throw new HTTPException(403, {
+        message: "Instruction review requires an authenticated person",
+      });
+    await requireWorkspaceSettingsGrant(c, deps, context.workspaceId);
+    context.actor.settingsScopes = ["workspace"];
+    return context;
+  }
   app.get(`${learning}/instructions/reviews`, (c) =>
     run(c, false, async (context) =>
-      c.json(await listAgentInstructionReviews(deps.db, context, c.req.query("cursor"))),
+      c.json(
+        await listAgentInstructionReviews(
+          deps.db,
+          await instructionReviewContext(c, context),
+          c.req.query("cursor"),
+        ),
+      ),
     ),
   );
   app.post(`${learning}/instructions/review`, (c) =>
@@ -313,7 +332,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       c.json(
         await reviewAgentInstruction(
           deps.db,
-          context,
+          await instructionReviewContext(c, context),
           AgentInstructionReviewRequest.parse(await c.req.json()),
         ),
       ),

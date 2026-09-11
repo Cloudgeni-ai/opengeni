@@ -112,17 +112,21 @@ async function migrateMemoryEvidence(
     } else if (ref.kind === "document" || ref.kind === "document_chunk") {
       const [doc] =
         ref.kind === "document_chunk"
-          ? await tx`SELECT d.id FROM document_chunks c JOIN documents d ON d.id=c.document_id AND d.account_id=c.account_id
+          ? await tx`SELECT d.id,d.status FROM document_chunks c JOIN documents d ON d.id=c.document_id AND d.account_id=c.account_id
             WHERE c.account_id=${memory.account_id} AND c.id=${ref.id}`
-          : await tx`SELECT id FROM documents WHERE account_id=${memory.account_id} AND id=${ref.id}`;
+          : await tx`SELECT id,status FROM documents WHERE account_id=${memory.account_id} AND id=${ref.id}`;
       if (doc) {
         const [version] =
           await tx`SELECT id FROM knowledge_document_versions WHERE account_id=${memory.account_id}
           AND document_id=${doc.id} ORDER BY created_at DESC,id DESC LIMIT 1`;
-        entryId = knowledgeMigrationId(
-          version ? "document-version" : "document",
-          String(version?.id ?? doc.id),
-        );
+        // Only these identities are imported below. Failed/queued ordinary
+        // documents have no canonical source yet; preserve their exact reference
+        // in legacySnapshot instead of creating a dangling evidence edge.
+        if (version || doc.status === "ready")
+          entryId = knowledgeMigrationId(
+            version ? "document-version" : "document",
+            String(version?.id ?? doc.id),
+          );
         if (ref.kind === "document_chunk") passage = `Legacy passage ${ref.id}`;
       }
     }

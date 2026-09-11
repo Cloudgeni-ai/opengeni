@@ -20,48 +20,22 @@ Product shape, invariants, execution, and ownership.
 
 ## 2. What OpenGeni is
 
-OpenGeni is a self-hostable, session-based agent runtime. Its durable control
-plane owns identity, tenancy, sessions, human intervention, goals, recovery,
-compute, files, artifacts, usage, and observability.
+OpenGeni is a self-hostable, session-based agent runtime. Postgres owns durable
+truth; Temporal coordinates execution; NATS transports reconstructible events.
+The API authorizes clients, storage, sandboxes, relays and realtime connections.
+Workers run agents in provisioned sandboxes or Connected Machines.
 
-The HTTP API authorizes public control and bounded direct browser access to
-storage, sandboxes, relays, Codex WebRTC, and Gateway realtime WebSockets.
-Workers execute agents in provisioned sandboxes or Connected Machines.
-Postgres owns durable truth; Temporal coordinates work; NATS transports
-reconstructible live updates and Connected Machine traffic.
+The main surfaces are sessions and goals; tools and connections; Knowledge,
+instructions and Skills; files and editable artifacts; and SDK, React and web
+clients. The focused ownership map in §13 gives each area's canonical sources.
 
-Surfaces (canonical sources in §13):
-
-- **Sessions:** turn control, queues, goals, approvals, human input, titles, history.
-- **Voice:** realtime sessions and editable drafts; Send persists transcription.
-  Workspace billing/fallback settings govern provider selection; successful or
-  uncertain attempts pin it. See [transcription](transcription.md).
-- **Compute:** provisioned sandboxes and user-owned Connected Machines.
-- **Tools:** MCP, capabilities, Codemode, connections, and authorized adapters.
-- **Knowledge:** structured source/finding/group entries, Skills,
-  instructions, organization identity, and learning policy retain distinct authority.
-- **Artifacts:** files, media, editable documents, browser/ComputerSession control,
-  terminals, and published outputs.
-- **Clients:** SDK, React, web console, in-process embedding.
-  Native and host products share Connect/Sites behavior; hosts own presentation
-  and authoring prompts. External users require explicit live membership;
-  linking never merges identities. Inline credentials remain supported and
-  durable renewal is opt-in. `asUser()` supplies canonical identity, not a second
-  session end-user label. Human private/shared visibility is distinct from optional
-  cross-tree `agentAccess`; personal Knowledge follows the verified active-turn user,
-  while task notes cover temporary tree-local coordination. Site SDK forwarding
-  binds the workspace destination and uses ordinary API authorization, not a
-  fixed page-operation list; tool calls retain version-pinned catalogs.
-  See [embedding authority internals](embedding-authority-internals.md),
-  [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md).
-
-- **[Feedback](feedback.md)** and **operations:** metering, entitlements, billing,
-  deployment, observability, release evidence.
-
-Canonical introductions: [`../README.md`](../README.md),
-[`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
-
-Skills: [`content, authority, and migration`](skills-lifecycle.md).
+External users require explicit live membership. `asUser()` supplies canonical
+identity; an end-user label does not. Private/shared visibility differs from
+cross-tree `agentAccess`. Personal Knowledge follows the verified active-turn
+user; task notes cover temporary tree coordination. Linking never merges users.
+See [product integration](product-integration.md),
+[embedding authority](embedding-authority-internals.md),
+[Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
 
 ---
 
@@ -216,7 +190,10 @@ relationships never grant access. Conversation history and task notes are separa
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable
 accepted-turn policy snapshots. Review first queues inactive changes without
-pausing the agent. Instructions and Skills retain their native authorities.
+pausing the agent. Explicit pending-proposal retrieval lets agents reuse and
+correct unapproved entries; default retrieval stays published-only. Pending
+content grants no publication or instruction authority. Instructions and Skills
+retain their native authorities.
 The old Memory and reviewed-Knowledge authoring lanes are retired; historical
 records remain audit/compatibility evidence. See [`knowledge.md`](knowledge.md).
 
@@ -1468,7 +1445,7 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 | NATS Core | Live fanout, invalidation, request/reply, and Connected Machine transport | Reconnect and rebuild from durable truth |
 | Object storage | Files, generated media, recordings, exports, retained evidence, and portable sandbox archives | Provider durability plus Postgres ownership receipts |
 | Sandbox/provider storage | Live workspace and optional native checkpoints | Must be fenced and represented by durable lease/checkpoint evidence |
-| Search indexes | Document and memory retrieval projections | Rebuildable from authorized source records |
+| Search indexes | Canonical Knowledge retrieval projections | Rebuildable from authorized source records |
 
 Postgres tables are cross-service contracts. Forward migrations and the exact
 runtime-role/RLS posture are owned by `@opengeni/db`; this document does not

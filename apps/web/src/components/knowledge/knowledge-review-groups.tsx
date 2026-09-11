@@ -1,5 +1,5 @@
 import type { KnowledgeEntryScope, KnowledgeReviewBatch } from "@opengeni/sdk";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { useAppContext } from "@/context";
@@ -23,8 +23,10 @@ export function KnowledgeReviewGroups({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const requestGeneration = useRef(0);
   useEffect(() => {
     let current = true;
+    ++requestGeneration.current;
     setLoading(true);
     setBatches([]);
     setCursor(null);
@@ -45,12 +47,18 @@ export function KnowledgeReviewGroups({
       });
     return () => {
       current = false;
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate pending pages on unmount
+      ++requestGeneration.current;
     };
   }, [context.client, workspaceId, scope, refresh, retry]);
   async function loadMore() {
     if (!cursor || loading) return;
     const invocation = context.captureWorkspaceInvocation(workspaceId);
     if (!invocation) return;
+    const generation = requestGeneration.current;
+    const isCurrent = () =>
+      generation === requestGeneration.current &&
+      context.ownsWorkspaceInvocation(workspaceId, invocation);
     setLoading(true);
     setError(null);
     try {
@@ -59,15 +67,14 @@ export function KnowledgeReviewGroups({
         cursor,
         limit: 20,
       });
-      if (context.ownsWorkspaceInvocation(workspaceId, invocation)) {
+      if (isCurrent()) {
         setBatches((prior) => [...prior, ...result.batches]);
         setCursor(result.nextCursor);
       }
     } catch (reason) {
-      if (context.ownsWorkspaceInvocation(workspaceId, invocation))
-        setError(reason instanceof Error ? reason.message : String(reason));
+      if (isCurrent()) setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      if (context.ownsWorkspaceInvocation(workspaceId, invocation)) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }
   return (

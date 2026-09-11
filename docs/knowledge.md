@@ -27,7 +27,8 @@ already retained source revision and a page, passage, message, or code location.
   `knowledge_review_batches` identifies changes from the same turn or scheduled
   run; counts include only currently accessible, reviewable revisions.
 - **Search:** keyword and embedding projections are rebuildable caches. They own
-  neither content nor publication. Apply scope and evidence access checks before
+  neither content nor publication. Every chunk indexes its entry title; hybrid
+  search includes graded lexical relevance before embeddings are available. Apply scope and evidence access checks before
   matching, ranking, counts, excerpts and pagination.
 
 Uploading retains the original. Source preparation extracts searchable content;
@@ -119,7 +120,9 @@ separate from learning policy.
 Workspace or personal defaults can be overridden per chat or scheduled task.
 Overrides are sparse: selecting Inherit removes that category's override.
 Settings list the active overrides in one place; chat options and a schedule's
-collapsed advanced settings provide context shortcuts. New-chat choices are retained
+collapsed advanced settings provide context shortcuts. Existing schedule
+overrides are drafts until Save; Cancel discards them. Schedule and learning
+changes commit together and restore together if scheduler synchronization fails. New-chat choices are retained
 in the composer draft and committed with the session before its first accepted
 turn; a keyed creation retry cannot change the original choices or reset later
 settings. A control must target the
@@ -144,16 +147,26 @@ verified owner access and a personal destination.
 
 Automatic publishes an authorized write immediately. Review first stores an
 inactive revision and returns a receipt; the agent continues without a chat
-approval interruption. Pending revisions never enter normal agent retrieval.
+approval interruption. Pending revisions never enter normal agent retrieval. Agents can explicitly use
+`view: "needs_review"` on search, browse and get to inspect accessible proposals
+as unapproved context. They should search both views before creating entries or
+collections, reuse IDs for corrections, and never treat pending content as an
+accepted answer or instruction. Exact live-attempt and evidence access checks
+still apply.
 A correction awaiting review leaves the previous published revision available.
 
 The Knowledge browser groups pending changes by chat turn or scheduled run. A
 human can inspect source evidence, approve, edit and approve, reject, or review a
 selection of up to 100 exact revisions atomically. A complete loaded group of up
 to 100 entries has an Approve all action; larger groups use selections. Approval
-orders pending evidence before dependent findings. Stale versions conflict rather
+orders pending evidence before dependent findings. Rejected initial entries remain discoverable in the Rejected view and can be
+restored as a new revision. The Personal review filter includes only personal
+Skills; workspace instruction proposals remain in workspace review.
+Stale versions conflict rather
 than silently overwriting another correction. Undo creates a new revision and
-keeps the original decision history. Instructions and Skills use their native
+keeps the original decision history. Exact save retries within the same logical
+turn recover the original operation receipt after worker replacement; changed
+input or another logical turn conflicts. Instructions and Skills use their native
 publication lifecycles in the adjacent review UI.
 
 ## Cutover and historical compatibility

@@ -1,48 +1,84 @@
 ---
-title: "Memory and knowledge"
-description: "What agents remember, what they can look up, and what tells them how to behave."
+title: "Knowledge and agent learning"
+description: "How agents retain useful information, organize it, and review changes."
 icon: "brain"
 ---
 
-OpenGeni keeps three kinds of durable context apart, because they carry different authority and follow different lifecycles.
+Knowledge is the shared system for information agents retain and retrieve. It
+replaces the former Memory system and separate reviewed Knowledge lane. Personal
+and workspace Knowledge use the same structure and tools, with different access.
 
-## Workspace Memory
+## Files, sources and findings
 
-Specific facts, decisions, incidents, fixes, and confirmed outcomes. When Memory is enabled for a workspace, live agents save these autonomously during a run with `memory_save`, correct them with `memory_correct`, and find them later with `memory_search`. Saved text is stored exactly as written and is visible in the workspace's Memory view.
+Uploading a PDF in a chat retains the original file. During its work, the agent
+prepares searchable source text and saves useful findings when Knowledge learning
+allows it. These are linked records, not three competing knowledge bases:
 
-Memory is retrieval context, never conversation history: the model sees relevant memories, not a transcript of how they were created.
+- **File:** the original PDF you can open or download.
+- **Source:** retained text with its file, page or external source reference.
+- **Finding:** useful information, such as a renewal date, with evidence pointing
+  to the source revision that supports it. A finding can cite an existing source;
+  it does not require another duplicate excerpt.
+- **Collection:** related entries about a customer, product or system. One Acme
+  collection can contain contract terms, Slack decisions and technical incidents.
 
-Integrations can choose a per-session `memoryScope`: `workspace`, `user`, `session`, or `off`. User and session scopes can read shared workspace facts, but their saves, corrections, and deletions stay within their own memory layer. Reading a shared fact does not allow a private chat to change it for everyone.
+Original bytes live in object storage. Source text, findings, collections,
+relationships and revision history live in Postgres. Search indexes are
+rebuildable. The **Agent Knowledge** page brings these together with Knowledge,
+Files, Instructions and Skills tabs. Files open their preview, extracted text
+and related entries; collection and entry cards open directly.
 
-The [chat integration](/guides/integrate-your-product#choose-agent-access-and-memory) exposes this as `memory: "workspace" | "user" | "session" | false`. If omitted, memory follows the chat's `agentAccess` scope, which defaults to `"session"`. User memory follows the product's opaque user label within the tenant and requires that label. `false` disables Memory tools, not the conversation's durable history, and it does not change which other sessions the agent may reach. Memory retrieval and saving also require Memory to be enabled for the workspace.
+A scheduled task reads its configured source through an agent, just as ordinary
+chat work does. It saves through the same Knowledge service and uses its own
+learning override when one is configured. Regular runs should find and update
+existing entries instead of appending duplicates.
 
-## Documents and Knowledge
+## Personal and shared Knowledge
 
-Upload documents or sync them from connected sources such as Google Drive. OpenGeni indexes them for hybrid vector and keyword search, and agents retrieve permission-filtered passages with citations. A separate curated Knowledge lane holds human-reviewed claims for facts that should not change without review.
+A private chat saves to its verified user's personal Knowledge. It may also read
+shared Knowledge that user is allowed to access, but it cannot change shared
+entries through its personal authoring scope. Shared chats save to the workspace.
+Relationships do not grant access, and a shared finding cannot expose private
+evidence. A human can explicitly copy text into a new workspace entry.
 
-## Behavior: instructions and Skills
+The SDK retains the compatibility names `memory` and `memoryScope` for selecting
+this scope. The chat facade accepts `memory: "workspace" | "user" | false`.
+With default `agentAccess: "session"`, omitted `memory` is `false`; with user or
+workspace access it follows that scope. `false` initializes Knowledge authoring
+to Off; it does not erase history or disable authorized Knowledge retrieval.
+Personal ownership requires the server-verified user, not an opaque label.
+See [product integration](/guides/integrate-your-product#choose-agent-access-and-memory).
 
-- **Workspace instructions** are unconditional rules every agent must follow. They are composed into the prompt of every session, so keep them short.
-- **Skills** are reusable, conditional how-to guidance the agent loads when relevant.
-- **Organization profile** holds the organization's identity and mission and is composed ahead of workspace rules.
+## Agent learning and review
 
-The same material should not be copied across these. A workspace instruction can say "search Memory for related incidents"; the incident itself stays in Memory and the investigation method stays in a Skill.
+**Settings → Agent learning** puts these categories in one place:
 
-<Note>
-  Skills, Packs, and the capability catalog are evolving quickly. The current contracts live in the
-  repository under
-  [docs/capabilities.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/capabilities.md)
-  and [docs/packs.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/packs.md).
-</Note>
+| Category               | Default      | What changes                               |
+| ---------------------- | ------------ | ------------------------------------------ |
+| Knowledge              | Automatic    | Retained sources, findings and collections |
+| Workspace instructions | Review first | Short rules composed into agent prompts    |
+| Skills                 | Review first | Reusable procedures loaded when relevant   |
 
-## Learning mode
+Each category supports **Automatic**, **Review first** and **Off**. Workspace or
+personal defaults apply unless a chat or scheduled task overrides that category.
+Chat options and a schedule's collapsed learning settings provide shortcuts;
+existing schedule edits apply with Save and Cancel discards them.
 
-A workspace learning policy governs whether agents may derive behavior changes from what they observe:
+Automatic publishes a change immediately. Review first stores a pending revision
+and lets the agent continue, without an approval prompt in the chat. The previous
+published version stays available. Agents can explicitly read pending proposals
+as unapproved context, reuse them and correct them, but ordinary retrieval uses
+published information. A human reviews changes grouped by chat turn or scheduled
+run and can approve, edit, reject or later restore an entry.
 
-| Mode         | Effect                                                                                 |
-| ------------ | -------------------------------------------------------------------------------------- |
-| Off          | No derived proposals                                                                   |
-| Review first | Agents leave auditable, inactive proposals for a human to activate                     |
-| Autonomous   | Eligible Skills and instruction policies activate through their own undoable lifecycle |
+Off stops new agent changes in that category. It does not hide existing Knowledge,
+disable installed Skills, prevent human edits or block a human plugin install.
+These settings do not replace external action permissions or tool approvals.
+Organization identity retains its separate organization-owner policy.
 
-Learning mode does not gate Memory. Agents save and correct facts whenever Memory is enabled.
+## Conversation history and task notes
+
+Conversation history preserves the session transcript. Temporary task notes help
+agents coordinate within one session tree. Neither is a second durable Knowledge
+system. Save a useful incident and its outcome in Knowledge; keep its general
+investigation procedure in a Skill and an unconditional rule in Instructions.

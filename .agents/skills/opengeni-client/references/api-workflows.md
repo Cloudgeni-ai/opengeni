@@ -83,7 +83,7 @@ The product must choose the workspace mapping from its sharing rule before
 running this flow. A tenant-shared workspace is suitable only when that tenant
 may share workspace-scoped agent authority and resources. Use a per-user
 workspace for cross-user chat privacy and a per-chat workspace for hard
-same-user chat isolation. `memoryEnabled: false` does not create either
+same-user chat isolation. Knowledge authoring Off does not create either
 boundary.
 
 For a headless product, send an explicit minimal `firstPartyMcpTools` and
@@ -181,9 +181,25 @@ The usual flow is:
 
 Never attach a file id from another workspace. Correct behavior is no data leak: 403 when the credential has no workspace grant, 404 when the resource is not in the granted workspace.
 
-## Documents And Search
+## Knowledge And Search
 
-Use document bases when the product needs indexed/searchable knowledge rather than one-off file attachments. Create or select a base, add documents from uploaded files/text, wait for indexing, then use either the search route or a configured document-search MCP tool.
+Uploaded originals remain Files. Attaching a ready file in a normal chat lets the
+accepted agent turn prepare its searchable source content when Knowledge
+authoring is enabled; users do not need a separate document-base upload flow.
+The attempt-bound `knowledge_retain_file` tool provides explicit preparation.
+Retained sources, findings and collections share the canonical Knowledge entries
+API. Use `listKnowledgeEntries` and `getKnowledgeEntry` for retrieval, or the
+first-party `knowledge_*` tools for agents. A finding cites a specific source
+revision; a collection relates existing entries across sources without copying.
+
+Default retrieval returns published content. Explicit `view: "needs_review"`
+returns accessible pending proposals as unapproved context, so an agent can
+improve an existing entry instead of creating duplicates. Agent learning resolves
+workspace/personal defaults plus chat or scheduled-task overrides: Automatic
+publishes, Review first stages without pausing work, and Off disables agent
+authoring while retaining authorized retrieval. Conversation history and
+temporary task notes remain separate. Inspect the installed SDK and live schema
+for exact request shapes rather than using the retired Memory writers.
 
 ## GitHub Repositories
 

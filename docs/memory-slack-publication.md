@@ -1,10 +1,13 @@
 # Durable workspace decision publication to Slack
 
-OpenGeni can publish bounded summaries of important Workspace Memory changes
-and completed governed-learning outcomes to one verified workspace Slack bot
-channel. Slack is a notification surface only. Workspace Memory, the durable
-learning attempt/receipt ledger, and their authoritative application views
-remain the source of truth.
+This document describes the pre-0459 publication lane and its retained outbox
+receipts. That lane does not subscribe to new canonical Knowledge writes.
+Historical queued deliveries retain their original access and idempotency checks;
+new Knowledge is available through [Agent Knowledge](knowledge.md). Do not tell
+agents that saving Knowledge automatically posts it to Slack.
+
+The details below are historical implementation evidence, not a supported new
+authoring workflow. External Slack messages still need their own permission.
 
 ## Authority and eligibility
 

@@ -499,7 +499,7 @@ producer's accepted policy. Legacy `memoryEnabled` opt-outs are converted to the
 Knowledge setting; the old setting cannot be changed after 0459.
 
 Retained Knowledge is retrieval context. It is not ambient conversation memory
-or behavioral authority. Normal search excludes pending revisions; source ACLs,
+or behavioral authority. Explicit `view: "needs_review"` lets agents inspect and correct unapproved proposals without activating them. Normal search excludes pending revisions; source ACLs,
 exact evidence revisions and scope checks apply before ranking. Review-first
 saves return inactive receipts and let the turn continue. Mandatory instructions
 and Skill descriptors retain their existing governance snapshots and prompt

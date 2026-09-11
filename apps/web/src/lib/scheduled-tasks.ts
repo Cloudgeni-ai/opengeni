@@ -59,6 +59,10 @@ export function normalizeCalendarDays(
 
 export type ScheduledTaskFormState = {
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  agentLearningVersion?: number;
+  agentLearningBaselineScope?: "workspace" | "personal";
+  agentLearningDestinationKey?: string;
+  agentLearningDirty?: boolean;
   knowledgeSource?: ScheduledTaskAgentConfig["knowledgeSource"];
   name: string;
   description: string;
@@ -743,4 +747,13 @@ export async function loadSessionSchedules(
     if (page.length < limit) return [...tasks.values()];
     offset += page.length;
   }
+}
+
+/** Identity of the execution destination being edited, excluding unrelated form fields. */
+export function scheduledLearningDestinationKey(form: ScheduledTaskFormState): string {
+  return JSON.stringify([
+    form.runMode,
+    form.targetSessionId,
+    form.knowledgeSource?.destination ?? null,
+  ]);
 }

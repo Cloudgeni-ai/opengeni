@@ -1,3 +1,7 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 import { registerFileRoutes } from "../src/routes/files";
 import { registerDocumentRoutes } from "../src/routes/documents";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -174,6 +178,19 @@ async function fixture(mode: "automatic" | "review_first" | "off" = "automatic")
   const url = `http://test/v1/workspaces/${grant.workspaceId}/knowledge/files/${fileId}/prepare`;
   return {
     app,
+    deps,
+    session,
+    agentGrant: {
+      ...grant,
+      subjectId: "worker:test",
+      principalKind: "agent_attempt" as const,
+      metadata: {
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+      },
+    },
     grant,
     fileId,
     subjectId,
@@ -295,4 +312,71 @@ test("the public file catalogue excludes private originals before paging and val
     headers: { authorization: await f.authorization([], false) },
   });
   expect(denied.status).toBe(403);
+});
+
+test("first-party MCP explicitly discovers and corrects a pending finding without publishing it", async () => {
+  const f = await fixture("review_first");
+  const server = new McpServer({ name: "knowledge-test", version: "1" });
+  registerKnowledgeEntryTools(server, f.deps, f.agentGrant, f.session.id);
+  const mcp = new McpClient({ name: "agent", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await server.connect(right);
+  await mcp.connect(left);
+  async function call(name: string, args: Record<string, unknown>) {
+    const result = await mcp.callTool({ name, arguments: args });
+    expect(result.isError).not.toBe(true);
+    return JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+  }
+  try {
+    const groupId = crypto.randomUUID(),
+      entryId = crypto.randomUUID();
+    await call("knowledge_save", {
+      operationId: crypto.randomUUID(),
+      entryId: groupId,
+      expectedVersion: 0,
+      entry: { kind: "group", title: "Acme", content: "Customer" },
+    });
+    await call("knowledge_save", {
+      operationId: crypto.randomUUID(),
+      entryId,
+      expectedVersion: 0,
+      entry: {
+        kind: "fact",
+        title: "Acme renewal",
+        content: "Likely December",
+        groupIds: [groupId],
+      },
+    });
+    expect((await call("knowledge_get", { entryId })).found).toBe(false);
+    expect((await call("knowledge_search", { query: "renewal", mode: "keyword" })).entries).toEqual(
+      [],
+    );
+    const search = await call("knowledge_search", {
+      query: "renewal",
+      mode: "keyword",
+      view: "needs_review",
+    });
+    expect(search.entries.map((entry: { id: string }) => entry.id)).toEqual([entryId]);
+    expect((await call("knowledge_browse", { view: "needs_review" })).entries[0].id).toBe(groupId);
+    expect((await call("knowledge_browse", { groupId, view: "needs_review" })).entries[0].id).toBe(
+      entryId,
+    );
+    const pending = await call("knowledge_get", { entryId, view: "needs_review" });
+    expect(pending.revision.outcome).toBe("pending");
+    const saved = await call("knowledge_save", {
+      operationId: crypto.randomUUID(),
+      entryId,
+      expectedVersion: pending.version,
+      entry: { ...pending.revision.entry, content: "December, date unconfirmed" },
+    });
+    expect(saved.outcome).toBe("pending");
+    expect((await call("knowledge_get", { entryId })).found).toBe(false);
+    expect(
+      (await call("knowledge_search", { query: "renewal", mode: "keyword", view: "needs_review" }))
+        .entries,
+    ).toHaveLength(1);
+  } finally {
+    await mcp.close();
+    await server.close();
+  }
 });

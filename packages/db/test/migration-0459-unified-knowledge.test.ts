@@ -66,6 +66,7 @@ const oldMultipleOwnerFileId = crypto.randomUUID();
 const secondFileOwner = `user:${crypto.randomUUID()}`;
 const oldSharedFileId = crypto.randomUUID();
 const documentId = crypto.randomUUID();
+const unpreparedDocumentId = crypto.randomUUID();
 const baseId = crypto.randomUUID();
 const exactText = `Acme renewal\u0000 with an unpaired surrogate \ud800 and literal \\u0000`;
 const longSource = Array.from({ length: 22_000 }, (_, i) => `term${i} definition${i}`).join(" ");
@@ -398,8 +399,14 @@ beforeAll(async () => {
     await owned.admin`INSERT INTO documents(id,account_id,workspace_id,origin_workspace_id,base_id,file_id,status,title,
       authority_kind,authority_workspace_id) VALUES(${documentId},${accountId},${workspaceId},${workspaceId},${baseId},${fileId},
       'ready','Acme contract','workspace',${workspaceId})`;
+    await owned.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key)
+      VALUES(${unpreparedDocumentId},${accountId},${workspaceId},'ready','Failed.pdf','Failed.pdf','application/pdf',500,'test',${unpreparedDocumentId})`;
+    await owned.admin`INSERT INTO documents(id,account_id,workspace_id,origin_workspace_id,base_id,file_id,status,title,
+      authority_kind,authority_workspace_id) VALUES(${unpreparedDocumentId},${accountId},${workspaceId},${workspaceId},${baseId},${unpreparedDocumentId},
+      'failed','Unprepared contract','workspace',${workspaceId})`;
     await owned!.admin`UPDATE knowledge_memories SET source_refs=${owned!.admin.json([
       { kind: "document", id: documentId, metadata: {} },
+      { kind: "document", id: unpreparedDocumentId, metadata: {} },
       {
         kind: "external",
         id: "unavailable-external-id",
@@ -864,6 +871,13 @@ describe("0459 owner-role conversion", () => {
         location: {},
       },
     ]);
+    const [audit] = await owned!
+      .admin`SELECT legacy_snapshot FROM knowledge_entry_revisions WHERE entry_id=${sharedId}`;
+    expect(audit!.legacy_snapshot.source_refs).toContainEqual({
+      kind: "document",
+      id: unpreparedDocumentId,
+      metadata: {},
+    });
     expect((await getKnowledgeEntry(app.db, human, personalId))?.scope).toBe("personal");
     expect(await getKnowledgeEntry(app.db, human, legacyId)).toBeNull();
     const other = {

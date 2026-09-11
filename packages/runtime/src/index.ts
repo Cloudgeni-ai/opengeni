@@ -1865,9 +1865,9 @@ export type BuildAgentOptions = {
   attemptConnectorActionBindings?: readonly AttemptConnectorActionBinding[];
   /** Exact open-suffix call the current human approved before this agent was rebuilt. */
   approvedToolCallId?: string;
-  // Workspace Memory V1 working-set block, resolved by the worker per turn.
-  // Composed after the workspace persona/CORE/codemode substrate and before
-  // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
+  // Historical prompt-replay/embedding compatibility slot. New Knowledge is
+  // retrieved through tools and must not be composed here as standing guidance.
+  // Omitted/blank preserves the existing prompt bytes.
   workspaceMemory?: string;
   // Exact-attempt active policy and preference descriptor block. When present,
   // runtime uses the structured governance precedence branch; absent preserves
@@ -2043,7 +2043,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "Use knowledge_search and knowledge_get when retained information is relevant. Save useful facts, decisions, requirements, incidents, fixes and confirmed outcomes autonomously through knowledge_save, whether explicitly requested or learned during work. Uploaded files are automatically retained as searchable source entries when this task can author Knowledge. Use knowledge_retain_file for a fetched file or a failed preparation, and reuse its source revision as evidence. Retained source text and selected facts use the same structured entries; a source does not require a separate finding for every passage. Link exact evidence revisions and reuse relevant groups across sources. Correct an existing entry using its ID and current version; reorganize references instead of copying entries. Private tasks retain personal Knowledge, shared tasks retain workspace Knowledge. Agent learning may publish immediately, save a pending review, or disable authoring. A pending receipt does not pause your task: continue without asking for another approval. Use task_note_save for temporary coordination within the current task tree. Conversation history is separate. Workspace instructions remain bounded universal rules; Skills remain reusable guidance. Their own Agent learning policy controls changes. Do not save the same content in multiple authorities.",
+    "Use knowledge_search and knowledge_get when retained information is relevant. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save when useful for future work, whether requested explicitly or learned during ordinary work. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files and automatically prepare source text when authoring is enabled. Use knowledge_retain_file for a newly fetched file or failed preparation. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2098,11 +2098,9 @@ export function appendPersistentSessionSettings(
 }
 
 /**
- * Appends the workspace memory working-set block to the already-composed
- * (workspace + CORE + generic substrate) instructions, joined by " ". The
- * memory slice is workspace-ground and intentionally lands before
- * per-session instructions. An absent/blank value is a no-op that returns the
- * composed string byte-for-byte.
+ * Historical prompt-composition compatibility helper. New Knowledge uses
+ * retrieval tools; this slot preserves existing embedding/replay inputs only.
+ * An absent/blank value returns the composed string byte-for-byte.
  */
 export function appendWorkspaceMemory(composed: string, workspaceMemory?: string): string {
   const trimmed = workspaceMemory?.trim();
@@ -2587,8 +2585,8 @@ export function buildOpenGeniAgent(
     //      when a codemode token was minted for this managed-sandbox turn,
     //   4. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
-    //   5. + workspace memory working set, ONLY when the workspace setting is on
-    //      and the worker resolved a nonblank block — appendWorkspaceMemory,
+    //   5. + a nonblank historical memory compatibility block, when supplied;
+    //      canonical Knowledge is retrieved through tools,
     //   6. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
     //   7. + host context for this exact turn, when supplied,

@@ -32,7 +32,10 @@ import {
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
+  getAgentLearningSettings,
   saveAgentLearningSettings,
+  type KnowledgeContext,
+  dbSql,
   deleteScheduledTask,
   getConnectionMetadata,
   getEnrollment,
@@ -484,6 +487,10 @@ export async function withScheduledTaskAuthorityWriteErrors<T>(run: () => Promis
   try {
     return await run();
   } catch (error) {
+    if (nestedPostgresSqlState(error) === "40001")
+      throw new HTTPException(409, {
+        message: "Scheduled task learning settings changed. Reload the task before saving.",
+      });
     if (nestedPostgresSqlState(error) === "42501") {
       const detail = nestedPostgresMessage(error);
       throw new HTTPException(409, {
@@ -502,7 +509,73 @@ export async function updateScheduledTaskForApi(
   workspaceId: string,
   taskId: string,
   update: UpdateScheduledTaskInput,
+  learning?: {
+    authorization: AccessGrantAuthorization;
+    request: NonNullable<UpdateScheduledTaskPayload["agentLearning"]>;
+    restoreState: ScheduledTaskRestoreState;
+  },
 ): Promise<ScheduledTask> {
+  if (learning) {
+    const context = await knowledgeContextForAccess(
+      { db },
+      learning.authorization,
+      "scheduled_tasks:manage",
+    );
+    if (context.actor.kind !== "human")
+      throw new HTTPException(403, {
+        message: "Only an authenticated person can configure Agent learning",
+      });
+    context.actor.settingsScopes = [learning.request.scope];
+    return withScheduledTaskAuthorityWriteErrors(() =>
+      db.transaction(async (tx) => {
+        const source = { kind: "scheduled_task" as const, id: taskId };
+        const baselineScope = learning.request.baselineScope ?? learning.request.scope;
+        // Lock policy owners in one order before comparing the draft baseline.
+        // A destination change must not race an edit in its previous owner layer.
+        const subjectId = context.actor.kind === "human" ? context.actor.subjectId : "";
+        const owners = [
+          ...new Set(
+            [baselineScope, learning.request.scope].map((scope) =>
+              scope === "personal" ? `personal:${subjectId}` : `workspace:${workspaceId}`,
+            ),
+          ),
+        ].sort();
+        for (const owner of owners)
+          await tx.execute(
+            dbSql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-learning:${context.accountId}:${owner}`},0))`,
+          );
+        const baseline = await getAgentLearningSettings(tx, context, baselineScope, source);
+        if (baseline.version !== learning.request.expectedVersion)
+          throw new HTTPException(409, {
+            message: "Scheduled task learning settings changed. Reload the task before saving.",
+          });
+        const task = await updateScheduledTask(tx, workspaceId, taskId, update);
+        const prior = await getAgentLearningSettings(tx, context, learning.request.scope, source);
+        const saved = await saveAgentLearningSettings(tx, context, {
+          scope: learning.request.scope,
+          operationId: learning.request.operationId,
+          expectedVersion:
+            baselineScope === learning.request.scope
+              ? learning.request.expectedVersion
+              : prior.version,
+          source,
+          settings: {
+            knowledge: "inherit",
+            instructions: "inherit",
+            skills: "inherit",
+            ...learning.request.settings,
+          },
+        });
+        learning.restoreState.learning = {
+          context,
+          scope: learning.request.scope,
+          settings: prior.settings,
+          expectedVersion: saved.version,
+        };
+        return task;
+      }),
+    );
+  }
   return await withScheduledTaskAuthorityWriteErrors(() =>
     updateScheduledTask(db, workspaceId, taskId, update),
   );
@@ -748,6 +821,19 @@ export async function validatedScheduledTaskUpdate(input: {
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<UpdateScheduledTaskInput> {
+  if (input.payload.agentLearning) {
+    const context = input.authorization
+      ? await knowledgeContextForAccess(
+          { db: input.db },
+          input.authorization,
+          "scheduled_tasks:manage",
+        )
+      : null;
+    if (context?.actor.kind !== "human")
+      throw new HTTPException(403, {
+        message: "Only an authenticated person can configure Agent learning",
+      });
+  }
   const update: UpdateScheduledTaskInput = {};
   // Editing an ordinary source task's prompt/settings must not orphan its
   // connector binding. Deleting the task is the explicit source-disable path.
@@ -1155,6 +1241,12 @@ export async function requireScheduledTaskForApi(
 export type ScheduledTaskRestoreState = {
   task: ScheduledTask;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  learning?: {
+    context: KnowledgeContext;
+    scope: "workspace" | "personal";
+    settings: import("@opengeni/contracts").AgentLearningOverridePatch;
+    expectedVersion: number;
+  };
 };
 
 export async function captureScheduledTaskRestoreState(
@@ -1360,7 +1452,25 @@ export async function syncUpdatedScheduledTask(input: {
   } catch (error) {
     let persistenceRestored = true;
     try {
-      await restoreScheduledTask(input.db, input.previous);
+      await input.db.transaction(async (tx) => {
+        const learning = input.previous.learning;
+        // Compensate only our exact settings version, while the updated task
+        // still names that owner scope. A concurrent edit is never overwritten.
+        if (learning)
+          await saveAgentLearningSettings(tx, learning.context, {
+            scope: learning.scope,
+            source: { kind: "scheduled_task", id: input.task.id },
+            operationId: crypto.randomUUID(),
+            expectedVersion: learning.expectedVersion,
+            settings: {
+              knowledge: "inherit",
+              instructions: "inherit",
+              skills: "inherit",
+              ...learning.settings,
+            },
+          });
+        await restoreScheduledTask(tx, input.previous);
+      });
     } catch {
       persistenceRestored = false;
     }

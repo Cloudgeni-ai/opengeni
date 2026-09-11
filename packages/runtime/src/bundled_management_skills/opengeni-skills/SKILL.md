@@ -6,7 +6,7 @@ description: Find, install, create, and edit workspace Skills; understand readin
 # Managing Skills
 
 A Skill is a folder containing `SKILL.md` and supporting UTF-8 text files.
-Use Skills for reusable instructions and procedures. Use Memory for facts and
+Use Skills for reusable instructions and procedures. Use Knowledge for facts and
 outcomes, and workspace instructions for short always-on rules.
 
 ## Read
@@ -62,6 +62,12 @@ contents in a tool argument. Checkout alone does not publish changes.
 Stop processes editing the directory before publishing it. Publishing reads the
 whole folder; server revision checks prevent overwriting a newer saved revision,
 but they do not freeze a directory another process is changing.
+
+Facts and incidents belong in `knowledge_save`, with exact evidence and relevant
+collections. Search published and pending Knowledge before adding duplicates.
+Pending findings may inform further investigation but are not accepted facts or
+permission to change a Skill. Use the current Skill content and its revision
+when proposing procedural changes.
 
 ## Persistent changes
 

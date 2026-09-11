@@ -277,6 +277,11 @@ describe("managed personal workspace access", () => {
     });
     expect(changedLearning.status).toBe(200);
     expect(await changedLearning.json()).toMatchObject({ settings: { knowledge: "off" } });
+    const instructionReviews = await app.request(`${base}/agent-learning/instructions/reviews`, {
+      headers,
+    });
+    expect(instructionReviews.status).toBe(200);
+    expect(await instructionReviews.json()).toMatchObject({ entries: [] });
     const retired = await app.request(`${base}/learning/revisions`, {
       method: "POST",
       headers,

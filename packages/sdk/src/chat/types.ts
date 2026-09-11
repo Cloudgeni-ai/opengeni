@@ -12,9 +12,10 @@ import type {
 export type ChatAgentAccess = "session" | "user" | "workspace";
 
 /**
- * Memory scope for the session: which memories the agent reads and where it
- * saves. `false` disables Memory tools. Omitted follows user/workspace agent
- * reach; session-only reach defaults to false. Task notes cover task-local data.
+ * Compatibility option for personal or workspace Knowledge. `false` initializes
+ * Knowledge authoring to Off; authorized retrieval remains available. Omitted
+ * follows user/workspace agent reach; session-only reach defaults to false.
+ * Task notes cover temporary session-tree data.
  */
 export type ChatMemory = "user" | "workspace" | false;
 

@@ -1,3 +1,4 @@
+import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
 import { KnowledgeReviewGroups } from "./knowledge-review-groups";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
@@ -19,7 +20,7 @@ import {
   SearchIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -57,7 +58,7 @@ const SOURCE: Record<string, string> = {
   manual: "Added directly",
   task_note: "Task note",
 };
-type View = "published" | "needs_review" | "archived";
+type View = "published" | "needs_review" | "archived" | "rejected";
 type Selection = { id: string; revisionId?: string; view?: View };
 const message = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
 function externalUrl(value?: string) {
@@ -122,8 +123,10 @@ export function KnowledgeBrowser({
     ...(view === "needs_review" && reviewGroup ? { reviewBatchId: reviewGroup.id } : {}),
   };
   const requestKey = JSON.stringify(request);
+  const requestGeneration = useRef(0);
   useEffect(() => {
     let current = true;
+    ++requestGeneration.current;
     setLoading(true);
     setEntries([]);
     setCursor(null);
@@ -151,23 +154,29 @@ export function KnowledgeBrowser({
       });
     return () => {
       current = false;
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate pending pages on unmount
+      ++requestGeneration.current;
     };
   }, [context.client, workspaceId, requestKey, refresh, view, reviewGroup]);
   async function loadMore() {
     if (!cursor || loading) return;
     const invocation = context.captureWorkspaceInvocation(workspaceId);
     if (!invocation) return;
+    const generation = requestGeneration.current;
+    const isCurrent = () =>
+      generation === requestGeneration.current &&
+      context.ownsWorkspaceInvocation(workspaceId, invocation);
     setLoading(true);
     try {
       const result = await context.client.listKnowledgeEntries(workspaceId, { ...request, cursor });
-      if (context.ownsWorkspaceInvocation(workspaceId, invocation)) {
+      if (isCurrent()) {
         setEntries((prior) => [...prior, ...result.entries]);
         setCursor(result.nextCursor);
       }
     } catch (reason) {
-      setError(message(reason));
+      if (isCurrent()) setError(message(reason));
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }
   async function review(decision: "approve" | "reject", all = false) {
@@ -322,7 +331,7 @@ export function KnowledgeBrowser({
           </Button>
         ) : null}
         {canEdit && !sourceOnly ? (
-          <Button onClick={() => setCreating("note")}>
+          <Button className="pointer-coarse:min-h-10" onClick={() => setCreating("note")}>
             <PlusIcon className="size-4" />
             Add knowledge
           </Button>
@@ -388,13 +397,21 @@ export function KnowledgeBrowser({
           <TabsTrigger value="archived" className="rounded-none border-0 px-0 shadow-none">
             Archived
           </TabsTrigger>
+          {!sourceOnly ? (
+            <TabsTrigger value="rejected" className="rounded-none border-0 px-0 shadow-none">
+              Rejected
+            </TabsTrigger>
+          ) : null}
         </TabsList>
-        {(["published", "needs_review", "archived"] as const).map((tab) => (
+        {(["published", "needs_review", "archived", "rejected"] as const).map((tab) => (
           <TabsContent key={tab} value={tab} className="mt-4">
             {tab === "needs_review" ? (
               <div className="mb-4 grid gap-3">
                 {!reviewGroup ? (
-                  <BehaviorReviews workspaceId={workspaceId} />
+                  <BehaviorReviews
+                    workspaceId={workspaceId}
+                    scope={scope === "all" ? undefined : scope}
+                  />
                 ) : (
                   <div className="flex items-center gap-3">
                     <Button variant="ghost" size="sm" onClick={() => setReviewGroup(null)}>
@@ -843,7 +860,7 @@ function KnowledgeInspector(props: {
               <p className="text-sm text-fg-muted">
                 {record.revision.change === "archive"
                   ? "Archive request awaiting review."
-                  : "This proposal is awaiting review and is not used by future tasks."}
+                  : "This proposal is awaiting review. Agents can inspect it as unapproved context; normal retrieval uses published knowledge."}
               </p>
             ) : null}
             {record.revision.outcome === "rejected" ? (
@@ -1057,7 +1074,8 @@ function KnowledgeInspector(props: {
                   ) : null}
                 </>
               ) : null}
-              {(historical || record.archived) && props.canEdit ? (
+              {(historical || record.archived || record.revision.outcome === "rejected") &&
+              props.canEdit ? (
                 <Button
                   variant="outline"
                   size="sm"
@@ -1211,6 +1229,14 @@ function KnowledgeEditor(props: {
           onChange={(event) => setDraft({ ...draft, content: event.target.value })}
         />
       </label>
+      {draft.evidence.length ? (
+        <KnowledgeEvidenceEditor
+          workspaceId={props.workspaceId}
+          evidence={draft.evidence}
+          disabled={busy}
+          onChange={(evidence) => setDraft({ ...draft, evidence })}
+        />
+      ) : null}
       <FormDisclosure
         title="More options"
         summary={

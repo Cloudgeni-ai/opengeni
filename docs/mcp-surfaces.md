@@ -79,17 +79,22 @@ On a Linux Docker build host, `bun scripts/test-codemode-image.ts <image>
 owned loopback fixture, including credential modes and GET-only recovery. This
 is release verification, not a health probe that executes customer tools.
 
-First-party OpenGeni MCP memory tools:
+First-party OpenGeni MCP Knowledge tools:
 
-- `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
-- `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically. Content is bounded by the destination it lands in: 600 characters for a mandatory workspace rule, 1,200 for a preference, 4,000 for a Knowledge fact, on every agent surface reaching those destinations including task-note promotion (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
+- `knowledge_search`, `knowledge_browse`, `knowledge_get`: published retrieval by
+  default; explicit `view: "needs_review"` reads unapproved proposals for reuse
+  and correction. Pending content never activates Knowledge or behavior.
+- `knowledge_save`, `knowledge_archive`, `knowledge_retain_file`: exact-attempt
+  writes through the shared Knowledge lifecycle. Accepted Agent learning controls
+  publication: Automatic, Review first, or Off. Off leaves retrieval available.
+- `instruction_policy_save`: the native instruction revision lifecycle, under
+  its own accepted Agent learning category. Skills use their native folder tools.
 
-These tools are session-scoped: they register only when the delegated bearer carries
-a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`
-setting is true. The REST/UI memory audit and seed surfaces remain available when
-the setting is off.
+Search published and pending entries before saving; reuse entry IDs and versions
+for corrections and collections across sources. See [Knowledge](knowledge.md).
+The retired Memory and reviewed-claim tools are not registered for new work.
 
-First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEnabled`):
+First-party OpenGeni MCP company-profile tools (separate organization policy):
 
 - `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Require approval: Off creates nothing, Require approval stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
@@ -227,12 +232,10 @@ portable authority.
   connection and existing Apps destination. It adds no personal-data category,
   purpose, recipient, retention behavior, or additional owner field.
 
-Docs MCP also has a `memory_search`, but it is the curated documents surface, not
-the first-party turn tool. It reads both `active` and `approved` memory records
-so reviewed Knowledge and autonomous Workspace Memory share the same
-agent-visible retrieval set; `memory_propose` still writes `proposed` records
-for human review, while first-party `memory_save` / `memory_correct` are enabled
-only by the separate workspace Memory toggle.
+Docs MCP document retrieval projects the same canonical published Knowledge and
+source revisions with permission-filtered passages. It is not another Memory or
+reviewed-claim authoring system. First-party Knowledge tools provide explicit
+pending-proposal reads; ordinary document search stays published-only.
 
 Rules of thumb:
 

@@ -9648,6 +9648,16 @@ export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskReque
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias({
+    agentLearning: z
+      .object({
+        scope: z.enum(["workspace", "personal"]),
+        baselineScope: z.enum(["workspace", "personal"]).optional(),
+        operationId: z.uuid(),
+        expectedVersion: z.number().int().nonnegative(),
+        settings: AgentLearningOverrides,
+      })
+      .strict()
+      .optional(),
     name: ScheduledTaskNameInput.optional(),
     schedule: ScheduledTaskScheduleSpec.optional(),
     runMode: ScheduledTaskRunMode.optional(),
