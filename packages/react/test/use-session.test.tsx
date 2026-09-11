@@ -267,3 +267,53 @@ test("useSession refreshes wait settlement and pending-input status without repl
   expect(hook.result.current.session?.status).toBe("running");
   await hook.unmount();
 });
+
+test("a coherent failed detail cursor lets the revival event refresh browser state", async () => {
+  let calls = 0;
+  const client = new OpenGeniClient({
+    baseUrl: "https://api.example.test",
+    fetch: async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          ...serverSession,
+          status: calls === 1 ? "failed" : "running",
+          lastSequence: calls === 1 ? 40 : 41,
+          failureDiagnostics:
+            calls === 1
+              ? {
+                  eventId: "failure",
+                  sequence: 40,
+                  turnId: null,
+                  occurredAt: "2026-09-11T00:00:00Z",
+                  payload: { error: "provider unavailable" },
+                }
+              : null,
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+  const hook = await renderHook(
+    (events: SessionEvent[]) =>
+      useSession(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events,
+      }),
+    [] as SessionEvent[],
+  );
+  await flush();
+  expect(hook.result.current.session?.status).toBe("failed");
+  const revival: SessionEvent = {
+    ...titleEvent("unused", 41),
+    type: "session.status.changed",
+    payload: { status: "running" },
+  };
+  await hook.rerender([revival]);
+  await flush();
+  expect(calls).toBe(2);
+  expect(hook.result.current.session?.status).toBe("running");
+  expect(hook.result.current.session?.failureDiagnostics).toBeNull();
+  await hook.unmount();
+});

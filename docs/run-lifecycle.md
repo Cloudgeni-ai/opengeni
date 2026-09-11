@@ -621,6 +621,11 @@ banner displays `providerRecoveryCount` only as the final consecutive automatic
 retry streak, never as the total number of recoveries or failed turns. Missing
 historical counts remain unknown. Two indexed latest-event reads select this
 projection; detail polling never aggregates the session's lifetime event log.
+The initial session status and replay cursor come from one SQL statement
+snapshot, so a concurrent revival cannot pair an old failed status with a cursor
+that skips the revival event. Diagnostic text is decoded through the lossless
+storage codec before its bounded logical prefix is returned; omitted suffixes
+are disclosed and exact event bytes remain in storage.
 
 Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the

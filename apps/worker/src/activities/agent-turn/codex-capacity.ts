@@ -1,4 +1,3 @@
-import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 import {
   connectionModelAllowed,
   getSessionGoal,
@@ -6,7 +5,7 @@ import {
   CodexCredentialLeaseAttemptFencedError,
   CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
-  recordSessionActiveCodexCredential,
+  recordSessionCodexSelectionForTurnAttempt,
   setSessionCodexPinInTransaction,
   settleCodexCredentialFailover,
   withSessionCodexCapacityMutation,
@@ -289,15 +288,33 @@ export async function selectCodexTurnCapacity(
         leases.codex.confirmedUntilMs !== null;
       if (leases.codex.held) leases.codex.startHeartbeat();
 
-      const selectionDiagnostics = providerTurn.effectiveCodexCredentialId
-        ? codexSelectionDiagnostics({
-            previousCredentialId: lockedSessionCodexState.lastCredentialId,
+      const eligibleCount = leased.accounts.filter((account) =>
+        isCodexCredentialEligible(account, new Date()),
+      ).length;
+      const selectionReceipt = providerTurn.effectiveCodexCredentialId
+        ? await recordSessionCodexSelectionForTurnAttempt(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
             credentialId: providerTurn.effectiveCodexCredentialId,
+            strategy: leased.rotationStrategy,
             reusedLease: leased.reused,
             pinnedCredentialId: sessionPin,
             pinSource: sessionPinSource,
+            eligibleCount,
+            connectedCount: leased.accounts.length,
           })
         : null;
+      if (selectionReceipt)
+        await publishDurableSessionEvents(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          selectionReceipt.events,
+        );
+      const selectionDiagnostics = selectionReceipt?.diagnostics ?? null;
       const actualOutcome = providerTurn.effectiveCodexCredentialId
         ? "selected"
         : rotationDecision.kind === "allCapped" || rotationDecision.kind === "allocatorDisabled"
@@ -366,9 +383,6 @@ export async function selectCodexTurnCapacity(
         });
       }
 
-      const eligibleCount = leased.accounts.filter((account) =>
-        isCodexCredentialEligible(account, new Date()),
-      ).length;
       const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
       observability.incrementCounter({
         name: "opengeni_codex_pool_observations_total",
@@ -694,27 +708,6 @@ export async function selectCodexTurnCapacity(
         return { exit: claimedResult({ status: "cancelled" }) };
       }
       if (providerTurn.effectiveCodexCredentialId) {
-        const priorAccountId = lockedSessionCodexState.lastCredentialId;
-        if (priorAccountId !== providerTurn.effectiveCodexCredentialId) {
-          await recordSessionActiveCodexCredential(
-            db,
-            input.workspaceId,
-            input.sessionId,
-            providerTurn.effectiveCodexCredentialId,
-          );
-          if (priorAccountId !== null)
-            await eventing.publish([
-              {
-                type: "codex.account.switched",
-                payload: {
-                  fromAccountId: priorAccountId,
-                  toAccountId: providerTurn.effectiveCodexCredentialId,
-                  reason: selectionDiagnostics?.source === "manual_pin" ? "manual" : "automatic",
-                },
-              },
-            ]);
-        }
-
         const selectionReason = selectionDiagnostics!.reason;
         observability.incrementCounter({
           name: "opengeni_codex_credential_selections_total",
@@ -725,22 +718,6 @@ export async function selectCodexTurnCapacity(
             reason: selectionReason,
           },
         });
-        await eventing.publish([
-          {
-            type: "codex.credential.selected",
-            payload: {
-              credentialId: providerTurn.effectiveCodexCredentialId,
-              strategy: leased.rotationStrategy,
-              reason: selectionReason,
-              transition: selectionDiagnostics!.transition,
-              source: selectionDiagnostics!.source,
-              previousCredentialId: priorAccountId,
-              eligibleCount,
-              connectedCount: leased.accounts.length,
-              reused: leased.reused,
-            },
-          },
-        ]);
       }
     } catch (error) {
       credentialSelectionOutcome = "failed";

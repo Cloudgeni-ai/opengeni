@@ -494,7 +494,13 @@ with session-relative `transition` (`assigned`, `unchanged`, `switched`),
 `source` (`manual_pin` or `allocator`), and a reason separating first assignment,
 actual switch, affinity reuse, and lease reuse. A workspace active-pointer
 mismatch is not a session account switch. `codex.account.switched` is emitted
-only when both previous and next session accounts exist and differ. Historical
+only when both previous and next session accounts exist and differ; its legacy
+`reason` stays `manual` or `rotation`. The exact current attempt commits its
+selection receipt, events, and observed session pointer in one transaction.
+Replaying that attempt returns the existing receipt; a different selection for
+the same attempt is rejected. The previous account comes from that live pointer,
+not the accepted turn's frozen allocation-policy snapshot, which remains unchanged.
+Historical
 selection/rotation events retain their original payloads; new diagnostics do not
 change allocator eligibility or retry/failover policy.
 The event also retains the stable credential-row id, strategy, pool counts, and

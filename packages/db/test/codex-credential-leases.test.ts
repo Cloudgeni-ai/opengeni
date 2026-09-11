@@ -30,6 +30,7 @@ import {
   mutateSessionControlInTransaction,
   quarantineCodexCredentialForLease,
   recordCodexAccountUsage,
+  recordSessionCodexSelectionForTurnAttempt,
   recordCodexTokenRefresh,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -2586,4 +2587,85 @@ describe("credential allocator atomic Codex credential allocation", () => {
     expect(providerRefreshes).toBe(1);
     expect(versions).toEqual([initialA!.version + 1, initialA!.version + 1]);
   });
+});
+
+test("observed Codex assignments survive same-turn recovery without changing frozen policy", async () => {
+  if (!available) return;
+  const [ws] = await freshAccount();
+  const a = await connectCredential(ws!, "observation-a");
+  const b = await connectCredential(ws!, "observation-b");
+  const turnId = await seedTurn(ws!);
+  const choose = async (credentialId: string) => {
+    const fence = await attemptFenceForTurn(turnId);
+    return await acquireCodexCredentialLease(
+      dbA,
+      {
+        ...ws!,
+        ...fence,
+        turnId,
+        holderId: `observation:${fence.attemptId}`,
+        advanceActivePointer: false,
+      },
+      () => ({ credentialId, decision: "test" }),
+    );
+  };
+  const firstLease = await choose(a);
+  expect(firstLease.sessionCodexState.lastCredentialId).toBeNull();
+  const record = async (credentialId: string, reusedLease = false) => {
+    const fence = await attemptFenceForTurn(turnId);
+    return await recordSessionCodexSelectionForTurnAttempt(dbA, {
+      workspaceId: ws!.workspaceId,
+      ...fence,
+      turnId,
+      credentialId,
+      reusedLease,
+      pinnedCredentialId: null,
+      pinSource: null,
+      strategy: "sharded",
+      eligibleCount: 2,
+      connectedCount: 2,
+    });
+  };
+  const first = await record(a);
+  expect(first.diagnostics.transition).toBe("assigned");
+  const replay = await record(a);
+  expect(replay.events.map((e) => e.id)).toEqual(first.events.map((e) => e.id));
+  await expect(record(b)).rejects.toThrow("two different Codex selections");
+  await startRecoveryAttempt(ws!, turnId);
+  const nextLease = await choose(b);
+  expect(nextLease.sessionCodexState.lastCredentialId).toBeNull();
+  const switched = await record(b);
+  expect(switched.diagnostics.transition).toBe("switched");
+  expect(switched.events.find((e) => e.type === "codex.account.switched")?.payload).toEqual({
+    fromAccountId: a,
+    toAccountId: b,
+    reason: "rotation",
+  });
+  const oldFence = await attemptFenceForTurn(turnId);
+  await startRecoveryAttempt(ws!, turnId);
+  await choose(b);
+  const reused = await record(b, true);
+  expect(reused.diagnostics).toEqual({
+    transition: "unchanged",
+    source: "allocator",
+    reason: "lease_reused",
+  });
+  expect(reused.events.some((e) => e.type === "codex.account.switched")).toBe(false);
+  await expect(
+    recordSessionCodexSelectionForTurnAttempt(dbA, {
+      workspaceId: ws!.workspaceId,
+      ...oldFence,
+      turnId,
+      credentialId: a,
+      reusedLease: false,
+      pinnedCredentialId: null,
+      pinSource: null,
+      strategy: "sharded",
+      eligibleCount: 2,
+      connectedCount: 2,
+    }),
+  ).rejects.toBeInstanceOf(CodexCredentialLeaseAttemptFencedError);
+  expect(
+    (await getSessionCodexState(dbA, ws!.workspaceId, oldFence.sessionId))?.lastCredentialId,
+  ).toBe(b);
 });

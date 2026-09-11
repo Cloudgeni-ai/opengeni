@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { LOSSLESS_JSON_STRING_PREFIX } from "../src/lossless-json";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   appendSessionEventsAndUpdateSession,
@@ -129,6 +130,37 @@ test("detail failure survives timeline paging and later pre-claim failure replac
       truncatedFields: ["error", "message", "detail", "lastRetryableError", "code", "status"],
     },
   });
+  for (const logical of [
+    "before\u0000after",
+    "before\ud800after\udc00",
+    `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+    "🙂".repeat(2000) + "\u0000",
+    "x".repeat(5000) + "\u0000",
+  ]) {
+    const [exact] = await appendSessionEventsAndUpdateSession(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      [
+        {
+          type: "turn.failed",
+          payload: { error: logical, detail: logical, providerRecoveryCount: 2 },
+        },
+      ],
+      { status: "failed" },
+    );
+    const projection = (await read())!.failureDiagnostics!;
+    expect(projection.payload).toMatchObject({
+      error: Array.from(logical).slice(0, 1024).join(""),
+      detail: Array.from(logical).slice(0, 1024).join(""),
+      providerRecoveryCount: 2,
+    });
+    const [event] = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: exact!.sequence - 1,
+      limit: 1,
+    });
+    expect(event!.payload).toMatchObject({ error: logical, detail: logical });
+  }
   const [unclaimed] = await appendSessionEventsAndUpdateSession(
     client.db,
     grant.workspaceId!,
