@@ -335,7 +335,6 @@ import {
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
-  SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -343,6 +342,7 @@ import {
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
 } from "@opengeni/config";
+import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
@@ -43119,19 +43119,6 @@ function archiveCaptureRemainingMs(
     : null;
 }
 
-function extendSandboxTransitionDeadline(
-  currentDeadline: number,
-  hardDeadline: number,
-  remainingCaptureMs: number | null | undefined,
-  now: number,
-): number {
-  if (remainingCaptureMs === null || remainingCaptureMs === undefined) return currentDeadline;
-  return Math.min(
-    hardDeadline,
-    Math.max(currentDeadline, now + remainingCaptureMs + SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS),
-  );
-}
-
 function providerlessLeaseBackendPredicateSql() {
   const providerlessBackends = Object.entries(SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND)
     .filter(([, fields]) => fields.length === 0)
@@ -43976,33 +43963,27 @@ export async function acquireLease(
   // NTP/VM resume may change timestamp interpretation, but must never stretch
   // or prematurely consume the caller's resource budget. PostgreSQL projects
   // an active claim's remaining time on its own authoritative clock; that may
-  // extend a positive caller budget after a rolling config change, but never
-  // beyond the same one-hour lifecycle ceiling.
+  // extend a positive caller budget once after a rolling config change. Later
+  // capture retries must not keep renewing a waiter's observational budget.
   const startedAt = performance.now();
-  const hardDeadline = startedAt + SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS;
-  let deadline = Math.min(hardDeadline, startedAt + captureWaitMs);
+  const waitBudget = new SandboxTransitionWaitBudget(captureWaitMs, startedAt);
   let delayMs = 25;
   for (;;) {
     const result = await acquireLeaseOnce(db, input);
     const now = performance.now();
     if (captureWaitMs > 0 && result.role === "fenced" && result.reason === "capture_in_progress") {
-      deadline = extendSandboxTransitionDeadline(
-        deadline,
-        hardDeadline,
-        result.captureRemainingMs,
-        now,
-      );
+      waitBudget.observeCapture(result.captureRemainingMs, now);
     }
     if (
       result.role !== "fenced" ||
       result.reason === "superseded" ||
       result.reason === "rotation_in_progress" ||
-      now >= deadline
+      now >= waitBudget.deadline
     ) {
       return result;
     }
     await waitForSandboxTransition(
-      Math.min(delayMs, Math.max(1, deadline - now)),
+      Math.min(delayMs, Math.max(1, waitBudget.deadline - now)),
       input.waitSignal,
       "Sandbox lease transition wait cancelled",
     );
@@ -50128,8 +50109,7 @@ async function advanceWorkspaceGenerationForAuthority(
     throw new Error("Workspace archive capture wait is invalid");
   }
   const startedAt = performance.now();
-  const hardDeadline = startedAt + SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS;
-  let deadline = Math.min(hardDeadline, startedAt + captureWaitMs);
+  const waitBudget = new SandboxTransitionWaitBudget(captureWaitMs, startedAt);
   let delayMs = 25;
   let captureWaitStartedAt: number | undefined;
   let captureWaitOutcome: "completed" | "failed" = "failed";
@@ -50150,23 +50130,18 @@ async function advanceWorkspaceGenerationForAuthority(
           error instanceof SandboxWorkspaceMutationFencedError &&
           error.code === "capture_in_progress"
         ) {
-          deadline = extendSandboxTransitionDeadline(
-            deadline,
-            hardDeadline,
-            error.captureRemainingMs,
-            now,
-          );
+          waitBudget.observeCapture(error.captureRemainingMs, now);
         }
         if (
           !(error instanceof SandboxWorkspaceMutationFencedError) ||
           error.code !== "capture_in_progress" ||
-          now >= deadline
+          now >= waitBudget.deadline
         ) {
           throw error;
         }
         captureWaitStartedAt ??= performance.now();
         await waitForSandboxTransition(
-          Math.min(delayMs, Math.max(1, deadline - now)),
+          Math.min(delayMs, Math.max(1, waitBudget.deadline - now)),
           waitSignal,
           "Sandbox workspace mutation wait cancelled",
         );
@@ -52240,12 +52215,12 @@ export async function claimWorkspaceArchiveCapture(
     throw new Error("Workspace archive capture timeout is invalid");
   }
   const operationId = input.operationId ?? input.captureId;
-  // captureId owns one DB callback; providerRequestId owns the external
-  // operation. Modal's wire contract explicitly defines snapshotId as an
-  // idempotency key, so every Temporal retry of one logical capture must reuse
-  // it. Other providers still retain the stable lineage for late-result
-  // adoption, but may not replay the physical request before its deadline.
-  const providerRequestId = operationId;
+  // A fresh admission-fenced capture gets a fresh provider request identity.
+  // After a released failure, writers may re-arm this same lease epoch before
+  // the drain workflow retries. Reusing its operationId could then retrieve an
+  // older provider snapshot as the newer workspace generation. Replacements of
+  // an uninterrupted claim retain this stored identity for late-result adoption.
+  const providerRequestId = randomUUID();
   const captureAttempt = input.attempt ?? 1;
   const providerReplaySafe = input.providerReplaySafe === true;
   const takeoverSafe = input.takeoverSafe === true;
