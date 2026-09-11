@@ -283,6 +283,24 @@ export const McpServerConnectionRefSchema = z
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
+/** Operator-owned protocol binding. Tool annotations cannot establish recovery. */
+export const McpOperationRecoverySchema = z
+  .record(
+    z.string().min(1).max(512).regex(/^\S+$/u),
+    z.object({ observerTool: z.string().min(1).max(512).regex(/^\S+$/u) }).strict(),
+  )
+  .superRefine((bindings, context) => {
+    for (const [originalTool, binding] of Object.entries(bindings)) {
+      if (originalTool === binding.observerTool) {
+        context.addIssue({
+          code: "custom",
+          path: [originalTool, "observerTool"],
+          message: "MCP recovery observer must differ from the original tool",
+        });
+      }
+    }
+  });
+
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
   "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:c3bd17b8841de1bff9bb2777aad422cf8c75de78e2c30f9ac81d0cd6810a1b78";
@@ -1376,6 +1394,7 @@ const SettingsSchema = z.object({
          */
         headers: z.record(z.string(), z.string()).optional(),
         connectionRef: McpServerConnectionRefSchema.optional(),
+        operationRecovery: McpOperationRecoverySchema.optional(),
       }),
     )
     .default([]),

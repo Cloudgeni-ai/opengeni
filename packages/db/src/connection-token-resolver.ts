@@ -126,6 +126,8 @@ export type ResolveConnectionCredentialResult =
       connectionVersion?: number;
       /** Metadata-only owner attribution from the immediate pre-use fence. */
       connectionUseAttribution?: ConnectionUseAttribution;
+      /** Metadata-only equality key from current live authority; never credentials or authorization. */
+      operationAuthorityDigest?: string;
       /**
        * Revalidate the exact accepted attempt immediately before one target
        * provider request. Credential lookup/refresh is a separate audited

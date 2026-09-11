@@ -19,6 +19,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./mcp-operations": {
+      "types": "./src/mcp-operations.ts",
+      "default": "./src/mcp-operations.ts"
+    },
     "./retained-provider-commands": {
       "types": "./src/retained-provider-commands.ts",
       "default": "./src/retained-provider-commands.ts"

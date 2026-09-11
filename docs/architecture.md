@@ -1151,6 +1151,14 @@ Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
 
+Opt-in remote MCP outcome recovery captures an immutable operation before
+dispatch and uses an explicitly configured observation-only provider tool under
+fresh accepted-attempt authority. SDK call correlation remains separate from
+UUID operation identity. The operation ledger retains late receipts separately
+from the original timeout; explicit `operation_read` calls use the ordinary
+tool-result lifecycle, without mutation replay or autonomous inference wakes.
+See [MCP operation recovery](mcp-operation-recovery.md).
+
 `@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
 authorization, approval-classification, and execution boundary. Runtime prepares
 one canonical provider set from enabled first-party and integration MCP servers;

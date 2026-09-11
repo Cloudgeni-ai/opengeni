@@ -715,12 +715,24 @@ export async function withSessionActivityRlsContext<T>(
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
   fenceMode: "shared" | "none" = "shared",
+  organizationMembershipFence = false,
 ): Promise<T> {
   await assertSessionActivityGateEntry(db);
   return await withRlsContext(
     db,
     context,
     async (scopedDb) => {
+      if (organizationMembershipFence) {
+        // Claim can inherit membership-fenced authority after locking sessions.
+        // Acquire membership before even a shared tenancy fence: an exclusive
+        // tenancy/control waiter can otherwise complete the same lock cycle.
+        await scopedDb.execute(sql`select pg_advisory_xact_lock(
+          hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
+        if (fenceMode === "shared") {
+          await scopedDb.execute(sql`select pg_advisory_xact_lock_shared(
+            hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`);
+        }
+      }
       const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
       const value = await fn(gate.db);
       // The finalizer must never trust tenant GUCs that arbitrary callback code
@@ -733,7 +745,7 @@ export async function withSessionActivityRlsContext<T>(
       return value;
     },
     transactionConfig,
-    fenceMode,
+    organizationMembershipFence ? "none" : fenceMode,
   );
 }
 
@@ -807,10 +819,19 @@ export async function withSessionActivitySavepoint<T>(
 export async function retrySessionActivityRls<T>(
   db: Database,
   workspaceId: string,
-  options: IdempotentPersistenceTransactionOptions,
+  options: IdempotentPersistenceTransactionOptions & {
+    /** Claim can inherit membership-fenced causal authority after locking the
+     * session. Acquire that fence before tenancy/control/session instead. An
+     * enclosing transaction must preserve this same lock prefix. */
+    organizationMembershipFence?: boolean;
+  },
   fn: (db: SessionActivityDatabase) => Promise<T>,
 ): Promise<T> {
   return await runIdempotentPersistenceTransaction(options, async () => {
+    if (options.organizationMembershipFence) {
+      const context = { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId };
+      return await withSessionActivityRlsContext(db, context, fn, undefined, "shared", true);
+    }
     return await withWorkspaceSessionActivityRls(db, workspaceId, fn);
   });
 }
