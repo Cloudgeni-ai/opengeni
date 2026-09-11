@@ -2222,6 +2222,7 @@ function SessionChatPane(props: {
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
+              turnSummary={{ rolling: true }}
               key={props.session.id}
               className="h-full"
               items={timelineWithOptimisticSends}

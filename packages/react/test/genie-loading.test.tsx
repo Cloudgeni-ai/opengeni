@@ -231,10 +231,106 @@ test("hosts can customize phrases and orb dimensions", async () => {
   const r = await renderComponent(
     <MessageTimeline
       items={[phase()]}
-      genieLoading={{ phrases: ["Custom wish"], orb: { size: 96 } }}
+      genieLoading={{ phrases: ["Custom wish"], orb: { size: 20 } }}
     />,
   );
   expect(r.container.textContent).toContain("Custom wish");
-  expect((r.container.querySelector(".og-genie-orb") as HTMLElement).style.width).toBe("96px");
+  expect((r.container.querySelector(".og-genie-orb") as HTMLElement).style.width).toBe("20px");
+  await r.unmount();
+});
+
+test("rolling steps start closed and preserve explicit expansion", async () => {
+  const item = {
+    kind: "tool-call" as const,
+    id: "tool1",
+    callId: "call1",
+    turnId: "turn",
+    name: "exec_command",
+    raw: undefined,
+    arguments: { cmd: "bun test" },
+    output: "secret detail",
+    status: "running" as const,
+    occurredAt: new Date().toISOString(),
+  };
+  const r = await renderComponent(
+    <MessageTimeline items={[item]} turnSummary={{ rolling: true }} />,
+  );
+  expect(r.container.querySelector(".og-rolling-status")).toBeNull();
+  await r.rerender(
+    <MessageTimeline
+      items={[item, { ...item, id: "tool2", callId: "call2" }]}
+      turnSummary={{ rolling: true }}
+    />,
+  );
+  const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
+  expect(r.container.textContent).toContain("+1 earlier");
+  expect(r.container.textContent).toContain("bun test");
+  await act(async () => trigger.click());
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  await r.rerender(
+    <MessageTimeline
+      items={[
+        item,
+        { ...item, id: "tool2", callId: "call2", arguments: { cmd: "bun run typecheck" } },
+      ]}
+      turnSummary={{ rolling: true }}
+    />,
+  );
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  await r.unmount();
+});
+
+test("reasoning previews render emphasis instead of raw Markdown markers", async () => {
+  const r = await renderComponent(
+    <ActivityRail
+      items={[
+        {
+          kind: "reasoning",
+          id: "markdown-thought",
+          turnId: "turn",
+          text: "**Checking the repository** before continuing.",
+          streaming: false,
+          occurredAt: new Date().toISOString(),
+        },
+      ]}
+    />,
+  );
+  await flush();
+  expect(r.container.textContent).toContain("Checking the repository");
+  expect(r.container.textContent).not.toContain("**");
+  expect(r.container.querySelector(".og-reasoning-preview strong")?.textContent).toBe(
+    "Checking the repository",
+  );
+  await r.unmount();
+});
+
+test("rolling reasoning keeps its live Markdown preview", async () => {
+  const items = [
+    phase(),
+    {
+      kind: "reasoning" as const,
+      id: "r1",
+      turnId: "turn",
+      text: "**First thought**",
+      streaming: false,
+      occurredAt: new Date().toISOString(),
+    },
+    {
+      kind: "reasoning" as const,
+      id: "r2",
+      turnId: "turn",
+      text: "**Current thought**",
+      streaming: true,
+      occurredAt: new Date().toISOString(),
+    },
+  ];
+  const r = await renderComponent(
+    <MessageTimeline items={items} turnSummary={{ rolling: true }} />,
+  );
+  await flush();
+  expect(r.container.querySelector(".og-reel-title")?.textContent).toBe("Thinking");
+  expect(r.container.querySelector(".og-reel-preview")?.textContent).toContain("Current thought");
   await r.unmount();
 });

@@ -214,7 +214,7 @@ function assertNever(item: never): never {
   throw new Error(`ActivityRail: unhandled activity item ${JSON.stringify(item)}`);
 }
 
-function renderActivity(
+export function renderActivity(
   item: ActivityItem,
   toolRegistry: ToolRegistry,
   onOpenSession: ((sessionId: string) => void) | undefined,

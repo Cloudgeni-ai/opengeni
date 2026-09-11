@@ -1,3 +1,4 @@
+import { RollingActivity } from "../timeline/rolling-activity";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
@@ -2532,7 +2533,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
     );
   }
   const settleFold =
-    group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
+    !turnSummary?.rolling &&
+    (group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle);
   switch (group.kind) {
     case "activity":
       // Preparation is one quiet surface, not a fold with eight technical steps.
@@ -2558,6 +2560,24 @@ const TimelineGroupView = memo(function TimelineGroupView({
           />
         );
       }
+      if (
+        turnSummary?.rolling &&
+        !startupDetails &&
+        group.items.filter((item) => item.kind !== "startup-phase").length === 1
+      ) {
+        return (
+          <ActivityRail
+            items={group.items}
+            startupActive={false}
+            bare
+            toolRegistry={toolRegistry}
+            onOpenSession={onOpenSession}
+            onMemoryClick={onMemoryClick}
+            loadRetainedScreenshot={loadRetainedScreenshot}
+            loadRetainedArtifact={loadRetainedArtifact}
+          />
+        );
+      }
       if (insideTurn) {
         // Nested chips whenever the parent has ≥2 clusters. During outer settle
         // chrome they stay force-open so structure is visible and height stays
@@ -2569,7 +2589,13 @@ const TimelineGroupView = memo(function TimelineGroupView({
         // settled closed pre-wrap was showing as a CHIP, so mounting it closed
         // is both the stable height and the honest state — force-opening it
         // was the "already-collapsed cluster auto-expands at the end" reopen.
-        const useNestedChip = nestClusterChips && activityShouldFold && !containsGeneratedImage;
+        const visibleActivity = group.items.filter((item) => item.kind !== "startup-phase");
+        const singleThought =
+          !startupDetails &&
+          visibleActivity.length === 1 &&
+          visibleActivity[0]?.kind === "reasoning";
+        const useNestedChip =
+          nestClusterChips && activityShouldFold && !containsGeneratedImage && !singleThought;
         if (!useNestedChip) {
           return (
             <ActivityRail
@@ -2614,7 +2640,16 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
-          defaultOpen={!activityShouldFold || group.outcome === "failed" ? true : undefined}
+          defaultOpen={
+            group.outcome === "failed" || (!turnSummary?.rolling && !activityShouldFold)
+              ? true
+              : undefined
+          }
+          liveHeader={
+            turnSummary?.rolling && !group.outcome && !foldLiveCluster ? (
+              <RollingActivity items={group.items} toolRegistry={toolRegistry} />
+            ) : undefined
+          }
           foldKey={group.id}
           facets={turnSummary?.facets}
           settleFold={settleFold}
