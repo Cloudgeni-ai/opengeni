@@ -1270,10 +1270,12 @@ export function WorkspaceStateRoute({
   workspaceId,
   view,
   fileId,
+  review,
 }: {
   workspaceId: string;
   view?: "instructions" | "skills" | "files";
   fileId?: string;
+  review?: boolean;
 }) {
   return (
     <AgentKnowledgePage key={workspaceId} workspaceId={workspaceId} section={view ?? "knowledge"}>
@@ -1283,7 +1285,11 @@ export function WorkspaceStateRoute({
         ) : view ? (
           <WorkspaceBehaviorPanel workspaceId={workspaceId} view={view} />
         ) : (
-          <KnowledgePanel workspaceId={workspaceId} {...(fileId ? { fileId } : {})} />
+          <KnowledgePanel
+            workspaceId={workspaceId}
+            review={review}
+            {...(fileId ? { fileId } : {})}
+          />
         )}
       </Suspense>
     </AgentKnowledgePage>

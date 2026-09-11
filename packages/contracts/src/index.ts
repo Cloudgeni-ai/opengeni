@@ -813,6 +813,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "knowledge_browse",
   "knowledge_save",
   "knowledge_retain_file",
+  "knowledge_retain_message",
   "knowledge_archive",
   "instruction_policy_save",
   "instruction_policy_get",
@@ -1037,6 +1038,7 @@ export function currentAgentLearningToolSelection(
   if (selected.has("memory_save") && selected.has("memory_correct")) {
     selected.add("knowledge_save");
     selected.add("knowledge_retain_file");
+    selected.add("knowledge_retain_message");
   }
   if (
     selected.has("instruction_policy_propose") ||

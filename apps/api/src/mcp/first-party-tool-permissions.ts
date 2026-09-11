@@ -24,6 +24,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   knowledge_get: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_browse: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_retain_file: { sessionRequired: true, allOf: ["documents:search", "files:read"] },
+  knowledge_retain_message: { sessionRequired: true, allOf: ["documents:search", "sessions:read"] },
   knowledge_save: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_archive: { sessionRequired: true, allOf: ["documents:search"] },
   instruction_policy_save: { sessionRequired: true, allOf: ["documents:search"] },

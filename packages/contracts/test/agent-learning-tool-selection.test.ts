@@ -16,6 +16,7 @@ describe("current Agent learning tool selection", () => {
       "knowledge_browse",
       "knowledge_save",
       "knowledge_retain_file",
+      "knowledge_retain_message",
       "instruction_policy_save",
       "instruction_policy_get",
     ]);

@@ -40,6 +40,9 @@ mock.module("@/components/rail/workspace-config-link", () => ({
   ),
 }));
 
+const client = { listKnowledgeEntries: async () => ({ entries: [] }) };
+mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
+
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 

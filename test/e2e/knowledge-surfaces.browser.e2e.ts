@@ -785,39 +785,56 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           .getByRole("button", { name: /^Review \d+ items?$/ })
           .click();
       await openBatch("Review acceptance Acme");
-      const dialog = page.getByRole("dialog");
+      const review = page.getByRole("region", { name: "Review knowledge", exact: true });
+      expect(await page.getByRole("dialog").count()).toBe(0);
       // UUID order begins with the finding; its unpublished collection and source must be reviewed first.
-      await dialog.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
-      await page.keyboard.press("Escape");
-      await page.getByRole("button", { name: "Continue review", exact: true }).click();
-      await dialog.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
-      await dialog.getByRole("button", { name: "Approve and next", exact: true }).click();
-      await dialog.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
-      await dialog.getByRole("button", { name: "Approve and next", exact: true }).click();
-      await dialog.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
+      await review.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
+      const pendingItems = review.getByRole("navigation", {
+        name: "Pending knowledge",
+        exact: true,
+      });
+      expect(await pendingItems.getByRole("button").count()).toBe(4);
+      await pendingItems.getByRole("button", { name: /^Review unsupported claim/ }).click();
+      await review
+        .getByRole("heading", { name: "Review unsupported claim", exact: true })
+        .waitFor();
+      expect(await pendingItems.locator('[aria-current="true"]').innerText()).toContain(
+        "Review unsupported claim",
+      );
+      await pendingItems.getByRole("button", { name: /^Review Acme collection/ }).click();
+      await review.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
+
+      await review.getByRole("button", { name: "All reviews", exact: true }).click();
+      await openBatch("Review acceptance Acme");
+      await review.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
+      await review.getByRole("button", { name: "Approve and next", exact: true }).click();
+      await review.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
+      await review.getByRole("button", { name: "Approve and next", exact: true }).click();
+      await review.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
       await waitFor(
-        async () => (await dialog.locator("mark").allTextContents()).join() === "20,000,21,000",
+        async () => (await review.locator("mark").allTextContents()).join() === "20,000,21,000",
         { timeoutMs: 10_000 },
       );
-      expect(await dialog.getByRole("region", { name: "Sources", exact: true }).isVisible()).toBe(
+      expect(await review.getByRole("region", { name: "Sources", exact: true }).isVisible()).toBe(
         false,
       );
-      await dialog
+      await review
         .locator("summary")
         .filter({ hasText: /^Details$/ })
         .click();
-      const details = dialog
+      const details = review
         .locator("details")
         .filter({ has: page.locator("summary", { hasText: /^Details$/ }) })
         .first();
-      await details
+      await review
         .locator("summary")
-        .filter({ hasText: /^Revision history$/ })
+        .filter({ hasText: /^History$/ })
         .click();
-      const revisions = details.getByRole("region", { name: "Revision history", exact: true });
+      const revisions = review.getByRole("region", { name: "Revision history", exact: true });
+      expect(await review.locator("details details").count()).toBe(0);
       await revisions.getByRole("button", { name: /^Revision 1/ }).waitFor();
       const historyBounds = await revisions.boundingBox();
-      const approveBounds = await dialog
+      const approveBounds = await review
         .getByRole("button", { name: "Approve and next", exact: true })
         .boundingBox();
       expect(historyBounds!.y + historyBounds!.height).toBeLessThan(approveBounds!.y);
@@ -826,31 +843,35 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         .locator("summary")
         .filter({ hasText: /^Details$/ })
         .click();
-      expect(await revisions.isVisible()).toBe(false);
+      expect(await revisions.isVisible()).toBe(true);
       await details
         .locator("summary")
         .filter({ hasText: /^Details$/ })
         .click();
       await revisions.getByRole("button", { name: /^Revision 1/ }).click();
-      await dialog.getByText("Acme pays EUR 20,000 annually.", { exact: true }).waitFor();
-      await dialog.getByRole("button", { name: "Back to review", exact: true }).click();
-      await dialog.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
-      await dialog
+      await review.getByText("Acme pays EUR 20,000 annually.", { exact: true }).waitFor();
+      await review.getByRole("button", { name: "Back to review", exact: true }).click();
+      await review.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
+      await review
         .locator("summary")
         .filter({ hasText: /^Details$/ })
         .click();
-      await dialog.getByRole("button", { name: "Review Acme contract", exact: true }).click();
-      await dialog.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
-      await dialog.getByRole("button", { name: "Back to review", exact: true }).click();
-      await dialog.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
+      await review.getByRole("button", { name: "Review Acme contract", exact: true }).click();
+      await review.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
+      await review.getByRole("button", { name: "Back to review", exact: true }).click();
+      await review.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
       await waitFor(
-        async () => (await dialog.locator("mark").allTextContents()).join() === "20,000,21,000",
+        async () => (await review.locator("mark").allTextContents()).join() === "20,000,21,000",
         { timeoutMs: 10_000 },
       );
-      await expectNoAxeViolations(page, "[data-slot='dialog-content']", "knowledge-review-light");
+      await expectNoAxeViolations(
+        page,
+        '[aria-label="Review knowledge"]',
+        "knowledge-review-light",
+      );
       await page.screenshot({ path: "/tmp/opengeni-knowledge-review-acceptance.png" });
       await setTheme(page, "dark");
-      await expectNoAxeViolations(page, "[data-slot='dialog-content']", "knowledge-review-dark");
+      await expectNoAxeViolations(page, '[aria-label="Review knowledge"]', "knowledge-review-dark");
       await page.screenshot({ path: "/tmp/opengeni-knowledge-review-dark.png" });
       await setTheme(page, "light");
       // Hold A's response after the server accepts it; opening B must invalidate A's UI completion.
@@ -867,36 +888,29 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         await held;
         await route.fulfill({ response });
       });
-      await dialog.getByRole("button", { name: "Approve and next", exact: true }).click();
+      await review.getByRole("button", { name: "Approve and next", exact: true }).click();
       await received;
-      await page.keyboard.press("Escape");
-      await page.getByRole("button", { name: "Filter knowledge", exact: true }).click();
-      await page
-        .getByRole("combobox", { name: "Knowledge type", exact: true })
-        .selectOption("fact");
-      await page.getByRole("textbox", { name: "Search knowledge", exact: true }).fill("Acme");
-      await page.getByRole("button", { name: "Search", exact: true }).click();
-      await page.getByRole("button", { name: "All reviews", exact: true }).click();
+      await review.getByRole("button", { name: "All reviews", exact: true }).click();
       await openBatch("Review acceptance another batch");
-      await dialog.getByRole("heading", { name: "Other batch proposal", exact: true }).waitFor();
+      await review.getByRole("heading", { name: "Other batch proposal", exact: true }).waitFor();
       const completed = page.waitForResponse((response) =>
         response.url().endsWith(`/knowledge/entries/${findingId}/review`),
       );
       release();
       await completed;
       expect(
-        await dialog
+        await review
           .getByRole("heading", { name: "Other batch proposal", exact: true })
           .isVisible(),
       ).toBe(true);
-      await dialog.getByRole("button", { name: "Reject and next", exact: true }).click();
-      await dialog.waitFor({ state: "hidden" });
+      await review.getByRole("button", { name: "Reject and next", exact: true }).click();
+      await review.waitFor({ state: "hidden" });
       await openBatch("Review acceptance Acme");
-      await dialog
+      await review
         .getByRole("heading", { name: "Review unsupported claim", exact: true })
         .waitFor();
-      await dialog.getByRole("button", { name: "Reject and next", exact: true }).click();
-      await dialog.waitFor({ state: "hidden" });
+      await review.getByRole("button", { name: "Reject and next", exact: true }).click();
+      await review.waitFor({ state: "hidden" });
       const saved = await getKnowledgeEntry(dbClient.db, human, findingId);
       expect(saved?.revision.entry.content).toBe("Acme pays EUR 21,000 annually.");
       expect(await getKnowledgeEntry(dbClient.db, human, noteId)).toBeNull();

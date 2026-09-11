@@ -2399,7 +2399,7 @@ function KnowledgeSaveRenderer({ item }: ToolRendererProps) {
             ? value.filename
             : undefined
       }
-      source={value.status === "retained"}
+      source={value.status === "retained" || value.retained === true}
     />
   );
 }
@@ -2409,6 +2409,7 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     "knowledge_save",
     "knowledge_archive",
     "knowledge_retain_file",
+    "knowledge_retain_message",
     "task_note_promote_knowledge",
   ].flatMap((name) =>
     [name, `opengeni__${name}`, `mcp__opengeni__${name}`].map((trustedName) => ({

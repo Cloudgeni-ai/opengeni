@@ -134,7 +134,11 @@ test("the delegated docs gateway exposes canonical Knowledge without private or 
         entryId: crypto.randomUUID(),
         expectedVersion: 0,
         scope,
-        entry: { kind: "fact", title: `Acme ${scope}`, content: `Acme ${scope} terms` },
+        entry: {
+          kind: "fact",
+          title: `Acme ${scope}`,
+          content: `Acme ${scope} terms. Renewal date: 1 December 2026.`,
+        },
       }),
     );
   const grant: AccessGrant = {
@@ -165,6 +169,22 @@ test("the delegated docs gateway exposes canonical Knowledge without private or 
     expect(JSON.parse(text).entries.map((entry: { id: string }) => entry.id)).toEqual([
       saved[0]!.entryId,
     ]);
+    const fallback = await client.callTool({
+      name: "knowledge_search",
+      arguments: { query: "Acme renewal renew contract expiration renewal date", mode: "hybrid" },
+    });
+    expect(fallback.isError).not.toBe(true);
+    const fallbackText = (fallback.content as Array<{ type: string; text?: string }>).find(
+      (item) => item.type === "text",
+    )!.text!;
+    const results = JSON.parse(fallbackText);
+    expect(results.searchMode).toBe("keyword");
+    expect(results.entries.map((entry: { id: string }) => entry.id)).toEqual([saved[0]!.entryId]);
+    const retained = await client.callTool({
+      name: "knowledge_get",
+      arguments: { entryId: saved[0]!.entryId },
+    });
+    expect(JSON.stringify(retained)).toContain("1 December 2026");
     const hidden = await client.callTool({
       name: "knowledge_get",
       arguments: { entryId: saved[1]!.entryId },

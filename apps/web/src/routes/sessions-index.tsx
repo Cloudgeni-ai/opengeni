@@ -994,6 +994,7 @@ function SessionsIndexRouteContent({
                     : undefined,
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
+                  newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
@@ -1049,6 +1050,7 @@ function SessionsIndexRouteContent({
                   ? [launch.skillCapabilityId]
                   : undefined,
                 expectedNewSessionDraftRevision: flushed.revision,
+                newSessionDraftToolPolicy: persistedToolPolicy,
                 agentLearning: draft.agentLearning,
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,

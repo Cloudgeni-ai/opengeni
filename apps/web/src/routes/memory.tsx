@@ -7,6 +7,7 @@ type KnowledgePanelProps = {
   workspaceId: string;
   focusMemoryId?: string | undefined;
   fileId?: string;
+  review?: boolean;
   returnToBrain?: boolean;
 };
 
@@ -19,13 +20,19 @@ export function MemoryRoute(props: KnowledgePanelProps) {
   );
 }
 
-export function KnowledgePanel({ workspaceId, focusMemoryId, fileId }: KnowledgePanelProps) {
+export function KnowledgePanel({
+  workspaceId,
+  focusMemoryId,
+  fileId,
+  review,
+}: KnowledgePanelProps) {
   const context = useAppContext();
   const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   return (
     <KnowledgeBrowser
-      key={`${workspaceId}:${fileId ?? "all"}`}
+      key={`${workspaceId}:${fileId ?? "all"}:${review ?? false}`}
+      initialReview={review}
       workspaceId={workspaceId}
       personal={personal}
       {...(fileId ? { fileId } : {})}

@@ -17,6 +17,16 @@ export async function searchKnowledgeEntries(
       searchMode: "keyword" as const,
     };
   }
+  // Hybrid queries are natural language, not a conjunction of every synonym.
+  // Keep lexical recall useful when embeddings or vector indexing are unavailable.
+  // Explicit keyword syntax and keyword-mode queries retain their exact semantics.
+  const lexicalQuery =
+    /^[\p{L}\p{N}\s]+$/u.test(request.query) && !/\bOR\b/i.test(request.query)
+      ? [...new Set(request.query.trim().split(/\s+/u))].map((term) => `"${term}"`).join(" OR ")
+      : request.query;
+  const lexicalRequest = KnowledgeEntryListRequest.safeParse({ ...request, query: lexicalQuery });
+  const retrievalRequest =
+    request.mode === "hybrid" && lexicalRequest.success ? lexicalRequest.data : request;
   let embedding: { model: string; values: number[] };
   try {
     const provider = embedder();
@@ -34,12 +44,12 @@ export async function searchKnowledgeEntries(
     // continue using the transactional keyword index while a provider is down.
     if (request.mode === "vector") throw error;
     return {
-      ...(await listKnowledgeEntries(db, context, { ...request, mode: "keyword" })),
+      ...(await listKnowledgeEntries(db, context, { ...retrievalRequest, mode: "keyword" })),
       searchMode: "keyword" as const,
     };
   }
   return {
-    ...(await listKnowledgeEntries(db, context, request, embedding)),
+    ...(await listKnowledgeEntries(db, context, retrievalRequest, embedding)),
     searchMode: request.mode,
   };
 }

@@ -12,6 +12,7 @@ import {
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 import {
+  archiveKnowledgeEntry,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   completeFileUpload,
@@ -83,7 +84,7 @@ async function fixture(mode: "automatic" | "review_first" | "off" = "automatic")
       initialMessage: "What are Acme's renewal terms?",
       resources: [],
       metadata: {},
-      model: "test",
+      model: "codex/gpt-5.6-sol",
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
@@ -180,6 +181,7 @@ async function fixture(mode: "automatic" | "review_first" | "off" = "automatic")
     app,
     deps,
     session,
+    human,
     agentGrant: {
       ...grant,
       subjectId: "worker:test",
@@ -375,6 +377,56 @@ test("first-party MCP explicitly discovers and corrects a pending finding withou
       (await call("knowledge_search", { query: "renewal", mode: "keyword", view: "needs_review" }))
         .entries,
     ).toHaveLength(1);
+  } finally {
+    await mcp.close();
+    await server.close();
+  }
+});
+
+test("message retention pins the real conversation message and respects review-first", async () => {
+  const f = await fixture("review_first");
+  const server = new McpServer({ name: "message-evidence-test", version: "1" });
+  registerKnowledgeEntryTools(server, f.deps, f.agentGrant, f.session.id);
+  const mcp = new McpClient({ name: "agent", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await server.connect(right);
+  await mcp.connect(left);
+  const call = async (name: string, args = {}) => {
+    const result = await mcp.callTool({ name, arguments: args });
+    if (result.isError) throw new Error(JSON.stringify(result));
+    return JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+  };
+  try {
+    const retained = await call("knowledge_retain_message");
+    expect(retained).toMatchObject({ retained: true, outcome: "pending" });
+    const record = await call("knowledge_get", { entryId: retained.entryId, view: "needs_review" });
+    expect(record.revision.entry.content).toBe("What are Acme's renewal terms?");
+    expect(record.revision.entry.source).toMatchObject({
+      kind: "conversation",
+      sessionId: f.session.id,
+      externalId: retained.messageId,
+    });
+    expect(await call("knowledge_retain_message")).toMatchObject({
+      entryId: retained.entryId,
+      revisionId: retained.revisionId,
+      reused: true,
+    });
+    expect(await call("knowledge_get", { entryId: retained.entryId })).toEqual({ found: false });
+    const foreign = await fixture();
+    const [foreignEvent] =
+      await shared.admin`SELECT id FROM session_events WHERE session_id=${foreign.session.id} AND type='user.message' ORDER BY sequence LIMIT 1`;
+    expect(await call("knowledge_retain_message", { messageId: foreignEvent.id })).toMatchObject({
+      retained: false,
+    });
+    await archiveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: retained.entryId,
+      expectedVersion: retained.version,
+    });
+    expect(await call("knowledge_retain_message")).toMatchObject({
+      retained: false,
+      entryId: retained.entryId,
+    });
   } finally {
     await mcp.close();
     await server.close();

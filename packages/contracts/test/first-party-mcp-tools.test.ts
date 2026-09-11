@@ -93,6 +93,7 @@ describe("first-party MCP tool-name contract", () => {
         "knowledge_browse",
         "knowledge_save",
         "knowledge_retain_file",
+        "knowledge_retain_message",
         "instruction_policy_save",
       ]),
     );

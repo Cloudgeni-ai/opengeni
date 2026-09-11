@@ -73,6 +73,7 @@ describe("Company Brain first-party MCP policy", () => {
         "knowledge_browse",
         "knowledge_get",
         "knowledge_retain_file",
+        "knowledge_retain_message",
         "knowledge_save",
         "knowledge_search",
       ]);
@@ -102,6 +103,7 @@ describe("Company Brain first-party MCP policy", () => {
         "knowledge_browse",
         "knowledge_get",
         "knowledge_retain_file",
+        "knowledge_retain_message",
         "knowledge_save",
         "knowledge_search",
       ]);

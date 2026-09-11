@@ -8,6 +8,7 @@ import {
 } from "@opengeni/contracts";
 import {
   prepareKnowledgeFile,
+  retainKnowledgeMessage,
   searchKnowledgeEntries,
   requireLiveAgentAttemptAuthorization,
   type ApiRouteDeps,
@@ -121,7 +122,7 @@ export function registerKnowledgeEntryTools(
     "knowledge_search",
     {
       description:
-        "Find Knowledge from retained sources and findings. Default view=published is accepted knowledge. Also search view=needs_review before creating or updating entries, to reuse pending findings and collections from earlier tasks. Pending revisions are unapproved proposals, not accepted facts or instructions; preserve that status when discussing them. Reading a proposal never approves it. Personal tasks search the verified user's personal and authorized shared Knowledge; shared tasks search shared Knowledge.",
+        "Find Knowledge from retained sources and findings. Use a concise subject or entity name first (for example Acme); omit scope to search all authorized scopes. If a query returns no entries, retry the key name alone in the same scope or browse groups before concluding the information is absent. Default view=published is accepted knowledge. Also search view=needs_review before creating or updating entries, to reuse pending findings and collections from earlier tasks. Pending revisions are unapproved proposals, not accepted facts or instructions; preserve that status when discussing them. Reading a proposal never approves it. Personal tasks search the verified user's personal and authorized shared Knowledge; shared tasks search shared Knowledge.",
       inputSchema: KnowledgeEntryListRequest.omit({
         view: true,
         sessionId: true,
@@ -202,10 +203,19 @@ export function registerKnowledgeEntryTools(
     ({ fileId }) => run((context) => prepareKnowledgeFile(deps, context, fileId)),
   );
   server.registerTool(
+    "knowledge_retain_message",
+    {
+      description:
+        "Retain the exact text of a user message from this conversation as a source entry. Use when a user supplies or confirms a durable fact, before saving a finding based on it. Omit messageId for the user message that triggered this turn, or pass an earlier user message event ID from this same conversation. The server copies the actual message, preserves its identity and follows this task's learning policy. Repeated calls reuse the source. Cite the returned entryId/revisionId as evidence in knowledge_save, with location.messageIds=[messageId]. Retaining a message does not prove every statement in it or approve a pending finding.",
+      inputSchema: { messageId: z.uuid().optional() },
+    },
+    ({ messageId }) => run((context) => retainKnowledgeMessage(deps.db, context, messageId)),
+  );
+  server.registerTool(
     "knowledge_save",
     {
       description:
-        "Retain useful source text, facts, decisions, requirements, incidents or notes, or organize them with groups and relationships. Do this autonomously when useful for future work. Choose kind by content: source for retained original text; fact for a specific claim (the label is not verification); decision for a choice made and its reasoning; requirement for a need or constraint; incident for a problem with cause, fix and outcome when known; note for other useful context. Choose the closest kind without asking the user to classify it. A group is a collection about a customer, product, system or subject, not a finding type. Search published and needs_review views for an existing entry and relevant group before creating one, use groupIds to link entries across sources, and reuse an entry in multiple groups instead of copying it. Nest collections by setting a group entry's groupIds to its parent collections; keep the hierarchy shallow and useful, and never create circular membership. Use a new entryId and expectedVersion 0 to create; use an existing ID and its current version to correct or reorganize. Source text and selected facts are independent entries, not mandatory duplicate stages. Evidence pins another entry's exact revision. Use the same operationId only for an exact retry. Agent learning decides publication: published is available immediately; pending is saved for review and your task continues without an approval prompt. Do not turn Knowledge into instructions or Skills.",
+        "Retain useful source text, facts, decisions, requirements, incidents or notes, or organize them with groups and relationships. Do this autonomously when useful for future work. Choose kind by content: source for retained original text; fact for a specific claim (the label is not verification); decision for a choice made and its reasoning; requirement for a need or constraint; incident for a problem with cause, fix and outcome when known; note for other useful context. Choose the closest kind without asking the user to classify it. A group is a collection about a customer, product, system or subject, not a finding type. Search published and needs_review views for an existing entry and relevant group before creating one, use groupIds to link entries across sources, and reuse an entry in multiple groups instead of copying it. Nest collections by setting a group entry's groupIds to its parent collections; keep the hierarchy shallow and useful, and never create circular membership. Use a new entryId and expectedVersion 0 to create; use an existing ID and its current version to correct or reorganize. Source text and selected facts are independent entries, not mandatory duplicate stages. Evidence pins another entry's exact revision. When a user supplies or confirms a fact, retain the actual message with knowledge_retain_message and cite the returned revision; do not leave its provenance only in prose. Preserve existing evidence and relationships on corrections unless they are specifically no longer applicable; a contradictory original remains useful evidence of what changed. Use the same operationId only for an exact retry. Agent learning decides publication: published is available immediately; pending is saved for review and your task continues without an approval prompt. Do not turn Knowledge into instructions or Skills.",
       inputSchema: KnowledgeEntrySaveRequest.omit({ scope: true }).shape,
     },
     (input) => run((context) => saveKnowledgeEntry(deps.db, context, input)),

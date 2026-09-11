@@ -197,6 +197,8 @@ export type BuildCreateSessionRequestInput = {
   visibility?: "private" | "workspace";
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
+  /** Exact policy acknowledged by the revision-fenced new-session draft. */
+  newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
   defaultLatencyMode: LatencyMode;
@@ -273,11 +275,14 @@ export function buildCreateSessionRequest(
   const defaultToolIds = input.workspaceDefaultMcpServerIds
     ? [...new Set(input.workspaceDefaultMcpServerIds)].sort()
     : null;
-  const tools =
-    input.workspaceMcpCatalogReady === true &&
-    defaultToolIds &&
-    selectedToolIds.join("\u0000") ===
-      [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
+  const tools = input.newSessionDraftToolPolicy
+    ? input.newSessionDraftToolPolicy.toolsProvided
+      ? [...input.newSessionDraftToolPolicy.tools]
+      : undefined
+    : input.workspaceMcpCatalogReady === true &&
+        defaultToolIds &&
+        selectedToolIds.join("\u0000") ===
+          [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
       ? undefined
       : [...input.selectedTools];
   return {

@@ -421,7 +421,8 @@ const workspaceStateRoute = createRoute({
   path: "state",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { view?: "instructions" | "skills" | "files"; file?: string } => ({
+  ): { view?: "instructions" | "skills" | "files"; file?: string; review?: boolean } => ({
+    ...(search.review === true ? { review: true } : {}),
     ...(search.view === "instructions" || search.view === "skills" || search.view === "files"
       ? { view: search.view }
       : {}),
@@ -717,11 +718,12 @@ function WorkspaceSettings() {
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  const { view, file } = workspaceStateRoute.useSearch();
+  const { view, file, review } = workspaceStateRoute.useSearch();
   return (
     <LazyWorkspaceStateRoute
       workspaceId={workspaceId}
       view={view}
+      review={review}
       {...(file ? { fileId: file } : {})}
     />
   );

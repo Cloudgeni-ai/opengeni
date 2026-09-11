@@ -206,7 +206,7 @@ function TextChange({ label, before, after }: { label: string; before: string; a
             }
           >
             <p
-              className={`mb-2 text-xs font-semibold ${title === "Proposed" ? "text-brand" : "text-fg-muted"}`}
+              className={`mb-2 text-xs font-semibold ${title === "Proposed" ? "text-fg" : "text-fg-muted"}`}
             >
               {title}
             </p>

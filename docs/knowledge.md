@@ -63,8 +63,7 @@ ownership. Tools use the exact live attempt; HTTP uses the full authenticated
 access boundary. Legacy role, session and ephemeral selectors remain restrictive.
 
 The original file, source entry, evidence and findings all retain their authority.
-A shared finding cannot point at private evidence. The human UI offers **Copy text
-to workspace** as an explicit, editable new entry. That action does not copy the
+A shared finding cannot point at private evidence. The human UI offers **Share with workspace** as an explicit, editable new entry. That action does not copy the
 private graph, grant access to its original files, or keep the two entries synced.
 Personal originals and Knowledge do not disappear just because their original
 shared workspace is removed. Migration derives original-file ownership from typed
@@ -82,6 +81,11 @@ Memory and Documents links keep the same navigation. Files is a library of
 original copies with one Upload action. Opening a file shows its preview, extracted
 text and a link to related Knowledge. Readable source text stays attached to its
 original and in canonical Knowledge; there is no competing Add text form.
+
+The workspace navigation marks Agent Knowledge with an amber indicator while
+accessible Knowledge proposals await review. That link opens Needs review directly.
+The indicator refreshes after local decisions, on window focus, and every 30 seconds
+while visible; a transient refresh failure preserves the last known pending state.
 
 The Knowledge page uses a compact expandable tree. Collections appear as folders
 with one-line descriptions; entries open their content and evidence on click.
@@ -163,13 +167,17 @@ still apply.
 A correction awaiting review leaves the previous published revision available.
 
 The Knowledge browser groups pending changes by chat turn or scheduled run. A
-human opens the first proposal directly, sees changed text against the exact
+human opens the first proposal directly in the page, with All reviews returning
+to the queue. A compact pending-item list stays beside the selected proposal,
+so reviewers can scan the batch and switch items without leaving the review.
+Review and its supporting entries stay in the page rather than a
+modal. The reviewer sees changed text against the exact
 published version, and approves or rejects it to move to the next change. Pending
 prerequisites are shown first, even outside the loaded page. Sources and
 collection placement are separated under Details, collapsed until requested;
 following an evidence link keeps a Back path to
-the proposal. Revision history expands in place inside Details, above entry
-actions. New entries show their proposed text, with long text expandable.
+the proposal. History expands separately alongside Details, above entry
+actions. Details is omitted when there is no supporting metadata. New entries show their proposed text, with long text expandable.
 Editing before approval and optional bulk selection remain available. A
 selection of up to 100 exact revisions can be reviewed atomically. A complete
 loaded group of up to 100 entries has an Approve all action; larger groups use
@@ -232,3 +240,11 @@ Video operations and screenshot cleanup preserve the accepted file owner so
 background settlement and cleanup remain possible after a source session is
 removed. These internal receipts grant no user or agent additional file access;
 private video status and original downloads still require the verified owner.
+
+Hybrid search treats plain multiword queries as alternatives for lexical recall while embedding the original query. This keeps relevant records discoverable when embeddings or vector indexing are unavailable. Explicit keyword queries and quoted/operator syntax keep their existing semantics. Agents should start with a concise entity name, search authorized scopes by default, and retry a key name or browse before claiming knowledge is absent.
+
+### User confirmations as evidence
+
+`knowledge_retain_message` retains the exact accepted user-message text from the calling conversation, using the same scope and frozen learning policy as other agent saves. Its source identity records the session and message event ID (`source.externalId`), plus the original timestamp. It defaults to the calling turn's user trigger; machine-triggered turns must select a real earlier user message. Foreign-session messages are refused. Repeated retention reuses the source without reviving rejected or archived content.
+
+A finding cites that source's entry and revision in `evidence`, with the message ID in `location.messageIds`. Corrections preserve earlier evidence, including conflicting originals, so a user confirmation explains why a newer value wins. The retained source can be inspected from the finding, and links back to its conversation. Retention is evidence capture, not approval or a claim that every statement is true.

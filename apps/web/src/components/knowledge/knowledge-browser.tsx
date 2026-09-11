@@ -1,3 +1,4 @@
+import { notifyKnowledgeReviewUpdated } from "@/components/rail/use-knowledge-review-indicator";
 import { firstReviewableEntry } from "./knowledge-review-order";
 import { KnowledgeReviewSummary } from "./knowledge-review-summary";
 import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
@@ -17,6 +18,7 @@ import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   FolderIcon,
+  FileTextIcon,
   QuoteIcon,
   LinkIcon,
   PlusIcon,
@@ -68,6 +70,7 @@ export function KnowledgeBrowser({
   initialKind,
   initialScope,
   sourceOnly = false,
+  initialReview = false,
 }: {
   workspaceId: string;
   personal?: boolean;
@@ -76,6 +79,7 @@ export function KnowledgeBrowser({
   initialKind?: KnowledgeEntryKind;
   initialScope?: KnowledgeEntryScope;
   sourceOnly?: boolean;
+  initialReview?: boolean;
 }) {
   const context = useAppContext();
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "documents:manage");
@@ -84,7 +88,7 @@ export function KnowledgeBrowser({
     workspace && hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
   );
   const [reviewGroup, setReviewGroup] = useState<KnowledgeReviewBatch | null>(null);
-  const [view, setView] = useState<View>("published");
+  const [view, setView] = useState<View>(initialReview ? "needs_review" : "published");
   const [scope, setScope] = useState<KnowledgeEntryScope | "all">(
     initialScope ?? (personal ? "personal" : "all"),
   );
@@ -104,6 +108,13 @@ export function KnowledgeBrowser({
   const [trail, setTrail] = useState<Selection[]>([]);
   const startReview = useRef<string | null>(null);
   const [reviewTransition, setReviewTransition] = useState(false);
+  const reviewPanel = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (view === "needs_review" && selection) {
+      reviewPanel.current?.focus();
+      reviewPanel.current?.scrollIntoView({ block: "start" });
+    }
+  }, [view, selection]);
   const [bulkReview, setBulkReview] = useState(false);
   function openRelated(next: Selection) {
     if (selection) setTrail((prior) => [...prior, selection]);
@@ -122,6 +133,7 @@ export function KnowledgeBrowser({
     setReviewTransition(true);
   }
   function finishReview() {
+    notifyKnowledgeReviewUpdated();
     setKind("all");
     setQuery("");
     setSearch("");
@@ -249,6 +261,7 @@ export function KnowledgeBrowser({
           decision,
         })),
       });
+      notifyKnowledgeReviewUpdated();
       setRefresh((value) => value + 1);
     } catch (reason) {
       setError(message(reason));
@@ -304,6 +317,141 @@ export function KnowledgeBrowser({
     setQuery("");
     setSearch("");
     setSelection(null);
+  }
+  const inlineReview = view === "needs_review" && (selection !== null || reviewTransition);
+  const inspection = (
+    <>
+      {reviewTransition ? (
+        <div>
+          <h2 className="text-lg font-semibold">Review knowledge</h2>
+          <p role="status" className="text-sm text-fg-muted">
+            Loading next item…
+          </p>
+        </div>
+      ) : null}
+      {trail.length ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="justify-self-start"
+          onClick={() => {
+            setSelection(trail.at(-1)!);
+            setTrail((prior) => prior.slice(0, -1));
+          }}
+        >
+          <ArrowLeftIcon className="size-4" />
+          {trail.at(-1)?.view === "needs_review" ? "Back to review" : "Back"}
+        </Button>
+      ) : null}
+      {selection?.requiredFor ? (
+        <p className="text-sm text-fg-muted">
+          Review this supporting change before “{selection.requiredFor}”.
+        </p>
+      ) : null}
+      {selection ? (
+        <KnowledgeInspector
+          key={`${selection.id}:${selection.revisionId ?? selection.view ?? "published"}`}
+          workspaceId={workspaceId}
+          selection={selection}
+          canEdit={canEdit}
+          inline={inlineReview}
+          onOpen={openRelated}
+          onReplace={setSelection}
+          onReviewed={finishReview}
+          continueReview={Boolean(reviewGroup)}
+          onGroup={(target) =>
+            selection.view === "needs_review" || trail.length
+              ? openRelated({ id: target.id })
+              : openGroup(target)
+          }
+          onCopy={(entry) => {
+            setSelection(null);
+            setCopying(entry);
+          }}
+          onChanged={() => setRefresh((n) => n + 1)}
+        />
+      ) : null}
+    </>
+  );
+  if (inlineReview) {
+    return (
+      <section
+        ref={reviewPanel}
+        tabIndex={-1}
+        aria-label="Review knowledge"
+        className="grid min-w-0 gap-6 outline-none"
+      >
+        <div className="flex items-center gap-3 border-b border-border pb-4">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setSelection(null);
+              setTrail([]);
+              setReviewGroup(null);
+              startReview.current = null;
+              setReviewTransition(false);
+            }}
+          >
+            <ArrowLeftIcon className="size-4" />
+            All reviews
+          </Button>
+          {reviewGroup?.title ? (
+            <span className="truncate text-sm text-fg-muted">{reviewGroup.title}</span>
+          ) : null}
+        </div>
+        <div className="grid min-w-0 items-start gap-6 md:grid-cols-[15rem_minmax(0,1fr)]">
+          <nav aria-label="Pending knowledge" className="grid min-w-0 gap-2 md:sticky md:top-4">
+            <h2 className="px-2 text-xs font-medium text-fg-muted">Needs review</h2>
+            <div className="grid max-h-56 gap-1 overflow-y-auto md:max-h-[65vh]">
+              {entries.map((item) => {
+                const active = (trail[0]?.id ?? selection?.id) === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    aria-current={active ? "true" : undefined}
+                    className={`flex min-w-0 items-start gap-2 rounded-md border-l-2 px-3 py-3 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ${active ? "border-brand bg-brand/10 text-fg" : "border-transparent text-fg-muted hover:bg-surface-2 hover:text-fg"}`}
+                    onClick={() => {
+                      startReview.current = null;
+                      setReviewTransition(false);
+                      setTrail([]);
+                      setSelection({ id: item.id, view: "needs_review" });
+                    }}
+                  >
+                    {item.revision.kind === "group" ? (
+                      <FolderIcon className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                    ) : (
+                      <FileTextIcon className="mt-0.5 size-4 shrink-0" />
+                    )}
+                    <span className="grid min-w-0 gap-1">
+                      <span className="break-words font-medium">{item.revision.title}</span>
+                      {item.revision.preview ? (
+                        <span className="line-clamp-2 text-xs leading-5 text-fg-muted">
+                          {item.revision.preview}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                );
+              })}
+              {loading && !entries.length ? (
+                <p role="status" className="px-3 text-sm text-fg-muted">
+                  Loading items…
+                </p>
+              ) : null}
+              {cursor ? (
+                <Button variant="ghost" disabled={loading} onClick={() => void loadMore()}>
+                  Show more
+                </Button>
+              ) : null}
+            </div>
+          </nav>
+          <div className="grid min-w-0 gap-5 border-t border-border pt-6 md:border-l md:border-t-0 md:pl-6 md:pt-0">
+            {inspection}
+          </div>
+        </div>
+      </section>
+    );
   }
   return (
     <div className="grid gap-5">
@@ -613,53 +761,7 @@ export function KnowledgeBrowser({
           className="min-w-0 bg-surface sm:max-w-3xl"
           style={{ borderColor: "var(--color-border-strong)" }}
         >
-          {reviewTransition ? (
-            <DialogHeader>
-              <DialogTitle>Review knowledge</DialogTitle>
-              <DialogDescription role="status">Loading next change…</DialogDescription>
-            </DialogHeader>
-          ) : null}
-          {trail.length ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="justify-self-start"
-              onClick={() => {
-                setSelection(trail.at(-1)!);
-                setTrail((prior) => prior.slice(0, -1));
-              }}
-            >
-              <ArrowLeftIcon className="size-4" />
-              {trail.at(-1)?.view === "needs_review" ? "Back to review" : "Back"}
-            </Button>
-          ) : null}
-          {selection?.requiredFor ? (
-            <p className="text-sm text-fg-muted">
-              Review this supporting change before “{selection.requiredFor}”.
-            </p>
-          ) : null}
-          {selection ? (
-            <KnowledgeInspector
-              key={`${selection.id}:${selection.revisionId ?? selection.view ?? "published"}`}
-              workspaceId={workspaceId}
-              selection={selection}
-              canEdit={canEdit}
-              onOpen={openRelated}
-              onReplace={setSelection}
-              onReviewed={finishReview}
-              continueReview={Boolean(reviewGroup)}
-              onGroup={(target) =>
-                selection.view === "needs_review" || trail.length
-                  ? openRelated({ id: target.id })
-                  : openGroup(target)
-              }
-              onCopy={(entry) => {
-                setSelection(null);
-                setCopying(entry);
-              }}
-              onChanged={() => setRefresh((n) => n + 1)}
-            />
-          ) : null}
+          {inspection}
         </DialogContent>
       </Dialog>
       {copying ? (
@@ -670,6 +772,7 @@ export function KnowledgeBrowser({
           onClose={() => setCopying(null)}
           onSaved={() => {
             setCopying(null);
+            notifyKnowledgeReviewUpdated();
             setRefresh((value) => value + 1);
           }}
         />
@@ -751,11 +854,11 @@ function CopyKnowledgeDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Copy text to workspace</DialogTitle>
+          <DialogTitle>Share with a workspace</DialogTitle>
           <DialogDescription>
-            Creates a separate entry everyone with Knowledge access in the selected workspace can
-            read. Review the text below. Original files, private evidence and private groups are not
-            included.
+            Share the text below as a new knowledge entry in the selected workspace. People and
+            agents with access to its knowledge can read it. Your personal entry stays private.
+            Attached files and private source links are not shared.
           </DialogDescription>
         </DialogHeader>
         {targets.length ? (
@@ -772,6 +875,7 @@ function CopyKnowledgeDialog({
             </label>
             <KnowledgeEditor
               key={target}
+              submitLabel="Share copy"
               workspaceId={target}
               scope="workspace"
               initial={{
@@ -807,6 +911,7 @@ function CopyKnowledgeDialog({
 }
 
 function KnowledgeInspector(props: {
+  inline?: boolean;
   workspaceId: string;
   selection: Selection;
   canEdit: boolean;
@@ -942,21 +1047,24 @@ function KnowledgeInspector(props: {
       if (isCurrent()) setHistoryLoading(false);
     }
   }
+  const Header = props.inline ? "header" : DialogHeader;
+  const Title = props.inline ? "h2" : DialogTitle;
+  const Description = props.inline ? "p" : DialogDescription;
   const entry = record?.revision.entry;
   const pending = record?.revision.outcome === "pending";
   const historical = record && !pending && record.revision.id !== record.publishedRevisionId;
   return (
     <>
-      <DialogHeader className="min-w-0 pr-6 text-left">
-        <DialogTitle className="break-words leading-snug">
+      <Header className="grid min-w-0 gap-2 pr-6 text-left">
+        <Title className="break-words text-lg font-semibold leading-snug">
           {entry?.title ?? "Knowledge entry"}
-        </DialogTitle>
-        <DialogDescription>
+        </Title>
+        <Description className="text-sm text-fg-muted">
           {record
             ? `${pending ? (record.revision.change === "archive" ? "Archive request" : record.publishedRevisionId ? "Review update" : entry?.kind === "group" ? "New collection" : "New knowledge") : KIND[record.revision.entry.kind]} · ${record.scope === "personal" ? "Only me" : record.scope === "organization" ? "Company" : "Workspace"}`
             : "Loading entry…"}
-        </DialogDescription>
-      </DialogHeader>
+        </Description>
+      </Header>
       <div className="grid min-w-0 gap-5">
         {error ? (
           <p role="alert" className="text-sm text-status-error">
@@ -1018,173 +1126,185 @@ function KnowledgeInspector(props: {
                 {entry.content || "This collection brings together related knowledge."}
               </div>
             )}
-            <details
-              className="group/details rounded-lg border border-border bg-bg/60 px-4 py-3"
-              open={pending ? undefined : true}
-            >
-              <summary className="cursor-pointer text-sm font-medium text-fg">Details</summary>
-              <div className="mt-3 grid gap-4">
-                {entry.source || entry.evidence.length ? (
-                  <section aria-label="Sources" className="grid gap-3">
-                    <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
-                      <QuoteIcon className="size-4 text-brand" />
-                      Sources
-                    </h3>
-                    {entry.source ? (
-                      <div className="grid gap-2">
-                        <p className="text-sm text-fg-muted">
-                          {SOURCE[entry.source.kind]}
-                          {entry.source.retention === "passages"
-                            ? " · Retained passages"
-                            : entry.source.retention === "full_text"
-                              ? " · Retained text"
-                              : ""}
-                        </p>
-                        {externalUrl(entry.source.uri) ? (
-                          <a
-                            href={externalUrl(entry.source.uri)!}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-sm text-brand hover:underline"
-                          >
-                            Open original source
-                          </a>
-                        ) : null}
-                        {entry.source.fileId ? (
-                          <KnowledgeOriginalFile
-                            key={`${record.id}:${record.revision.id}`}
-                            workspaceId={props.workspaceId}
-                            entryId={record.id}
-                            revisionId={record.revision.id}
-                          />
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {entry.evidence.length ? (
-                      <div className="grid gap-3">
-                        {entry.evidence.map((evidence) => (
-                          <div key={JSON.stringify(evidence)} className="grid gap-1">
-                            {evidence.quote ? (
-                              <blockquote className="border-l-2 border-brand/40 pl-3 text-sm text-fg">
-                                {evidence.quote}
-                              </blockquote>
-                            ) : null}
-                            <KnowledgeReference
+            {(entry.source && entry.source.kind !== "manual") ||
+            entry.evidence.length ||
+            entry.groupIds.length ||
+            entry.relationships.length ? (
+              <details
+                className="group/details rounded-lg border border-border bg-bg/60 px-4 py-3"
+                open={pending ? undefined : true}
+              >
+                <summary className="cursor-pointer text-sm font-medium text-fg">Details</summary>
+                <div className="mt-3 grid gap-4">
+                  {(entry.source && entry.source.kind !== "manual") || entry.evidence.length ? (
+                    <section aria-label="Sources" className="grid gap-3">
+                      <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+                        <QuoteIcon className="size-4 text-brand" />
+                        Sources
+                      </h3>
+                      {entry.source ? (
+                        <div className="grid gap-2">
+                          <p className="text-sm text-fg-muted">
+                            {SOURCE[entry.source.kind]}
+                            {entry.source.retention === "passages"
+                              ? " · Retained passages"
+                              : entry.source.retention === "full_text"
+                                ? " · Retained text"
+                                : ""}
+                          </p>
+                          {externalUrl(entry.source.uri) ? (
+                            <a
+                              href={externalUrl(entry.source.uri)!}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-sm text-brand hover:underline"
+                            >
+                              Open original source
+                            </a>
+                          ) : null}
+                          {entry.source.kind === "conversation" && entry.source.sessionId ? (
+                            <a
+                              href={`/workspaces/${props.workspaceId}/sessions/${entry.source.sessionId}`}
+                              className="text-sm text-brand hover:underline"
+                            >
+                              Open conversation
+                            </a>
+                          ) : null}
+                          {entry.source.fileId ? (
+                            <KnowledgeOriginalFile
+                              key={`${record.id}:${record.revision.id}`}
                               workspaceId={props.workspaceId}
-                              id={evidence.entryId}
-                              revisionId={evidence.revisionId}
-                              onClick={() =>
-                                props.onOpen({
-                                  id: evidence.entryId,
-                                  revisionId: evidence.revisionId,
-                                })
-                              }
+                              entryId={record.id}
+                              revisionId={record.revision.id}
                             />
-                            {evidence.location.page ? (
-                              <span className="text-xs text-fg-subtle">
-                                Page {evidence.location.page}
-                              </span>
-                            ) : null}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </section>
-                ) : null}
-                {entry.groupIds.length ? (
-                  <section
-                    aria-label="Collection placement"
-                    className={`grid gap-2 ${entry.source || entry.evidence.length ? "border-t border-border pt-4" : ""}`}
-                  >
-                    <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
-                      <FolderIcon className="size-4 text-amber-600 dark:text-amber-400" />
-                      {pending && record.revision.change !== "archive" ? "Save in" : "Saved in"}
-                    </h3>
-                    {entry.groupIds.map((id) => (
-                      <KnowledgeReference
-                        key={id}
-                        workspaceId={props.workspaceId}
-                        id={id}
-                        onClick={(title) => props.onGroup({ id, title })}
-                      />
-                    ))}
-                  </section>
-                ) : null}
-                {entry.relationships.length ? (
-                  <section className="grid gap-2 border-t border-border pt-4">
-                    <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
-                      <LinkIcon className="size-4" />
-                      Related knowledge
-                    </h3>
-                    {entry.relationships.map((relation) => (
-                      <div key={`${relation.entryId}:${relation.relation}`}>
-                        <span className="mr-2 text-xs text-fg-subtle">
-                          {relation.relation.replaceAll("_", " ")}
-                        </span>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {entry.evidence.length ? (
+                        <div className="grid gap-3">
+                          {entry.evidence.map((evidence) => (
+                            <div key={JSON.stringify(evidence)} className="grid gap-1">
+                              {evidence.quote ? (
+                                <blockquote className="border-l-2 border-brand/40 pl-3 text-sm text-fg">
+                                  {evidence.quote}
+                                </blockquote>
+                              ) : null}
+                              <KnowledgeReference
+                                workspaceId={props.workspaceId}
+                                id={evidence.entryId}
+                                revisionId={evidence.revisionId}
+                                onClick={() =>
+                                  props.onOpen({
+                                    id: evidence.entryId,
+                                    revisionId: evidence.revisionId,
+                                  })
+                                }
+                              />
+                              {evidence.location.page ? (
+                                <span className="text-xs text-fg-subtle">
+                                  Page {evidence.location.page}
+                                </span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </section>
+                  ) : null}
+                  {entry.groupIds.length ? (
+                    <section
+                      aria-label="Collection placement"
+                      className={`grid gap-2 ${entry.source || entry.evidence.length ? "border-t border-border pt-4" : ""}`}
+                    >
+                      <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+                        <FolderIcon className="size-4 text-amber-600 dark:text-amber-400" />
+                        {pending && record.revision.change !== "archive" ? "Save in" : "Saved in"}
+                      </h3>
+                      {entry.groupIds.map((id) => (
                         <KnowledgeReference
+                          key={id}
                           workspaceId={props.workspaceId}
-                          id={relation.entryId}
-                          onClick={() => props.onOpen({ id: relation.entryId })}
+                          id={id}
+                          onClick={(title) => props.onGroup({ id, title })}
                         />
-                      </div>
-                    ))}
-                  </section>
+                      ))}
+                    </section>
+                  ) : null}
+                  {entry.relationships.length ? (
+                    <section className="grid gap-2 border-t border-border pt-4">
+                      <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+                        <LinkIcon className="size-4" />
+                        Related knowledge
+                      </h3>
+                      {entry.relationships.map((relation) => (
+                        <div key={`${relation.entryId}:${relation.relation}`}>
+                          <span className="mr-2 text-xs text-fg-subtle">
+                            {relation.relation.replaceAll("_", " ")}
+                          </span>
+                          <KnowledgeReference
+                            workspaceId={props.workspaceId}
+                            id={relation.entryId}
+                            onClick={() => props.onOpen({ id: relation.entryId })}
+                          />
+                        </div>
+                      ))}
+                    </section>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+            <details
+              className="rounded-lg border border-border bg-bg/60 px-4 py-3"
+              key={`history:${record.version}`}
+              onToggle={(event) => {
+                if (event.currentTarget.open && !historyLoading) void loadHistory();
+              }}
+            >
+              <summary className="cursor-pointer text-sm font-medium text-fg">History</summary>
+              <section aria-label="Revision history" className="mt-3 grid gap-2">
+                {historyLoading ? (
+                  <p role="status" className="text-sm text-fg-muted">
+                    Loading revisions…
+                  </p>
                 ) : null}
-                <details
-                  key={`history:${record.version}`}
-                  onToggle={(event) => {
-                    if (event.currentTarget.open && !historyLoading) void loadHistory();
-                  }}
-                >
-                  <summary className="cursor-pointer text-sm font-medium text-fg">
-                    Revision history
-                  </summary>
-                  <section aria-label="Revision history" className="mt-3 grid gap-2">
-                    {historyLoading ? (
-                      <p role="status" className="text-sm text-fg-muted">
-                        Loading revisions…
-                      </p>
-                    ) : null}
-                    {historyError ? (
-                      <div role="alert" className="text-sm text-status-error">
-                        {historyError}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={historyLoading}
-                          onClick={() => void loadHistory()}
-                        >
-                          Retry history
-                        </Button>
-                      </div>
-                    ) : null}
-                    {history.map((item) => (
-                      <button
-                        key={item.revision.id}
-                        className="text-left text-sm text-fg-muted hover:text-fg"
-                        onClick={() =>
-                          props.onOpen({
-                            id: item.id,
-                            revisionId: item.revision.id,
-                          })
-                        }
-                      >
-                        Revision {item.revision.number} · {item.revision.outcome} ·{" "}
-                        {relativeTimeLabel(item.revision.createdAt)}
-                      </button>
-                    ))}
-                    {before ? (
-                      <Button
-                        variant="ghost"
-                        disabled={historyLoading}
-                        onClick={() => void loadHistory(true)}
-                      >
-                        Earlier revisions
-                      </Button>
-                    ) : null}
-                  </section>
-                </details>
-              </div>
+                {historyError ? (
+                  <div role="alert" className="text-sm text-status-error">
+                    {historyError}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={historyLoading}
+                      onClick={() => void loadHistory()}
+                    >
+                      Retry history
+                    </Button>
+                  </div>
+                ) : null}
+                {history.map((item) => (
+                  <button
+                    key={item.revision.id}
+                    className="text-left text-sm text-fg-muted hover:text-fg"
+                    onClick={() =>
+                      props.onOpen({
+                        id: item.id,
+                        revisionId: item.revision.id,
+                      })
+                    }
+                  >
+                    Revision {item.revision.number} · {item.revision.outcome} ·{" "}
+                    {relativeTimeLabel(item.revision.createdAt)}
+                  </button>
+                ))}
+                {before ? (
+                  <Button
+                    variant="ghost"
+                    disabled={historyLoading}
+                    onClick={() => void loadHistory(true)}
+                  >
+                    Earlier revisions
+                  </Button>
+                ) : null}
+              </section>
             </details>
             <div className="flex flex-wrap gap-2 border-t border-border pt-4">
               {props.canEdit && !editing && !historical ? (
@@ -1209,7 +1329,7 @@ function KnowledgeInspector(props: {
                       disabled={busy}
                       onClick={() => props.onCopy(record)}
                     >
-                      Copy text to workspace
+                      Share with workspace
                     </Button>
                   ) : null}
                   {pending ? (

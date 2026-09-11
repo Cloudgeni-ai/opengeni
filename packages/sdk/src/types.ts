@@ -3024,6 +3024,7 @@ export type FirstPartyMcpToolName =
   | "knowledge_browse"
   | "knowledge_save"
   | "knowledge_retain_file"
+  | "knowledge_retain_message"
   | "knowledge_archive"
   | "instruction_policy_save"
   | "instruction_policy_get"

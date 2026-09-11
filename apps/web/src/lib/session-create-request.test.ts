@@ -223,6 +223,33 @@ describe("buildCreateSessionRequest", () => {
     expect(result).not.toHaveProperty("tools");
   });
 
+  test("preserves the acknowledged draft policy when explicit tools equal defaults", () => {
+    const tools = [{ kind: "mcp" as const, id: "docs" }];
+    const result = build([], [], {
+      selectedTools: tools,
+      workspaceDefaultMcpServerIds: ["docs"],
+      workspaceMcpCatalogReady: true,
+      expectedNewSessionDraftRevision: 7,
+      newSessionDraftToolPolicy: { tools, toolsProvided: true },
+    });
+    expect(result.tools).toEqual(tools);
+    expect(result.expectedNewSessionDraftRevision).toBe(7);
+  });
+
+  test("preserves explicit empty and omitted draft policies across catalog changes", () => {
+    for (const toolsProvided of [true, false]) {
+      const result = build([], [], {
+        selectedTools: [{ kind: "mcp", id: "docs" }],
+        workspaceDefaultMcpServerIds: ["files"],
+        workspaceMcpCatalogReady: true,
+        expectedNewSessionDraftRevision: 7,
+        newSessionDraftToolPolicy: { tools: [], toolsProvided },
+      });
+      if (toolsProvided) expect(result.tools).toEqual([]);
+      else expect(result).not.toHaveProperty("tools");
+    }
+  });
+
   test("keeps explicit empty, subset, and partially hydrated selections on the wire", () => {
     const common = {
       workspaceDefaultMcpServerIds: ["docs"],

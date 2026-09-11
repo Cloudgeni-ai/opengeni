@@ -27,7 +27,7 @@ export function buildDocumentsMcpServer(
     "knowledge_search",
     {
       description:
-        "Search published structured Knowledge and retained source text in the current authorized scope.",
+        "Search published structured Knowledge and retained source text in the current authorized scope. Use a concise subject or entity name first (for example Acme); omit scope to search all authorized scopes. If a query returns no entries, retry the key name alone in the same scope or browse groups before concluding the information is absent.",
       inputSchema: KnowledgeEntryListRequest.omit({
         view: true,
         sessionId: true,
