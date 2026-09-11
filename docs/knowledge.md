@@ -77,11 +77,15 @@ retain their prior workspace ownership instead of guessing an owner.
 
 Agent Knowledge is one page with persistent **Knowledge**, **Files**,
 **Instructions** and **Skills** tabs. Each tab has a URL under `/state`; historical
-Memory and Documents links keep the same navigation. Files contains original
-copies and saved source text. Both lead back to related Knowledge without leaving
-this page's navigation. Source text is a filtered view of canonical Knowledge.
+Memory and Documents links keep the same navigation. Files is a library of
+original copies with one Upload action. Opening a file shows its preview, extracted
+text and a link to related Knowledge. Readable source text stays attached to its
+original and in canonical Knowledge; there is no competing Add text form.
 
-The main Knowledge list emphasizes titles, content and origin. Detailed types are
+The Knowledge page separates collection cards from knowledge entry cards. Each
+card opens directly with mouse or keyboard; a collection opens its members, and
+an entry opens its content and evidence. Both sections retain the same server
+search and pagination. The list emphasizes titles, content and origin. Detailed types are
 available through an optional filter and entry details; manual authoring starts
 with title and text. The UI calls groups **collections** and the general `note`
 kind **General knowledge**. A collection brings together entries about a customer,

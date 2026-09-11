@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -36,7 +36,12 @@ const createKnowledgeDrop = mock(async (_workspace: string, _request: unknown) =
   error: null,
 }));
 const context = {
-  client: { listFiles, uploadFile, createKnowledgeDrop },
+  client: {
+    listFiles,
+    uploadFile,
+    createKnowledgeDrop,
+    createFileDownloadUrl: async () => ({ url: "https://files.example.test/contract.pdf" }),
+  },
   clientConfig: { fileUploads: { enabled: true } },
   accessContext: {
     mode: "local",
@@ -56,11 +61,9 @@ mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("@/components/knowledge/knowledge-browser", () => ({
   KnowledgeBrowser: () => <div>Canonical source browser</div>,
 }));
+GlobalRegistrator.register();
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const { DocumentsRoute } = await import("./documents");
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-});
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
@@ -105,9 +108,16 @@ test("lists retained chat originals and links each to its canonical Knowledge", 
   try {
     expect(listFiles).toHaveBeenCalledWith("workspace-a", { scope: "workspace", limit: 30 });
     expect(view.container.textContent).toContain("Acme-contract.pdf");
-    expect(view.container.textContent).toContain("Original copy");
-    const link = [...view.container.querySelectorAll("a")].find(
-      (a) => a.textContent === "Related knowledge",
+    expect(view.container.textContent).not.toContain("Add text");
+    expect(view.container.textContent).not.toContain("Saved source text");
+    const card = view.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Acme-contract.pdf"]',
+    )!;
+    await act(async () => card.click());
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Extracted text");
+    const link = [...dialog.querySelectorAll("a")].find((a) =>
+      a.textContent?.includes("View knowledge from this file"),
     )!;
     expect(link.getAttribute("href")).toContain(`file=${original.id}`);
     expect(view.container.textContent).not.toContain("No documents yet");

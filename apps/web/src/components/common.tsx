@@ -133,9 +133,15 @@ export function PageHeader(props: {
   title: string;
   description: string;
   actions?: ReactNode;
+  className?: string;
 }) {
   return (
-    <div className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
+    <div
+      className={cn(
+        "flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between",
+        props.className,
+      )}
+    >
       <div className="min-w-0">
         <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
           <span className="text-brand">{props.icon}</span>

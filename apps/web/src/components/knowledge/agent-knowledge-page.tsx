@@ -26,6 +26,7 @@ export function AgentKnowledgePage({
   return (
     <ContentPage width="standard">
       <PageHeader
+        className="border-0 pb-0"
         icon={<BrainCircuitIcon className="size-4" />}
         title="Agent Knowledge"
         description={
@@ -35,7 +36,7 @@ export function AgentKnowledgePage({
         }
       />
       <Tabs
-        className="mt-6 min-w-0 gap-6"
+        className="mt-7 min-w-0 gap-7"
         value={section}
         onValueChange={(value) => {
           const next = value as AgentKnowledgeSection;
@@ -48,11 +49,22 @@ export function AgentKnowledgePage({
         }}
       >
         <div className="min-w-0 overflow-x-auto border-b border-border pb-1">
-          <TabsList variant="line" aria-label="Agent Knowledge sections">
-            <TabsTrigger value="knowledge">Knowledge</TabsTrigger>
-            <TabsTrigger value="files">Files</TabsTrigger>
-            <TabsTrigger value="instructions">Instructions</TabsTrigger>
-            <TabsTrigger value="skills">Skills</TabsTrigger>
+          <TabsList variant="line" aria-label="Agent Knowledge sections" className="gap-5 p-0">
+            <TabsTrigger value="knowledge" className="rounded-none border-0 px-1 py-2 shadow-none">
+              Knowledge
+            </TabsTrigger>
+            <TabsTrigger value="files" className="rounded-none border-0 px-1 py-2 shadow-none">
+              Files
+            </TabsTrigger>
+            <TabsTrigger
+              value="instructions"
+              className="rounded-none border-0 px-1 py-2 shadow-none"
+            >
+              Instructions
+            </TabsTrigger>
+            <TabsTrigger value="skills" className="rounded-none border-0 px-1 py-2 shadow-none">
+              Skills
+            </TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value={section} className="min-w-0">

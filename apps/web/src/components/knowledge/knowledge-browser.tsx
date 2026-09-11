@@ -11,13 +11,19 @@ import type {
   KnowledgeReviewBatch,
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, FileTextIcon, FolderIcon, PlusIcon, SearchIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  FileTextIcon,
+  FolderIcon,
+  PlusIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { MetaChip } from "@/components/ui/meta-chip";
 import {
   Sheet,
   SheetContent,
@@ -38,6 +44,7 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { BehaviorReviews } from "./behavior-reviews";
 import { KNOWLEDGE_KIND_LABEL as KIND, KNOWLEDGE_KIND_HELP } from "./knowledge-labels";
+import { KnowledgeCard } from "./knowledge-card";
 import { FormDisclosure } from "@/components/ui/form-disclosure";
 
 const SOURCE: Record<string, string> = {
@@ -185,6 +192,60 @@ export function KnowledgeBrowser({
       setBusy(false);
     }
   }
+  const collections = entries.filter((entry) => entry.revision.kind === "group");
+  const knowledge = entries.filter((entry) => entry.revision.kind !== "group");
+  function renderEntry(entry: KnowledgeEntrySummary, tab: View) {
+    const collection = entry.revision.kind === "group";
+    return (
+      <div key={entry.id} className="flex min-w-0 items-stretch gap-3">
+        {tab === "needs_review" && canEdit ? (
+          <input
+            type="checkbox"
+            aria-label={`Select ${entry.revision.title}`}
+            className="mt-6 size-4 shrink-0"
+            checked={selected.has(entry.id)}
+            disabled={busy || (!selected.has(entry.id) && selected.size >= 100)}
+            onChange={(event) => {
+              setSelected((prior) => {
+                const next = new Set(prior);
+                if (event.target.checked) next.add(entry.id);
+                else next.delete(entry.id);
+                return next;
+              });
+            }}
+          />
+        ) : null}
+        <KnowledgeCard
+          title={entry.revision.title}
+          description={entry.excerpts[0]?.text ?? entry.revision.preview}
+          variant={collection ? "collection" : "entry"}
+          icon={
+            collection ? <FolderIcon className="size-5" /> : <FileTextIcon className="size-4" />
+          }
+          metadata={
+            <>
+              {entry.revision.kind === "source" ? <span>Reference material</span> : null}
+              {entry.revision.sourceKind ? <span>{SOURCE[entry.revision.sourceKind]}</span> : null}
+              <span>
+                {entry.scope === "personal"
+                  ? "Only me"
+                  : entry.scope === "organization"
+                    ? "Company"
+                    : "Workspace"}
+              </span>
+              {entry.revision.change === "archive" ? <span>Archive requested</span> : null}
+              <span>{relativeTimeLabel(entry.updatedAt)}</span>
+            </>
+          }
+          onClick={() =>
+            collection && tab === "published"
+              ? openGroup({ id: entry.id, title: entry.revision.title })
+              : setSelection({ id: entry.id, view: tab })
+          }
+        />
+      </div>
+    );
+  }
   function openGroup(entry: { id: string; title: string }) {
     setGroup(entry);
     setKind("all");
@@ -208,7 +269,7 @@ export function KnowledgeBrowser({
       <div className="flex flex-wrap items-center gap-2">
         {view !== "needs_review" || reviewGroup ? (
           <form
-            className="flex min-w-48 flex-1 items-center gap-2"
+            className="relative min-w-48 flex-1"
             onSubmit={(event) => {
               event.preventDefault();
               setSearch(query);
@@ -216,11 +277,18 @@ export function KnowledgeBrowser({
           >
             <Input
               aria-label="Search knowledge"
+              className="pl-10"
               value={query}
               placeholder="Search knowledge"
               onChange={(event) => setQuery(event.target.value)}
             />
-            <Button type="submit" variant="outline" size="icon" aria-label="Search">
+            <Button
+              type="submit"
+              variant="ghost"
+              size="icon"
+              className="absolute inset-y-0 left-0"
+              aria-label="Search"
+            >
               <SearchIcon className="size-4" />
             </Button>
           </form>
@@ -243,24 +311,21 @@ export function KnowledgeBrowser({
         {!sourceOnly && (view !== "needs_review" || reviewGroup) ? (
           <Button
             variant="ghost"
+            size="icon"
+            aria-label={kind === "all" ? "Filter knowledge" : `Filter knowledge: ${KIND[kind]}`}
+            title="Filter knowledge"
             aria-expanded={filtersOpen}
-            aria-controls="knowledge-type-filters"
+            aria-controls={filtersOpen ? "knowledge-type-filters" : undefined}
             onClick={() => setFiltersOpen((open) => !open)}
           >
-            {kind === "all" ? "Filter by type" : `Type: ${KIND[kind]}`}
+            <SlidersHorizontalIcon className="size-4" />
           </Button>
         ) : null}
         {canEdit && !sourceOnly ? (
-          <>
-            <Button variant="outline" onClick={() => setCreating("note")}>
-              <PlusIcon className="size-4" />
-              Add knowledge
-            </Button>
-            <Button variant="ghost" onClick={() => setCreating("group")}>
-              <FolderIcon className="size-4" />
-              New collection
-            </Button>
-          </>
+          <Button onClick={() => setCreating("note")}>
+            <PlusIcon className="size-4" />
+            Add knowledge
+          </Button>
         ) : null}
       </div>
       {filtersOpen && !sourceOnly && (view !== "needs_review" || reviewGroup) ? (
@@ -290,7 +355,14 @@ export function KnowledgeBrowser({
             <ArrowLeftIcon className="size-4" />
             All knowledge
           </Button>
-          <h2 className="text-base font-medium">{group.title}</h2>
+          <h2 className="min-w-0 flex-1 text-base font-semibold">{group.title}</h2>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSelection({ id: group.id, view: "published" })}
+          >
+            Collection details
+          </Button>
         </div>
       ) : null}
       <Tabs
@@ -304,10 +376,18 @@ export function KnowledgeBrowser({
           setGroup(null);
         }}
       >
-        <TabsList aria-label="Knowledge status">
-          <TabsTrigger value="published">Saved</TabsTrigger>
-          {!sourceOnly ? <TabsTrigger value="needs_review">Needs review</TabsTrigger> : null}
-          <TabsTrigger value="archived">Archived</TabsTrigger>
+        <TabsList variant="line" aria-label="Knowledge status" className="gap-4 p-0">
+          <TabsTrigger value="published" className="rounded-none border-0 px-0 shadow-none">
+            All knowledge
+          </TabsTrigger>
+          {!sourceOnly ? (
+            <TabsTrigger value="needs_review" className="rounded-none border-0 px-0 shadow-none">
+              Needs review
+            </TabsTrigger>
+          ) : null}
+          <TabsTrigger value="archived" className="rounded-none border-0 px-0 shadow-none">
+            Archived
+          </TabsTrigger>
         </TabsList>
         {(["published", "needs_review", "archived"] as const).map((tab) => (
           <TabsContent key={tab} value={tab} className="mt-4">
@@ -386,77 +466,57 @@ export function KnowledgeBrowser({
                 </Button>
               </p>
             ) : null}
-            <div className="divide-y divide-border border-y border-border">
-              {entries.map((entry) => (
-                <div key={entry.id} className="flex items-start gap-3 py-4">
-                  {tab === "needs_review" && canEdit ? (
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${entry.revision.title}`}
-                      className="mt-1 size-4"
-                      checked={selected.has(entry.id)}
-                      disabled={busy || (!selected.has(entry.id) && selected.size >= 100)}
-                      onChange={(event) => {
-                        setSelected((prior) => {
-                          const next = new Set(prior);
-                          if (event.target.checked) next.add(entry.id);
-                          else next.delete(entry.id);
-                          return next;
-                        });
-                      }}
-                    />
-                  ) : null}
-                  {entry.revision.kind === "group" ? (
-                    <FolderIcon className="mt-1 size-4 shrink-0 text-fg-muted" />
-                  ) : (
-                    <FileTextIcon className="mt-1 size-4 shrink-0 text-fg-muted" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <button
-                      type="button"
-                      className="text-left text-sm font-medium hover:underline"
-                      onClick={() =>
-                        entry.revision.kind === "group" && tab === "published"
-                          ? openGroup({ id: entry.id, title: entry.revision.title })
-                          : setSelection({ id: entry.id, view: tab })
-                      }
-                    >
-                      {entry.revision.title}
-                    </button>
-                    <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-sm text-fg-muted">
-                      {entry.excerpts[0]?.text ?? entry.revision.preview}
-                    </p>
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {entry.revision.kind === "group" || entry.revision.kind === "source" ? (
-                        <MetaChip>{KIND[entry.revision.kind]}</MetaChip>
-                      ) : null}
-                      <MetaChip>
-                        {entry.scope === "personal"
-                          ? "Only me"
-                          : entry.scope === "organization"
-                            ? "Company"
-                            : "Workspace"}
-                      </MetaChip>
-                      {entry.revision.sourceKind ? (
-                        <MetaChip>{SOURCE[entry.revision.sourceKind]}</MetaChip>
-                      ) : null}
-                      {entry.revision.change === "archive" ? (
-                        <MetaChip>Archive requested</MetaChip>
-                      ) : null}
-                      <span className="text-xs text-fg-subtle">
-                        {relativeTimeLabel(entry.updatedAt)}
-                      </span>
+            <div className="grid gap-8">
+              {collections.length ||
+              (tab === "published" &&
+                !sourceOnly &&
+                !group &&
+                !fileFilter &&
+                !search &&
+                kind === "all") ? (
+                <section aria-label="Collections" className="grid gap-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-semibold">
+                        {group ? "Related collections" : "Collections"}
+                      </h2>
+                      <p className="mt-1 text-sm text-fg-muted">
+                        Related knowledge, organized by customer, product, or system.
+                      </p>
                     </div>
+                    {canEdit && tab === "published" ? (
+                      <Button variant="ghost" size="sm" onClick={() => setCreating("group")}>
+                        <PlusIcon className="size-4" />
+                        New collection
+                      </Button>
+                    ) : null}
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSelection({ id: entry.id, view: tab })}
-                  >
-                    Inspect
-                  </Button>
-                </div>
-              ))}
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {collections.map((entry) => renderEntry(entry, tab))}
+                  </div>
+                  {!collections.length && !loading ? (
+                    <p className="text-sm text-fg-subtle">
+                      {canEdit
+                        ? "Create a collection to keep related entries together."
+                        : "No collections yet."}
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+              {knowledge.length ? (
+                <section aria-label="Knowledge entries" className="grid gap-3">
+                  <h2 className="text-sm font-semibold">
+                    {sourceOnly
+                      ? "Reference material"
+                      : group
+                        ? "In this collection"
+                        : "Knowledge entries"}
+                  </h2>
+                  <div className="grid gap-3">
+                    {knowledge.map((entry) => renderEntry(entry, tab))}
+                  </div>
+                </section>
+              ) : null}
             </div>
             {loading ? (
               <p role="status" className="py-6 text-sm text-fg-muted">
