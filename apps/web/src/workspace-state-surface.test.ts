@@ -19,13 +19,15 @@ describe("Agent Knowledge surface", () => {
   });
 
   test("routes organization profile and instruction and Skill autonomy to settings", async () => {
-    const [organization, shell, workspaceSettings, learning, memory] = await Promise.all([
-      source("routes/org-settings.tsx"),
-      source("components/settings/organization-settings-shell.tsx"),
-      source("routes/workspace-settings.tsx"),
-      source("routes/workspace-learning-admin.tsx"),
-      source("components/knowledge/knowledge-browser.tsx"),
-    ]);
+    const [organization, shell, workspaceSettings, learning, memory, knowledgePage] =
+      await Promise.all([
+        source("routes/org-settings.tsx"),
+        source("components/settings/organization-settings-shell.tsx"),
+        source("routes/workspace-settings.tsx"),
+        source("routes/workspace-learning-admin.tsx"),
+        source("components/knowledge/knowledge-browser.tsx"),
+        source("components/knowledge/agent-knowledge-page.tsx"),
+      ]);
     expect(shell).toContain('id: "knowledge"');
     expect(shell).toContain('title: "Knowledge"');
     expect(organization).toContain('section === "knowledge"');
@@ -38,8 +40,8 @@ describe("Agent Knowledge surface", () => {
     expect(workspaceSettings).not.toContain("editable on Documents");
     expect(learning).toContain("AgentLearningSettingsEditor");
     expect(memory).toContain("KnowledgeOriginalFile");
-    expect(memory).toContain("Workspace instructions");
-    expect(memory).toContain("Skills");
+    expect(knowledgePage).toContain("Instructions");
+    expect(knowledgePage).toContain("Skills");
   });
 
   test("teaches agents the three durable destinations and compact instruction budget", async () => {

@@ -421,8 +421,10 @@ const workspaceStateRoute = createRoute({
   path: "state",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { view?: "instructions" | "skills"; file?: string } => ({
-    ...(search.view === "instructions" || search.view === "skills" ? { view: search.view } : {}),
+  ): { view?: "instructions" | "skills" | "files"; file?: string } => ({
+    ...(search.view === "instructions" || search.view === "skills" || search.view === "files"
+      ? { view: search.view }
+      : {}),
     ...(typeof search.file === "string" ? { file: search.file } : {}),
   }),
   component: WorkspaceState,

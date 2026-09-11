@@ -3,10 +3,9 @@ import { Link } from "@tanstack/react-router";
 import { FileTextIcon, Loader2Icon, UploadIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { PageHeader } from "@/components/common";
+import { AgentKnowledgePage } from "@/components/knowledge/agent-knowledge-page";
 import { KnowledgeBrowser } from "@/components/knowledge/knowledge-browser";
 import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
@@ -24,15 +23,22 @@ import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions"
 import { formatBytes } from "@/lib/format";
 import type { DocumentAuthorityKind } from "@/types";
 
-/** The legacy /documents URL now presents actual originals and canonical source content. */
-export function DocumentsRoute({
-  workspaceId,
-  authorityKind,
-}: {
+type KnowledgeFilesProps = {
   workspaceId: string;
   authorityKind?: DocumentAuthorityKind;
   returnToBrain?: boolean;
-}) {
+};
+
+/** Historical /documents links keep the common Knowledge navigation. */
+export function DocumentsRoute(props: KnowledgeFilesProps) {
+  return (
+    <AgentKnowledgePage workspaceId={props.workspaceId} section="files">
+      <KnowledgeFilesPanel {...props} />
+    </AgentKnowledgePage>
+  );
+}
+
+export function KnowledgeFilesPanel({ workspaceId, authorityKind }: KnowledgeFilesProps) {
   const context = useAppContext();
   const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
@@ -206,14 +212,12 @@ export function DocumentsRoute({
     }
   }
   return (
-    <ContentPage width="standard">
-      <PageHeader
-        icon={<FileTextIcon className="size-4" />}
-        title="Files & sources"
-        description="Original files and the source content retained in Knowledge."
-      />
+    <>
+      <p className="mb-5 text-sm text-fg-muted">
+        Open original files or inspect saved text from files, conversations, and connected sources.
+      </p>
       <div
-        className="mt-6 grid gap-5"
+        className="grid gap-5"
         role="region"
         aria-label="File upload drop zone"
         onDragOver={(event) => {
@@ -272,14 +276,6 @@ export function DocumentsRoute({
           >
             Refresh
           </Button>
-          <Link
-            to="/workspaces/$workspaceId/state"
-            params={{ workspaceId }}
-            search={{}}
-            className="text-sm text-fg-muted hover:text-fg"
-          >
-            Agent Knowledge
-          </Link>
         </div>
         {error ? (
           <p role="alert" className="text-sm text-status-error">
@@ -289,9 +285,9 @@ export function DocumentsRoute({
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
             <TabsTrigger value="files" disabled={scope === "organization"}>
-              Files
+              Original files
             </TabsTrigger>
-            <TabsTrigger value="sources">Source content</TabsTrigger>
+            <TabsTrigger value="sources">Saved source text</TabsTrigger>
           </TabsList>
           <TabsContent value="files" className="mt-4 grid gap-3">
             {busy && !files.length ? (
@@ -407,7 +403,7 @@ export function DocumentsRoute({
           ) : null}
         </DialogContent>
       </Dialog>
-    </ContentPage>
+    </>
   );
 }
 function OriginalFile({ workspaceId, file }: { workspaceId: string; file: FileAsset }) {

@@ -37,16 +37,9 @@ import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { BehaviorReviews } from "./behavior-reviews";
+import { KNOWLEDGE_KIND_LABEL as KIND, KNOWLEDGE_KIND_HELP } from "./knowledge-labels";
+import { FormDisclosure } from "@/components/ui/form-disclosure";
 
-const KIND: Record<KnowledgeEntryKind, string> = {
-  source: "Source",
-  fact: "Fact",
-  decision: "Decision",
-  requirement: "Requirement",
-  incident: "Incident",
-  note: "Note",
-  group: "Group",
-};
 const SOURCE: Record<string, string> = {
   file: "File",
   slack: "Slack",
@@ -106,7 +99,8 @@ export function KnowledgeBrowser({
   const [selection, setSelection] = useState<Selection | null>(
     focusEntryId ? { id: focusEntryId } : null,
   );
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState<"note" | "group" | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [copying, setCopying] = useState<KnowledgeEntryRecord | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -195,39 +189,12 @@ export function KnowledgeBrowser({
     setGroup(entry);
     setKind("all");
     setView("published");
+    setQuery("");
+    setSearch("");
     setSelection(null);
   }
   return (
     <div className="grid gap-5">
-      {!sourceOnly ? (
-        <nav aria-label="Agent Knowledge sections" className="flex flex-wrap gap-4 text-sm">
-          <span className="font-medium">Knowledge</span>
-          <Link
-            to="/workspaces/$workspaceId/state"
-            params={{ workspaceId }}
-            search={{ view: "instructions" }}
-            className="text-fg-muted hover:text-fg"
-          >
-            Workspace instructions
-          </Link>
-          <Link
-            to="/workspaces/$workspaceId/state"
-            params={{ workspaceId }}
-            search={{ view: "skills" }}
-            className="text-fg-muted hover:text-fg"
-          >
-            Skills
-          </Link>
-          <Link
-            to="/workspaces/$workspaceId/documents"
-            params={{ workspaceId }}
-            search={{}}
-            className="text-fg-muted hover:text-fg"
-          >
-            Files & sources
-          </Link>
-        </nav>
-      ) : null}
       {fileFilter ? (
         <div className="flex items-center gap-3 text-sm text-fg-muted">
           <span>Knowledge related to this file</span>
@@ -274,6 +241,30 @@ export function KnowledgeBrowser({
           </Select>
         ) : null}
         {!sourceOnly && (view !== "needs_review" || reviewGroup) ? (
+          <Button
+            variant="ghost"
+            aria-expanded={filtersOpen}
+            aria-controls="knowledge-type-filters"
+            onClick={() => setFiltersOpen((open) => !open)}
+          >
+            {kind === "all" ? "Filter by type" : `Type: ${KIND[kind]}`}
+          </Button>
+        ) : null}
+        {canEdit && !sourceOnly ? (
+          <>
+            <Button variant="outline" onClick={() => setCreating("note")}>
+              <PlusIcon className="size-4" />
+              Add knowledge
+            </Button>
+            <Button variant="ghost" onClick={() => setCreating("group")}>
+              <FolderIcon className="size-4" />
+              New collection
+            </Button>
+          </>
+        ) : null}
+      </div>
+      {filtersOpen && !sourceOnly && (view !== "needs_review" || reviewGroup) ? (
+        <div id="knowledge-type-filters" className="grid gap-2 sm:max-w-md">
           <Select
             aria-label="Knowledge type"
             value={kind}
@@ -286,14 +277,13 @@ export function KnowledgeBrowser({
               </option>
             ))}
           </Select>
-        ) : null}
-        {canEdit && !sourceOnly ? (
-          <Button variant="outline" onClick={() => setCreating(true)}>
-            <PlusIcon className="size-4" />
-            Add knowledge
-          </Button>
-        ) : null}
-      </div>
+          <p className="text-xs text-fg-muted">
+            {kind === "all"
+              ? "Agents choose a type to describe the content. All types are searchable together."
+              : KNOWLEDGE_KIND_HELP[kind]}
+          </p>
+        </div>
+      ) : null}
       {group ? (
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => setGroup(null)}>
@@ -314,8 +304,8 @@ export function KnowledgeBrowser({
           setGroup(null);
         }}
       >
-        <TabsList variant="line">
-          <TabsTrigger value="published">Knowledge</TabsTrigger>
+        <TabsList aria-label="Knowledge status">
+          <TabsTrigger value="published">Saved</TabsTrigger>
           {!sourceOnly ? <TabsTrigger value="needs_review">Needs review</TabsTrigger> : null}
           <TabsTrigger value="archived">Archived</TabsTrigger>
         </TabsList>
@@ -437,7 +427,9 @@ export function KnowledgeBrowser({
                       {entry.excerpts[0]?.text ?? entry.revision.preview}
                     </p>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <MetaChip>{KIND[entry.revision.kind]}</MetaChip>
+                      {entry.revision.kind === "group" || entry.revision.kind === "source" ? (
+                        <MetaChip>{KIND[entry.revision.kind]}</MetaChip>
+                      ) : null}
                       <MetaChip>
                         {entry.scope === "personal"
                           ? "Only me"
@@ -528,20 +520,28 @@ export function KnowledgeBrowser({
           }}
         />
       ) : null}
-      <Dialog open={creating} onOpenChange={setCreating}>
+      <Dialog
+        open={creating !== null}
+        onOpenChange={(open) => {
+          if (!open) setCreating(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add knowledge</DialogTitle>
+            <DialogTitle>{creating === "group" ? "New collection" : "Add knowledge"}</DialogTitle>
             <DialogDescription>
-              Add a useful fact, note or group. You can correct it later.
+              {creating === "group"
+                ? "Collect related knowledge about a customer, product, system, or subject."
+                : "Write what is useful to remember. You can organize or correct it later."}
             </DialogDescription>
           </DialogHeader>
           <KnowledgeEditor
+            key={creating}
             workspaceId={workspaceId}
             scope={scope === "all" ? (personal ? "personal" : "workspace") : scope}
             initial={{
               title: "",
-              kind: "note",
+              kind: creating ?? "note",
               content: "",
               evidence: [],
               relationships: [],
@@ -555,7 +555,7 @@ export function KnowledgeBrowser({
                 scope: scope === "all" ? (personal ? "personal" : "workspace") : scope,
                 entry,
               });
-              setCreating(false);
+              setCreating(null);
               setRefresh((n) => n + 1);
             }}
           />
@@ -778,6 +778,7 @@ function KnowledgeInspector(props: {
         ) : null}
         {record && entry ? (
           <>
+            <p className="text-xs text-fg-muted">{KNOWLEDGE_KIND_HELP[entry.kind]}</p>
             {pending ? (
               <p className="text-sm text-fg-muted">
                 {record.revision.change === "archive"
@@ -824,7 +825,7 @@ function KnowledgeInspector(props: {
               />
             ) : (
               <div className="whitespace-pre-wrap break-words text-sm leading-6">
-                {entry.content || "This group collects related entries."}
+                {entry.content || "This collection brings together related knowledge."}
               </div>
             )}
             {entry.source ? (
@@ -885,7 +886,7 @@ function KnowledgeInspector(props: {
             ) : null}
             {entry.groupIds.length ? (
               <section className="grid gap-2 border-t border-border pt-4">
-                <h3 className="text-sm font-medium">Grouped with</h3>
+                <h3 className="text-sm font-medium">Collections</h3>
                 {entry.groupIds.map((id) => (
                   <KnowledgeReference
                     key={id}
@@ -923,7 +924,7 @@ function KnowledgeInspector(props: {
                       disabled={busy}
                       onClick={() => setEditing(true)}
                     >
-                      {pending ? "Edit and approve" : "Correct or regroup"}
+                      {pending ? "Edit and approve" : "Edit knowledge"}
                     </Button>
                   ) : null}
                   {record.scope === "personal" &&
@@ -1094,6 +1095,7 @@ function KnowledgeEditor(props: {
 }) {
   const { client } = useAppContext();
   const [draft, setDraft] = useState(props.initial);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [groups, setGroups] = useState<KnowledgeEntrySummary[]>([]);
@@ -1141,24 +1143,6 @@ function KnowledgeEditor(props: {
         />
       </label>
       <label className="grid gap-1 text-sm">
-        Type
-        <Select
-          value={draft.kind}
-          disabled={busy || draft.kind === "source"}
-          onChange={(event) =>
-            setDraft({ ...draft, kind: event.target.value as KnowledgeEntryKind })
-          }
-        >
-          {Object.entries(KIND)
-            .filter(([key]) => key !== "source" || draft.kind === "source")
-            .map(([key, title]) => (
-              <option key={key} value={key}>
-                {title}
-              </option>
-            ))}
-        </Select>
-      </label>
-      <label className="grid gap-1 text-sm">
         Content
         <Textarea
           className="min-h-40"
@@ -1167,34 +1151,64 @@ function KnowledgeEditor(props: {
           onChange={(event) => setDraft({ ...draft, content: event.target.value })}
         />
       </label>
-      <fieldset disabled={busy} className="grid gap-2">
-        <legend className="mb-2 text-sm font-medium">Groups</legend>
-        <Input
-          aria-label="Find groups"
-          value={groupQuery}
-          placeholder="Find a group"
-          onChange={(event) => setGroupQuery(event.target.value)}
-        />
-        <div className="max-h-40 overflow-y-auto">
-          {groups.map((group) => (
-            <label key={group.id} className="flex items-center gap-2 py-1 text-sm">
-              <input
-                type="checkbox"
-                checked={draft.groupIds.includes(group.id)}
-                onChange={(event) =>
-                  setDraft({
-                    ...draft,
-                    groupIds: event.target.checked
-                      ? [...draft.groupIds, group.id]
-                      : draft.groupIds.filter((id) => id !== group.id),
-                  })
-                }
-              />
-              {group.revision.title}
-            </label>
-          ))}
-        </div>
-      </fieldset>
+      <FormDisclosure
+        title="More options"
+        summary={
+          draft.kind === "note"
+            ? "Choose a type or add to collections"
+            : `${KIND[draft.kind]} · Collections`
+        }
+        open={optionsOpen}
+        onOpenChange={setOptionsOpen}
+      >
+        <label className="grid gap-1 text-sm">
+          Type
+          <Select
+            value={draft.kind}
+            disabled={busy || draft.kind === "source"}
+            onChange={(event) =>
+              setDraft({ ...draft, kind: event.target.value as KnowledgeEntryKind })
+            }
+          >
+            {Object.entries(KIND)
+              .filter(([key]) => key !== "source" || draft.kind === "source")
+              .map(([key, title]) => (
+                <option key={key} value={key}>
+                  {title}
+                </option>
+              ))}
+          </Select>
+        </label>
+        <p className="text-xs text-fg-muted">{KNOWLEDGE_KIND_HELP[draft.kind]}</p>
+        <fieldset disabled={busy} className="grid gap-2">
+          <legend className="mb-2 text-sm font-medium">Collections</legend>
+          <Input
+            aria-label="Find collections"
+            value={groupQuery}
+            placeholder="Find a collection"
+            onChange={(event) => setGroupQuery(event.target.value)}
+          />
+          <div className="max-h-40 overflow-y-auto">
+            {groups.map((group) => (
+              <label key={group.id} className="flex items-center gap-2 py-1 text-sm">
+                <input
+                  type="checkbox"
+                  checked={draft.groupIds.includes(group.id)}
+                  onChange={(event) =>
+                    setDraft({
+                      ...draft,
+                      groupIds: event.target.checked
+                        ? [...draft.groupIds, group.id]
+                        : draft.groupIds.filter((id) => id !== group.id),
+                    })
+                  }
+                />
+                {group.revision.title}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      </FormDisclosure>
       {error ? (
         <p role="alert" className="text-sm text-status-error">
           {error}

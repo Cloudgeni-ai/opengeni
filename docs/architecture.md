@@ -921,7 +921,10 @@ artifact-retention fences; provider bytes do not become permanent prompt
 history.
 
 Knowledge is the product destination for retained sources and findings, with
-instructions and Skills adjacent in the UI. File previews, revision-pinned
+Files, Instructions and Skills as persistent tabs on the Agent Knowledge page.
+`apps/web/src/components/knowledge/agent-knowledge-page.tsx` owns that shared
+page navigation, including historical Memory and Documents links. Groups appear
+as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled
 agents with frozen source selections and Agent learning policy. Attempt-bound

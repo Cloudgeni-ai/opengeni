@@ -12,12 +12,12 @@ import {
   type WorkspaceStateGovernanceDriftStatus,
   type WorkspaceStateResponse,
 } from "@opengeni/sdk";
-import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, BrainCircuitIcon, ChevronDownIcon } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { lazyRouteComponent } from "@tanstack/react-router";
+import { ChevronDownIcon } from "lucide-react";
+import { type FormEvent, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
-import { ContentPage } from "@/components/ui/content-layout";
+import { EmptyState, LoadErrorState } from "@/components/common";
+import { AgentKnowledgePage } from "@/components/knowledge/agent-knowledge-page";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
@@ -26,7 +26,8 @@ import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions"
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 
-import { MemoryRoute } from "./memory";
+import { KnowledgePanel } from "./memory";
+
 import { AgentKnowledgePrompt } from "./agent-brain-prompt";
 import {
   useCompanyProfileInventory,
@@ -34,6 +35,8 @@ import {
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
 import { SkillsPanel } from "./skills-panel";
+
+const KnowledgeFilesPanel = lazyRouteComponent(() => import("./documents"), "KnowledgeFilesPanel");
 
 function formatDate(value: string | null): string {
   if (!value) return "No activity";
@@ -1270,21 +1273,25 @@ export function WorkspaceStateRoute({
   fileId,
 }: {
   workspaceId: string;
-  view?: "instructions" | "skills";
+  view?: "instructions" | "skills" | "files";
   fileId?: string;
 }) {
-  if (!view)
-    return (
-      <MemoryRoute
-        key={`${workspaceId}:${fileId ?? "all"}`}
-        workspaceId={workspaceId}
-        {...(fileId ? { fileId } : {})}
-      />
-    );
-  return <WorkspaceBehaviorRoute key={workspaceId} workspaceId={workspaceId} view={view} />;
+  return (
+    <AgentKnowledgePage key={workspaceId} workspaceId={workspaceId} section={view ?? "knowledge"}>
+      <Suspense fallback={<WorkspaceStateLoading />}>
+        {view === "files" ? (
+          <KnowledgeFilesPanel workspaceId={workspaceId} />
+        ) : view ? (
+          <WorkspaceBehaviorPanel workspaceId={workspaceId} view={view} />
+        ) : (
+          <KnowledgePanel workspaceId={workspaceId} {...(fileId ? { fileId } : {})} />
+        )}
+      </Suspense>
+    </AgentKnowledgePage>
+  );
 }
 
-function WorkspaceBehaviorRoute({
+function WorkspaceBehaviorPanel({
   workspaceId,
   view,
 }: {
@@ -1301,48 +1308,17 @@ function WorkspaceBehaviorRoute({
   );
 
   return (
-    <ContentPage width="standard">
-      <PageHeader
-        icon={<BrainCircuitIcon className="size-4" />}
-        title={
-          view === "instructions"
-            ? personalWorkspace
-              ? "Personal workspace instructions"
-              : "Workspace instructions"
-            : view === "skills"
-              ? personalWorkspace
-                ? "Your Skills"
-                : "Skills"
-              : personalWorkspace
-                ? "Your Agent Knowledge"
-                : "Agent Knowledge"
-        }
-        description={
-          view === "instructions"
-            ? personalWorkspace
-              ? "View the always-on guidance currently applied in your personal workspace."
-              : "Set the concise, always-on guidance for agents in this workspace."
-            : view === "skills"
-              ? personalWorkspace
-                ? "Manage personal Skills that follow you, alongside other Skills available here."
-                : "Create reusable instructions agents can fetch when relevant."
-              : personalWorkspace
-                ? "Your private Knowledge, instructions, and Skills, together with company knowledge you can access."
-                : "The instructions, skills, documents, and memories available to agents in this workspace."
-        }
-      />
-      <div className="mt-6">
-        {view ? (
-          <Link
-            to="/workspaces/$workspaceId/state"
-            params={{ workspaceId }}
-            search={{}}
-            className="mb-4 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-          >
-            <ArrowLeftIcon className="size-3" />
-            Back to Agent Knowledge
-          </Link>
-        ) : null}
+    <>
+      <p className="mb-5 text-sm text-fg-muted">
+        {view === "instructions"
+          ? personalWorkspace
+            ? "View the always-on guidance currently applied in your personal workspace."
+            : "Set the concise, always-on guidance for agents in this workspace."
+          : personalWorkspace
+            ? "Manage your personal Skills and other Skills available here."
+            : "Create reusable instructions agents can fetch when relevant."}
+      </p>
+      <div>
         {loading && !state ? <WorkspaceStateLoading /> : null}
         {error && !state ? (
           <LoadErrorState
@@ -1375,6 +1351,6 @@ function WorkspaceBehaviorRoute({
           </div>
         ) : null}
       </div>
-    </ContentPage>
+    </>
   );
 }

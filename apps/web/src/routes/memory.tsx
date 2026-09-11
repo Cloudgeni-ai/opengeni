@@ -1,40 +1,35 @@
-import { BrainCircuitIcon } from "lucide-react";
-import { PageHeader } from "@/components/common";
+import { AgentKnowledgePage } from "@/components/knowledge/agent-knowledge-page";
 import { KnowledgeBrowser } from "@/components/knowledge/knowledge-browser";
-import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 
-/** The historical Memory URL remains a link-compatible entry into Knowledge. */
-export function MemoryRoute({
-  workspaceId,
-  focusMemoryId,
-  fileId,
-}: {
+type KnowledgePanelProps = {
   workspaceId: string;
   focusMemoryId?: string | undefined;
   fileId?: string;
   returnToBrain?: boolean;
-}) {
+};
+
+/** The historical Memory URL remains a link-compatible entry into Knowledge. */
+export function MemoryRoute(props: KnowledgePanelProps) {
+  return (
+    <AgentKnowledgePage workspaceId={props.workspaceId} section="knowledge">
+      <KnowledgePanel {...props} />
+    </AgentKnowledgePage>
+  );
+}
+
+export function KnowledgePanel({ workspaceId, focusMemoryId, fileId }: KnowledgePanelProps) {
   const context = useAppContext();
   const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   return (
-    <ContentPage width="standard">
-      <PageHeader
-        icon={<BrainCircuitIcon className="size-4" />}
-        title={personal ? "Your Knowledge" : "Agent Knowledge"}
-        description="Sources and useful findings, connected across files, conversations and agent work."
-      />
-      <div className="mt-6">
-        <KnowledgeBrowser
-          key={workspaceId}
-          workspaceId={workspaceId}
-          personal={personal}
-          {...(fileId ? { fileId } : {})}
-          {...(focusMemoryId ? { focusEntryId: focusMemoryId } : {})}
-        />
-      </div>
-    </ContentPage>
+    <KnowledgeBrowser
+      key={`${workspaceId}:${fileId ?? "all"}`}
+      workspaceId={workspaceId}
+      personal={personal}
+      {...(fileId ? { fileId } : {})}
+      {...(focusMemoryId ? { focusEntryId: focusMemoryId } : {})}
+    />
   );
 }

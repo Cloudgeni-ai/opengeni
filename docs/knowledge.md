@@ -73,6 +73,28 @@ unrelated workspace readers do not. An original already referenced by a shared
 chat or document keeps its existing shared authority. Unbound historical files
 retain their prior workspace ownership instead of guessing an owner.
 
+## Browsing Knowledge
+
+Agent Knowledge is one page with persistent **Knowledge**, **Files**,
+**Instructions** and **Skills** tabs. Each tab has a URL under `/state`; historical
+Memory and Documents links keep the same navigation. Files contains original
+copies and saved source text. Both lead back to related Knowledge without leaving
+this page's navigation. Source text is a filtered view of canonical Knowledge.
+
+The main Knowledge list emphasizes titles, content and origin. Detailed types are
+available through an optional filter and entry details; manual authoring starts
+with title and text. The UI calls groups **collections** and the general `note`
+kind **General knowledge**. A collection brings together entries about a customer,
+product, system or subject without copying them. It is an organizing object,
+not a competing content type or storage authority.
+
+Agents choose the closest type based on content: fact for a specific claim,
+decision for an adopted choice, requirement for a need, incident for a problem
+and its known cause/fix/outcome, or note for other useful context. A fact label is
+not proof of verification. Agents are instructed to find and reuse existing
+collections and entries across sources without asking users to classify content.
+All finding types share retrieval, review, permissions and revision history.
+
 ## Agent learning settings
 
 **Settings → Agent learning** groups three destinations together:

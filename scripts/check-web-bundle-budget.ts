@@ -515,7 +515,9 @@ const effectiveBudgets = {
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
-    33,
+    // The shared Knowledge tabs split the graph into 34 files while reducing
+    // it to 2,365,495 raw / 661,680 gzip bytes (Bun 1.4, macOS/arm64).
+    34,
   ),
 } as const;
 
