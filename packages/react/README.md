@@ -32,6 +32,9 @@ Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 when that scope changes. The controller uses your authenticated backend proxy;
 never place an organization key in browser props. Import
 `@opengeni/react/connect.css` for opt-in, scoped styles without Tailwind.
+`DeviceAuthorization` also accepts an optional `render` callback for host presentation;
+it receives shared copy state, the copy action, and the validated verification URL.
+Omitting it preserves the default embedded presentation.
 
 ```tsx
 import { ConnectPanel } from "@opengeni/react/connect";

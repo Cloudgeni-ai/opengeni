@@ -206,7 +206,16 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
       forceRefresh: false,
       connectionRef,
     };
-    expect(await authorizeDirectHostMcpUse(client.db, request)).toBe(true);
+    const snapshots: unknown[] = [];
+    expect(
+      await authorizeDirectHostMcpUse(client.db, request, (snapshot) => snapshots.push(snapshot)),
+    ).toBe(true);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      bindingId: binding.id,
+      delegationId: delegation.id,
+      targetSessionId: request.sessionId,
+    });
     let renewals = 0;
     const resolve = buildHostConnectionTokenResolver(
       async () => {
@@ -313,7 +322,12 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
     };
     expect(await authorizeDirectHostMcpUse(client.db, childRequest)).toBe(true);
     await revokeHostMcpDelegation(client.db, owner, delegation.id, 1);
-    expect(await authorizeDirectHostMcpUse(client.db, childRequest)).toBe(false);
+    expect(
+      await authorizeDirectHostMcpUse(client.db, childRequest, (snapshot) =>
+        snapshots.push(snapshot),
+      ),
+    ).toBe(false);
+    expect(snapshots).toHaveLength(1);
     expect(await credential.authorizeProviderRequest?.()).toBe(false);
     expect((await resolve(request)).status).not.toBe("ok");
     expect(renewals).toBe(1);

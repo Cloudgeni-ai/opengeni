@@ -4,6 +4,7 @@ import {
   approvalIdentifier,
   RequestHumanInteractionToolInput,
   RequestHumanInputToolInput,
+  canonicalSkillReviewQuestion,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   type SessionEventMediaPreview,
@@ -690,6 +691,28 @@ export function serializeHumanInputRequests(
         throw new Error("Human-input interruption is missing a stable tool-call identity");
       }
       const input = RequestHumanInputToolInput.parse(interruptionArguments(item));
+      const reviews = input.questions.filter((question) => question.skillReview);
+      if (reviews.length > 0) {
+        if (input.questions.length !== 1) {
+          throw new Error("Skill review requires one dedicated human-input question");
+        }
+        const question = reviews[0]!;
+        const canonical = canonicalSkillReviewQuestion(question);
+        // Normalize only known wire differences, never turn misleading text
+        // into a trusted review based solely on a model-supplied reference.
+        // The DB still binds that reference to the receipt and live human.
+        if (!canonical) {
+          throw new Error("Skill review must use the exact host-owned confirmation presentation");
+        }
+        return {
+          toolCallId,
+          input: {
+            ...input,
+            questions: [canonical],
+            allowSkip: false,
+          },
+        };
+      }
       return {
         toolCallId,
         input: {

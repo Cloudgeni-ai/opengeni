@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "82e0ba4ffd9693e923af86f75e835734b5e3dbcdc057b4829999fb3beeec9b30"
+      "sha256": "182363157bd87ca47b0e67ab2365976849f7f88efa62bd82bf2ebd922976834b"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -42,7 +42,11 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "35ea669e9119244185608d6b3ba36bd1594b1cf51dc8e7e800fcee91c7b0a495"
+      "sha256": "8d13c059295343b1238467af8ddec4cf750cdef48ac3e62c645a36839a21fdb8"
+    },
+    {
+      "path": ".github/workflows/reconcile-production-packages.yml",
+      "sha256": "d05f65de51d9684c0c2ee08ffdacde3ab7a7ae7e1c09322edbd06ef37636014b"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
@@ -50,7 +54,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "49d8a518d63f3b11ba8434a1238707831c83d1e8d01f9f37f5681d4d1183b535"
+      "sha256": "cf388d5503891b91fcf8edaddc7f2ae36f9b7a89743b90e82f068d011cd07dcb"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -848,6 +852,12 @@
       "job": "publish",
       "step": "Verify publishable closure",
       "sha256": "c18d0e2815c7263404fd08bd381f6afc66620c8bbba61f13828a0f6f6b22eda4"
+    },
+    {
+      "workflow": ".github/workflows/reconcile-production-packages.yml",
+      "job": "reconcile",
+      "step": "Publish missing packages for the healthy production revision",
+      "sha256": "403bf534ac1eb6c2465f2260ec881f48c0b5744b28dd51d22e1633e113ddc59c"
     },
     {
       "workflow": ".github/workflows/release-acceptance.yml",

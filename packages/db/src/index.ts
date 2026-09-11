@@ -272,6 +272,7 @@ import {
   SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
   parseWorkspaceArchiveDescriptor,
   parseWorkspaceArchiveObjectRef,
+  validateWorkspaceArchiveObjectRef,
   workspaceArchivePayloadPresent,
   omitInlineWorkspaceArchiveWhenObjectRefPresent,
   type WorkspaceArchiveObjectRef,
@@ -323,6 +324,7 @@ import {
   HostUsageExportBatch as HostUsageExportBatchContract,
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
+  canonicalSkillReviewQuestion,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
   CodexCredentialPolicySnapshotV1,
@@ -53447,13 +53449,30 @@ export async function adoptLegacyModalCheckpointArtifact(
 }
 
 function publishedWorkspaceArchiveFields(input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  workspaceArchiveMeta: SandboxArchiveRevision;
   workspaceArchive?: string | null;
   workspaceArchiveRef?: WorkspaceArchiveObjectRef | null;
 }): {
   workspaceArchive?: string;
   workspaceArchiveRef?: WorkspaceArchiveObjectRef;
 } {
-  const ref = parseWorkspaceArchiveObjectRef(input.workspaceArchiveRef) ?? undefined;
+  const ref =
+    input.workspaceArchiveRef == null
+      ? undefined
+      : (validateWorkspaceArchiveObjectRef(input.workspaceArchiveRef, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: input.sandboxGroupId,
+          descriptor: input.workspaceArchiveMeta,
+        }) ?? undefined);
+  if (input.workspaceArchiveRef != null && !ref) {
+    throw new Error(
+      "Invalid workspace archive object ref: publication scope or descriptor mismatch",
+    );
+  }
   const inline =
     typeof input.workspaceArchive === "string" && input.workspaceArchive.length > 0
       ? input.workspaceArchive
@@ -53472,6 +53491,30 @@ function publishedWorkspaceArchiveFields(input: {
     throw new Error("workspace archive publication requires inline bytes or an object ref");
   }
   return { workspaceArchive: inline };
+}
+
+/** Object-candidate outcome from the publication transaction, independent of
+ * lifecycle `wrote`. Absent for inline/provider receipts and pure CAS checks.
+ * `unused` is NOT a retirement receipt: only the owner of a fresh candidate with
+ * no other publication in flight may use it for immediate cleanup. Exceptions
+ * give no disposition (commit may have happened). Legacy/shared keys and evicted
+ * refs need durable no-reattachment evidence before deletion. */
+export type WorkspaceArchiveCandidateDisposition = "adopted" | "already_referenced" | "unused";
+
+function workspaceArchiveCandidateFields(
+  candidate: WorkspaceArchiveObjectRef | undefined,
+  lockedResumeState: Record<string, unknown> | null | undefined,
+): { candidateDisposition?: WorkspaceArchiveCandidateDisposition } {
+  if (!candidate) return {};
+  const sessionState = lockedResumeState?.sessionState as Record<string, unknown> | undefined;
+  const referenced = [
+    sessionState?.workspaceArchiveRef,
+    sessionState?.workspaceArchivePrevRef,
+  ].some((value) => {
+    const ref = parseWorkspaceArchiveObjectRef(value);
+    return ref?.key === candidate.key && ref.backend === candidate.backend;
+  });
+  return { candidateDisposition: referenced ? "already_referenced" : "unused" };
 }
 
 export async function persistDrainSnapshot(
@@ -53510,12 +53553,14 @@ export async function persistDrainSnapshot(
 ): Promise<{
   wrote: boolean;
   archiveRevision: string | null;
+  candidateDisposition?: WorkspaceArchiveCandidateDisposition;
 }> {
   const workspaceArchiveMeta =
     input.workspaceArchive === null ? null : parseArchiveRevision(input.workspaceArchiveMeta);
   if (input.workspaceArchive !== null && !workspaceArchiveMeta) {
     throw new Error("Invalid verified workspace archive descriptor");
   }
+  const published = input.workspaceArchive === null ? null : publishedWorkspaceArchiveFields(input);
   if (
     workspaceArchiveMeta?.version === 2 &&
     (workspaceArchiveMeta.provider === "modal_snapshot_filesystem" ||
@@ -53574,10 +53619,15 @@ export async function persistDrainSnapshot(
         for update
       `);
       const row = guard[0];
+      const candidateFields = workspaceArchiveCandidateFields(
+        published?.workspaceArchiveRef,
+        row?.resume_state,
+      );
       if (!row) {
         return {
           wrote: false,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       const sourceLeaseMatches =
@@ -53623,7 +53673,7 @@ export async function persistDrainSnapshot(
         lateReceipt.providerRequestId === input.providerRequestId &&
         !row.unsettled_mutation;
       if (!activePublication && !coldLatePublication) {
-        return { wrote: false, archiveRevision: null };
+        return { wrote: false, archiveRevision: null, ...candidateFields };
       }
       const priorArchive = row.prior_archive ?? null;
       const priorArchivePrev = row.prior_archive_prev ?? null;
@@ -53641,7 +53691,7 @@ export async function persistDrainSnapshot(
           archiveRevision: null,
         };
       }
-      const published = publishedWorkspaceArchiveFields(input);
+      if (!published) throw new Error("Missing workspace archive publication fields");
       const priorMeta = parseArchiveRevision(priorSessionState?.workspaceArchiveMeta);
       if (activePublication && row.archive_capture_published_at !== null) {
         // A predecessor and its successor may receive the same provider result.
@@ -53667,7 +53717,7 @@ export async function persistDrainSnapshot(
               )
           `);
         }
-        return { wrote: true, archiveRevision: priorMeta.revision };
+        return { wrote: true, archiveRevision: priorMeta.revision, ...candidateFields };
       }
       const rotation = rotateWorkspaceArchives({
         resumeState: row.resume_state,
@@ -53728,11 +53778,13 @@ export async function persistDrainSnapshot(
         return {
           wrote: false,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       return {
         wrote: true,
         archiveRevision: workspaceArchiveMeta?.revision ?? null,
+        ...(published.workspaceArchiveRef ? { candidateDisposition: "adopted" as const } : {}),
       };
     },
   );
@@ -54131,6 +54183,7 @@ export async function persistWarmSnapshot(
   throttled: boolean;
   superseded: boolean;
   archiveRevision: string | null;
+  candidateDisposition?: WorkspaceArchiveCandidateDisposition;
 }> {
   const capturedAtMs = input.capturedAtMs ?? Date.now();
   const workspaceArchiveMeta = parseArchiveRevision(input.workspaceArchiveMeta);
@@ -54200,6 +54253,26 @@ export async function persistWarmSnapshot(
             (attempt.outcome === "completed" ||
               attempt.outcome === "failed" ||
               attempt.outcome === "requires_action"));
+      // Even a replay rejected by the attempt/epoch/capture guards may name
+      // a committed current or previous object. Inspect those slots under the
+      // same lease lock as publication, after the canonical workspace lock.
+      // This conveys no retirement or no-future-reattachment authority.
+      const candidateLease = published.workspaceArchiveRef
+        ? await scopedDb.execute<{ resume_state: Record<string, unknown> | null }>(sql`
+            select jsonb_build_object('sessionState', jsonb_build_object(
+              'workspaceArchiveRef', resume_state #> '{sessionState,workspaceArchiveRef}',
+              'workspaceArchivePrevRef', resume_state #> '{sessionState,workspaceArchivePrevRef}'
+            )) as resume_state
+            from sandbox_leases
+            where workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+            for update
+          `)
+        : [];
+      const candidateFields = workspaceArchiveCandidateFields(
+        published.workspaceArchiveRef,
+        candidateLease[0]?.resume_state,
+      );
       if (
         !attempt ||
         attempt.accountId !== input.accountId ||
@@ -54212,6 +54285,7 @@ export async function persistWarmSnapshot(
           throttled: false,
           superseded: true,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       const guard = await scopedDb.execute<{
@@ -54269,6 +54343,7 @@ export async function persistWarmSnapshot(
           throttled: false,
           superseded: false,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
@@ -54289,6 +54364,7 @@ export async function persistWarmSnapshot(
           throttled: false,
           superseded: true,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       if (
@@ -54301,6 +54377,7 @@ export async function persistWarmSnapshot(
           throttled: true,
           superseded: false,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       const rotation = rotateWorkspaceArchives({
@@ -54322,6 +54399,7 @@ export async function persistWarmSnapshot(
           throttled: false,
           superseded: false,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       const livenessGuard: "warm" | "draining" = rowLiveness;
@@ -54354,6 +54432,7 @@ export async function persistWarmSnapshot(
           throttled: false,
           superseded: false,
           archiveRevision: null,
+          ...candidateFields,
         };
       }
       return {
@@ -54361,6 +54440,7 @@ export async function persistWarmSnapshot(
         throttled: false,
         superseded: false,
         archiveRevision: workspaceArchiveMeta.revision,
+        ...(published.workspaceArchiveRef ? { candidateDisposition: "adopted" as const } : {}),
       };
     },
   );
@@ -64023,6 +64103,7 @@ export async function claimSessionWorkForAttempt(
       stage: "session_attempts.claim",
       eventTypes: ["session.turn.attempt_claimed"],
       maxAttempts: 3,
+      organizationMembershipFence: true,
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
@@ -70395,6 +70476,13 @@ export async function applySessionTurnSettlement(
         ...request,
         questions: request.questions.map((question) => {
           const parsed = HumanInputQuestionContract.parse(question);
+          if (parsed.skillReview) {
+            const canonical = canonicalSkillReviewQuestion(question);
+            if (!canonical || request.questions.length !== 1 || request.allowSkip) {
+              throw new Error("Skill review requires the exact dedicated confirmation contract");
+            }
+            return canonical;
+          }
           return parsed.kind === "text" || parsed.allowOther
             ? parsed
             : { ...parsed, allowOther: true };
@@ -70464,6 +70552,40 @@ export async function applySessionTurnSettlement(
         );
         if (humanInputRequests.length > 0) {
           for (const request of humanInputRequests) {
+            if (request.questions.length === 1 && request.questions[0]!.skillReview) {
+              const [existing] = await tx
+                .select()
+                .from(schema.sessionHumanInputRequests)
+                .where(
+                  and(
+                    eq(schema.sessionHumanInputRequests.accountId, session.accountId),
+                    eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+                    eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+                    eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+                    eq(schema.sessionHumanInputRequests.toolCallId, request.toolCallId),
+                  ),
+                )
+                .for("update");
+              if (existing) {
+                const canonical =
+                  existing.questions.length === 1
+                    ? canonicalSkillReviewQuestion(existing.questions[0]!)
+                    : null;
+                if (
+                  existing.id !== request.id ||
+                  !canonical ||
+                  stableJson(canonical) !== stableJson(request.questions[0])
+                ) {
+                  throw new Error(
+                    `Human-input request ${request.id} changed contract before re-freeze`,
+                  );
+                }
+                // Preserve immutable displayed/audited bytes. The unchanged
+                // UPSERT predicate below still fences pending status, skip and
+                // exact deadline; only generation ownership can advance.
+                request.questions = existing.questions;
+              }
+            }
             const [persistedRequest] = await tx
               .insert(schema.sessionHumanInputRequests)
               .values({

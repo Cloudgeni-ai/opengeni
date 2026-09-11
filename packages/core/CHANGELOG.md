@@ -1,5 +1,42 @@
 # @opengeni/core
 
+## 2.9.4
+
+### Patch Changes
+
+- Updated dependencies [e1a50ba]
+  - @opengeni/runtime@2.5.3
+  - @opengeni/storage@0.2.127
+  - @opengeni/contracts@3.0.2
+  - @opengeni/db@4.3.3
+  - @opengeni/documents@0.8.27
+  - @opengeni/config@1.1.2
+  - @opengeni/events@0.4.25
+  - @opengeni/observability@0.8.26
+
+## 2.9.3
+
+### Patch Changes
+
+- Updated dependencies [a9cc903]
+  - @opengeni/db@4.3.2
+  - @opengeni/documents@0.8.26
+  - @opengeni/events@0.4.24
+
+## 2.9.2
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/db@4.3.1
+  - @opengeni/runtime@2.5.2
+  - @opengeni/contracts@3.0.1
+  - @opengeni/documents@0.8.25
+  - @opengeni/events@0.4.23
+  - @opengeni/config@1.1.1
+  - @opengeni/observability@0.8.25
+  - @opengeni/storage@0.2.126
+
 ## 2.9.1
 
 ### Patch Changes

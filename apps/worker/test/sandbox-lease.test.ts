@@ -1122,7 +1122,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const workspaceId = "22222222-2222-4222-8222-222222222222";
     const sandboxGroupId = "33333333-3333-4333-8333-333333333333";
     const archive = Buffer.from("left-bytes").toString("base64");
-    const meta = archiveDescriptor(archive, 1_900_000_000_000);
+    // Keep the locator and descriptor valid together so this exercises the
+    // independent inline-byte comparison, not descriptor/ref validation.
+    const meta = archiveDescriptor(
+      Buffer.from("right-bytes").toString("base64"),
+      1_900_000_000_000,
+    );
     await expect(
       persistWarmSnapshotRaw(db, {
         accountId,
@@ -1145,7 +1150,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             sandboxGroupId,
             revision: meta.revision,
           }),
-          sha256: "0".repeat(64),
+          sha256: meta.archiveSha256,
           bytes: meta.archiveBytes,
           backend: "s3-compatible",
         },
@@ -1323,6 +1328,152 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(captured).toBe(1);
     expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
   }, 60_000);
+
+  for (const backend of ["local", "docker"] as const) {
+    test(`(1b-recovery-host) ${backend} capture failure preserves admission fencing and exact successor lineage through publication`, async () => {
+      if (!available) return;
+      const ids = await freshWorkspace();
+      const instanceId = `box-${backend}-capture-failure`;
+      const epoch = 15;
+      await insertLease(ids, {
+        liveness: "draining",
+        leaseEpoch: epoch,
+        expiresInMs: -1_000,
+        instanceId,
+        backend,
+        resumeBackendId: backend,
+        resumeState: {
+          backendId: backend,
+          sessionState: {
+            providerState:
+              backend === "local" ? { workspaceRootPath: instanceId } : { containerId: instanceId },
+          },
+        },
+      });
+      const target = {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        instanceId,
+        leaseEpoch: epoch,
+      };
+      const input = {
+        target,
+        timeoutClass: "fast" as const,
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+      };
+      let providerLive = true;
+      let captureCalls = 0;
+      let stopCalls = 0;
+      let providerRequestId: string | undefined;
+      let priorCaptureId: string | undefined;
+      let successorCaptureId: string | undefined;
+      const assertAdmissionFenced = async () => {
+        const arrival = await acquireLease(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          kind: "viewer",
+          holderId: `viewer-${backend}-during-capture`,
+          backend,
+          leaseTtlMs: 60_000,
+        });
+        expect(arrival).toMatchObject({ role: "fenced", reason: "capture_in_progress" });
+      };
+      const terminateBox: TerminateBoxFn = async (
+        _settings,
+        lease,
+        _observability,
+        persistArchive,
+        requestId,
+        disposition,
+      ) => {
+        expect(providerLive).toBe(true);
+        expect(lease.instanceId).toBe(instanceId);
+        expect(lease.leaseEpoch).toBe(epoch);
+        const current = await readLease(db, ids.workspaceId, ids.groupId);
+        expect(current?.liveness).toBe("draining");
+        await assertAdmissionFenced();
+        if (captureCalls === 0) {
+          expect(disposition).toBe("capture_required");
+          providerRequestId = requestId;
+          priorCaptureId = current?.archiveCapture?.id;
+          expect(priorCaptureId).toBeTruthy();
+          expect(current?.archiveCapture).toMatchObject({
+            providerRequestId: requestId,
+            takeoverSafe: true,
+            providerReplaySafe: false,
+          });
+          captureCalls += 1;
+          throw new Error("synthetic host capture failed before publication");
+        }
+        expect(requestId).toBe(providerRequestId);
+        expect(current?.archiveCapture?.providerRequestId).toBe(providerRequestId);
+        if (captureCalls === 1) {
+          expect(disposition).toBe("capture_required");
+          successorCaptureId = current?.archiveCapture?.id;
+          expect(successorCaptureId).toBeTruthy();
+          expect(successorCaptureId).not.toBe(priorCaptureId);
+          captureCalls += 1;
+          const archive = Buffer.from(`${backend} verified successor archive`).toString("base64");
+          expect(
+            (await persistArchive(archive, archiveDescriptor(archive, Date.now()))).wrote,
+          ).toBe(true);
+          const published = await readLease(db, ids.workspaceId, ids.groupId);
+          expect(published?.archiveCapture?.publishedAt).toBeTruthy();
+          expect(published?.archiveComplete).toBe(true);
+          await assertAdmissionFenced();
+          // Publication succeeded but teardown did not. Its durable claim must
+          // survive this interruption, too; never manually remove the fence.
+          throw new Error("synthetic interruption after verified publication");
+        }
+        expect(disposition).toBe("archive_published");
+        expect(current?.archiveCapture?.id).toBe(successorCaptureId);
+        expect(current?.archiveCapture?.publishedAt).toBeTruthy();
+        stopCalls += 1;
+        providerLive = false;
+        return { terminated: true, providerMissingBeforeCapture: false };
+      };
+      const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox,
+        probeDrainableProvider: async () => {
+          throw new Error("readiness is not capture settlement proof");
+        },
+      });
+      await expect(
+        drainSandboxLease({ ...input, operationId: crypto.randomUUID() }),
+      ).rejects.toThrow("synthetic host capture failed before publication");
+      const failed = await readLease(db, ids.workspaceId, ids.groupId);
+      expect(failed).toMatchObject({
+        liveness: "draining",
+        instanceId,
+        leaseEpoch: epoch,
+        archiveComplete: false,
+        archiveCapture: { id: priorCaptureId, providerRequestId, publishedAt: null },
+      });
+      expect(providerLive).toBe(true);
+      expect(stopCalls).toBe(0);
+      await assertAdmissionFenced();
+
+      await expect(
+        drainSandboxLease({ ...input, operationId: crypto.randomUUID() }),
+      ).rejects.toThrow("synthetic interruption after verified publication");
+      expect(providerLive).toBe(true);
+      expect(stopCalls).toBe(0);
+      await assertAdmissionFenced();
+      expect(await drainSandboxLease({ ...input, operationId: crypto.randomUUID() })).toEqual({
+        status: "terminated",
+      });
+      expect(captureCalls).toBe(2);
+      expect(stopCalls).toBe(1);
+      expect(providerLive).toBe(false);
+      expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+        liveness: "cold",
+        archiveCapture: null,
+        archiveComplete: true,
+      });
+    }, 60_000);
+  }
 
   test("(1b-recovery-directory) Modal directory capture waits for predecessor cleanup before retry", async () => {
     if (!available) return;

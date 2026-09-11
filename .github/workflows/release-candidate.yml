@@ -318,7 +318,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
+            OPENGENI_DEPLOYMENT_REVISION=${{ inputs.source_sha }}
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
           labels: |

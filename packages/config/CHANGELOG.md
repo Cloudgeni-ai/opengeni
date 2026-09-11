@@ -1,5 +1,19 @@
 # @opengeni/config
 
+## 1.1.2
+
+### Patch Changes
+
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+
+## 1.1.1
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+
 ## 1.1.0
 
 ### Minor Changes

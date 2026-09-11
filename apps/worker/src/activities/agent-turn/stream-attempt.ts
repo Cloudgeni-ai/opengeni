@@ -865,7 +865,8 @@ export async function runTurnStreamAttempt(
                 },
               }
             : {}),
-          contextCompactionSignal: () => modelResponseContextSignal(modelResponseState),
+          contextCompactionSignal: () =>
+            modelResponseContextSignal(modelResponseState, responseCountBeforeStream),
           contextCompactionRequested: () =>
             isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
           onModelPreparationPhase: (measurement) => {
@@ -1061,7 +1062,7 @@ export async function runTurnStreamAttempt(
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
           await historySink.reconcileConversationTruth();
-          turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
+          turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
           try {
             await ensureRunAllowed(

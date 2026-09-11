@@ -31,11 +31,14 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Hono } from "hono";
+import postgres from "postgres";
 
 import { registerWorkspaceArtifactRoutes } from "../src/routes/workspace-artifacts";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 const SIGNING_SECRET = "workspace-artifacts-test-signing-secret";
+const externalAdminUrl = process.env.OPENGENI_ARTIFACT_AUTHORITY_POSTGRES_ADMIN_URL?.trim();
+const externalAppUrl = process.env.OPENGENI_ARTIFACT_AUTHORITY_POSTGRES_APP_URL?.trim();
 type Grant = Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
 
 let shared: SharedTestDatabase;
@@ -47,8 +50,26 @@ let objectStorage: ObjectStorageDependency;
 const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
 let objectPutCount = 0;
 
+async function acquireWorkspaceArtifactsTestDatabase(): Promise<SharedTestDatabase | null> {
+  if (Boolean(externalAdminUrl) !== Boolean(externalAppUrl)) {
+    throw new Error(
+      "OPENGENI_ARTIFACT_AUTHORITY_POSTGRES_ADMIN_URL and OPENGENI_ARTIFACT_AUTHORITY_POSTGRES_APP_URL must be set together",
+    );
+  }
+  if (externalAdminUrl && externalAppUrl) {
+    const admin = postgres(externalAdminUrl, { max: 4 });
+    return {
+      admin,
+      adminUrl: externalAdminUrl,
+      appUrl: externalAppUrl,
+      release: async () => await admin.end(),
+    };
+  }
+  return await acquireSharedTestDatabase("workspace-artifacts");
+}
+
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("workspace-artifacts");
+  const acquired = await acquireWorkspaceArtifactsTestDatabase();
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);

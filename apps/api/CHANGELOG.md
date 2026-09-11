@@ -1,5 +1,55 @@
 # @opengeni/api-router
 
+## 2.12.4
+
+### Patch Changes
+
+- e1a50ba: Spool Linux host-backed workspace archives through capture, object storage, and cold restore instead of materializing whole JSON/base64 payloads. Isolate each upload at a fresh physical locator and verify stored bytes without assuming conditional-PUT support. Preserve legacy locators, archive format, configured restore limits, and lease capture/publication authority; retain candidates after ambiguous publication outcomes.
+- Updated dependencies [e1a50ba]
+  - @opengeni/runtime@2.5.3
+  - @opengeni/storage@0.2.127
+  - @opengeni/contracts@3.0.2
+  - @opengeni/db@4.3.3
+  - @opengeni/core@2.9.4
+  - @opengeni/documents@0.8.27
+  - @opengeni/artifact-tool@0.3.26
+  - @opengeni/codemode@0.5.6
+  - @opengeni/config@1.1.2
+  - @opengeni/events@0.4.25
+  - @opengeni/github@0.7.10
+  - @opengeni/observability@0.8.26
+  - @opengeni/tool-gateway@0.1.7
+
+## 2.12.3
+
+### Patch Changes
+
+- a9cc903: Allow workspace artifact mutations from service turns that retain an immutable causal human only while the exact live attempt, selected artifact tool, publish permission, and interruption fences all hold. Document that the causal-human field is never standalone authorization, and continue to reject pure service work and stale attempts.
+- Updated dependencies [a9cc903]
+  - @opengeni/db@4.3.2
+  - @opengeni/core@2.9.3
+  - @opengeni/documents@0.8.26
+  - @opengeni/events@0.4.24
+
+## 2.12.2
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/db@4.3.1
+  - @opengeni/runtime@2.5.2
+  - @opengeni/contracts@3.0.1
+  - @opengeni/core@2.9.2
+  - @opengeni/documents@0.8.25
+  - @opengeni/events@0.4.23
+  - @opengeni/artifact-tool@0.3.25
+  - @opengeni/codemode@0.5.5
+  - @opengeni/config@1.1.1
+  - @opengeni/github@0.7.9
+  - @opengeni/observability@0.8.25
+  - @opengeni/storage@0.2.126
+  - @opengeni/tool-gateway@0.1.6
+
 ## 2.12.1
 
 ### Patch Changes

@@ -78,8 +78,11 @@ export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLT
   observer?.observe(scroller);
   observer?.observe(body);
   observer?.observe(table);
-  return () => {
-    observer?.disconnect();
-    reset();
+  return {
+    measure,
+    disconnect: () => {
+      observer?.disconnect();
+      reset();
+    },
   };
 }

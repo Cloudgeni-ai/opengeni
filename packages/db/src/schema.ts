@@ -6646,10 +6646,11 @@ export const sessionTurns = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
-    // Immutable human authority for exact-attempt governance. Human turns bind
-    // their own subject; trusted continuations/compactions may inherit the
-    // causal turn's value while retaining a service initiator. Null means the
-    // turn has no human preference authority.
+    // Bounded, immutable causal-human selector for named attempt-bound
+    // capabilities. Human turns bind their own subject; trusted continuations
+    // and compactions may inherit the causal turn's value while retaining a
+    // service initiator. It never authorizes by itself. Null means pure service
+    // work has no human-bound authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
     // Exact goal authority frozen when the logical turn is accepted. The
     // migration trigger fills this for old and rolling writers; claim only
@@ -6927,6 +6928,52 @@ export const sessionRealtimeContextProjections = pgTable(
 // First-class ownership for one accepted execution attempt. A workflow may
 // preallocate id, but this row is inserted only by the activity transaction
 // that actually claims the logical turn and registers its exact dispatch.
+// Protected EXECUTE-only ledger. SQL owns live-attempt/principal derivation,
+// immutable settlement, bounds, RLS and source ownership constraints.
+export const mcpOperations = pgTable(
+  "mcp_operations",
+  {
+    operationId: uuid("operation_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    sourceTurnId: uuid("source_turn_id").notNull(),
+    sourceAttemptId: uuid("source_attempt_id").notNull(),
+    sourceExecutionGeneration: integer("source_execution_generation").notNull(),
+    sourceCallId: text("source_call_id"),
+    principalKind: text("principal_kind").notNull(),
+    principalId: text("principal_id").notNull(),
+    principalMembershipId: uuid("principal_membership_id"),
+    principalMembershipRevision: bigint("principal_membership_revision", { mode: "number" }),
+    serverId: text("server_id").notNull(),
+    originalTool: text("original_tool").notNull(),
+    observerTool: text("observer_tool").notNull(),
+    argumentDigest: text("argument_digest").notNull(),
+    destinationDigest: text("destination_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
+    originalOutcome: text("original_outcome").notNull().default("captured"),
+    originalResult: jsonb("original_result"),
+    originalResultCodecVersion: integer("original_result_codec_version"),
+    observationResult: jsonb("observation_result"),
+    observationResultCodecVersion: integer("observation_result_codec_version"),
+    receiptRevision: text("receipt_revision"),
+    receiptDigest: text("receipt_digest"),
+    observationClaimId: uuid("observation_claim_id"),
+    observationClaimAttemptId: uuid("observation_claim_attempt_id"),
+    observationClaimExpiresAt: timestamp("observation_claim_expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    observedAt: timestamp("observed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    source: index("mcp_operations_source_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.sourceTurnId,
+      table.sourceCallId,
+    ),
+  }),
+);
+
 export const sessionTurnAttempts = pgTable(
   "session_turn_attempts",
   {

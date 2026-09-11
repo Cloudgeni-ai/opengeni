@@ -1,5 +1,33 @@
 # @opengeni/runtime
 
+## 2.5.3
+
+### Patch Changes
+
+- e1a50ba: Spool Linux host-backed workspace archives through capture, object storage, and cold restore instead of materializing whole JSON/base64 payloads. Isolate each upload at a fresh physical locator and verify stored bytes without assuming conditional-PUT support. Preserve legacy locators, archive format, configured restore limits, and lease capture/publication authority; retain candidates after ambiguous publication outcomes.
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+  - @opengeni/codemode@0.5.6
+  - @opengeni/config@1.1.2
+  - @opengeni/sdk@5.0.5
+  - @opengeni/tool-gateway@0.1.7
+
+## 2.5.2
+
+### Patch Changes
+
+- 6a60a58: Canonicalize typed Skill review cards using host-owned choices. Allow explicit
+  authorized Save/Don't save responses to existing exact-bound cards with the
+  legacy Other flag and null option descriptions, without rewriting cards,
+  manufacturing consent, or weakening human, tenant, turn, or revision fences.
+  Apply rolling migration 0458; pre-0435 runtimes remain unsupported.
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+  - @opengeni/codemode@0.5.5
+  - @opengeni/config@1.1.1
+  - @opengeni/sdk@5.0.3
+  - @opengeni/tool-gateway@0.1.6
+
 ## 2.5.1
 
 ### Patch Changes

@@ -451,6 +451,8 @@ probes remain immediate.
 
 Rotation recovery: [lifecycle](run-lifecycle.md).
 
+Archive capture/restore: [storage](workspace-archive-storage.md).
+
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.
@@ -857,6 +859,10 @@ Human preferences require frozen causal identity. Command/timeout successors
 preserve immutable receipts, separate causal claims and live personal-grant
 admission; see [run lifecycle](run-lifecycle.md).
 
+`session_turns.initiating_human_subject_id` never authorizes alone:
+`artifacts:publish`, archive, restore, and exact mutation fences apply;
+pure service work fails closed. See [run lifecycle](run-lifecycle.md).
+
 Tool disclosure is progressive, but authority is not. A tool may be eager or
 lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
 still resolves through the current authorized catalog and the same execution
@@ -1141,9 +1147,11 @@ conversation rows, or authorization into vector ranking.
 
 Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-projects`.
 
-Capabilities define available integration/tool shapes. Connections bind live
-credentials and ownership. Session tool policy selects from authorized tools.
-MCP and Codemode are execution surfaces, not grant sources.
+Capabilities define integration/tool shapes. Connections bind credentials and
+ownership. Session policy selects authorized tools.
+MCP/Codemode execute tools; neither grants authority.
+
+[MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 
 `@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
 authorization, approval-classification, and execution boundary. Runtime prepares
@@ -1517,6 +1525,8 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 ## 11. Build, test, and release
 
+Production npm availability reconciles independently of acceptance; see `reconcile-production-packages.yml`.
+
 The TypeScript stack uses Bun with strict TypeScript. The Rust agent and relay
 use Cargo. Unit tests and typechecking are infrastructure-free; integration,
 end-to-end, browser, artifact-runtime, and live lanes add their required
@@ -1527,9 +1537,9 @@ container images, the Helm chart, the Rust agent, and retained source identity.
 Package manifests, Changesets configuration, CI workflows, and release scripts
 own the exact closure and procedure. Web image assets compile natively for both CPU targets.
 
-Canonical commands and contribution rules are in
+Commands:
 [`../AGENTS.md`](../AGENTS.md) and [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
-Toolchain details are in [`toolchain.md`](toolchain.md).
+Toolchain: [`toolchain.md`](toolchain.md).
 
 ---
 

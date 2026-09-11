@@ -1,5 +1,21 @@
 # @opengeni/codemode
 
+## 0.5.6
+
+### Patch Changes
+
+- Updated dependencies [e1a50ba]
+  - @opengeni/contracts@3.0.2
+  - @opengeni/tool-gateway@0.1.7
+
+## 0.5.5
+
+### Patch Changes
+
+- Updated dependencies [6a60a58]
+  - @opengeni/contracts@3.0.1
+  - @opengeni/tool-gateway@0.1.6
+
 ## 0.5.4
 
 ### Patch Changes

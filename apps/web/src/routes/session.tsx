@@ -74,6 +74,7 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionCommands } from "@/components/session/commands";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
+import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
 import {
   SessionVariableSetPicker,
   type SessionVariableSetPickerSharedState,
@@ -1117,7 +1118,27 @@ function SessionDock(props: {
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
   });
-  const artifactSummaries = artifactState.artifacts;
+  const [artifactRequest, setArtifactRequest] = useState<{
+    sessionId: string;
+    artifactId: string;
+    requestId: number;
+    tab: string;
+  } | null>(null);
+  const currentArtifactRequest =
+    artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
+  const artifactSummaries = [...artifactState.artifacts];
+  // A just-published Site may be linked before discovery refresh completes, or
+  // belong to another session in this workspace. The viewer still authorizes its read.
+  if (
+    currentArtifactRequest &&
+    !artifactSummaries.some((item) => item.id === currentArtifactRequest.artifactId)
+  ) {
+    artifactSummaries.push({
+      id: currentArtifactRequest.artifactId,
+      modality: "site",
+      title: "Site",
+    });
+  }
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "artifacts",
@@ -1137,10 +1158,12 @@ function SessionDock(props: {
           <LazySessionEditableArtifactsWorkspace
             key={props.sessionId}
             workspaceId={props.workspaceId}
+            sessionId={props.sessionId}
             artifacts={artifactSummaries}
             status={artifactState.status}
             onRetry={artifactState.retry}
             initialSelectedArtifactId={dockNavigation.artifactId}
+            openArtifactRequest={currentArtifactRequest}
             onSelectedArtifactIdChange={rememberArtifact}
           />
         </Suspense>
@@ -1171,7 +1194,30 @@ function SessionDock(props: {
       sessionId={props.sessionId}
       preferenceOwnerId={context.accessContext.subjectId}
       events={props.events}
-      primary={props.primary}
+      primary={
+        <ArtifactLinkBoundary
+          workspaceId={props.workspaceId}
+          onOpen={(target) => {
+            // Editable artifacts require their discovered modality; unlisted editor
+            // links retain the normal full-page destination.
+            if (
+              target.editable &&
+              !artifactSummaries.some((item) => item.id === target.id && item.modality !== "site")
+            )
+              return false;
+            setArtifactRequest((previous) => ({
+              sessionId: props.sessionId,
+              artifactId: target.id,
+              requestId: (previous?.requestId ?? 0) + 1,
+              tab: "artifacts",
+            }));
+            return true;
+          }}
+        >
+          {props.primary}
+        </ArtifactLinkBoundary>
+      }
+      openTabRequest={currentArtifactRequest}
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}

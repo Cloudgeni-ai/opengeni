@@ -1,4 +1,6 @@
-import type { ObjectStorage } from "@opengeni/storage";
+import { uploadWorkspaceArchiveSpool, type ObjectStorage } from "@opengeni/storage";
+import { randomUUID } from "node:crypto";
+import type { VerifiedHostWorkspaceArchive } from "@opengeni/runtime/sandbox";
 import {
   parseWorkspaceArchiveObjectRef,
   workspaceArchiveObjectKey,
@@ -35,30 +37,87 @@ export async function putTarWorkspaceArchiveObject(input: {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
-  archive: { bytes: Uint8Array; descriptor: WorkspaceArchiveDescriptor };
+  archive:
+    | { bytes: Uint8Array; descriptor: WorkspaceArchiveDescriptor }
+    | VerifiedHostWorkspaceArchive;
 }): Promise<WorkspaceArchiveObjectRef> {
-  if (input.archive.descriptor.version !== 1) {
+  // Snapshot caller-owned metadata before any provider callback can mutate it.
+  const descriptor = structuredClone(input.archive.descriptor);
+  if (descriptor.version !== 1) {
     throw new Error("Object-storage workspace archives are portable tar only");
   }
   const key = workspaceArchiveObjectKey({
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sandboxGroupId: input.sandboxGroupId,
-    revision: input.archive.descriptor.revision,
+    revision: descriptor.revision,
+    uploadId: randomUUID(),
   });
-  await input.objectStorage.putObject({
-    key,
-    contentType: "application/x-tar",
-    body: input.archive.bytes,
-    sha256: input.archive.descriptor.archiveSha256,
-  });
+  const archive = input.archive;
+  if ("spool" in archive) {
+    if (
+      archive.spool.byteSize !== descriptor.archiveBytes ||
+      archive.spool.sha256 !== descriptor.archiveSha256
+    ) {
+      throw new Error("Workspace archive spool does not match its verified descriptor");
+    }
+  }
+  const source =
+    "spool" in archive
+      ? archive.spool
+      : {
+          path: "",
+          byteSize: archive.bytes.byteLength,
+          sha256: descriptor.archiveSha256,
+          async *open() {
+            for (let offset = 0; offset < archive.bytes.length; offset += 1024 * 1024)
+              yield archive.bytes.subarray(offset, offset + 1024 * 1024);
+          },
+          async dispose() {},
+        };
+  try {
+    await uploadWorkspaceArchiveSpool(input.objectStorage, key, {
+      ...source,
+      byteSize: descriptor.archiveBytes,
+      sha256: descriptor.archiveSha256,
+      open: source.open.bind(source),
+    });
+  } catch (error) {
+    // This fresh locator has never been offered to database publication. An
+    // ambiguous provider upload can leave an orphan, never overwrite a retained
+    // archive or justify deleting another attempt's object.
+    await input.objectStorage.deleteObject(key).catch(() => undefined);
+    throw error;
+  }
   return {
     schema: "sandbox_archive_object_v1",
     key,
-    sha256: input.archive.descriptor.archiveSha256,
-    bytes: input.archive.descriptor.archiveBytes,
+    sha256: descriptor.archiveSha256,
+    bytes: descriptor.archiveBytes,
     backend: input.objectStorage.backend,
   };
+}
+
+/** The caller owns a fresh candidate returned by this module. A thrown or lost
+ * database response is UNKNOWN: it may have committed, so never delete on catch.
+ * Only the transaction's exact candidate disposition can authorize cleanup. */
+export async function persistWorkspaceArchiveCandidate<
+  T extends {
+    wrote: boolean;
+    candidateDisposition?: "adopted" | "already_referenced" | "unused";
+  },
+>(input: {
+  objectStorage?: ObjectStorage | null;
+  ref?: WorkspaceArchiveObjectRef;
+  persist: () => Promise<T>;
+}): Promise<T> {
+  const objectStorage = input.objectStorage;
+  const ref = input.ref ? { ...input.ref } : undefined;
+  const result = await input.persist();
+  if (objectStorage && ref && result.candidateDisposition === "unused") {
+    await deleteUnpublishedWorkspaceArchiveObject(objectStorage, ref);
+  }
+  return result;
 }
 
 export async function putVersion1TarArchiveOrInline(input: {
@@ -67,11 +126,13 @@ export async function putVersion1TarArchiveOrInline(input: {
   accountId: string;
   workspaceId: string;
   sandboxGroupId: string;
-  archive: {
-    bytes: Uint8Array;
-    descriptor: WorkspaceArchiveDescriptor;
-    base64: string;
-  };
+  archive:
+    | VerifiedHostWorkspaceArchive
+    | {
+        bytes: Uint8Array;
+        descriptor: WorkspaceArchiveDescriptor;
+        base64: string;
+      };
   metrics?: {
     onWorkspaceArchiveObject?: (input: {
       outcome: "put" | "put_failed" | "deleted_unpublished";
@@ -83,12 +144,15 @@ export async function putVersion1TarArchiveOrInline(input: {
   workspaceArchiveRef?: WorkspaceArchiveObjectRef;
 }> {
   if (input.archive.descriptor.version !== 1) {
+    if ("spool" in input.archive) throw new Error("Native snapshots cannot use a portable spool");
     return { workspaceArchive: input.archive.base64 };
   }
   if (input.backend === "opensandbox" && !input.objectStorage) {
     throw new WorkspaceArchiveObjectStorageRequiredError("opensandbox");
   }
   if (!input.objectStorage) {
+    if ("spool" in input.archive)
+      throw new WorkspaceArchiveObjectStorageRequiredError(input.backend);
     return { workspaceArchive: input.archive.base64 };
   }
   try {
@@ -97,7 +161,7 @@ export async function putVersion1TarArchiveOrInline(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sandboxGroupId: input.sandboxGroupId,
-      archive: { bytes: input.archive.bytes, descriptor: input.archive.descriptor },
+      archive: input.archive,
     });
     try {
       input.metrics?.onWorkspaceArchiveObject?.({

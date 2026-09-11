@@ -68,6 +68,35 @@ entry disappears from the current read projection after activation. Don't save r
 Other, expired requests, agent answers and noncanonical bearer responses never
 activate a Skill.
 
+New typed Skill questions must match the host-owned confirmation text and
+choices before the runtime normalizes known wire differences. A typed reference
+does not authorize replacing misleading prompts, labels or descriptions. The
+canonical result has one dedicated question, no Other and no
+request skip. This constructs a review card, not consent or authority; the
+database still verifies the reference against its immutable source receipt.
+
+Migration 0458 is a rolling compatibility fix over 0435. It changes no stored
+cards, historical answers, grants, or authorization stamps. An existing pending
+card with the canonical text and exact choices may have `allowOther: true` and
+absent or null option descriptions. The initiating human must explicitly answer
+Save or Don't save again through normal authorized response admission. Other
+answers cannot confirm. Every receipt, live authority, turn/generation, expiry,
+head and revision fence still applies; altered labels, non-null descriptions or
+references are not repaired. There is no automatic approval or backfill, and
+no need to rewrite the audit history. Rolling back the application to a
+0435-or-newer binary retains this narrow database compatibility; do not undo the
+migration or restart a pre-0435 binary. Deployment and the actual human decision
+remain separate operations.
+
+Database settlement uses the same canonical presentation validator and never
+forces Other onto a new Skill card. If another interruption is answered first,
+the remaining Skill request may re-freeze in the next execution generation.
+Settlement preserves its existing question bytes only after its stable request
+identity, full canonical presentation and complete typed reference match. The
+original pending-status, skip and deadline predicates remain exact, and only
+generation ownership advances. Unknown fields, changed references, misleading
+text, altered deadlines or settled requests do not qualify for compatibility.
+
 Confirmation validates the canonical prompt, label, help text, choices and typed
 reference against the original immutable receipt. The logical turn, initiating
 human, current workspace authority, full revision identity, latest revision,

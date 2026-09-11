@@ -51,6 +51,18 @@ function knowledgeAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+// Remaining MCP authority tables not already supplied by the canonical
+// workspace, membership, external-link and session authority fixtures below.
+function mcpOperationAuthorityTables(includeWorkspaceMembership = false): RuntimeTablePosture[] {
+  return [
+    "mcp_operations",
+    "external_link_turn_authorities",
+    "host_mcp_turn_authorities",
+    "scheduled_task_runs",
+    ...(includeWorkspaceMembership ? ["workspace_memberships"] : []),
+  ].map((name) => ({ ...knowledgeAuthorityTables()[0]!, name }));
+}
+
 function googleDriveAuthorityTables(): RuntimeTablePosture[] {
   return [
     "connections",
@@ -379,6 +391,7 @@ function safePosture(): RuntimeDatabasePosture {
         trigger: false,
       },
       ...knowledgeAuthorityTables(),
+      ...mcpOperationAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...managedAuthSessionSetAuthorityTables(),
@@ -605,7 +618,8 @@ describe("runtime database posture evaluator", () => {
             ? length +
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
-              organizationRecoveryProtectedTableCount
+              organizationRecoveryProtectedTableCount +
+              1 // Additive protected MCP operation ledger; no runtime DML.
             : length);
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -613,7 +627,10 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 1;
+      expect(FORCE_RLS_TABLES).toContain("mcp_operations");
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("mcp_operations");
+      expect(RUNTIME_TABLE_PRIVILEGES.mcp_operations).toBeUndefined();
       expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
       for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
@@ -1589,6 +1606,7 @@ describe("runtime database posture evaluator", () => {
           : table,
       ),
       ...knowledgeAuthorityTables(),
+      ...mcpOperationAuthorityTables(true),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...managedAuthSessionSetAuthorityTables(),
@@ -1780,6 +1798,7 @@ describe("runtime database posture evaluator", () => {
         artifactMaterializerPolicy: true,
       })),
       ...knowledgeAuthorityTables(),
+      ...mcpOperationAuthorityTables(true),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...managedAuthSessionSetAuthorityTables(),
@@ -1872,5 +1891,51 @@ describe("runtime database posture evaluator", () => {
         expect.stringContaining("PUBLIC has forbidden owner-internal helper"),
       ]),
     );
+  });
+
+  test("MCP operation capability requires every authority table and matching ownership", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "mcp_operations");
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "MCP operation authority tables are missing: mcp_operations",
+    );
+    const split = safePosture();
+    split.tables.find((table) => table.name === "external_link_turn_authorities")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      "MCP operation capability mcp_operation_command(jsonb, text, jsonb) authority table owners do not match",
+    );
+  });
+
+  test("MCP operation internals remain owner-only with no runtime or PUBLIC execution", () => {
+    for (const name of [
+      "guard_mcp_operation_immutable()",
+      "mcp_operation_command_scoped(jsonb, text, jsonb)",
+    ]) {
+      const posture = safePosture();
+      const routine = {
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: false,
+      };
+      posture.privateRoutines.push(routine);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      routine.execute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP operation internal routine ${name}`,
+      );
+      routine.execute = false;
+      routine.publicExecute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP operation internal routine ${name}`,
+      );
+      routine.publicExecute = false;
+      routine.owner = "another_owner";
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP operation internal routine ${name} owner does not match ledger owner`,
+      );
+    }
   });
 });

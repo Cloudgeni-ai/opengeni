@@ -22,8 +22,7 @@ import type {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import { DeviceAuthorization } from "@opengeni/react/connect";
-import "@opengeni/react/connect.css";
+import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import {
   Loader2Icon,
   RefreshCwIcon,
@@ -690,12 +689,11 @@ export function CodexDeviceCodePanel({
   loadClipboard?: () => Promise<ClipboardModule>;
 }) {
   return (
-    <DeviceAuthorization
+    <SubscriptionDeviceCodePanel
+      provider="codex"
       userCode={userCode}
       verificationUri={verificationUri}
       loadClipboard={loadClipboard}
-      codeAttributes={{ "data-codex-device-code": "" }}
-      description="Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you navigate away."
       onCopyResult={(copied) =>
         copied
           ? toast.success("Code copied")

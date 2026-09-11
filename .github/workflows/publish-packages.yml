@@ -1,4 +1,5 @@
 name: Publish npm packages
+run-name: publish-packages:${{ inputs.source_sha }}
 
 on:
   workflow_dispatch:
