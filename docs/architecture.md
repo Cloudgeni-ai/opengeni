@@ -1525,9 +1525,7 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 ## 11. Build, test, and release
 
-`reconcile-production-packages.yml` independently checks the healthy managed
-production revision and dispatches exact candidate npm publication when missing.
-It retries without depending on post-deployment acceptance; see `deployment.md`.
+Production npm availability reconciles independently of acceptance; see `reconcile-production-packages.yml`.
 
 The TypeScript stack uses Bun with strict TypeScript. The Rust agent and relay
 use Cargo. Unit tests and typechecking are infrastructure-free; integration,
