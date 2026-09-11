@@ -14,7 +14,15 @@ import type {
   KnowledgeReviewBatch,
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, PlusIcon, SearchIcon, SlidersHorizontalIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  FolderIcon,
+  QuoteIcon,
+  LinkIcon,
+  PlusIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -97,7 +105,6 @@ export function KnowledgeBrowser({
   const startReview = useRef<string | null>(null);
   const [reviewTransition, setReviewTransition] = useState(false);
   const [bulkReview, setBulkReview] = useState(false);
-  const [reviewedCount, setReviewedCount] = useState(0);
   function openRelated(next: Selection) {
     if (selection) setTrail((prior) => [...prior, selection]);
     setSelection(next);
@@ -110,7 +117,6 @@ export function KnowledgeBrowser({
     setEntries([]);
     setTrail([]);
     setBulkReview(false);
-    setReviewedCount(0);
     setReviewGroup(batch);
     startReview.current = batch.id;
     setReviewTransition(true);
@@ -120,7 +126,6 @@ export function KnowledgeBrowser({
     setQuery("");
     setSearch("");
     setTrail([]);
-    setReviewedCount((count) => count + 1);
     setSelection(null);
     if (reviewGroup) {
       startReview.current = reviewGroup.id;
@@ -610,7 +615,10 @@ export function KnowledgeBrowser({
           }
         }}
       >
-        <DialogContent className="min-w-0 bg-bg sm:max-w-3xl">
+        <DialogContent
+          className="min-w-0 bg-surface sm:max-w-3xl"
+          style={{ borderColor: "var(--color-border-strong)" }}
+        >
           {reviewTransition ? (
             <DialogHeader>
               <DialogTitle>Review knowledge</DialogTitle>
@@ -630,13 +638,6 @@ export function KnowledgeBrowser({
               <ArrowLeftIcon className="size-4" />
               {trail.at(-1)?.view === "needs_review" ? "Back to review" : "Back"}
             </Button>
-          ) : reviewGroup && selection?.view === "needs_review" ? (
-            <p className="pr-8 text-xs text-fg-muted">
-              {reviewGroup.title && reviewGroup.title !== "New conversation"
-                ? reviewGroup.title
-                : "Review changes"}
-              {reviewedCount ? ` · ${reviewedCount} reviewed` : ""}
-            </p>
           ) : null}
           {selection?.requiredFor ? (
             <p className="text-sm text-fg-muted">
@@ -1015,75 +1016,88 @@ function KnowledgeInspector(props: {
                 {entry.content || "This collection brings together related knowledge."}
               </div>
             )}
-            <details className="group/details" open={pending ? undefined : true}>
-              <summary className="cursor-pointer text-sm text-fg-muted hover:text-fg">
-                Supporting details
-              </summary>
+            <details
+              className="group/details rounded-lg border border-border bg-bg/60 px-4 py-3"
+              open={pending ? undefined : true}
+            >
+              <summary className="cursor-pointer text-sm font-medium text-fg">Details</summary>
               <div className="mt-3 grid gap-4">
-                {entry.source ? (
-                  <section className="grid gap-2 border-t border-border pt-4">
-                    <h3 className="text-sm font-medium">Source</h3>
-                    <p className="text-sm text-fg-muted">
-                      {SOURCE[entry.source.kind]}
-                      {entry.source.retention === "passages"
-                        ? " · Retained passages"
-                        : entry.source.retention === "full_text"
-                          ? " · Retained text"
-                          : ""}
-                    </p>
-                    {externalUrl(entry.source.uri) ? (
-                      <a
-                        href={externalUrl(entry.source.uri)!}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-sm text-brand hover:underline"
-                      >
-                        Open original source
-                      </a>
-                    ) : null}
-                    {entry.source.fileId ? (
-                      <KnowledgeOriginalFile
-                        key={`${record.id}:${record.revision.id}`}
-                        workspaceId={props.workspaceId}
-                        entryId={record.id}
-                        revisionId={record.revision.id}
-                      />
-                    ) : null}
-                  </section>
-                ) : null}
-                {entry.evidence.length ? (
-                  <section className="grid gap-3 border-t border-border pt-4">
-                    <h3 className="text-sm font-medium">Supporting information</h3>
-                    {entry.evidence.map((evidence) => (
-                      <div key={JSON.stringify(evidence)} className="grid gap-1">
-                        {evidence.quote ? (
-                          <blockquote className="border-l-2 border-border pl-3 text-sm text-fg-muted">
-                            {evidence.quote}
-                          </blockquote>
+                {entry.source || entry.evidence.length ? (
+                  <section aria-label="Sources" className="grid gap-3">
+                    <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+                      <QuoteIcon className="size-4 text-brand" />
+                      Sources
+                    </h3>
+                    {entry.source ? (
+                      <div className="grid gap-2">
+                        <p className="text-sm text-fg-muted">
+                          {SOURCE[entry.source.kind]}
+                          {entry.source.retention === "passages"
+                            ? " · Retained passages"
+                            : entry.source.retention === "full_text"
+                              ? " · Retained text"
+                              : ""}
+                        </p>
+                        {externalUrl(entry.source.uri) ? (
+                          <a
+                            href={externalUrl(entry.source.uri)!}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-sm text-brand hover:underline"
+                          >
+                            Open original source
+                          </a>
                         ) : null}
-                        <KnowledgeReference
-                          workspaceId={props.workspaceId}
-                          id={evidence.entryId}
-                          revisionId={evidence.revisionId}
-                          onClick={() =>
-                            props.onOpen({
-                              id: evidence.entryId,
-                              revisionId: evidence.revisionId,
-                            })
-                          }
-                        />
-                        {evidence.location.page ? (
-                          <span className="text-xs text-fg-subtle">
-                            Page {evidence.location.page}
-                          </span>
+                        {entry.source.fileId ? (
+                          <KnowledgeOriginalFile
+                            key={`${record.id}:${record.revision.id}`}
+                            workspaceId={props.workspaceId}
+                            entryId={record.id}
+                            revisionId={record.revision.id}
+                          />
                         ) : null}
                       </div>
-                    ))}
+                    ) : null}
+                    {entry.evidence.length ? (
+                      <div className="grid gap-3">
+                        {entry.evidence.map((evidence) => (
+                          <div key={JSON.stringify(evidence)} className="grid gap-1">
+                            {evidence.quote ? (
+                              <blockquote className="border-l-2 border-brand/40 pl-3 text-sm text-fg">
+                                {evidence.quote}
+                              </blockquote>
+                            ) : null}
+                            <KnowledgeReference
+                              workspaceId={props.workspaceId}
+                              id={evidence.entryId}
+                              revisionId={evidence.revisionId}
+                              onClick={() =>
+                                props.onOpen({
+                                  id: evidence.entryId,
+                                  revisionId: evidence.revisionId,
+                                })
+                              }
+                            />
+                            {evidence.location.page ? (
+                              <span className="text-xs text-fg-subtle">
+                                Page {evidence.location.page}
+                              </span>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                   </section>
                 ) : null}
                 {entry.groupIds.length ? (
-                  <section className="grid gap-2 border-t border-border pt-4">
-                    <h3 className="text-sm font-medium">Collections</h3>
+                  <section
+                    aria-label="Collection placement"
+                    className={`grid gap-2 ${entry.source || entry.evidence.length ? "border-t border-border pt-4" : ""}`}
+                  >
+                    <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+                      <FolderIcon className="size-4 text-amber-600 dark:text-amber-400" />
+                      {pending && record.revision.change !== "archive" ? "Save in" : "Saved in"}
+                    </h3>
                     {entry.groupIds.map((id) => (
                       <KnowledgeReference
                         key={id}
@@ -1096,7 +1110,10 @@ function KnowledgeInspector(props: {
                 ) : null}
                 {entry.relationships.length ? (
                   <section className="grid gap-2 border-t border-border pt-4">
-                    <h3 className="text-sm font-medium">Related knowledge</h3>
+                    <h3 className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+                      <LinkIcon className="size-4" />
+                      Related knowledge
+                    </h3>
                     {entry.relationships.map((relation) => (
                       <div key={`${relation.entryId}:${relation.relation}`}>
                         <span className="mr-2 text-xs text-fg-subtle">

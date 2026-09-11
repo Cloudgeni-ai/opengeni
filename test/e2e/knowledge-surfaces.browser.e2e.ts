@@ -799,12 +799,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         async () => (await dialog.locator("mark").allTextContents()).join() === "20,000,21,000",
         { timeoutMs: 10_000 },
       );
-      expect(await dialog.getByText("Supporting information", { exact: true }).isVisible()).toBe(
+      expect(await dialog.getByRole("region", { name: "Sources", exact: true }).isVisible()).toBe(
         false,
       );
       await dialog
         .locator("summary")
-        .filter({ hasText: /^Supporting details$/ })
+        .filter({ hasText: /^Details$/ })
         .click();
       await dialog.getByRole("button", { name: "Review Acme contract", exact: true }).click();
       await dialog.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
@@ -814,7 +814,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         async () => (await dialog.locator("mark").allTextContents()).join() === "20,000,21,000",
         { timeoutMs: 10_000 },
       );
+      await expectNoAxeViolations(page, "[data-slot='dialog-content']", "knowledge-review-light");
       await page.screenshot({ path: "/tmp/opengeni-knowledge-review-acceptance.png" });
+      await setTheme(page, "dark");
+      await expectNoAxeViolations(page, "[data-slot='dialog-content']", "knowledge-review-dark");
+      await page.screenshot({ path: "/tmp/opengeni-knowledge-review-dark.png" });
+      await setTheme(page, "light");
       // Hold A's response after the server accepts it; opening B must invalidate A's UI completion.
       let release!: () => void, accepted!: () => void;
       const held = new Promise<void>((resolve) => {

@@ -165,8 +165,9 @@ A correction awaiting review leaves the previous published revision available.
 The Knowledge browser groups pending changes by chat turn or scheduled run. A
 human opens the first proposal directly, sees changed text against the exact
 published version, and approves or rejects it to move to the next change. Pending
-prerequisites are shown first, even outside the loaded page. Supporting details
-are collapsed until requested; following an evidence link keeps a Back path to
+prerequisites are shown first, even outside the loaded page. Sources and
+collection placement are separated under Details, collapsed until requested;
+following an evidence link keeps a Back path to
 the proposal. New entries show their proposed text, with long text expandable.
 Editing before approval and optional bulk selection remain available. A
 selection of up to 100 exact revisions can be reviewed atomically. A complete

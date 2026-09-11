@@ -118,8 +118,8 @@ export function KnowledgeReviewSummary({
           ) : null}
           {(
             [
-              ["source", "Source changed"],
-              ["evidence", "Supporting information changed"],
+              ["source", "Original source changed"],
+              ["evidence", "Sources changed"],
               ["relationships", "Related knowledge changed"],
             ] as const
           ).map(([field, title]) =>
@@ -158,7 +158,13 @@ function sameIds(a: string[], b: string[]) {
 function TextPreview({ text }: { text: string }) {
   const [full, setFull] = useState(false);
   return (
-    <div className="grid gap-2">
+    <div
+      className="grid gap-2 rounded-lg border border-l-[3px] bg-brand/5 p-4"
+      style={{
+        borderColor: "color-mix(in oklab, var(--color-brand) 30%, var(--color-border))",
+        borderLeftColor: "var(--color-brand)",
+      }}
+    >
       <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6">
         {full || text.length <= 800 ? text : `${text.slice(0, 800)}…`}
       </p>
@@ -187,8 +193,23 @@ function TextChange({ label, before, after }: { label: string; before: string; a
             ["Proposed", difference.after],
           ] as const
         ).map(([title, text]) => (
-          <div key={title} className="min-w-0 rounded-md bg-surface/60 p-3">
-            <p className="mb-2 text-xs font-medium text-fg-muted">{title}</p>
+          <div
+            key={title}
+            className={`min-w-0 rounded-lg border p-4 ${title === "Proposed" ? "border-t-[3px] bg-brand/5" : "bg-bg"}`}
+            style={
+              title === "Proposed"
+                ? {
+                    borderColor: "color-mix(in oklab, var(--color-brand) 30%, var(--color-border))",
+                    borderTopColor: "var(--color-brand)",
+                  }
+                : { borderColor: "var(--color-border-strong)" }
+            }
+          >
+            <p
+              className={`mb-2 text-xs font-semibold ${title === "Proposed" ? "text-brand" : "text-fg-muted"}`}
+            >
+              {title}
+            </p>
             <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6">
               {difference.prefix}
               <mark
