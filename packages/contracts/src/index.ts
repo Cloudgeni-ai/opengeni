@@ -11414,6 +11414,7 @@ export const SkillImportFileSummary = z.object({
 export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
 
 export const SkillImportPreview = z.object({
+  markdown: z.string().max(262144).optional(),
   source: SkillImportSource,
   sourceUrl: z.string().url(),
   repositoryUrl: z.string().url(),
@@ -12147,6 +12148,7 @@ export const PluginInstallationSummary = z
     description: z.string().max(4000),
     category: z.string().min(1).max(100),
     tags: z.array(z.string().min(1).max(100)).max(64),
+    logoUrl: z.string().url().max(2048).nullable().optional(),
     sourceUrl: z.string().url().max(2048).nullable(),
     manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
     installationVersion: z.number().int().positive(),
@@ -17099,3 +17101,7 @@ export * from "./remember";
 export * from "./agent-authored-durable-text";
 
 export * from "./feedback";
+
+export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
+export { mcpEndpointIdentity } from "./mcp-endpoint";
+export { pluginMcpUnavailableReason } from "./mcp-endpoint";

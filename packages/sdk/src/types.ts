@@ -6975,6 +6975,7 @@ export type SkillImportFileSummary = {
 };
 
 export type SkillImportPreview = {
+  markdown?: string;
   source: SkillImportSource;
   sourceUrl: string;
   repositoryUrl: string;
@@ -7431,6 +7432,7 @@ export type PluginInstallationSummary = {
   description: string;
   category: string;
   tags: string[];
+  logoUrl?: string | null;
   sourceUrl: string | null;
   manifestDigest: string;
   installationVersion: number;

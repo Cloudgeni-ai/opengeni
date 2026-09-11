@@ -33,7 +33,7 @@ describe("BundlesSection", () => {
       const rendered = await renderSection({ query });
       try {
         expect(rowIds(rendered.container)).toEqual([expected]);
-        expect(count(rendered.container)).toBe("1 of 4");
+        expect(count(rendered.container)).toBe("1 results");
         expect(rendered.container.querySelector('input[type="search"]')).toBeNull();
       } finally {
         await rendered.unmount();
@@ -45,7 +45,7 @@ describe("BundlesSection", () => {
     const rendered = await renderSection({ query: "unmatched-connector" });
     try {
       expect(rowIds(rendered.container)).toEqual([]);
-      expect(count(rendered.container)).toBe("0 of 4");
+      expect(count(rendered.container)).toBe("0 results");
     } finally {
       await rendered.unmount();
     }
@@ -54,10 +54,8 @@ describe("BundlesSection", () => {
     const rendered = await renderSection();
     try {
       const heading = rendered.container.querySelector("#bundles-heading");
-      expect(heading?.textContent).toBe("Bundles");
-      expect(rendered.container.textContent).toContain(
-        "A named collection of tools and instructions, not a live connection to anything.",
-      );
+      expect(heading?.textContent).toBe("Skills & plugins");
+      expect(rendered.container.textContent).toContain("Install tools and skills together.");
 
       const rows = rowIds(rendered.container);
       expect(rows).toEqual([
@@ -70,7 +68,7 @@ describe("BundlesSection", () => {
       // the visible line inside the button, so the taxonomy the row shows is
       // spoken between the name and the state rather than lost.
       expect(rowNames(rendered.container)).toEqual([
-        "Infrastructure operations. Pack, registered in this workspace. Not installed",
+        "Infrastructure operations. Workflow template, registered in this workspace. Not installed",
         "Research suite. Plugin, imported from source. Installed",
         "release-operator. Skill, imported from source. Installed",
         "Terraform. Skill, curated by OpenGeni. Installed",
@@ -100,7 +98,7 @@ describe("BundlesSection", () => {
   test("reports how much of the bundle list the search is showing", async () => {
     const rendered = await renderSection();
     try {
-      expect(count(rendered.container)).toBe("4 of 4");
+      expect(count(rendered.container)).toBe("4 results");
     } finally {
       await rendered.unmount();
     }
@@ -110,8 +108,8 @@ describe("BundlesSection", () => {
     const rendered = await renderSection({ empty: true });
     try {
       expect(rowIds(rendered.container)).toEqual([]);
-      expect(rendered.container.textContent).toContain("No bundles yet");
-      expect(count(rendered.container)).toBe("0 of 0");
+      expect(rendered.container.textContent).toContain("No skills or plugins yet");
+      expect(count(rendered.container)).toBe("0 results");
     } finally {
       await rendered.unmount();
     }
@@ -125,7 +123,7 @@ describe("BundlesSection", () => {
       );
       // The banner above already owns this state; claiming nothing is installed
       // would contradict it.
-      expect(rendered.container.textContent).not.toContain("No bundles yet");
+      expect(rendered.container.textContent).not.toContain("No skills or plugins yet");
       expect(rowIds(rendered.container)).toEqual([]);
     } finally {
       await rendered.unmount();
@@ -136,7 +134,7 @@ describe("BundlesSection", () => {
     const rendered = await renderSection({ empty: true, packsError: true });
     try {
       expect(rendered.container.textContent).toContain("Couldn't load Packs");
-      expect(rendered.container.textContent).not.toContain("No bundles yet");
+      expect(rendered.container.textContent).not.toContain("No skills or plugins yet");
     } finally {
       await rendered.unmount();
     }
@@ -165,7 +163,7 @@ describe("BundlesSection", () => {
       );
       expect(labels.some((label) => label.includes("Import Skill"))).toBe(true);
       expect(labels.some((label) => label.includes("Install Plugin"))).toBe(true);
-      expect(labels.some((label) => label.includes("Add manifest"))).toBe(true);
+      expect(labels.some((label) => label.includes("Add workflow template"))).toBe(true);
     } finally {
       await rendered.unmount();
     }
@@ -175,11 +173,11 @@ describe("BundlesSection", () => {
     const rendered = await renderSection({ canManage: false });
     try {
       expect(rendered.container.textContent).toContain(
-        "Workspace administrators can install, update, and remove Bundles.",
+        "Workspace administrators can install, update, and remove these items.",
       );
       // Every header action is a workspace-administrator action; none of them
       // may sit live directly under the sentence that says so.
-      for (const label of ["Import Skill", "Install Plugin", "Add manifest"]) {
+      for (const label of ["Import Skill", "Install Plugin", "Add workflow template"]) {
         const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
           candidate.textContent?.includes(label),
         );
@@ -209,6 +207,7 @@ function count(container: ParentNode): string {
 
 async function renderSection(
   options: {
+    section?: "skills" | "plugins" | "all";
     canManage?: boolean;
     empty?: boolean;
     loadError?: boolean;
@@ -219,6 +218,7 @@ async function renderSection(
 ) {
   const rendered = await render(
     <BundlesSection
+      section={options.section ?? "all"}
       query={options.query ?? ""}
       client={stubClient(options.empty ?? false, options.loadError ?? false)}
       workspaceId="00000000-0000-4000-8000-000000000001"

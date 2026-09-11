@@ -7,7 +7,7 @@ export function CapabilitiesLegacyRedirect({
   section,
 }: {
   workspaceId: string;
-  section?: "packs";
+  section?: "packs" | "skills";
 }) {
   const callback = slackSettingsSearch(
     Object.fromEntries(new URLSearchParams(window.location.search)),

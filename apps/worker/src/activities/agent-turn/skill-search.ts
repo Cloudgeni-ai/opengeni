@@ -1,6 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import { PublicSkillSearchError, type PublicSkillSearchClient } from "@opengeni/core";
-import { listSkillLibraryEntries } from "@opengeni/runtime/skill-library";
 
 export type WorkspaceSkillSearchEntry = Readonly<{
   id: string;
@@ -23,7 +22,7 @@ export function createSkillSearchAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_search"],
     title: "Search Skills",
     description:
-      "Find installed workspace Skills or available curated and public Skills. Returns identifiers and install sources, not file contents. Search never installs or starts a sandbox. Scope defaults to all; use installed to avoid external search.",
+      "Find installed workspace Skills or available public Skills. Returns identifiers and install sources, not file contents. Search never installs or starts a sandbox. Scope defaults to all; use installed to avoid external search.",
     inputSchema: {
       type: "object",
       properties: {
@@ -60,19 +59,6 @@ export function createSkillSearchAttemptToolDefinition(input: {
           source: entry.source ?? "workspace",
           installed: !entry.source || entry.source === "workspace",
         }));
-      const libraryHits =
-        scope === "installed"
-          ? []
-          : listSkillLibraryEntries()
-              .filter(matches)
-              .slice(0, limit)
-              .map((entry) => ({
-                id: `library:${entry.id}`,
-                name: entry.name,
-                description: entry.description,
-                source: "library" as const,
-                libraryId: entry.id,
-              }));
       let publicResult: Awaited<ReturnType<PublicSkillSearchClient["search"]>> | null = null;
       let publicError: {
         source: "skills_sh";
@@ -93,7 +79,7 @@ export function createSkillSearchAttemptToolDefinition(input: {
       }
       const output = {
         workspace: workspaceHits,
-        library: libraryHits,
+        library: [], // Retained response field for older clients.
         public: publicResult?.items.map((entry) => ({ ...entry })) ?? [],
         // A provider outage is not an empty search. Keep local results useful
         // and expose partial failure explicitly, without leaking network details.

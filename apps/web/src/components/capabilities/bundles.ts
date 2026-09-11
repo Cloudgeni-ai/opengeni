@@ -254,7 +254,7 @@ export function importedSkillBundleRow(
         chip,
         connection: [
           { label: "Source", value: sourceHost(skill.sourceUrl) },
-          { label: "Pinned commit", value: skill.sourceCommit.slice(0, 12) },
+          { label: "Source version", value: skill.sourceCommit.slice(0, 12) },
           { label: "Content digest", value: skill.contentSha256.slice(0, 12) },
           { label: "Reviewed files", value: String(skill.fileCount) },
           { label: "Installation version", value: String(skill.installationVersion) },

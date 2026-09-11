@@ -1,4 +1,4 @@
-import { InboxIcon, SearchIcon, SparklesIcon } from "lucide-react";
+import { InboxIcon, PlugIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import { useDeferredValue, useState } from "react";
 import type { SupportCase, SupportWorkspaceState } from "./types";
 
@@ -21,11 +21,13 @@ export function SupportInbox({
   selectedTicketId,
   agentEnabled,
   onSelectTicket,
+  onOpenConnections,
 }: {
   state: SupportWorkspaceState;
   selectedTicketId: string;
   agentEnabled: boolean;
   onSelectTicket: (ticketId: string) => void;
+  onOpenConnections: () => void;
 }) {
   const [filter, setFilter] = useState<InboxFilter>("mine");
   const [query, setQuery] = useState("");
@@ -138,6 +140,15 @@ export function SupportInbox({
         </div>
       </div>
 
+      <button
+        type="button"
+        onClick={onOpenConnections}
+        aria-haspopup="dialog"
+        className="mx-4 mb-3 flex h-10 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium text-[#494c49] hover:bg-white/60 focus-visible:outline-2 focus-visible:outline-[#2c725f]"
+      >
+        <PlugIcon className="size-4" />
+        Connections
+      </button>
       <footer className="flex shrink-0 items-center gap-3 border-t border-[#d9d9d4] px-5 py-4">
         <div className="grid size-8 place-items-center rounded-full bg-[#cbbdaa] text-[10px] font-bold text-[#594c3e]">
           MC

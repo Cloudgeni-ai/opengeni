@@ -1,3 +1,6 @@
+import { PluginDiscovery } from "./plugin-discovery";
+import { SkillDiscovery } from "./skill-discovery";
+import { InstalledStrip } from "./installed-strip";
 /**
  * Bundles: one section, one uniform row, for every Skill, Plugin, and Pack.
  *
@@ -15,8 +18,8 @@
  * quick-connect fast path: the trailing state indicator stays decorative.
  */
 import type { usePacks } from "@opengeni/react";
-import { PackagePlusIcon, PlusIcon, PuzzleIcon, SparklesIcon } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { PackagePlusIcon, PlusIcon, PuzzleIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
@@ -58,6 +61,9 @@ const BUNDLE_COUNT_ID = "bundles-visible-count";
 
 export function BundlesSection({
   query,
+  importSkillRef,
+  onSearchSkills,
+  section = "plugins",
   client,
   workspaceId,
   connections,
@@ -80,6 +86,9 @@ export function BundlesSection({
   onChanged,
 }: {
   query: string;
+  importSkillRef?: RefObject<(() => void) | null>;
+  onSearchSkills?: (() => void) | undefined;
+  section?: "skills" | "plugins" | "all";
   client: OpenGeniBrowserClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
@@ -123,6 +132,11 @@ export function BundlesSection({
     onChanged,
   });
   const [openSheetId, setOpenSheetId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!importSkillRef) return;
+    importSkillRef.current = source.importSkill;
+    return () => { importSkillRef.current = null; };
+  }, [importSkillRef, source.importSkill]);
   const [openPackId, setOpenPackId] = useState<string | null>(null);
   const [manifestOpen, setManifestOpen] = useState(false);
   // Captured synchronously when a row opens something, so closing returns focus
@@ -130,7 +144,7 @@ export function BundlesSection({
   const openerRef = useRef<HTMLElement | null>(null);
 
   const catalogSkills = useMemo(
-    () => items.filter((item) => item.kind === "skill" && !isWorkspaceImportedSkill(item)),
+    () => items.filter((item) => item.kind === "skill" && item.enabled && !isWorkspaceImportedSkill(item)),
     [items],
   );
 
@@ -185,7 +199,18 @@ export function BundlesSection({
     canManage,
   ]);
 
-  const visible = useMemo(() => filterBundleRows(rows, query), [rows, query]);
+  const visible = useMemo(
+    () =>
+      filterBundleRows(
+        rows.filter(
+          (row) =>
+            section === "all" ||
+            (section === "skills" ? row.kind === "skill" : row.kind !== "skill"),
+        ),
+        query,
+      ),
+    [rows, query, section],
+  );
   // Resolved from the whole list, not the filtered one: narrowing the search
   // while a sheet is open must not yank the sheet closed.
   const openSheetModel =
@@ -226,22 +251,26 @@ export function BundlesSection({
   }
 
   return (
-    <section className="mt-10 space-y-3" aria-labelledby="bundles-heading">
+    <section className="mt-6 space-y-3" aria-label={section === "plugins" ? "Plugins" : "Skills and plugins"}>
+      {section !== "plugins" ? <SkillDiscovery client={client} workspaceId={workspaceId} query={query} canManage={canManage} installedSkills={source.skills} onSearch={onSearchSkills} onImport={(url) => source.importSkill(url)} /> : null}
+      <div hidden={section === "plugins" || (!visible.length && !loading && !failed)} className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-            Skills, plugins &amp; packs
-          </p>
           <h2 id="bundles-heading" className="mt-1 text-base font-semibold text-fg">
-            Bundles
+            {section === "all"
+              ? "Skills & plugins"
+              : section === "skills"
+                ? "Installed packages"
+                : "Installed plugins"}
           </h2>
           <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-            A named collection of tools and instructions, not a live connection to anything. Install
-            one and everything inside it becomes available together.
+            {section === "skills"
+              ? "Manage imported skills and their updates."
+              : "Skills and connections installed together."}
           </p>
           {!canManage ? (
             <p className="mt-1 text-2xs leading-4 text-fg-subtle">
-              Workspace administrators can install, update, and remove Bundles.
+              Workspace administrators can install, update, and remove these items.
             </p>
           ) : null}
         </div>
@@ -251,36 +280,44 @@ export function BundlesSection({
             variant="outline"
             size="sm"
             disabled={!canManage}
-            onClick={source.importSkill}
-          >
-            <SparklesIcon />
-            Import Skill
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={!canManage}
+            hidden={section !== "plugins"}
             onClick={source.installPlugin}
           >
             <PuzzleIcon />
-            Install Plugin
+            Import plugin
           </Button>
           <Button
             type="button"
             size="sm"
             disabled={!canManage}
+            hidden={section !== "plugins"}
             onClick={(event) => {
               openerRef.current = event.currentTarget;
               setManifestOpen(true);
             }}
           >
             <PlusIcon />
-            Add manifest
+            Add workflow template
           </Button>
         </div>
       </div>
 
+      <InstalledStrip
+        items={visible
+          .filter(
+            (row) =>
+              (section === "all" ||
+                (section === "skills" ? row.kind === "skill" : row.kind !== "skill")) &&
+              ["Installed", "Update available"].includes(row.chip.label),
+          )
+          .map((row) => ({
+            id: row.id,
+            name: row.name,
+            status: row.chip.label,
+            logoSrc: "logoSrc" in row.mark ? row.mark.logoSrc : null,
+            onOpen: () => open(row, document.activeElement),
+          }))}
+      />
       <div className="flex flex-wrap items-center gap-3">
         {/*
           A live region tied to the search box: narrowing the list is otherwise
@@ -289,11 +326,11 @@ export function BundlesSection({
         <span
           id={BUNDLE_COUNT_ID}
           role="status"
-          aria-label="Bundle search results"
+          aria-label="Search results"
           className="shrink-0 text-xs text-fg-muted"
           data-bundle-count
         >
-          {visible.length} of {rows.length}
+          {visible.length} results
         </span>
       </div>
 
@@ -317,29 +354,56 @@ export function BundlesSection({
           {visible.map((row) => (
             <IntegrationRow
               key={row.id}
-              model={row}
+              model={
+                row.kind === "pack"
+                  ? {
+                      ...row,
+                      description: row.description.replace(/^Pack/, "Workflow template"),
+                      accessibleDetail: row.accessibleDetail?.replace(/^Pack/, "Workflow template"),
+                    }
+                  : row
+              }
               busy={row.busy}
               onOpen={() => open(row, document.activeElement)}
             />
           ))}
         </div>
       ) : loading ? (
-        <div className="grid gap-2" aria-label="Loading bundles" aria-busy="true">
+        <div className="grid gap-2" aria-label="Loading items" aria-busy="true">
           <Skeleton className="h-16 rounded-xl" />
           <Skeleton className="h-16 rounded-xl" />
         </div>
-      ) : failed ? null : (
+      ) : failed ? null : section === "plugins" ? (
+        <p className="py-2 text-sm text-fg-muted">{searching ? "No matching installed plugins." : "No plugins installed yet."}</p>
+      ) : searching ? (
+        <p className="py-4 text-sm text-fg-muted">No matching installed items.</p>
+      ) : (
         <EmptyState
           icon={<PackagePlusIcon />}
-          title={searching ? "No bundles match" : "No bundles yet"}
+          title={searching ? "No matching skills or plugins" : "No skills or plugins yet"}
           description={
             searching
-              ? "Try another search, or install a Skill, Plugin, or Pack."
-              : "Import a reviewed Skill, install a Plugin bill of materials, or register a Pack manifest."
+              ? "Try another search, or install a skill, plugin, or workflow template."
+              : "Import skills, install a plugin, or add a workflow template."
           }
         />
       )}
 
+      </div>
+      {section === "plugins" ? <div className="space-y-8">
+        <div className="flex items-center justify-between gap-4">
+          <div><h2 className="text-lg font-semibold text-fg">Plugins</h2><p className="mt-1 text-sm text-fg-muted">Tools and skills, together.</p></div>
+          <Button variant="outline" size="sm" disabled={!canManage} onClick={source.installPlugin}><PlusIcon />Import plugin</Button>
+        </div>
+        {source.loadError ? <LoadErrorState title="Couldn’t load installed plugins" error={source.loadError} onRetry={source.reload} /> : null}
+        <PluginDiscovery installedPlugins={source.plugins} onOpenConnection={onOpenCatalogItem} client={client} workspaceId={workspaceId} query={query} canManage={canManage} onChanged={() => { source.reload(); onChanged(); }} />
+        <details className="border-t border-border pt-5">
+          <summary className="cursor-pointer text-sm font-medium text-fg-muted">Workflow templates</summary>
+
+          <div className="mt-4 grid gap-x-6 sm:grid-cols-2">{visible.filter(row => row.kind === "pack").map(row => <button type="button" key={row.id} className="min-w-0 rounded-lg px-2 py-3 text-left hover:bg-surface-2" onClick={event => open(row, event.currentTarget)}><span className="block text-sm font-medium">{row.name}</span><span className="mt-1 block line-clamp-2 text-xs leading-5 text-fg-muted">{row.description}</span></button>)}</div>
+          <Button className="mt-3" variant="ghost" size="sm" disabled={!canManage} onClick={() => setManifestOpen(true)}><PlusIcon />Add workflow template</Button>
+        </details>
+      </div> : section === "all" ? <PluginDiscovery installedPlugins={source.plugins} onOpenConnection={onOpenCatalogItem} client={client} workspaceId={workspaceId} query={query} canManage={canManage} onChanged={() => { source.reload(); onChanged(); }} /> : null}
       <IntegrationSheet
         model={openSheetModel?.kind === "sheet" ? openSheetModel.model : null}
         open={openSheetModel?.kind === "sheet"}
