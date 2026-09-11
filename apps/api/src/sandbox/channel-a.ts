@@ -727,6 +727,7 @@ async function withChannelAOperation<T>(
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+        transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         ...(settings.agentOpStreamEnabled === true &&
         enrollment?.opStream === true &&
         bus.getOpStreamConnection

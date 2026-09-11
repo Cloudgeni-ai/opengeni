@@ -195,6 +195,9 @@ message Capabilities {
   // separate from the memory-policy bit so a newer control plane never sends a
   // CPU quota that an older memory-only runner would ignore as an unknown field.
   bool operation_cpu_quota = 13;
+  // Transactional uploads via OpStart.fs_write / WriteChunk / OpQuery / OpCancel.
+  // Independent of op_stream. Absent/false runners MUST NOT receive this path.
+  bool transactional_fs_write = 14;
 }
 
 // Capabilities of one live browser-profile bridge endpoint. This describes the
@@ -1047,18 +1050,27 @@ message OpExit {
   map<string, string> failure_detail = 8;
 }
 
-// The op-begin for a STREAMING fs_write (M7): the target is set up here; the bytes
-// arrive as chunked, idempotent WriteChunk request/replies (no reverse streaming).
+// Transactional upload begin. Requires transactional_fs_write, not op_stream.
+// The op_id must use the fsw- namespace; bytes arrive as sequential WriteChunk
+// requests. This path emits no OpFrames and supports no OpAttach/OpAck.
 message FsWriteBegin {
   string path = 1;
-  // Create parent directories as needed.
+  // Reserved compatibility field. Transactional writes require existing parent
+  // directories; even true never creates visible directories during staging.
   bool create_parents = 2;
   // POSIX mode for a newly created file (0 => platform default).
   uint32 mode = 3;
-  // Editor safety (M6): the expected blake3 hex digest of the file's CURRENT
-  // content for a read-modify-write; empty for a plain write. On a re-dispatch a
-  // mismatch REFUSES rather than double-applying a diff.
+  // Expected lowercase BLAKE3 hex digest of CURRENT content for replacement.
+  // Required unless expected_absent. Checked with opened inode identity before
+  // commit; optimistic against unrelated writers, NOT an atomic filesystem CAS.
   string expected_base_digest = 4;
+  // Required lowercase BLAKE3 hex digest of the complete intended content.
+  string content_digest = 5;
+  // Required presence, including an explicitly present zero for empty content.
+  optional uint64 content_size = 6;
+  // Exactly one of expected_absent / expected_base_digest is required.
+  // Creation publishes atomically without replacing a concurrently created file.
+  bool expected_absent = 7;
 }
 
 // Start an op (server→runner). IDEMPOTENT by op_id (= ControlRequest.request_id):
@@ -1126,18 +1138,24 @@ message OpStatus {
   OpExit exit = 4;
   // Present iff state == OP_STATE_LOST.
   OpLostReason lost_reason = 5;
+  // Transactional fs_write only: accepted byte offset. next_seq is the next
+  // chunk sequence, not an output frame sequence. Complete echoes verified
+  // content in exit.digests["content"] / exit.totals["content"]. No OpFrames.
+  uint64 write_offset = 6;
 }
 
 // One chunk of a streaming upload (server→runner): plain idempotent request/reply
-// per chunk (≤512 KiB). A duplicate (op_id, seq) is acked WITHOUT re-applying.
+// per chunk (≤512 KiB). An exact duplicate of the most recently accepted chunk
+// is acked WITHOUT re-applying (including a lost final ack). Older sequences or
+// changed duplicate bodies are refused, never silently accepted or re-applied.
 message WriteChunk {
   string op_id = 1;
   // The op-scoped monotonic chunk sequence.
   uint64 seq = 2;
   bytes bytes = 3;
-  // The final chunk: commit = digest-verify then atomic rename (M7).
+  // Final chunk: verify intended size/digest and base, then atomic publication.
   bool last = 4;
-  // Byte offset this chunk writes at (M7: writes land in an op-scoped temp file,
+  // Byte offset this chunk writes at (writes land in an op-scoped temp file,
   // committed on the last chunk — an aborted transfer leaves no visible file).
   uint64 offset = 5;
 }

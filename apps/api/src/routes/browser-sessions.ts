@@ -2703,6 +2703,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+        transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection

@@ -459,6 +459,7 @@ export class FakeOpRunner implements ControlRpc {
       opId,
       state: complete ? OpState.OP_STATE_COMPLETE : OpState.OP_STATE_RUNNING,
       nextSeq: complete ? (run.exitSeq + 1n).toString() : "1",
+      writeOffset: "0",
       exit: complete ? run.exit : undefined,
       lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
     };
@@ -617,6 +618,7 @@ function lostStatus(opId: string): OpStatus {
   return {
     opId,
     state: OpState.OP_STATE_LOST,
+    writeOffset: "0",
     nextSeq: "0",
     exit: undefined,
     lostReason: OpLostReason.OP_LOST_REASON_EVICTED,
@@ -627,6 +629,7 @@ function cancelledStatus(opId: string): OpStatus {
   return {
     opId,
     state: OpState.OP_STATE_COMPLETE,
+    writeOffset: "0",
     nextSeq: "1",
     exit: {
       exitCode: -1,
