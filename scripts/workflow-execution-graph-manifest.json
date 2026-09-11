@@ -42,7 +42,11 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "35ea669e9119244185608d6b3ba36bd1594b1cf51dc8e7e800fcee91c7b0a495"
+      "sha256": "8d13c059295343b1238467af8ddec4cf750cdef48ac3e62c645a36839a21fdb8"
+    },
+    {
+      "path": ".github/workflows/reconcile-production-packages.yml",
+      "sha256": "d05f65de51d9684c0c2ee08ffdacde3ab7a7ae7e1c09322edbd06ef37636014b"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
@@ -848,6 +852,12 @@
       "job": "publish",
       "step": "Verify publishable closure",
       "sha256": "c18d0e2815c7263404fd08bd381f6afc66620c8bbba61f13828a0f6f6b22eda4"
+    },
+    {
+      "workflow": ".github/workflows/reconcile-production-packages.yml",
+      "job": "reconcile",
+      "step": "Publish missing packages for the healthy production revision",
+      "sha256": "403bf534ac1eb6c2465f2260ec881f48c0b5744b28dd51d22e1633e113ddc59c"
     },
     {
       "workflow": ".github/workflows/release-acceptance.yml",
