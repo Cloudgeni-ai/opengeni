@@ -253,7 +253,7 @@ export function BundlesSection({
   return (
     <section className="mt-6 space-y-3" aria-label={section === "plugins" ? "Plugins" : "Skills and plugins"}>
       {section !== "plugins" ? <SkillDiscovery client={client} workspaceId={workspaceId} query={query} canManage={canManage} installedSkills={source.skills} onSearch={onSearchSkills} onImport={(url) => source.importSkill(url)} /> : null}
-      <div hidden={section === "plugins" || (section !== "plugins" && !visible.length && !loading && !failed)} className="space-y-3">
+      <div hidden={section === "plugins" || (!visible.length && !loading && !failed)} className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
           <h2 id="bundles-heading" className="mt-1 text-base font-semibold text-fg">

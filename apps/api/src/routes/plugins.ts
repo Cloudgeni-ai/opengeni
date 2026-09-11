@@ -1,3 +1,4 @@
+import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
 import { marketplacePlugin } from "../integrations/marketplace-plugin";
 import { mcpEndpointIdentity } from "@opengeni/contracts";
 import { buildCapabilityCatalog, createCatalogItem } from "@opengeni/core";
@@ -104,7 +105,11 @@ export function registerPluginRoutes(
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       ListInstalledPluginsResponse.parse({
-        plugins: await listInstalledPluginPackages(deps.db, workspaceId),
+        plugins: (await listInstalledPluginPackages(deps.db, workspaceId)).map(plugin => {
+          const source = pluginSnapshot.sources.find(source => plugin.pluginKey.startsWith("marketplace/" + source.provider + "/"));
+          const entry = source?.entries.find(entry => plugin.pluginKey === "marketplace/" + source!.provider + "/" + entry.name);
+          return { ...plugin, logoUrl: plugin.logoUrl ?? entry?.logoUrl ?? null };
+        }),
       }),
     );
   });

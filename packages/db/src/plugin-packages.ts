@@ -48,6 +48,7 @@ export type InstalledPluginPackageSummary = {
   category: string;
   tags: string[];
   sourceUrl: string | null;
+  logoUrl: string | null;
   manifestDigest: string;
   installationVersion: number;
   componentCount: number;
@@ -158,6 +159,7 @@ export async function listInstalledPluginPackages(
     return rows.map((row) => {
       const manifest = objectValue(row.manifest);
       const sourceUrl = stringValue(manifest.sourceUrl);
+      const logoUrl = stringValue(objectValue(manifest.discovery).logoUrl);
       const bom = pluginBom(manifest);
       if (row.status !== "active" && row.status !== "needs_attention") {
         throw new Error(`Unknown installed Plugin status: ${row.status}`);
@@ -173,6 +175,7 @@ export async function listInstalledPluginPackages(
             ? stringArray(manifest.tags)
             : stringArray(row.tags),
         sourceUrl: sourceUrl && safeHttpUrl(sourceUrl) ? sourceUrl : null,
+        logoUrl: logoUrl && safeHttpUrl(logoUrl) ? logoUrl : null,
         manifestDigest: row.manifestDigest,
         installationVersion: row.installationVersion,
         componentCount: bom.length,
