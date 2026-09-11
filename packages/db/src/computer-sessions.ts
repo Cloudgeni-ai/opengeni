@@ -504,7 +504,11 @@ export async function prepareComputerSessionCreate(
           state: "prepared",
           actorSubjectId: input.actorSubjectId,
         })
-        .onConflictDoNothing({ target: schema.interactionOperations.operationId })
+        // The operation also has a workspace/operation unique index. Concurrent
+        // speculative inserts can collide there even when the primary-key
+        // arbiter would deduplicate them. Arbitrate every constraint, then use
+        // the scoped lookup and immutable request checks below to authorize replay.
+        .onConflictDoNothing()
         .returning();
       if (!insertedOperation) {
         const existing = await loadOperation(tx, input.workspaceId, input.operationId);

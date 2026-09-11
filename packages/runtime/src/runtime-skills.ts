@@ -384,10 +384,12 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
   names: string[];
   reason: string;
 }> {
-  const sources: Array<{ names: string[]; reason: string }> = [{
-    names: skillDirNames(packagedSkillDirectory("bundled_default_skills")),
-    reason: "included by default",
-  }];
+  const sources: Array<{ names: string[]; reason: string }> = [
+    {
+      names: skillDirNames(packagedSkillDirectory("bundled_default_skills")),
+      reason: "included by default",
+    },
+  ];
   if (nativeTools.editableArtifacts) {
     sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_artifact_skills")),

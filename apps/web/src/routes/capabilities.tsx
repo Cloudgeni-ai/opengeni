@@ -5,8 +5,9 @@ import { ConnectionLogo } from "@opengeni/react/connect";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
+  partitionConnectionServices,
 } from "@/components/capabilities/connection-services";
-import { capabilityStateChip, capabilityCuration } from "@/lib/capabilities";
+import { capabilityStateChip } from "@/lib/capabilities";
 import { InstalledStrip } from "@/components/capabilities/installed-strip";
 import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
@@ -74,10 +75,6 @@ import {
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
 import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
-import {
-  QuickConnectDialog,
-  type QuickConnectRequest,
-} from "@/components/capabilities/quick-connect-dialog";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
 import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
@@ -97,15 +94,10 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
 import {
-  apiKeyConnectionRef,
-  apiKeyCredential,
   capabilityConnectPlan,
   capabilityErrorToast,
   capabilityInputFromForm,
-  capabilityQuickConnectPlan,
   connectionHealth,
-  connectionToReuseForApiKey,
-  createInputFromCatalogItem,
   filterCapabilityCatalogItems,
   isConnectorCatalogItem,
   isMissingCredentialsError,
@@ -118,10 +110,9 @@ import {
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
-  type RequiredHeaderField,
   type SheetSelection,
 } from "@/lib/capabilities";
-import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { mcpOAuthCallbackFailureMessage } from "@/lib/mcp-oauth";
 import {
   personalGitHubOAuthFailureMessage,
   personalGitHubOAuthReturn,
@@ -231,10 +222,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const [searchScope, setSearchScope] = useState("all");
   const hasQuery = query.trim().length > 0;
   const searchingAll = hasQuery && searchScope === "all";
-  const setQuery = (value: string) => {
-    if (!query.trim() || !value.trim()) setSearchScope("all");
-    updateQuery(value);
-  };
+  const setQuery = useCallback(
+    (value: string) => {
+      if (!query.trim() || !value.trim()) setSearchScope("all");
+      updateQuery(value);
+    },
+    [query],
+  );
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const browseLoadMoreRef = useRef<HTMLDivElement | null>(null);
 
@@ -291,11 +285,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     removesDefinition: boolean;
   } | null>(null);
 
-  // The one shared quick-connect dialog: only `api_key` and unreviewed
-  // `oauth2` connectors ever need it. `none` and reviewed `oauth2` connect
-  // directly from the row/tile icon with no screen of ours.
-  const [quickConnectRequest, setQuickConnectRequest] = useState<QuickConnectRequest | null>(null);
-
   // Public MCP registry search (only offered when the catalog has no matches).
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
@@ -337,7 +326,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   const logoUrl = useCallback(
     (item: CapabilityCatalogItem) =>
-      item.name === "Gmail" ? "/capability-logos/gmail.ico" : capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
+      item.name === "Gmail"
+        ? "/capability-logos/gmail.ico"
+        : capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
     [client],
   );
   const connectionsLoaded = connections !== null;
@@ -480,16 +471,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       ],
     })),
   ]);
-  const featuredServiceIds = showFeatured ? [...new Set([
-    ...featured.map(item => catalogServiceIdentity(item.id,item.name,item.providerDomain).id),
-    ...integrations.map(({model})=>model.id),
-    ...connectorItems.filter(item=>capabilityCuration(item).curated || item.id === "api:fiken" || ["dropbox.com","front.com"].includes(item.providerDomain ?? "")).map(item=>catalogServiceIdentity(item.id,item.name,item.providerDomain).id),
-  ])] : [];
-  const featuredServices = featuredServiceIds.flatMap(
-    (id) => connectionServices.find((service) => service.id === id) ?? [],
-  );
-  const remainingServices = connectionServices.filter(
-    (service) => !featuredServiceIds.includes(service.id),
+  const { featuredServices, remainingServices } = partitionConnectionServices(
+    connectionServices,
+    showFeatured,
+    featured,
+    integrations.map(({ model }) => model.id),
+    connectorItems,
   );
   const openIntegrationModel =
     integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
@@ -497,31 +484,56 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // aren't in `items` until persisted, so they fall back to their snapshot; a
   // non-registry selection with no live row resolves to null and the effect
   // below closes the sheet rather than render a ghost.
-  const [authInspection, setAuthInspection] = useState<{ id: string; url: string; kind: "oauth2" | "none" | "unknown" } | null>(null);
+  const [authInspection, setAuthInspection] = useState<{
+    id: string;
+    url: string;
+    kind: "oauth2" | "none" | "unknown";
+  } | null>(null);
   const rawSelectedItem: CapabilityCatalogItem | null = useMemo(
     () => resolveSheetItem(selected, items),
     [selected, items],
   );
   const inspectUrl = rawSelectedItem?.mcpUrl ?? rawSelectedItem?.endpointUrl;
-  const needsAuthInspection = rawSelectedItem?.kind === "mcp" && !rawSelectedItem.enabled &&
-    capabilityConnectPlan(rawSelectedItem).mode === "setup_required" && Boolean(inspectUrl);
+  const selectedItemId = rawSelectedItem?.id;
+  const needsAuthInspection =
+    rawSelectedItem?.kind === "mcp" &&
+    !rawSelectedItem.enabled &&
+    capabilityConnectPlan(rawSelectedItem).mode === "setup_required" &&
+    Boolean(inspectUrl);
   useEffect(() => {
-    if (!needsAuthInspection || !rawSelectedItem || !inspectUrl) return;
+    if (!needsAuthInspection || !selectedItemId || !inspectUrl) return;
     let active = true;
-    const id = rawSelectedItem.id;
+    const id = selectedItemId;
     setAuthInspection(null);
     void client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
-      (result) => { if (active) setAuthInspection({ id, url: inspectUrl, kind: result.kind }); },
-      () => { if (active) setAuthInspection({ id, url: inspectUrl, kind: "unknown" }); },
+      (result) => {
+        if (active) setAuthInspection({ id, url: inspectUrl, kind: result.kind });
+      },
+      () => {
+        if (active) setAuthInspection({ id, url: inspectUrl, kind: "unknown" });
+      },
     );
-    return () => { active = false; };
-  }, [client, workspaceId, rawSelectedItem?.id, inspectUrl, needsAuthInspection]);
-  const inspection = authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl ? authInspection : null;
-  const selectedItem = rawSelectedItem && needsAuthInspection ? {
-    ...rawSelectedItem,
-    authKind: inspection?.kind === "oauth2" ? "oauth2" as const : inspection?.kind === "none" ? "none" as const : null,
-    metadata: { ...rawSelectedItem.metadata, authDiscovery: inspection?.kind ?? "checking" },
-  } : rawSelectedItem;
+    return () => {
+      active = false;
+    };
+  }, [client, workspaceId, selectedItemId, inspectUrl, needsAuthInspection]);
+  const inspection =
+    authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl
+      ? authInspection
+      : null;
+  const selectedItem =
+    rawSelectedItem && needsAuthInspection
+      ? {
+          ...rawSelectedItem,
+          authKind:
+            inspection?.kind === "oauth2"
+              ? ("oauth2" as const)
+              : inspection?.kind === "none"
+                ? ("none" as const)
+                : null,
+          metadata: { ...rawSelectedItem.metadata, authDiscovery: inspection?.kind ?? "checking" },
+        }
+      : rawSelectedItem;
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
@@ -594,13 +606,22 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   useEffect(() => {
     const target = browseLoadMoreRef.current;
-    if (!target || searchingAll || activeTab !== "connections" ||
-        visibleCount >= remainingServices.length || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (!entry?.isIntersecting) return;
-      observer.disconnect();
-      setVisibleCount(count => Math.min(count + PAGE_SIZE, remainingServices.length));
-    }, { root: capabilityFocusFallbackRef.current, rootMargin: "0px 0px 300px 0px" });
+    if (
+      !target ||
+      searchingAll ||
+      activeTab !== "connections" ||
+      visibleCount >= remainingServices.length ||
+      typeof IntersectionObserver === "undefined"
+    )
+      return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        observer.disconnect();
+        setVisibleCount((count) => Math.min(count + PAGE_SIZE, remainingServices.length));
+      },
+      { root: capabilityFocusFallbackRef.current, rootMargin: "0px 0px 300px 0px" },
+    );
     observer.observe(target);
     return () => observer.disconnect();
   }, [activeTab, searchingAll, visibleCount, remainingServices.length]);
@@ -841,161 +862,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
   }
 
-  // --- Connectors quick-connect fast path --------------------------------------
-  // The row/tile icon click: `none` and reviewed `oauth2` act immediately with
-  // no screen of ours; `api_key` and unreviewed `oauth2` open the one shared
-  // quick-connect dialog. Reuses the exact same connect mutations `handleAction`
-  // uses for the full sheet, just without requiring the sheet to be open first.
-
-  function capabilityQuickConnectAction(item: CapabilityCatalogItem): (() => void) | undefined {
-    const plan = capabilityQuickConnectPlan(item);
-    // No fast path: "dedicated" lifecycles (Skills, Plugins, first-party
-    // Fiken/social), "social_oauth", and any api-key connector needing more
-    // than one header - the full sheet owns those.
-    if (!plan) return undefined;
-    if (plan.mode === "enable") {
-      return () => void quickEnable(item);
-    }
-    if (plan.mode === "oauth") {
-      return plan.confirm
-        ? () =>
-            setQuickConnectRequest({
-              authKind: "oauth2_unreviewed",
-              itemName: item.name,
-              providerDomain: plan.providerDomain,
-              onConnect: () => quickOAuth(item, plan.providerDomain, plan.mcpUrl, plan.ownership),
-            })
-        : () => void quickOAuth(item, plan.providerDomain, plan.mcpUrl, plan.ownership);
-    }
-    return () =>
-      setQuickConnectRequest({
-        authKind: "api_key",
-        itemName: item.name,
-        providerDomain: plan.providerDomain,
-        fieldLabel: plan.field.label,
-        onConnect: (value) =>
-          quickApiKey(item, plan.providerDomain, plan.field, plan.ownership, value),
-      });
-  }
-
-  async function enableMcpThroughConnect(capabilityId: string) {
-    const attempt = await client.beginConnect(workspaceId, {
-      providerId: "mcp-install",
-      ownership: "workspace",
-      returnUrl: window.location.href,
-      idempotencyKey: crypto.randomUUID(),
-    });
-    const completed = await client.connectTransport().advance(workspaceId, attempt.id, {
-      expectedRevision: attempt.revision,
-      idempotencyKey: crypto.randomUUID(),
-      action: { type: "credentials", values: { capabilityId } },
-    });
-    if (completed.state !== "complete" || !completed.integrationInstalled)
-      throw new Error("MCP setup did not complete. Reload connection setup before retrying.");
-  }
-
-  async function quickEnable(item: CapabilityCatalogItem) {
-    setBusyId(item.id);
-    try {
-      const persisted = await persistIfRegistry(item, false);
-      await enableMcpThroughConnect(persisted.id);
-      await refresh();
-      onRuntimeChanged();
-      toast.success(`Enabled ${item.name}`);
-    } catch (error) {
-      const { title, description } = capabilityErrorToast(error, "Couldn't enable this connector");
-      toast.error(title, { description });
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function quickOAuth(
-    item: CapabilityCatalogItem,
-    providerDomain: string,
-    mcpUrl: string | null,
-    ownership: ConnectionOwnership,
-  ) {
-    setBusyId(item.id);
-    try {
-      const persisted = await persistIfRegistry(item, false);
-      const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
-      const response = await startMcpOAuthWithTimeout(client, workspaceId, {
-        ...(mcpUrl ? { mcpUrl } : {}),
-        ...(providerDomain ? { providerDomain } : {}),
-        ownership,
-        returnPath,
-      });
-      if (!response.authorizationUrl) {
-        throw new Error("The provider did not return an authorization link.");
-      }
-      window.location.assign(response.authorizationUrl);
-    } catch (error) {
-      setBusyId(null);
-      const { title, description } = capabilityErrorToast(error, "Couldn't start the connection");
-      toast.error(title, { description });
-      throw error;
-    }
-  }
-
-  async function quickApiKey(
-    item: CapabilityCatalogItem,
-    providerDomain: string,
-    field: RequiredHeaderField,
-    ownership: ConnectionOwnership,
-    value: string,
-  ) {
-    if (!value) throw new Error(`Enter ${field.label.toLowerCase()}.`);
-    setBusyId(item.id);
-    try {
-      const persisted = await persistIfRegistry(item, false);
-      // The credential is stored under the WIRE header name the broker injects,
-      // never the human label ("API key" is not even a legal header token).
-      const credential = apiKeyCredential(field, value);
-      const reuseId = connectionToReuseForApiKey(
-        persisted,
-        connections ?? [],
-        providerDomain,
-        ownership,
-      );
-      const connection = reuseId
-        ? await client.updateConnection(workspaceId, reuseId, {
-            credential,
-            status: "active",
-          })
-        : await client.createConnection(workspaceId, {
-            providerDomain,
-            kind: "api_key",
-            ownership,
-            credential,
-          });
-      await client.enableCapability(workspaceId, persisted.id, {
-        connectionRef: apiKeyConnectionRef(ownership, connection.id, connection.providerDomain),
-      });
-      await refresh();
-      onRuntimeChanged();
-      toast.success(`Connected ${item.name}`);
-    } catch (error) {
-      const { title, description } = capabilityErrorToast(error, "Couldn't connect this connector");
-      toast.error(title, { description });
-      throw error;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   // --- Connect flows ---------------------------------------------------------
-
-  // Registry items aren't persisted; create the catalog row before connecting so
-  // enable/OAuth have a real capability id to reference.
-  async function persistIfRegistry(
-    item: CapabilityCatalogItem,
-    registry: boolean,
-  ): Promise<CapabilityCatalogItem> {
-    if (!registry) return item;
-    const created = await client.createCapability(workspaceId, createInputFromCatalogItem(item));
-    return created;
-  }
 
   async function handleAction(action: ConnectAction) {
     if (!selected || !selectedItem || busyId !== null) return;
@@ -1189,7 +1056,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setQuery(capabilityId.replace(/^[^:]+:/, ""));
       toast.error("That recommended capability is no longer available");
     }
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   // Deep-link from an in-session reconnect card for an api-key connection:
   // ?reconnect_domain=<domain> opens the connect sheet for the enabled item on
@@ -1538,7 +1405,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           icon={<PlugIcon className="size-4" />}
           title="Capabilities"
           description="Connect your favorite tools and extend OpenGeni's capabilities."
-
         />
 
         <PluginSearch query={query} onQueryChange={setQuery} />
@@ -1559,44 +1425,54 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
           <TabsContent value={hasQuery ? searchScope : activeTab} forceMount>
             <div hidden={!searchingAll && activeTab !== "connections"}>
-              {!searchingAll ? <div className="mb-6 mt-6 flex items-center justify-between gap-4">
-                <h2 className="text-lg font-semibold text-fg">Connections</h2>
-                <Button type="button" onClick={() => setAddOpen(true)}><PlusIcon />Add connection</Button>
-              </div> : null}
+              {!searchingAll ? (
+                <div className="mb-6 mt-6 flex items-center justify-between gap-4">
+                  <h2 className="text-lg font-semibold text-fg">Connections</h2>
+                  <Button type="button" onClick={() => setAddOpen(true)}>
+                    <PlusIcon />
+                    Add connection
+                  </Button>
+                </div>
+              ) : null}
               <InstalledStrip
                 title="Connected"
-                items={hasQuery ? [] : [
-                  ...integrations
-                    .filter(
-                      ({ model }) =>
-                        model.chip.label === "Connected" || model.chip.label === "Needs attention",
-                    )
-                    .map(({ model }) => ({
-                      id: model.id,
-                      name: model.name,
-                      status: model.chip.label,
-                      logoSrc: "logoSrc" in model.mark ? model.mark.logoSrc : null,
-                      onOpen: () => {
-                        integrationOpenerRef.current =
-                          document.activeElement instanceof HTMLElement
-                            ? document.activeElement
-                            : null;
-                        setOpenIntegration(model.id);
-                      },
-                    })),
-                  ...connectorItems
-                    .filter((item) => item.enabled)
-                    .map((item) => ({
-                      id: item.id,
-                      name: item.name,
-                      status: capabilityStateChip(
-                        item,
-                        connectionHealth(item, connections ?? [], connectionsLoaded),
-                      ).label,
-                      logoSrc: logoUrl(item),
-                      onOpen: () => openItem(item),
-                    })),
-                ]}
+                items={
+                  hasQuery
+                    ? []
+                    : [
+                        ...integrations
+                          .filter(
+                            ({ model }) =>
+                              model.chip.label === "Connected" ||
+                              model.chip.label === "Needs attention",
+                          )
+                          .map(({ model }) => ({
+                            id: model.id,
+                            name: model.name,
+                            status: model.chip.label,
+                            logoSrc: "logoSrc" in model.mark ? model.mark.logoSrc : null,
+                            onOpen: () => {
+                              integrationOpenerRef.current =
+                                document.activeElement instanceof HTMLElement
+                                  ? document.activeElement
+                                  : null;
+                              setOpenIntegration(model.id);
+                            },
+                          })),
+                        ...connectorItems
+                          .filter((item) => item.enabled)
+                          .map((item) => ({
+                            id: item.id,
+                            name: item.name,
+                            status: capabilityStateChip(
+                              item,
+                              connectionHealth(item, connections ?? [], connectionsLoaded),
+                            ).label,
+                            logoSrc: logoUrl(item),
+                            onOpen: () => openItem(item),
+                          })),
+                      ]
+                }
               />
               {showFeatured && featuredServices.length > 0 ? (
                 <section aria-label="Featured" className="mt-6">
@@ -1608,27 +1484,50 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 <h2 className="mb-2 text-sm font-semibold">
                   {hasQuery ? "Connections" : "Browse"}
                 </h2>
-                <ConnectionCatalog
-                  services={remainingServices.slice(
-                    0,
-                    hasQuery ? remainingServices.length : visibleCount,
-                  )}
-                  query={query}
-                />
-                {hasQuery && !remainingServices.length && !featuredServices.length ? <div className="mt-3 flex flex-wrap gap-2">
-                  {!searchingAll ? <Button variant="outline" size="sm" onClick={() => setSearchScope("all")}>Search all categories</Button> : null}
-                  <Button variant="ghost" size="sm" onClick={() => setQuery("")}>Clear search</Button>
-                </div> : null}
+                {loading && items.length === 0 ? (
+                  <p role="status" className="py-4 text-sm text-fg-muted">
+                    Loading connections…
+                  </p>
+                ) : (
+                  <ConnectionCatalog
+                    services={remainingServices.slice(
+                      0,
+                      hasQuery ? remainingServices.length : visibleCount,
+                    )}
+                    query={query}
+                  />
+                )}
+                {hasQuery && !remainingServices.length && !featuredServices.length ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {!searchingAll ? (
+                      <Button variant="outline" size="sm" onClick={() => setSearchScope("all")}>
+                        Search all categories
+                      </Button>
+                    ) : null}
+                    <Button variant="ghost" size="sm" onClick={() => setQuery("")}>
+                      Clear search
+                    </Button>
+                  </div>
+                ) : null}
                 {!hasQuery && remainingServices.length > visibleCount ? (
-                  <div ref={browseLoadMoreRef} className="mt-4 flex flex-col items-center gap-2 py-3">
-                  <Button
-                    variant="outline"
-                    className="min-h-11 w-full border-border-strong bg-surface font-medium sm:w-auto sm:min-w-56"
-                    onClick={() => setVisibleCount((count) => Math.min(count + PAGE_SIZE, remainingServices.length))}
+                  <div
+                    ref={browseLoadMoreRef}
+                    className="mt-4 flex flex-col items-center gap-2 py-3"
                   >
-                    Load more connections
-                  </Button>
-                  <p className="text-xs text-fg-muted">{visibleCount} of {remainingServices.length} connections</p>
+                    <Button
+                      variant="outline"
+                      className="min-h-11 w-full border-border-strong bg-surface font-medium sm:w-auto sm:min-w-56"
+                      onClick={() =>
+                        setVisibleCount((count) =>
+                          Math.min(count + PAGE_SIZE, remainingServices.length),
+                        )
+                      }
+                    >
+                      Load more connections
+                    </Button>
+                    <p className="text-xs text-fg-muted">
+                      {visibleCount} of {remainingServices.length} connections
+                    </p>
                   </div>
                 ) : null}
               </section>
@@ -1643,13 +1542,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
               {integrations.map((adapter) => (
                 <Fragment key={adapter.model.id}>{adapter.dialogs}</Fragment>
               ))}
-
-              <QuickConnectDialog
-                request={quickConnectRequest}
-                onOpenChange={(open) => {
-                  if (!open) setQuickConnectRequest(null);
-                }}
-              />
 
               {/*
           One <section> per top-level surface. Featured, the discovery controls,
@@ -1680,7 +1572,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       disabled={registryBusy}
                       onClick={() => void searchRegistry()}
                     >
-                      {registryBusy ? "Searching registry…" : "Search the broader public MCP registry"}
+                      {registryBusy
+                        ? "Searching registry…"
+                        : "Search the broader public MCP registry"}
                     </button>
                   </p>
                   {visibleRegistry.length ? (
@@ -1703,7 +1597,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }))}
                     />
                   ) : registrySearched === query.trim() ? (
-                    <p className="text-sm text-fg-muted">No compatible remote MCP servers found. Servers that require a local install aren’t included.</p>
+                    <p className="text-sm text-fg-muted">
+                      No compatible remote MCP servers found. Servers that require a local install
+                      aren’t included.
+                    </p>
                   ) : null}
                 </div>
               ) : null}
@@ -1716,18 +1613,51 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 </p>
               ) : null}
             </div>
-            {searchingAll ? <div className="capability-search-section"><PluginDiscovery onOpenConnection={item => openItem(item, false, true)} client={client} workspaceId={workspaceId} query={query} canManage={canManageSkills} onChanged={() => { void refresh(); onRuntimeChanged(); }} /></div> : null}
-            <div className={searchingAll ? "capability-search-section" : undefined} hidden={!searchingAll && activeTab !== "skills"}>
-              <SkillsPanel key={workspaceId} workspaceId={workspaceId} query={query} onImportSkill={() => importSkillRef.current?.()} onFindSkill={() => {
-                const search = capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>('input[type="search"]');
-                search?.scrollIntoView({ block: "center", behavior: "smooth" });
-                search?.focus({ preventScroll: true });
-              }} />
+            {searchingAll ? (
+              <div className="capability-search-section">
+                <PluginDiscovery
+                  onOpenConnection={(item) => openItem(item, false, true)}
+                  client={client}
+                  workspaceId={workspaceId}
+                  query={query}
+                  canManage={canManageSkills}
+                  onChanged={() => {
+                    void refresh();
+                    onRuntimeChanged();
+                  }}
+                />
+              </div>
+            ) : null}
+            <div
+              className={searchingAll ? "capability-search-section" : undefined}
+              hidden={!searchingAll && activeTab !== "skills"}
+            >
+              <SkillsPanel
+                key={workspaceId}
+                workspaceId={workspaceId}
+                query={query}
+                onImportSkill={() => importSkillRef.current?.()}
+                onFindSkill={() => {
+                  const search =
+                    capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                      'input[type="search"]',
+                    );
+                  search?.scrollIntoView({ block: "center", behavior: "smooth" });
+                  search?.focus({ preventScroll: true });
+                }}
+              />
             </div>
-            <div ref={bundlesRef} className={searchingAll ? "capability-search-section" : undefined} hidden={!searchingAll && activeTab === "connections"}>
+            <div
+              ref={bundlesRef}
+              className={searchingAll ? "capability-search-section" : undefined}
+              hidden={!searchingAll && activeTab === "connections"}
+            >
               <BundlesSection
                 onSearchSkills={() => {
-                  const search = capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>('input[type="search"]');
+                  const search =
+                    capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                      'input[type="search"]',
+                    );
                   search?.scrollIntoView({ block: "center", behavior: "smooth" });
                   search?.focus({ preventScroll: true });
                 }}
@@ -1741,7 +1671,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 items={items}
                 logoUrl={logoUrl}
                 busyCatalogId={busyId}
-                onOpenCatalogItem={item => openItem(item, false, true)}
+                onOpenCatalogItem={(item) => openItem(item, false, true)}
                 packs={packs}
                 variableSets={variableSets.variableSets.map((variableSet) => ({
                   id: variableSet.id,

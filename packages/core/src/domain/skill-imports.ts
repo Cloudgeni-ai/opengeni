@@ -19,7 +19,11 @@ export type GitHubSkillTreeEntry = Readonly<{
 }>;
 
 export type GitHubSkillSourceClient = Readonly<{
-  downloadSnapshot?(owner: string, repository: string, slug: string): Promise<readonly SkillLibraryFile[]>;
+  downloadSnapshot?(
+    owner: string,
+    repository: string,
+    slug: string,
+  ): Promise<readonly SkillLibraryFile[]>;
   resolveCommit(owner: string, repository: string, ref: string): Promise<string>;
   listTree(
     owner: string,
@@ -120,11 +124,22 @@ function buildResolvedImport(
   // The existing revision field holds our content digest for registry snapshots;
   // snapshots do not provide a Git commit or a repository-relative folder path.
   const sourceCommit = commit ?? artifact.contentSha256;
-  if (!commit && artifact.name.toLowerCase().replace(/[\s_]+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "") !== parsed.skillSlug!.toLowerCase()) {
-    throw new HTTPException(422, { message: "The downloaded skill does not match the requested name" });
+  if (
+    !commit &&
+    artifact.name
+      .toLowerCase()
+      .replace(/[\s_]+/g, "-")
+      .replace(/[^a-z0-9-]/g, "")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "") !== parsed.skillSlug!.toLowerCase()
+  ) {
+    throw new HTTPException(422, {
+      message: "The downloaded skill does not match the requested name",
+    });
   }
-  const sourceUrl =
-    !commit ? `https://skills.sh/${parsed.owner}/${parsed.repository}/${parsed.skillSlug}` : sourcePath === "."
+  const sourceUrl = !commit
+    ? `https://skills.sh/${parsed.owner}/${parsed.repository}/${parsed.skillSlug}`
+    : sourcePath === "."
       ? `${repositoryUrl}/tree/${sourceCommit}`
       : `${repositoryUrl}/tree/${sourceCommit}/${encodeGitHubPath(sourcePath)}`;
   const warnings: string[] = [];
