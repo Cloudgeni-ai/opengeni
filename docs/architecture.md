@@ -426,28 +426,29 @@ must prove that the current turn context can establish the target, and a stale
 or structurally invalid pointer is reconciled visibly rather than silently
 routing to an arbitrary provider.
 
-Managed sandbox lifecycle belongs to the lease and reaper. An API or viewer
-that resumes a box receives a non-owned handle and must not terminate it when
-the request ends. Provider create/restore identity is persisted before setup,
-and workspace capture is fenced against every live writer. A provider loss may
-retire only the exact matching instance and must never cause an ambiguous
-operation to be replayed. Ordinary periodic and turn-end snapshots keep the
-short `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS` provider budget. Zero-holder drain
-and rotation captures may use the independent
-`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` budget; when unset it inherits the
-ordinary timeout. Deployment admission always reserves provider-deadline
-rotation headroom for the larger configured capture budget plus one reaper
-period, including after the default backend changes because historical Modal
-leases remain durable. A drain timeout therefore cannot outlive the rotation
-window. An explicit drain budget is also admitted only when one reaper period,
-the full durable capture, and retry handoff fit inside the lifecycle transition
-wait ceiling. A caller's current configuration supplies only its initial wait:
-after it observes an active capture, PostgreSQL's remaining
-`archive_capture_deadline_at` plus the fixed handoff grace extends that wait up
-to the same one-hour ceiling. Lowering the timeout or rolling the setting across
-processes therefore cannot make an opted-in viewer, turn, or mutation caller
-abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
-probes remain immediate.
+Managed sandbox lifecycle belongs to the lease and reaper. API/viewer handles
+are non-owned: request completion must not terminate them. Provider identity is
+persisted before setup; workspace capture fences every writer. Provider loss
+retires only the matching instance and never licenses ambiguous effect replay.
+
+Ordinary snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains
+and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inherits
+the ordinary budget). Boot admission reserves rotation headroom for the larger
+budget plus a reaper period, including historical Modal leases after a backend
+change. Explicit drain budgets must fit dispatch, capture and retry handoff
+inside the lifecycle ceiling.
+
+Acquisition/mutation waiters may extend their configured budget once for the
+first observed durable capture deadline plus handoff grace, capped at one hour.
+Expired/replacement claims cannot replenish it; zero-wait probes remain immediate.
+Expiry returns a fence, never capture takeover or writer authority. The shared
+policy is `packages/db/src/sandbox-transition-wait.ts`.
+
+A settled capture rejection releases only its exact unpublished claim, allowing
+waiters to re-arm the intact instance. Unresolved timeouts and publication/teardown
+failures retain ownership. Fresh claims receive fresh provider request IDs;
+uninterrupted replacements retain the stored ID so late results remain adoptable
+without reusing pre-mutation snapshots after a release.
 
 Rotation recovery: [lifecycle](run-lifecycle.md).
 
