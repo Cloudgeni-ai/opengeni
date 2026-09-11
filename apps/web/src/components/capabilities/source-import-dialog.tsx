@@ -8,11 +8,11 @@ import {
   PuzzleIcon,
   RefreshCwIcon,
   SearchIcon,
-  ShieldCheckIcon,
   SparklesIcon,
 } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 
+import { Markdown } from "@opengeni/react";
 import { customApiConnectionLabel } from "@/components/capabilities/custom-api-flow";
 import {
   pluginComponentConnections,
@@ -68,16 +68,15 @@ export function SourceImportDialog({
 
   return (
     <Dialog open={state.open} onOpenChange={onOpenChange}>
-      <DialogContent style={{ maxWidth: "var(--container-2xl)" }}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto" style={{ maxWidth: state.skillPreview ? "800px" : "var(--container-2xl)" }}>
         <DialogHeader>
           <DialogTitle>
-            {state.intent === "update"
+            {state.skillPreview ? state.skillPreview.name : state.directPreview ? "Skill preview" : state.intent === "update"
               ? `Review ${state.kind === "skill" ? "Skill" : "Plugin"} update`
               : "Import Skill or Plugin"}
           </DialogTitle>
           <DialogDescription>
-            OpenGeni resolves the source to an immutable commit or manifest digest, previews every
-            file and component, and installs only the exact revision you approve.
+            {state.skillPreview ? `${state.skillPreview.owner}/${state.skillPreview.repository}` : state.directPreview ? "" : "Import from a URL."}
           </DialogDescription>
         </DialogHeader>
 
@@ -93,7 +92,7 @@ export function SourceImportDialog({
           </div>
         ) : null}
 
-        {state.phase === "source" || state.phase === "previewing" ? (
+        {!state.directPreview && (state.phase === "source" || state.phase === "previewing") ? (
           <form className="grid gap-5" onSubmit={submitSource}>
             {state.intent === "create" ? (
               <fieldset className="grid gap-2">
@@ -139,8 +138,7 @@ export function SourceImportDialog({
                 aria-describedby="source-import-help"
               />
               <p id="source-import-help" className="text-2xs leading-4 text-fg-subtle">
-                Preview is read-only. Symlinks, submodules, unsafe paths, oversized content, source
-                drift, and unsupported Plugin components fail before workspace mutation.
+                Paste a source URL to review its contents.
               </p>
             </div>
 
@@ -158,6 +156,12 @@ export function SourceImportDialog({
               </Button>
             </DialogFooter>
           </form>
+        ) : null}
+
+        {state.directPreview && !review ? (
+          <div className="py-8">
+            {busy ? <p role="status" className="flex items-center gap-2 text-sm text-fg-muted"><Loader2Icon className="size-4 animate-spin" />Loading skill…</p> : <div className="flex items-center gap-4"><Button variant="outline" onClick={onPreview}>Retry</Button><a href={state.url} target="_blank" rel="noopener noreferrer" className="text-sm text-fg-muted underline underline-offset-4">View source ↗</a></div>}
+          </div>
         ) : null}
 
         {review && state.skillPreview ? (
@@ -205,62 +209,23 @@ function SkillReview({
   onBack: () => void;
 }) {
   const preview = state.skillPreview!;
+  const markdown = preview.markdown?.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim();
   return (
     <div className="grid gap-5">
-      <PreviewReady title="Immutable Skill preview ready" />
-
-      <div className="grid gap-4 rounded-xl border border-border bg-bg/50 p-4">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <SparklesIcon className="size-4 text-brand" />
-            <h3 className="text-sm font-semibold text-fg">{preview.name}</h3>
-            <Badge variant="outline" className="text-2xs uppercase text-fg-subtle">
-              {preview.source === "skills_sh" ? "skills.sh" : "GitHub"}
-            </Badge>
-          </div>
-          <p className="mt-1 text-xs leading-5 text-fg-muted">{preview.description}</p>
-        </div>
-        <dl className="grid gap-3 text-xs sm:grid-cols-2">
-          <ReviewFact label="Repository" value={`${preview.owner}/${preview.repository}`} />
-          <ReviewFact label="Folder" value={preview.sourcePath} mono />
-          <ReviewFact label="Pinned commit" value={preview.sourceCommit} mono />
-          <ReviewFact label="Content digest" value={preview.contentSha256} mono />
-          <ReviewFact label="Files" value={String(preview.files.length)} />
-          <ReviewFact label="Total size" value={formatBytes(preview.totalBytes)} />
-        </dl>
-      </div>
-
-      {preview.warnings.length > 0 ? <Warnings warnings={preview.warnings} /> : null}
-
-      <details className="group rounded-xl border border-border p-4">
-        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold text-fg">
-          <FileCode2Icon className="size-4 text-fg-subtle" />
-          Review {preview.files.length} immutable files
-        </summary>
-        <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">
-          {preview.files.map((file) => (
-            <div key={file.path} className="rounded-lg border border-border/80 bg-bg/50 p-3">
-              <p className="break-all font-mono text-2xs text-fg-muted">{file.path}</p>
-              <p className="mt-1 font-mono text-2xs text-fg-subtle">
-                {formatBytes(file.byteSize)} · {file.contentSha256.slice(0, 16)}…
-              </p>
-            </div>
-          ))}
-        </div>
+      <p className="text-sm leading-6 text-fg-muted">{preview.description}</p>
+      {markdown ? <div className="min-w-0 border-t border-border pt-5"><Markdown streaming={false}>{markdown}</Markdown></div> : null}
+      <details className="border-t border-border pt-3 text-xs text-fg-muted">
+        <summary className="cursor-pointer py-1">Included files · {preview.files.length}</summary>
+        <ul className="mt-2 space-y-1">
+          {preview.files.map((file) => <li key={file.path} className="break-all py-1 font-mono">{file.path}</li>)}
+        </ul>
       </details>
-
-      <DialogFooter>
-        <Button type="button" variant="ghost" onClick={onBack} disabled={busy}>
-          <ArrowLeftIcon />
-          Back
-        </Button>
-        <Button
-          type="button"
-          onClick={onInstall}
-          disabled={!canManage || busy || !!validationError}
-        >
-          {busy ? <Loader2Icon className="animate-spin" /> : <ShieldCheckIcon />}
-          {preview.installed ? "Update this Skill" : "Install this Skill"}
+      <DialogFooter className="sticky bottom-0 border-t border-border bg-bg py-3">
+        <a href={preview.sourceUrl} target="_blank" rel="noopener noreferrer" className="mr-auto self-center text-sm text-fg-muted underline underline-offset-4">View source ↗</a>
+        {!state.directPreview ? <Button type="button" variant="ghost" onClick={onBack} disabled={busy}>Back</Button> : null}
+        <Button type="button" onClick={onInstall} disabled={!canManage || busy || !!validationError}>
+          {busy ? <Loader2Icon className="animate-spin" /> : null}
+          {preview.installed ? "Update" : "Install"}
         </Button>
       </DialogFooter>
     </div>
@@ -292,7 +257,7 @@ export function PluginReview({
   const update = preview.installed;
   return (
     <div className="grid gap-5">
-      <PreviewReady title="Immutable Plugin bill of materials ready" />
+      <PreviewReady title="Plugin ready to review" />
 
       <div className="grid gap-4 rounded-xl border border-border bg-bg/50 p-4">
         <div>
@@ -321,7 +286,7 @@ export function PluginReview({
       {update ? <PluginDiff preview={preview} /> : null}
 
       <div className="grid gap-2">
-        <h3 className="text-xs font-semibold text-fg">Component bill of materials</h3>
+        <h3 className="text-xs font-semibold text-fg">Included components</h3>
         {preview.components.map((component) => (
           <PluginComponentCard
             key={component.key}
@@ -549,7 +514,7 @@ function factValue(value: unknown): string {
     return String(value);
   }
   if (Array.isArray(value)) return value.map(String).join(", ");
-  return "Available in immutable manifest";
+  return "Included in this version";
 }
 
 function humanize(value: string): string {

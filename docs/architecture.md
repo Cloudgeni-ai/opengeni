@@ -1658,3 +1658,29 @@ Library Skills retain workspace scope and reviewed version/hash.
 Personal MCP use requires an owner-issued exact-session grant, with shared-results
 acknowledgement for shared conversations. The composer restores only active grants
 matching visibility and authority epoch; credentials alone grant no use.
+
+### Embeddable connection presentation
+
+`@opengeni/react/connect` exports `ConnectionLogo`, `ConnectionInstalled`,
+`ConnectionServiceRow`, `ConnectionOptionRow`, `ConnectionCatalog`, and
+`ConnectionTypePicker`; scoped styling is in `@opengeni/react/connect.css`.
+These components accept data and callbacks, without app routing or provider
+credentials. `ConnectPanel` and `ConnectChooser` optionally use the catalogue
+presentation over the existing shared connection controller.
+The web Capabilities route owns tabs, global search, and curated ordering.
+`apps/web/src/components/capabilities/connection-services.ts` groups explicit
+provider identities without merging their independent authorization options.
+Northstar demonstrates the same SDK catalogue with its existing API proxy.
+
+### Public skill discovery
+
+The workspace-authorized endpoint `GET /v1/workspaces/:workspaceId/skills/search?q=...` uses the existing unauthenticated skills.sh search adapter. Self-hosters need no Vercel account, linking, or key. The upstream compatibility endpoint is undocumented; failures remain visible and retryable rather than appearing as empty results.
+
+`OpenGeniClient.searchPublicSkills` and `SkillDiscovery` from `@opengeni/react/connect` expose search to embedded products. Include `@opengeni/react/connect.css`; the host supplies its query and preview/import callback. Search is debounced, requires two characters, and never installs automatically. Results use the existing source preview and pinned installation flow. Popular and trending feeds are not part of this integration.
+
+Existing library installations remain manageable, but uninstalled legacy library entries are no longer advertised. Document parsing is included in `bundled_default_skills`, independently of editable-artifact tools.
+
+Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
+`data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities
+API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
+catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).

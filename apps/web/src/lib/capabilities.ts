@@ -221,6 +221,7 @@ export type RequiredHeaderField = {
 };
 
 export type CapabilityConnectPlan =
+  | { mode: "setup_required" }
   | { mode: "enable" }
   | { mode: "dedicated" }
   | { mode: "social_oauth"; provider: "x" | "reddit" }
@@ -278,6 +279,10 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   // then a bare "credentials needed" notice (the original Supabase-422 UX).
   if (item.authKind === "api_key" || item.authModel === "credential_ref") {
     return { mode: "api_key", providerDomain, fields: [GENERIC_API_KEY_FIELD] };
+  }
+  if (item.metadata.authDiscovery === "unknown" || item.metadata.authDiscovery === "checking" ||
+      ((item.source === "public_registry" || item.source === "manual") && item.authKind == null && item.metadata.authDiscovery !== "none")) {
+    return { mode: "setup_required" };
   }
   return { mode: "enable" };
 }

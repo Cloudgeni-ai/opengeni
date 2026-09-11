@@ -10,6 +10,7 @@ import { SupportTicketView } from "./support-ticket";
 import type { SupportCase } from "./types";
 import { useSupportDemo } from "./use-support-demo";
 import "./styles.css";
+import { ConnectionsDialog } from "./connections-dialog";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
@@ -21,6 +22,8 @@ declare global {
 
 function NorthstarApp() {
   const demo = useSupportDemo();
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [connectionsVisited, setConnectionsVisited] = useState(false);
   const [agentEnabled, setAgentEnabled] = useState(false);
   const [agentPanelExpanded, setAgentPanelExpanded] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -58,6 +61,10 @@ function NorthstarApp() {
         data-og-theme="light"
       >
         <SupportInbox
+          onOpenConnections={() => {
+            setConnectionsVisited(true);
+            setConnectionsOpen(true);
+          }}
           state={demo.state}
           selectedTicketId={selectedCase.ticket.id}
           agentEnabled={agentEnabled}
@@ -116,6 +123,15 @@ function NorthstarApp() {
           ) : null}
         </AnimatePresence>
       </div>
+      {connectionsVisited && demo.health?.workspaceId ? (
+        <ConnectionsDialog
+          key={demo.health.workspaceId}
+          client={client}
+          workspaceId={demo.health.workspaceId}
+          open={connectionsOpen}
+          onClose={() => setConnectionsOpen(false)}
+        />
+      ) : null}
     </OpenGeniProvider>
   );
 }

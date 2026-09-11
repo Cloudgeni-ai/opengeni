@@ -11408,6 +11408,7 @@ export const SkillImportFileSummary = z.object({
 export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
 
 export const SkillImportPreview = z.object({
+  markdown: z.string().max(262144).optional(),
   source: SkillImportSource,
   sourceUrl: z.string().url(),
   repositoryUrl: z.string().url(),
@@ -17058,3 +17059,7 @@ export * from "./remember";
 export * from "./agent-authored-durable-text";
 
 export * from "./feedback";
+
+export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
+export { mcpEndpointIdentity } from "./mcp-endpoint";
+export { pluginMcpUnavailableReason } from "./mcp-endpoint";

@@ -2,6 +2,7 @@
 // The host owns controller lifetime; unmounting one observer does not cancel an
 // attempt another observer is displaying or a durable backend operation.
 import { useMemo, useSyncExternalStore } from "react";
+export { SkillDiscovery, type SkillDiscoveryProps, type SkillDiscoveryClient, type SkillDiscoveryItem, type SkillDiscoveryPage } from "./skill-discovery";
 import type { ConnectController } from "@opengeni/connect";
 export { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
 export { ConnectChooser, type ConnectChooserProps } from "./connect-chooser";
@@ -46,3 +47,17 @@ export function useConnect(controller: ConnectController) {
   );
   return useMemo(() => ({ ...snapshot, ...actions }), [snapshot, actions]);
 }
+
+export {
+  ConnectionCatalog,
+  ConnectionServiceRow,
+  ConnectionOptionRow,
+  type ConnectionCatalogProps,
+  type ConnectionCatalogService,
+  type ConnectionCatalogOption,
+} from "./connection-catalog";
+export { ConnectionInstalled, type ConnectionInstalledItem } from "./connection-installed";
+export { ConnectionTypePicker, type ConnectionType } from "./connection-type-picker";
+export { ConnectionLogo } from "./connection-logo";
+export { PluginDiscovery, type PluginDiscoveryProps } from "./plugin-discovery";
+export { PluginDetails } from "./plugin-details";

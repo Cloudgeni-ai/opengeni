@@ -1,3 +1,4 @@
+import { ConnectionCatalog } from "./connection-catalog";
 import { useEffect, useState, type FormEvent } from "react";
 import type { ConnectController, ConnectProvider } from "@opengeni/connect";
 import { useConnect } from "./connect";
@@ -7,6 +8,7 @@ export type ConnectChooserProps = {
   /** Exact host return string; no completion parameters are added. */
   returnUrl: string;
   className?: string;
+  presentation?: "select" | "catalog";
 };
 
 /** Catalog readiness is supplied by the authenticated backend, never inferred
@@ -24,11 +26,17 @@ export function ConnectChooser(props: ConnectChooserProps) {
   return <ScopedChooser key={generation} {...props} />;
 }
 
-function ScopedChooser({ controller, returnUrl, className }: ConnectChooserProps) {
+function ScopedChooser({
+  controller,
+  returnUrl,
+  className,
+  presentation = "select",
+}: ConnectChooserProps) {
   const view = useConnect(controller);
   const [catalog, setCatalog] = useState<ConnectProvider[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [load, setLoad] = useState(0);
+  const [query, setQuery] = useState("");
   const [providerId, setProviderId] = useState("");
   const [ownership, setOwnership] = useState("");
   useEffect(() => {
@@ -85,7 +93,52 @@ function ScopedChooser({ controller, returnUrl, className }: ConnectChooserProps
         <form onSubmit={submit}>
           <fieldset disabled={view.busy}>
             <legend>Provider and ownership</legend>
-            <label>
+            {presentation === "catalog" && !provider ? (
+              <>
+                <label>
+                  Search connections
+                  <input
+                    type="search"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </label>
+                <ConnectionCatalog
+                  query={query}
+                  services={catalog!.map((entry) => ({
+                    id: entry.id,
+                    name: entry.label,
+                    options: [
+                      {
+                        id: entry.id,
+                        name: entry.label,
+                        description: entry.reason,
+                        status: entry.readiness.replaceAll("_", " "),
+                        connected: false,
+                        onOpen: () => {
+                          if (!view.busy) {
+                            setProviderId(entry.id);
+                            setOwnership(entry.ownership.length === 1 ? entry.ownership[0]! : "");
+                          }
+                        },
+                      },
+                    ],
+                  }))}
+                />
+              </>
+            ) : null}
+            {presentation === "catalog" && provider ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setProviderId("");
+                  setOwnership("");
+                }}
+              >
+                Back to connections
+              </button>
+            ) : null}
+            <label hidden={presentation === "catalog"}>
               Provider
               <select
                 required
@@ -110,27 +163,34 @@ function ScopedChooser({ controller, returnUrl, className }: ConnectChooserProps
               </select>
             </label>
             {provider && (
-              <label>
-                Ownership
-                <select
-                  required
-                  value={ownership}
-                  onChange={(event) => setOwnership(event.target.value)}
-                >
-                  <option value="" disabled>
-                    Choose ownership
-                  </option>
-                  {provider.ownership.map((choice) => (
-                    <option key={choice} value={choice}>
-                      {choice === "personal"
-                        ? "Personal — owned by you"
-                        : "Workspace — shared connection"}
+              <>
+                <strong>{presentation === "catalog" ? provider.label : null}</strong>
+                <label>
+                  Ownership
+                  <select
+                    required
+                    value={ownership}
+                    onChange={(event) => setOwnership(event.target.value)}
+                  >
+                    <option value="" disabled>
+                      Choose ownership
                     </option>
-                  ))}
-                </select>
-              </label>
+                    {provider.ownership.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice === "personal"
+                          ? "Personal — owned by you"
+                          : "Workspace — shared connection"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
             )}
-            <button type="submit" disabled={!canBegin}>
+            <button
+              hidden={presentation === "catalog" && !provider}
+              type="submit"
+              disabled={!canBegin}
+            >
               Start setup
             </button>
           </fieldset>

@@ -315,6 +315,7 @@
     {
       "mcpUrl": "https://mcp.dropbox.com/chatgpt_app_mcp",
       "name": "Dropbox",
+      "featured": true,
       "description": "Search and read files in the Dropbox account you connect.",
       "category": "files",
       "official": true,
@@ -369,6 +370,7 @@
     {
       "mcpUrl": "https://mcp.frontapp.com/mcp",
       "name": "Front",
+      "featured": true,
       "description": "Shared inbox conversations and contacts.",
       "category": "communication",
       "notes": [

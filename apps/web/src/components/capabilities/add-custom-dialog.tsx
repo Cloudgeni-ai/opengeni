@@ -1,3 +1,5 @@
+import { ConnectionTypePicker, type ConnectionType } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
 import { Loader2Icon, PlusIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -29,16 +31,22 @@ export function AddCustomDialog({
   onOpenChange,
   busy,
   onSubmit,
+  onCustomApi,
 }: {
+  onCustomApi?: (protocol: "openapi" | "graphql") => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   busy: boolean;
   onSubmit: (form: CapabilityFormState) => void;
 }) {
+  const [connectionType, setConnectionType] = useState<ConnectionType>("mcp");
   const [form, setForm] = useState<CapabilityFormState>(() => emptyCapabilityForm());
   // Reset to a clean form each time the dialog opens.
   useEffect(() => {
-    if (open) setForm(emptyCapabilityForm());
+    if (open) {
+      setForm(emptyCapabilityForm());
+      setConnectionType("mcp");
+    }
   }, [open]);
 
   const error = capabilityFormError(form);
@@ -49,80 +57,98 @@ export function AddCustomDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add MCP server</DialogTitle>
+          <DialogTitle>Add connection</DialogTitle>
           <DialogDescription>
-            Register a remote MCP server. Use the dedicated source review flows for Skills, Plugins,
-            OpenAPI, and GraphQL.
+            Choose how to connect your tools.
           </DialogDescription>
         </DialogHeader>
 
-        <form
-          className="grid gap-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!error && !busy) onSubmit(form);
-          }}
-        >
-          <div className="grid gap-1.5">
-            <Label htmlFor="add-name" className="text-xs text-fg-muted">
-              Name
-            </Label>
-            <Input
-              id="add-name"
-              suppressAutofill
-              value={form.name}
-              onChange={(event) => update({ name: event.target.value })}
-              placeholder="e.g. Internal Tools MCP"
-              autoFocus
-            />
+        {onCustomApi ? (
+          <ConnectionTypePicker
+            value={connectionType}
+            onChange={setConnectionType}
+            disabled={busy}
+          />
+        ) : null}
+        {connectionType !== "mcp" ? (
+          <div className="grid gap-4">
+            <p className="text-sm text-fg-muted">
+              {connectionType === "openapi"
+                ? "Connect using an OpenAPI specification."
+                : "Connect a GraphQL endpoint."}{" "}
+              Next, choose tools and sign in.
+            </p>
+            <Button onClick={() => onCustomApi?.(connectionType)}>Continue</Button>
           </div>
+        ) : (
+          <form
+            className="grid gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!error && !busy) onSubmit(form);
+            }}
+          >
+            <div className="grid gap-1.5">
+              <Label htmlFor="add-name" className="text-xs text-fg-muted">
+                Name
+              </Label>
+              <Input
+                id="add-name"
+                suppressAutofill
+                value={form.name}
+                onChange={(event) => update({ name: event.target.value })}
+                placeholder="e.g. Internal Tools MCP"
+                autoFocus
+              />
+            </div>
 
-          <div className="grid gap-1.5">
-            <Label htmlFor="add-endpoint" className="text-xs text-fg-muted">
-              Server URL
-            </Label>
-            <Input
-              id="add-endpoint"
-              value={form.endpointUrl}
-              onChange={(event) => update({ endpointUrl: event.target.value })}
-              placeholder="https://mcp.example.com/sse"
-              inputMode="url"
-            />
-          </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="add-endpoint" className="text-xs text-fg-muted">
+                Server URL
+              </Label>
+              <Input
+                id="add-endpoint"
+                value={form.endpointUrl}
+                onChange={(event) => update({ endpointUrl: event.target.value })}
+                placeholder="https://mcp.example.com/sse"
+                inputMode="url"
+              />
+            </div>
 
-          <div className="grid gap-1.5">
-            <Label htmlFor="add-description" className="text-xs text-fg-muted">
-              Description <span className="text-fg-subtle">(optional)</span>
-            </Label>
-            <textarea
-              id="add-description"
-              value={form.description}
-              onChange={(event) => update({ description: event.target.value })}
-              placeholder="What is it for?"
-              className="min-h-16 rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
-            />
-          </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="add-description" className="text-xs text-fg-muted">
+                Description <span className="text-fg-subtle">(optional)</span>
+              </Label>
+              <textarea
+                id="add-description"
+                value={form.description}
+                onChange={(event) => update({ description: event.target.value })}
+                placeholder="What is it for?"
+                className="min-h-16 rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+              />
+            </div>
 
-          <label className="flex items-center gap-2 text-sm text-fg-muted">
-            <input
-              type="checkbox"
-              checked={form.enableAfterAdd}
-              onChange={(event) => update({ enableAfterAdd: event.target.checked })}
-              className="size-4 accent-brand"
-            />
-            Enable after adding
-          </label>
+            <label className="flex items-center gap-2 text-sm text-fg-muted">
+              <input
+                type="checkbox"
+                checked={form.enableAfterAdd}
+                onChange={(event) => update({ enableAfterAdd: event.target.checked })}
+                className="size-4 accent-brand"
+              />
+              Enable after adding
+            </label>
 
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={busy || Boolean(error)}>
-              {busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
-              Add MCP server
-            </Button>
-          </DialogFooter>
-        </form>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={busy || Boolean(error)}>
+                {busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
+                Add MCP server
+              </Button>
+            </DialogFooter>
+          </form>
+        )}
       </DialogContent>
     </Dialog>
   );

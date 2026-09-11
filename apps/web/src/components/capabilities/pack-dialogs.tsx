@@ -100,10 +100,9 @@ export function PackManifestDialog({
         onCloseAutoFocus={(event) => restoreOpenerFocus(event, restoreFocusRef)}
       >
         <DialogHeader>
-          <DialogTitle>Add a Pack manifest</DialogTitle>
+          <DialogTitle>Add a workflow template</DialogTitle>
           <DialogDescription>
-            Paste a Pack manifest as JSON. Registration does not install anything; you review its
-            additions and any account, compute, or configuration requirements in the next step.
+            Paste the template JSON, then review its tools and setup requirements.
           </DialogDescription>
         </DialogHeader>
         <textarea
