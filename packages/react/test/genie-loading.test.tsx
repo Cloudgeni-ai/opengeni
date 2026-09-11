@@ -258,7 +258,7 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
   expect(r.container.querySelector(".og-rolling-status")).toBeNull();
   await r.rerender(
     <MessageTimeline
-      items={[item, { ...item, id: "tool2", callId: "call2" }]}
+      items={[item, { ...item, id: "tool2", callId: "call2", arguments: { cmd: "bun run build" } }]}
       turnSummary={{ rolling: true }}
     />,
   );
@@ -267,6 +267,9 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
   expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
   expect(r.container.textContent).toContain("+1 earlier");
   expect(r.container.textContent).toContain("bun test");
+  expect(r.container.textContent).toContain("bun run build");
+  // Both faces exist during the first standalone-to-reel transition.
+  expect(r.container.querySelectorAll(".og-rolling-face").length).toBe(2);
   await act(async () => trigger.click());
   expect(trigger.getAttribute("aria-expanded")).toBe("true");
   await r.rerender(
@@ -332,5 +335,52 @@ test("rolling reasoning keeps its live Markdown preview", async () => {
   await flush();
   expect(r.container.querySelector(".og-reel-title")?.textContent).toBe("Thinking");
   expect(r.container.querySelector(".og-reel-preview")?.textContent).toContain("Current thought");
+  await r.unmount();
+});
+
+test("rolling sandbox and worker steps reuse descriptive compact rows", async () => {
+  const { RollingActivity } = await import("../src/timeline/rolling-activity");
+  const shared = {
+    turnId: "turn",
+    status: "running" as const,
+    occurredAt: new Date().toISOString(),
+  };
+  const r = await renderComponent(
+    <RollingActivity
+      items={[
+        {
+          ...shared,
+          kind: "sandbox",
+          id: "sandbox",
+          name: "exec",
+          command: "sleep 20",
+          output: "",
+        },
+      ]}
+    />,
+  );
+  await flush();
+  expect(r.container.textContent).toContain("sleep 20");
+  expect(
+    r.container.querySelector('.og-rolling-status[data-running="true"] .og-command-reel'),
+  ).not.toBeNull();
+  await r.rerender(
+    <RollingActivity
+      items={[
+        {
+          ...shared,
+          kind: "worker",
+          id: "worker",
+          callId: "call",
+          action: "spawn",
+          prompt: "Inspect the repository",
+          workerSessionId: null,
+          failure: null,
+        },
+      ]}
+    />,
+  );
+  expect(r.container.textContent).toContain("Spawning worker");
+  expect(r.container.textContent).toContain("Inspect the repository");
   await r.unmount();
 });

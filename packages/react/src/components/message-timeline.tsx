@@ -2507,6 +2507,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const startupDetails = useStartupDetails();
   const enter = useEntranceAnimation();
   const settleChrome = useTurnSettleOpen();
+  const previousSingleActivity = useRef<ActivityItem | undefined>(undefined);
+  useLayoutEffect(() => {
+    const work =
+      group.kind === "activity" ? group.items.filter((item) => item.kind !== "startup-phase") : [];
+    previousSingleActivity.current = work.length === 1 ? work[0] : undefined;
+  }, [group]);
   const foldMemory = useFoldMemory();
   // Settled (or live-fold) activity clusters get a chip. Inside an expanded
   // turn that is the second layer — quiet nested chips under the outer turn
@@ -2647,7 +2653,11 @@ const TimelineGroupView = memo(function TimelineGroupView({
           }
           liveHeader={
             turnSummary?.rolling && !group.outcome && !foldLiveCluster ? (
-              <RollingActivity items={group.items} toolRegistry={toolRegistry} />
+              <RollingActivity
+                items={group.items}
+                toolRegistry={toolRegistry}
+                previousItem={previousSingleActivity.current}
+              />
             ) : undefined
           }
           foldKey={group.id}

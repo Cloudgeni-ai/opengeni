@@ -2,7 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
 import { useStartupDetails } from "./startup-preference";
 import { ArrowRightIcon, BotIcon, BrainCircuitIcon } from "lucide-react";
-import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useContext, useLayoutEffect, useRef, useState } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
@@ -11,7 +11,13 @@ import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
-import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
+import {
+  BodyNote,
+  PayloadBlock,
+  ActivityDisclosure,
+  CompactActivityContext,
+  ToolCallTruncationProvider,
+} from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, WorkerItem } from "./types";
 
@@ -380,6 +386,7 @@ function WorkerRow({
   item: WorkerItem;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
+  const compact = useContext(CompactActivityContext);
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
@@ -399,6 +406,16 @@ function WorkerRow({
           : cancelled
             ? "Worker interrupted"
             : "Worker messaged";
+  if (compact) {
+    return (
+      <ActivityDisclosure
+        icon={<BotIcon className="size-3.5" />}
+        title={title}
+        preview={item.prompt}
+        running={running}
+      />
+    );
+  }
   // A worker is a first-class actor but still a STEP on the rail — a borderless
   // row (no card), aligned to its sibling tool rows: the chevron column is an
   // empty spacer (a worker doesn't expand), then the bot glyph, then the title

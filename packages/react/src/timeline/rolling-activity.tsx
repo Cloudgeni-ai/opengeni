@@ -1,7 +1,7 @@
 import { renderActivity } from "./activity-rail";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { WrenchIcon } from "lucide-react";
-import { Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { CompactActivityContext } from "./shared";
 import { defaultToolRegistry } from "./tool-renderers";
 import type { ToolRegistry } from "./registry";
@@ -12,20 +12,27 @@ import type { ActivityItem } from "./types";
 export function RollingActivity({
   items,
   toolRegistry = defaultToolRegistry,
+  previousItem,
 }: {
   items: ActivityItem[];
+  /** The standalone item visible immediately before this reel mounted. */
+  previousItem?: ActivityItem | undefined;
   toolRegistry?: ToolRegistry;
 }) {
   const reduced = useReducedMotion();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const work = items.filter((item) => item.kind !== "startup-phase");
   const active = work.filter((item) =>
     item.kind === "reasoning" ? item.streaming : "status" in item && item.status === "running",
   );
   // Advance with the event order; finishing a parallel tool must not replay an older one.
-  const item = work.at(-1);
+  const item = !mounted && previousItem ? previousItem : work.at(-1);
   if (!item) return null;
-  const earlierCount = work.indexOf(item);
-  const Renderer = item.kind === "tool-call" ? toolRegistry.resolve(item) : null;
+  const earlierCount = Math.max(
+    0,
+    work.findIndex((entry) => entry.id === item.id),
+  );
   const fallback = (
     <span className="og-rolling-label">
       <WrenchIcon className="size-3.5" />
@@ -35,7 +42,7 @@ export function RollingActivity({
   return (
     <span
       className="og-rolling-status"
-      data-running={item && active.includes(item) ? "true" : undefined}
+      data-running={active.some((entry) => entry.id === item.id) ? "true" : undefined}
     >
       <span className="sr-only">
         {item.kind === "tool-call"
@@ -62,13 +69,7 @@ export function RollingActivity({
           >
             <CompactActivityContext.Provider value={true}>
               <Suspense fallback={fallback}>
-                {Renderer && item.kind === "tool-call" ? (
-                  <Renderer item={item} />
-                ) : item.kind === "reasoning" ? (
-                  renderActivity(item, toolRegistry, undefined, undefined, undefined, undefined)
-                ) : (
-                  fallback
-                )}
+                {renderActivity(item, toolRegistry, undefined, undefined, undefined, undefined)}
               </Suspense>
             </CompactActivityContext.Provider>
           </motion.span>
