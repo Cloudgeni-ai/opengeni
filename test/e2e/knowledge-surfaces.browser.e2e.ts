@@ -1,6 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  withSessionRlsActorContext,
+  saveAgentLearningSettings,
+  saveKnowledgeEntry,
+  getKnowledgeEntry,
+  type KnowledgeContext,
+} from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
   acquireSharedTestDatabase,
@@ -604,6 +612,262 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
   }, 90_000);
 
+  test("reviews changes directly, orders prerequisites, and returns from evidence without losing the proposal", async () => {
+    const expectedMissingKnowledge = new Set<string>();
+    const context = await configuredContext(
+      browser,
+      { viewport: { width: 1280, height: 900 }, extraHTTPHeaders: ownerHeaders },
+      false,
+      expectedMissingKnowledge,
+    );
+    try {
+      const page = await context.newPage();
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const access = await page.evaluate(
+        async (url) => (await fetch(`${url}/v1/access/me`, { credentials: "include" })).json(),
+        apiBaseUrl,
+      );
+      const grant = access.workspaceGrants.find(
+        (g: { workspaceId: string }) => g.workspaceId === workspaceId,
+      );
+      const { accountId, subjectId } = grant;
+      const human: KnowledgeContext = {
+        accountId,
+        workspaceId,
+        actor: {
+          kind: "human",
+          principalKind: "human_session",
+          subjectId,
+          writeScopes: ["workspace"],
+          settingsScopes: ["workspace"],
+          review: true,
+        },
+      };
+      async function agentFor(title: string): Promise<KnowledgeContext> {
+        const session = await withSessionRlsActorContext({ subjectId }, () =>
+          createSession(dbClient.db, {
+            accountId,
+            workspaceId,
+            initialMessage: title,
+            memoryScope: "workspace",
+            resources: [],
+            metadata: {},
+            model: "test-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            sandboxBackend: "none",
+            createdBy: { kind: "subject", subjectId },
+            createdByContext: {},
+          }),
+        );
+        await saveAgentLearningSettings(dbClient.db, human, {
+          scope: "workspace",
+          source: { kind: "chat", id: session.id },
+          operationId: crypto.randomUUID(),
+          expectedVersion: 0,
+          settings: { knowledge: "review_first" },
+        });
+        const turnId = crypto.randomUUID(),
+          attemptId = crypto.randomUUID();
+        await shared.admin.begin(async (tx) => {
+          await tx`SELECT set_config('opengeni.session_inference_claim','1',true)`;
+          await tx`INSERT INTO session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,initiator_kind,initiator_subject_id,initiator_context,initiating_human_subject_id) VALUES(${turnId},${accountId},${workspaceId},${session.id},${crypto.randomUUID()},${`review-${turnId}`},'running','user',1,${title},'test-model','medium','none',1,'subject',${subjectId},'{}',${subjectId})`;
+          await tx`UPDATE sessions SET active_turn_id=${turnId},status='running',title=${title},title_source='user' WHERE id=${session.id}`;
+          await tx`UPDATE session_turns SET active_attempt_id=${attemptId} WHERE id=${turnId}`;
+          await tx`INSERT INTO session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies) VALUES(${attemptId},${accountId},${workspaceId},${session.id},${turnId},1,'running',${`review-${turnId}`},${`run-${attemptId}`},${`activity-${attemptId}`},0,'{}')`;
+        });
+        return {
+          accountId,
+          workspaceId,
+          actor: {
+            kind: "agent",
+            sessionId: session.id,
+            turnId,
+            attemptId,
+            executionGeneration: 1,
+          },
+        };
+      }
+      const agent = await agentFor("Review acceptance Acme");
+      const otherAgent = await agentFor("Review acceptance another batch");
+      const id = (prefix: string) => prefix + crypto.randomUUID().slice(8);
+      const sourceId = id("eeeeeeee"),
+        findingId = id("11111111"),
+        folderId = id("ffffffff"),
+        noteId = id("22222222");
+      expectedMissingKnowledge.add(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/knowledge/entries/${folderId}`,
+      );
+      const source = await saveKnowledgeEntry(dbClient.db, human, {
+        operationId: crypto.randomUUID(),
+        entryId: sourceId,
+        expectedVersion: 0,
+        entry: {
+          title: "Review Acme contract",
+          kind: "source",
+          content: "Annual fee EUR 20,000.",
+          source: { kind: "manual", retention: "full_text" },
+        },
+      });
+      const finding = await saveKnowledgeEntry(dbClient.db, human, {
+        operationId: crypto.randomUUID(),
+        entryId: findingId,
+        expectedVersion: 0,
+        entry: {
+          title: "Review Acme renewal",
+          kind: "fact",
+          content: "Acme pays EUR 20,000 annually.",
+          evidence: [
+            {
+              entryId: sourceId,
+              revisionId: source.revisionId,
+              quote: "Annual fee EUR 20,000.",
+              location: {},
+            },
+          ],
+        },
+      });
+      await saveKnowledgeEntry(dbClient.db, agent, {
+        operationId: crypto.randomUUID(),
+        entryId: folderId,
+        expectedVersion: 0,
+        entry: { title: "Review Acme collection", kind: "group", content: "Acme contracts" },
+      });
+      const updatedSource = await saveKnowledgeEntry(dbClient.db, agent, {
+        operationId: crypto.randomUUID(),
+        entryId: sourceId,
+        expectedVersion: source.version,
+        entry: {
+          title: "Review Acme contract",
+          kind: "source",
+          content: "Annual fee EUR 21,000.",
+          groupIds: [folderId],
+          source: { kind: "manual", retention: "full_text" },
+        },
+      });
+      await saveKnowledgeEntry(dbClient.db, agent, {
+        operationId: crypto.randomUUID(),
+        entryId: findingId,
+        expectedVersion: finding.version,
+        entry: {
+          title: "Review Acme renewal",
+          kind: "fact",
+          content: "Acme pays EUR 21,000 annually.",
+          evidence: [
+            {
+              entryId: sourceId,
+              revisionId: updatedSource.revisionId,
+              quote: "Annual fee EUR 21,000.",
+              location: {},
+            },
+          ],
+        },
+      });
+      await saveKnowledgeEntry(dbClient.db, agent, {
+        operationId: crypto.randomUUID(),
+        entryId: noteId,
+        expectedVersion: 0,
+        entry: { title: "Review unsupported claim", kind: "note", content: "Reject this claim." },
+      });
+      await saveKnowledgeEntry(dbClient.db, otherAgent, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: { title: "Other batch proposal", kind: "note", content: "Another review." },
+      });
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
+      await page.getByRole("tab", { name: "Needs review", exact: true }).click();
+      const batches = page.locator('[aria-label="Knowledge review groups"] > div');
+      const openBatch = async (title: string) =>
+        batches
+          .filter({ hasText: title })
+          .getByRole("button", { name: /^Review \d+ changes?$/ })
+          .click();
+      await openBatch("Review acceptance Acme");
+      const dialog = page.getByRole("dialog");
+      // UUID order begins with the finding; its unpublished collection and source must be reviewed first.
+      await dialog.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Continue review", exact: true }).click();
+      await dialog.getByRole("heading", { name: "Review Acme collection", exact: true }).waitFor();
+      await dialog.getByRole("button", { name: "Approve and next", exact: true }).click();
+      await dialog.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
+      await dialog.getByRole("button", { name: "Approve and next", exact: true }).click();
+      await dialog.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
+      await waitFor(
+        async () => (await dialog.locator("mark").allTextContents()).join() === "20,000,21,000",
+        { timeoutMs: 10_000 },
+      );
+      expect(await dialog.getByText("Supporting information", { exact: true }).isVisible()).toBe(
+        false,
+      );
+      await dialog
+        .locator("summary")
+        .filter({ hasText: /^Supporting details$/ })
+        .click();
+      await dialog.getByRole("button", { name: "Review Acme contract", exact: true }).click();
+      await dialog.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
+      await dialog.getByRole("button", { name: "Back to review", exact: true }).click();
+      await dialog.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
+      await waitFor(
+        async () => (await dialog.locator("mark").allTextContents()).join() === "20,000,21,000",
+        { timeoutMs: 10_000 },
+      );
+      await page.screenshot({ path: "/tmp/opengeni-knowledge-review-acceptance.png" });
+      // Hold A's response after the server accepts it; opening B must invalidate A's UI completion.
+      let release!: () => void, accepted!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const received = new Promise<void>((resolve) => {
+        accepted = resolve;
+      });
+      await page.route(`**/knowledge/entries/${findingId}/review`, async (route) => {
+        const response = await route.fetch();
+        accepted();
+        await held;
+        await route.fulfill({ response });
+      });
+      await dialog.getByRole("button", { name: "Approve and next", exact: true }).click();
+      await received;
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Filter knowledge", exact: true }).click();
+      await page
+        .getByRole("combobox", { name: "Knowledge type", exact: true })
+        .selectOption("fact");
+      await page.getByRole("textbox", { name: "Search knowledge", exact: true }).fill("Acme");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await page.getByRole("button", { name: "All reviews", exact: true }).click();
+      await openBatch("Review acceptance another batch");
+      await dialog.getByRole("heading", { name: "Other batch proposal", exact: true }).waitFor();
+      const completed = page.waitForResponse((response) =>
+        response.url().endsWith(`/knowledge/entries/${findingId}/review`),
+      );
+      release();
+      await completed;
+      expect(
+        await dialog
+          .getByRole("heading", { name: "Other batch proposal", exact: true })
+          .isVisible(),
+      ).toBe(true);
+      await dialog.getByRole("button", { name: "Reject and next", exact: true }).click();
+      await dialog.waitFor({ state: "hidden" });
+      await openBatch("Review acceptance Acme");
+      await dialog
+        .getByRole("heading", { name: "Review unsupported claim", exact: true })
+        .waitFor();
+      await dialog.getByRole("button", { name: "Reject and next", exact: true }).click();
+      await dialog.waitFor({ state: "hidden" });
+      const saved = await getKnowledgeEntry(dbClient.db, human, findingId);
+      expect(saved?.revision.entry.content).toBe("Acme pays EUR 21,000 annually.");
+      expect(await getKnowledgeEntry(dbClient.db, human, noteId)).toBeNull();
+      expect(unexpectedDiagnostics(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
   async function exerciseTruthfulStates(
     page: Page,
     workspaceId: string,
@@ -759,11 +1023,13 @@ async function configuredContext(
   browser: Browser,
   options: BrowserContextOptions,
   sandboxSelfhostedEnabled: boolean,
+  expectedMissingKnowledge: ReadonlySet<string> = new Set(),
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
   context.setDefaultTimeout(15_000);
   const problems: string[] = [];
   const expectedMachines404Urls = new Set<string>();
+  const observedKnowledge404Urls = new Set<string>();
   diagnostics.set(context, problems);
   context.on("page", (page) => {
     page.on("pageerror", (error) => problems.push(`page error: ${String(error)}`));
@@ -802,6 +1068,16 @@ async function configuredContext(
       expectedMachines404Urls.add(response.url());
       return;
     }
+    // A pending collection has no published version yet. The review resolver
+    // probes that exact identity before reading its proposal; no other 404 is allowed.
+    if (
+      response.status() === 404 &&
+      response.request().method() === "GET" &&
+      expectedMissingKnowledge.has(response.url())
+    ) {
+      observedKnowledge404Urls.add(response.url());
+      return;
+    }
     problems.push(
       `response ${response.status()}: ${response.request().method()} ${response.url()}`,
     );
@@ -817,6 +1093,14 @@ async function configuredContext(
       return;
     }
     const locationUrl = message.location().url;
+    if (
+      message.text() ===
+        "Failed to load resource: the server responded with a status of 404 (Not Found)" &&
+      observedKnowledge404Urls.has(locationUrl)
+    ) {
+      observedKnowledge404Urls.delete(locationUrl);
+      return;
+    }
     if (
       isExpectedDisabledMachinesConsoleError(
         { text: message.text(), locationUrl },

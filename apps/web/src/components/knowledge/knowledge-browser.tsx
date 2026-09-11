@@ -1,3 +1,5 @@
+import { firstReviewableEntry } from "./knowledge-review-order";
+import { KnowledgeReviewSummary } from "./knowledge-review-summary";
 import { KnowledgeEvidenceEditor } from "./knowledge-evidence-editor";
 import { KnowledgeReviewGroups } from "./knowledge-review-groups";
 import { KnowledgeOriginalFile } from "./knowledge-original-file";
@@ -39,7 +41,7 @@ import { KnowledgeTree, KnowledgeRow, type KnowledgeCollection } from "./knowled
 import { FormDisclosure } from "@/components/ui/form-disclosure";
 
 type View = "published" | "needs_review" | "archived" | "rejected";
-type Selection = { id: string; revisionId?: string; view?: View };
+type Selection = { id: string; revisionId?: string; view?: View; requiredFor?: string };
 const message = (reason: unknown) => (reason instanceof Error ? reason.message : String(reason));
 function externalUrl(value?: string) {
   try {
@@ -91,6 +93,41 @@ export function KnowledgeBrowser({
   const [selection, setSelection] = useState<Selection | null>(
     focusEntryId ? { id: focusEntryId } : null,
   );
+  const [trail, setTrail] = useState<Selection[]>([]);
+  const startReview = useRef<string | null>(null);
+  const [reviewTransition, setReviewTransition] = useState(false);
+  const [bulkReview, setBulkReview] = useState(false);
+  const [reviewedCount, setReviewedCount] = useState(0);
+  function openRelated(next: Selection) {
+    if (selection) setTrail((prior) => [...prior, selection]);
+    setSelection(next);
+  }
+  function beginReview(batch: KnowledgeReviewBatch) {
+    setKind("all");
+    setQuery("");
+    setSearch("");
+    setGroup(null);
+    setEntries([]);
+    setTrail([]);
+    setBulkReview(false);
+    setReviewedCount(0);
+    setReviewGroup(batch);
+    startReview.current = batch.id;
+    setReviewTransition(true);
+  }
+  function finishReview() {
+    setKind("all");
+    setQuery("");
+    setSearch("");
+    setTrail([]);
+    setReviewedCount((count) => count + 1);
+    setSelection(null);
+    if (reviewGroup) {
+      startReview.current = reviewGroup.id;
+      setReviewTransition(true);
+    }
+    setRefresh((n) => n + 1);
+  }
   const [creating, setCreating] = useState<"note" | "group" | null>(null);
   const [createParent, setCreateParent] = useState<KnowledgeCollection | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -128,14 +165,36 @@ export function KnowledgeBrowser({
     }
     void context.client
       .listKnowledgeEntries(workspaceId, JSON.parse(requestKey))
-      .then((result) => {
+      .then(async (result) => {
         if (current) {
           setEntries(result.entries);
           setCursor(result.nextCursor);
+          if (startReview.current && reviewGroup?.id === startReview.current) {
+            const first = result.entries[0]
+              ? await firstReviewableEntry(result.entries[0].id, (id, options) =>
+                  context.client.getKnowledgeEntry(workspaceId, id, options),
+                )
+              : null;
+            if (!current || startReview.current !== reviewGroup.id) return;
+            startReview.current = null;
+            setReviewTransition(false);
+            if (first)
+              setSelection({
+                id: first.id,
+                view: "needs_review",
+                ...(first.id !== result.entries[0]?.id
+                  ? { requiredFor: result.entries[0]?.revision.title }
+                  : {}),
+              });
+            else setReviewGroup(null);
+          }
         }
       })
       .catch((reason) => {
-        if (current) setError(message(reason));
+        if (current) {
+          setError(message(reason));
+          setReviewTransition(false);
+        }
       })
       .finally(() => {
         if (current) setLoading(false);
@@ -195,7 +254,7 @@ export function KnowledgeBrowser({
   function renderEntry(entry: KnowledgeEntrySummary, tab: View) {
     return (
       <div key={entry.id} className="flex min-w-0 items-center gap-2">
-        {tab === "needs_review" && canEdit ? (
+        {tab === "needs_review" && canEdit && bulkReview ? (
           <input
             type="checkbox"
             aria-label={`Select ${entry.revision.title}`}
@@ -221,7 +280,10 @@ export function KnowledgeBrowser({
                 ? entry.revision.preview
                 : undefined
           }
-          onClick={() => setSelection({ id: entry.id, view: tab })}
+          onClick={() => {
+            setTrail([]);
+            setSelection({ id: entry.id, view: tab });
+          }}
         />
       </div>
     );
@@ -399,18 +461,40 @@ export function KnowledgeBrowser({
                   </div>
                 )}
                 <p className="text-sm text-fg-muted">
-                  These changes are saved for review. Agents continue working; previously published
-                  knowledge remains available.
+                  Review proposed changes before adding them to your knowledge.
                 </p>
                 {!reviewGroup && canEdit ? (
                   <KnowledgeReviewGroups
                     workspaceId={workspaceId}
                     scope={scope === "all" ? undefined : scope}
                     refresh={refresh}
-                    onSelect={setReviewGroup}
+                    onSelect={beginReview}
                   />
                 ) : null}
                 {canEdit && reviewGroup && entries.length ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={loading}
+                      onClick={() => {
+                        setTrail([]);
+                        startReview.current = reviewGroup.id;
+                        setReviewTransition(true);
+                        setRefresh((n) => n + 1);
+                      }}
+                    >
+                      Continue review
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setBulkReview((value) => !value)}
+                    >
+                      {bulkReview ? "Hide selection" : "Select changes"}
+                    </Button>
+                  </div>
+                ) : null}
+                {canEdit && reviewGroup && entries.length && bulkReview ? (
                   <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="outline"
@@ -516,20 +600,64 @@ export function KnowledgeBrowser({
         ))}
       </Tabs>
       <Dialog
-        open={selection !== null}
+        open={selection !== null || reviewTransition}
         onOpenChange={(open) => {
-          if (!open) setSelection(null);
+          if (!open) {
+            setSelection(null);
+            setTrail([]);
+            startReview.current = null;
+            setReviewTransition(false);
+          }
         }}
       >
         <DialogContent className="min-w-0 bg-bg sm:max-w-3xl">
+          {reviewTransition ? (
+            <DialogHeader>
+              <DialogTitle>Review knowledge</DialogTitle>
+              <DialogDescription role="status">Loading next change…</DialogDescription>
+            </DialogHeader>
+          ) : null}
+          {trail.length ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="justify-self-start"
+              onClick={() => {
+                setSelection(trail.at(-1)!);
+                setTrail((prior) => prior.slice(0, -1));
+              }}
+            >
+              <ArrowLeftIcon className="size-4" />
+              {trail.at(-1)?.view === "needs_review" ? "Back to review" : "Back"}
+            </Button>
+          ) : reviewGroup && selection?.view === "needs_review" ? (
+            <p className="pr-8 text-xs text-fg-muted">
+              {reviewGroup.title && reviewGroup.title !== "New conversation"
+                ? reviewGroup.title
+                : "Review changes"}
+              {reviewedCount ? ` · ${reviewedCount} reviewed` : ""}
+            </p>
+          ) : null}
+          {selection?.requiredFor ? (
+            <p className="text-sm text-fg-muted">
+              Review this supporting change before “{selection.requiredFor}”.
+            </p>
+          ) : null}
           {selection ? (
             <KnowledgeInspector
               key={`${selection.id}:${selection.revisionId ?? selection.view ?? "published"}`}
               workspaceId={workspaceId}
               selection={selection}
               canEdit={canEdit}
-              onOpen={setSelection}
-              onGroup={openGroup}
+              onOpen={openRelated}
+              onReplace={setSelection}
+              onReviewed={finishReview}
+              continueReview={Boolean(reviewGroup)}
+              onGroup={(target) =>
+                selection.view === "needs_review" || trail.length
+                  ? openRelated({ id: target.id })
+                  : openGroup(target)
+              }
               onCopy={(entry) => {
                 setSelection(null);
                 setCopying(entry);
@@ -688,6 +816,9 @@ function KnowledgeInspector(props: {
   selection: Selection;
   canEdit: boolean;
   onOpen: (selection: Selection) => void;
+  onReplace: (selection: Selection) => void;
+  onReviewed: () => void;
+  continueReview: boolean;
   onGroup: (group: { id: string; title: string }) => void;
   onChanged: () => void;
   onCopy: (record: KnowledgeEntryRecord) => void;
@@ -701,16 +832,30 @@ function KnowledgeInspector(props: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const lifetime = useRef(0);
+  useEffect(() => {
+    ++lifetime.current;
+    return () => {
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate async completions, not a DOM ref
+      ++lifetime.current;
+    };
+  }, [props.workspaceId, props.selection.id, props.selection.revisionId, props.selection.view]);
   useEffect(() => {
     let current = true;
     setRecord(null);
     setError(null);
     void (async () => {
       try {
-        return await client.getKnowledgeEntry(props.workspaceId, props.selection.id, {
+        const loaded = await client.getKnowledgeEntry(props.workspaceId, props.selection.id, {
           ...(props.selection.revisionId ? { revisionId: props.selection.revisionId } : {}),
           ...(props.selection.view ? { view: props.selection.view } : {}),
         });
+        return loaded.revision.outcome === "pending" && props.selection.view !== "needs_review"
+          ? client.getKnowledgeEntry(props.workspaceId, loaded.id, {
+              revisionId: loaded.revision.id,
+              view: "needs_review",
+            })
+          : loaded;
       } catch (reason) {
         // Related entries normally open their published content. A reviewer
         // may also follow a link to an entry whose first revision is pending.
@@ -746,16 +891,22 @@ function KnowledgeInspector(props: {
     refresh,
   ]);
   async function mutate(action: () => Promise<unknown>) {
+    const generation = lifetime.current;
     setBusy(true);
     setError(null);
     try {
       const result = await action();
+      if (generation !== lifetime.current) return;
       setEditing(false);
+      if (record?.revision.outcome === "pending") {
+        props.onReviewed();
+        return;
+      }
       props.onChanged();
       setRefresh((n) => n + 1);
       const outcome =
         result && typeof result === "object" && "outcome" in result ? result.outcome : null;
-      props.onOpen(
+      props.onReplace(
         outcome === "archived"
           ? { id: props.selection.id, view: "archived" }
           : outcome === "rejected" && record
@@ -763,12 +914,13 @@ function KnowledgeInspector(props: {
             : { id: props.selection.id, view: "published" },
       );
     } catch (reason) {
-      setError(message(reason));
+      if (generation === lifetime.current) setError(message(reason));
     } finally {
-      setBusy(false);
+      if (generation === lifetime.current) setBusy(false);
     }
   }
   async function loadHistory(more = false) {
+    const generation = lifetime.current;
     setBusy(true);
     setError(null);
     try {
@@ -777,13 +929,14 @@ function KnowledgeInspector(props: {
         props.selection.id,
         more && before ? before : undefined,
       );
+      if (generation !== lifetime.current) return;
       setHistory((prior) => (more ? [...prior, ...result.entries] : result.entries));
       setBefore(result.beforeRevision);
       setHistoryOpen(true);
     } catch (reason) {
-      setError(message(reason));
+      if (generation === lifetime.current) setError(message(reason));
     } finally {
-      setBusy(false);
+      if (generation === lifetime.current) setBusy(false);
     }
   }
   const entry = record?.revision.entry;
@@ -797,7 +950,7 @@ function KnowledgeInspector(props: {
         </DialogTitle>
         <DialogDescription>
           {record
-            ? `${KIND[record.revision.entry.kind]} · Revision ${record.revision.number} · ${record.scope === "personal" ? "Only me" : record.scope === "organization" ? "Company" : "Workspace"}`
+            ? `${pending ? (record.revision.change === "archive" ? "Archive request" : record.publishedRevisionId ? "Review update" : entry?.kind === "group" ? "New collection" : "New knowledge") : KIND[record.revision.entry.kind]} · ${record.scope === "personal" ? "Only me" : record.scope === "organization" ? "Company" : "Workspace"}`
             : "Loading entry…"}
         </DialogDescription>
       </DialogHeader>
@@ -812,14 +965,6 @@ function KnowledgeInspector(props: {
         ) : null}
         {record && entry ? (
           <>
-            <p className="text-xs text-fg-muted">{KNOWLEDGE_KIND_HELP[entry.kind]}</p>
-            {pending ? (
-              <p className="text-sm text-fg-muted">
-                {record.revision.change === "archive"
-                  ? "Archive request awaiting review."
-                  : "This proposal is awaiting review. Agents can inspect it as unapproved context; normal retrieval uses published knowledge."}
-              </p>
-            ) : null}
             {record.revision.outcome === "rejected" ? (
               <p className="text-sm text-fg-muted">
                 This proposal was rejected. It remains in history and is not used by agents.
@@ -835,6 +980,7 @@ function KnowledgeInspector(props: {
                 submitLabel={pending ? "Save and approve" : "Save"}
                 onCancel={() => setEditing(false)}
                 onSave={async (updated) => {
+                  const generation = lifetime.current;
                   if (pending)
                     await client.reviewKnowledgeEntry(props.workspaceId, {
                       operationId: crypto.randomUUID(),
@@ -851,110 +997,137 @@ function KnowledgeInspector(props: {
                       expectedVersion: record.version,
                       entry: updated,
                     });
+                  if (generation !== lifetime.current) return;
                   setEditing(false);
+                  if (pending) {
+                    props.onReviewed();
+                    return;
+                  }
                   props.onChanged();
                   setRefresh((n) => n + 1);
-                  props.onOpen({ id: record.id, view: "published" });
+                  props.onReplace({ id: record.id, view: "published" });
                 }}
               />
+            ) : pending ? (
+              <KnowledgeReviewSummary workspaceId={props.workspaceId} record={record} />
             ) : (
               <div className="whitespace-pre-wrap break-words text-sm leading-6">
                 {entry.content || "This collection brings together related knowledge."}
               </div>
             )}
-            {entry.source ? (
-              <section className="grid gap-2 border-t border-border pt-4">
-                <h3 className="text-sm font-medium">Source</h3>
-                <p className="text-sm text-fg-muted">
-                  {SOURCE[entry.source.kind]}
-                  {entry.source.retention === "passages"
-                    ? " · Retained passages"
-                    : entry.source.retention === "full_text"
-                      ? " · Retained text"
-                      : ""}
-                </p>
-                {externalUrl(entry.source.uri) ? (
-                  <a
-                    href={externalUrl(entry.source.uri)!}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-sm text-brand hover:underline"
+            <details className="group/details" open={pending ? undefined : true}>
+              <summary className="cursor-pointer text-sm text-fg-muted hover:text-fg">
+                Supporting details
+              </summary>
+              <div className="mt-3 grid gap-4">
+                {entry.source ? (
+                  <section className="grid gap-2 border-t border-border pt-4">
+                    <h3 className="text-sm font-medium">Source</h3>
+                    <p className="text-sm text-fg-muted">
+                      {SOURCE[entry.source.kind]}
+                      {entry.source.retention === "passages"
+                        ? " · Retained passages"
+                        : entry.source.retention === "full_text"
+                          ? " · Retained text"
+                          : ""}
+                    </p>
+                    {externalUrl(entry.source.uri) ? (
+                      <a
+                        href={externalUrl(entry.source.uri)!}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm text-brand hover:underline"
+                      >
+                        Open original source
+                      </a>
+                    ) : null}
+                    {entry.source.fileId ? (
+                      <KnowledgeOriginalFile
+                        key={`${record.id}:${record.revision.id}`}
+                        workspaceId={props.workspaceId}
+                        entryId={record.id}
+                        revisionId={record.revision.id}
+                      />
+                    ) : null}
+                  </section>
+                ) : null}
+                {entry.evidence.length ? (
+                  <section className="grid gap-3 border-t border-border pt-4">
+                    <h3 className="text-sm font-medium">Supporting information</h3>
+                    {entry.evidence.map((evidence) => (
+                      <div key={JSON.stringify(evidence)} className="grid gap-1">
+                        {evidence.quote ? (
+                          <blockquote className="border-l-2 border-border pl-3 text-sm text-fg-muted">
+                            {evidence.quote}
+                          </blockquote>
+                        ) : null}
+                        <KnowledgeReference
+                          workspaceId={props.workspaceId}
+                          id={evidence.entryId}
+                          revisionId={evidence.revisionId}
+                          onClick={() =>
+                            props.onOpen({
+                              id: evidence.entryId,
+                              revisionId: evidence.revisionId,
+                            })
+                          }
+                        />
+                        {evidence.location.page ? (
+                          <span className="text-xs text-fg-subtle">
+                            Page {evidence.location.page}
+                          </span>
+                        ) : null}
+                      </div>
+                    ))}
+                  </section>
+                ) : null}
+                {entry.groupIds.length ? (
+                  <section className="grid gap-2 border-t border-border pt-4">
+                    <h3 className="text-sm font-medium">Collections</h3>
+                    {entry.groupIds.map((id) => (
+                      <KnowledgeReference
+                        key={id}
+                        workspaceId={props.workspaceId}
+                        id={id}
+                        onClick={(title) => props.onGroup({ id, title })}
+                      />
+                    ))}
+                  </section>
+                ) : null}
+                {entry.relationships.length ? (
+                  <section className="grid gap-2 border-t border-border pt-4">
+                    <h3 className="text-sm font-medium">Related knowledge</h3>
+                    {entry.relationships.map((relation) => (
+                      <div key={`${relation.entryId}:${relation.relation}`}>
+                        <span className="mr-2 text-xs text-fg-subtle">
+                          {relation.relation.replaceAll("_", " ")}
+                        </span>
+                        <KnowledgeReference
+                          workspaceId={props.workspaceId}
+                          id={relation.entryId}
+                          onClick={() => props.onOpen({ id: relation.entryId })}
+                        />
+                      </div>
+                    ))}
+                  </section>
+                ) : null}
+                {pending ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="justify-self-start"
+                    disabled={busy}
+                    onClick={() => void loadHistory()}
                   >
-                    Open original source
-                  </a>
+                    Revision history
+                  </Button>
                 ) : null}
-                {entry.source.fileId ? (
-                  <KnowledgeOriginalFile
-                    key={`${record.id}:${record.revision.id}`}
-                    workspaceId={props.workspaceId}
-                    entryId={record.id}
-                    revisionId={record.revision.id}
-                  />
-                ) : null}
-              </section>
-            ) : null}
-            {entry.evidence.length ? (
-              <section className="grid gap-3 border-t border-border pt-4">
-                <h3 className="text-sm font-medium">Supporting information</h3>
-                {entry.evidence.map((evidence) => (
-                  <div key={JSON.stringify(evidence)} className="grid gap-1">
-                    {evidence.quote ? (
-                      <blockquote className="border-l-2 border-border pl-3 text-sm text-fg-muted">
-                        {evidence.quote}
-                      </blockquote>
-                    ) : null}
-                    <KnowledgeReference
-                      workspaceId={props.workspaceId}
-                      id={evidence.entryId}
-                      revisionId={evidence.revisionId}
-                      onClick={() =>
-                        props.onOpen({
-                          id: evidence.entryId,
-                          revisionId: evidence.revisionId,
-                        })
-                      }
-                    />
-                    {evidence.location.page ? (
-                      <span className="text-xs text-fg-subtle">Page {evidence.location.page}</span>
-                    ) : null}
-                  </div>
-                ))}
-              </section>
-            ) : null}
-            {entry.groupIds.length ? (
-              <section className="grid gap-2 border-t border-border pt-4">
-                <h3 className="text-sm font-medium">Collections</h3>
-                {entry.groupIds.map((id) => (
-                  <KnowledgeReference
-                    key={id}
-                    workspaceId={props.workspaceId}
-                    id={id}
-                    onClick={(title) => props.onGroup({ id, title })}
-                  />
-                ))}
-              </section>
-            ) : null}
-            {entry.relationships.length ? (
-              <section className="grid gap-2 border-t border-border pt-4">
-                <h3 className="text-sm font-medium">Related knowledge</h3>
-                {entry.relationships.map((relation) => (
-                  <div key={`${relation.entryId}:${relation.relation}`}>
-                    <span className="mr-2 text-xs text-fg-subtle">
-                      {relation.relation.replaceAll("_", " ")}
-                    </span>
-                    <KnowledgeReference
-                      workspaceId={props.workspaceId}
-                      id={relation.entryId}
-                      onClick={() => props.onOpen({ id: relation.entryId })}
-                    />
-                  </div>
-                ))}
-              </section>
-            ) : null}
+              </div>
+            </details>
             <div className="flex flex-wrap gap-2 border-t border-border pt-4">
               {props.canEdit && !editing && !historical ? (
                 <>
-                  {!record.archived && record.revision.change !== "archive" ? (
+                  {!pending && !record.archived && record.revision.change !== "archive" ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -994,7 +1167,7 @@ function KnowledgeInspector(props: {
                           )
                         }
                       >
-                        Approve
+                        {props.continueReview ? "Approve and next" : "Approve"}
                       </Button>
                       <Button
                         variant="outline"
@@ -1012,8 +1185,18 @@ function KnowledgeInspector(props: {
                           )
                         }
                       >
-                        Reject
+                        {props.continueReview ? "Reject and next" : "Reject"}
                       </Button>
+                      {record.revision.change !== "archive" ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => setEditing(true)}
+                        >
+                          Edit first
+                        </Button>
+                      ) : null}
                     </>
                   ) : !record.archived ? (
                     <Button
@@ -1054,9 +1237,16 @@ function KnowledgeInspector(props: {
                   Restore this revision
                 </Button>
               ) : null}
-              <Button variant="ghost" size="sm" disabled={busy} onClick={() => void loadHistory()}>
-                History
-              </Button>
+              {!pending ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void loadHistory()}
+                >
+                  History
+                </Button>
+              ) : null}
             </div>
             {historyOpen ? (
               <section className="grid gap-2">

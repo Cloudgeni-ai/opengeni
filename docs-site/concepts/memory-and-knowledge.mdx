@@ -72,8 +72,12 @@ Automatic publishes a change immediately. Review first stores a pending revision
 and lets the agent continue, without an approval prompt in the chat. The previous
 published version stays available. Agents can explicitly read pending proposals
 as unapproved context, reuse them and correct them, but ordinary retrieval uses
-published information. A human reviews changes grouped by chat turn or scheduled
-run and can approve, edit, reject or later restore an entry.
+published information. Review opens one proposed change at a time, showing what
+changed from the published version. Supporting details are optional, and Back
+returns you to the proposal after opening a source. Approve or reject moves to
+the next change; linked proposals are reviewed before findings that need them.
+A human reviews changes grouped by chat turn or scheduled run and can approve,
+edit, reject or later restore an entry.
 
 Off stops new agent changes in that category. It does not hide existing Knowledge,
 disable installed Skills, prevent human edits or block a human plugin install.

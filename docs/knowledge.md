@@ -163,11 +163,17 @@ still apply.
 A correction awaiting review leaves the previous published revision available.
 
 The Knowledge browser groups pending changes by chat turn or scheduled run. A
-human can inspect source evidence, approve, edit and approve, reject, or review a
-selection of up to 100 exact revisions atomically. A complete loaded group of up
-to 100 entries has an Approve all action; larger groups use selections. Approval
-orders pending evidence before dependent findings. Rejected initial entries remain discoverable in the Rejected view and can be
-restored as a new revision. The Personal review filter includes only personal
+human opens the first proposal directly, sees changed text against the exact
+published version, and approves or rejects it to move to the next change. Pending
+prerequisites are shown first, even outside the loaded page. Supporting details
+are collapsed until requested; following an evidence link keeps a Back path to
+the proposal. New entries show their proposed text, with long text expandable.
+Editing before approval and optional bulk selection remain available. A
+selection of up to 100 exact revisions can be reviewed atomically. A complete
+loaded group of up to 100 entries has an Approve all action; larger groups use
+selections. Approval orders pending evidence before dependent findings. Rejected
+initial entries remain discoverable in the Rejected view and can be restored as a
+new revision. The Personal review filter includes only personal
 Skills; workspace instruction proposals remain in workspace review.
 Stale versions conflict rather
 than silently overwriting another correction. Undo creates a new revision and
