@@ -123,7 +123,7 @@ export async function buildCapabilityCatalog(input: {
     ...configuredMcpCatalogItems(input.settings),
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
-    ...curatedLibrarySkills,
+    ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
         (skill) =>
@@ -980,9 +980,6 @@ export async function discoverMcpRegistryCapabilities(input: {
       if (!item || seen.has(item.id)) {
         continue;
       }
-      if (query && !catalogSearchText(item).includes(query)) {
-        continue;
-      }
       seen.add(item.id);
       items.push(item);
       if (items.length >= limit) {
@@ -990,7 +987,9 @@ export async function discoverMcpRegistryCapabilities(input: {
       }
     }
     cursor = typeof page.metadata?.nextCursor === "string" ? page.metadata.nextCursor : undefined;
-    if (!cursor) {
+    // Return usable results promptly rather than fetching more pages merely
+    // to fill the requested limit. The registry already applies the search.
+    if (items.length > 0 || !cursor) {
       break;
     }
   }

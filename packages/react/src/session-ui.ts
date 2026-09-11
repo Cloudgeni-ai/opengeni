@@ -46,3 +46,6 @@ export { SessionCommandsPanel } from "./components/session-commands-panel";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
+export { StartupTimings } from "./timeline/startup-timings";
+export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
+export type { GenieLoadingOptions } from "./timeline/genie-loading";

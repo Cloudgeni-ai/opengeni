@@ -141,6 +141,11 @@ opengeni-agent connect --force --api-url https://<deployment> --workspace-id <wo
 
 ## Wire protocol — single source of truth
 
+For native large-file editor writes, see [transactional uploads](TRANSACTIONAL-WRITES.md):
+the independent capability gate, exact upload lifecycle, supported Linux file
+semantics, and restart/lost-ack restrictions. `op_stream` alone does not imply
+transactional filesystem support.
+
 The protocol is defined **once** in [`proto/opengeni_agent.proto`](proto/opengeni_agent.proto)
 (proto3, package `opengeni.agent.v1`) and code-generated to **both** stacks so the
 control plane (TypeScript) and the agent (Rust) can never drift:

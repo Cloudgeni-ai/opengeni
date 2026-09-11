@@ -1,6 +1,9 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { GenieLoading } from "./genie-loading";
+import { useStartupDetails } from "./startup-preference";
 import { ArrowRightIcon, BotIcon, BrainCircuitIcon } from "lucide-react";
-import { lazy, Suspense, useLayoutEffect, useRef } from "react";
+import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
@@ -29,6 +32,8 @@ const LazyPlatformActivityRow = lazy(() => import("./platform-activity-row"));
 
 export type ActivityRailProps = {
   items: ActivityItem[];
+  /** The owning turn remains active between individual phase receipts. */
+  startupActive?: boolean;
   /** Renderer registry for tool calls. Defaults to {@link defaultToolRegistry}. */
   toolRegistry?: ToolRegistry | undefined;
   /** Drill into a spawned worker session. */
@@ -61,6 +66,7 @@ function familyOf(item: ActivityItem): string {
 
 export function ActivityRail({
   items,
+  startupActive,
   toolRegistry = defaultToolRegistry,
   onOpenSession,
   onMemoryClick,
@@ -69,6 +75,37 @@ export function ActivityRail({
   bare,
   className,
 }: ActivityRailProps) {
+  const debug = useStartupDetails();
+  const reducedMotion = useReducedMotion();
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const phases = items.filter((item) => item.kind === "startup-phase");
+  // Empty reasoning envelopes can arrive before any visible model output.
+  const hasWork = items.some(
+    (item) =>
+      item.kind !== "startup-phase" && (item.kind !== "reasoning" || item.text.trim().length > 0),
+  );
+  const interrupted = phases.some(
+    (item) => item.status === "failed" || item.status === "cancelled",
+  );
+  const providerResponded = phases.some(
+    (item) => item.phase === "provider_first_byte" && item.status === "complete",
+  );
+  const preparing =
+    !hasWork &&
+    !interrupted &&
+    (startupActive ?? (!providerResponded && phases.some((item) => item.status === "running")));
+  const visibleItems =
+    debug || detailsOpen
+      ? items
+      : items.filter((item) =>
+          item.kind === "startup-phase"
+            ? item.status === "failed" || item.status === "cancelled"
+            : item.kind !== "reasoning" || item.text.trim().length > 0,
+        );
+  const startedAt = phases.reduce(
+    (first, item) => (item.startedAt < first ? item.startedAt : first),
+    phases[0]?.startedAt ?? "",
+  );
   const enterMounted = useEntranceAnimation();
   // Live gate: rails born during bulk capture enter=false forever; with a
   // seen-id map we still want later live appends to fade (ids gate remounts).
@@ -103,7 +140,7 @@ export function ActivityRail({
         // Rows sit TIGHT by default (gap-0.5) so a same-family run reads as one
         // calm cluster; a family change opens real breathing room (mt-3) below,
         // so a long rail reads as a few clusters, not a metronome of rows.
-        "flex flex-col gap-0.5",
+        "relative flex flex-col gap-0.5",
         !bare && "border-l-2 border-og-border pl-3 sm:pl-4",
         // Whole-rail enter: standalone rails only (no seen-id map). Inside
         // MessageTimeline, unknown ids take per-row enter — remounts stay quiet.
@@ -111,8 +148,42 @@ export function ActivityRail({
         className,
       )}
     >
-      {items.map((item, index) => {
-        const newFamily = index > 0 && familyOf(item) !== familyOf(items[index - 1]!);
+      <AnimatePresence initial={false}>
+        {preparing && !debug ? (
+          <motion.div
+            key="startup"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{
+              opacity: 0,
+              height: 0,
+              pointerEvents: "none",
+            }}
+            transition={{
+              height: { duration: reducedMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] },
+              opacity: { duration: reducedMotion ? 0 : 0.16 },
+            }}
+            style={{ overflow: "hidden" }}
+          >
+            <GenieLoading
+              startedAt={startedAt}
+              detailsOpen={detailsOpen}
+              onShowDetails={() => setDetailsOpen((open) => !open)}
+            />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      {detailsOpen && !debug && !preparing ? (
+        <button
+          type="button"
+          className="og-genie-details self-start"
+          onClick={() => setDetailsOpen(false)}
+        >
+          Hide startup details
+        </button>
+      ) : null}
+      {visibleItems.map((item, index) => {
+        const newFamily = index > 0 && familyOf(item) !== familyOf(visibleItems[index - 1]!);
         const row = renderActivity(
           item,
           toolRegistry,

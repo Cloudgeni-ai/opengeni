@@ -220,8 +220,14 @@ function extensionForMimeType(mimeType: string): string {
 }
 
 async function commandSucceeds(command: string, args: string[]): Promise<boolean> {
-  const result = await runCommand(command, args);
-  return !result.spawnError && result.exitCode === 0;
+  try {
+    const result = await runCommand(command, args);
+    return !result.spawnError && result.exitCode === 0;
+  } catch {
+    // Some runtimes throw during spawn instead of emitting an error event.
+    // An unavailable optional audio tool must not prevent client startup.
+    return false;
+  }
 }
 
 async function runCommand(

@@ -1,3 +1,7 @@
+import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
+import { marketplacePlugin } from "../integrations/marketplace-plugin";
+import { mcpEndpointIdentity } from "@opengeni/contracts";
+import { buildCapabilityCatalog, createCatalogItem } from "@opengeni/core";
 import { createHash } from "node:crypto";
 
 import {
@@ -101,9 +105,35 @@ export function registerPluginRoutes(
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       ListInstalledPluginsResponse.parse({
-        plugins: await listInstalledPluginPackages(deps.db, workspaceId),
+        plugins: (await listInstalledPluginPackages(deps.db, workspaceId)).map(plugin => {
+          const source = pluginSnapshot.sources.find(source => plugin.pluginKey.startsWith("marketplace/" + source.provider + "/"));
+          const entry = source?.entries.find(entry => plugin.pluginKey === "marketplace/" + source!.provider + "/" + entry.name);
+          return { ...plugin, logoUrl: plugin.logoUrl ?? entry?.logoUrl ?? null };
+        }),
       }),
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/plugins/details", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const plugin = await getInstalledPluginPackage(deps.db, workspaceId, c.req.query("pluginKey") ?? "");
+    if (!plugin || plugin.status === "disabled") throw new HTTPException(404, { message: "Plugin is not installed" });
+    const stored = plugin.manifest as Record<string, any>;
+    if (stored.discovery) return c.json(stored.discovery);
+    const catalog = await buildCapabilityCatalog({ db: deps.db, workspaceId, settings: deps.settings, subjectId: grant.subjectId });
+    const members = Array.isArray(stored.components) ? stored.components : [];
+    return c.json({
+      id: String(stored.pluginKey ?? "installed").replace("marketplace/", "").replace("/", ":"), name: stored.name, displayName: stored.name,
+      description: stored.description ?? "", longDescription: stored.description ?? "", provider: "custom", category: stored.category ?? null,
+      logoUrl: null, darkLogoUrl: null, sourceUrl: stored.sourceUrl ?? null, author: null, version: stored.version,
+      skills: members.filter(member => member.kind === "skill").map(member => ({ name: decodeURIComponent(member.url.split("/").filter(Boolean).at(-2) ?? member.key), sourceUrl: member.url })),
+      mcpServers: members.filter(member => member.kind === "mcp").map(member => {
+        const bom = Array.isArray(stored.bom) ? stored.bom.find((entry: any) => entry.key === member.key) : null;
+        const item = catalog.items.find(item => item.id === bom?.capabilityId);
+        return { name: item?.name ?? member.serverId, transport: item?.transport ?? "http", endpoint: item?.endpointUrl ?? null };
+      }), components: [...new Set(members.map(member => member.kind === "skill" ? "skills" : member.kind))], installation: "installed",
+    });
   });
 
   app.post("/v1/workspaces/:workspaceId/plugins/preview", async (c) => {
@@ -329,7 +359,9 @@ async function resolvePluginPackage(input: {
   >;
 }): Promise<ResolvedPluginPackage> {
   let manifest;
+  const marketplace = marketplacePlugin(input.url);
   try {
+    if (marketplace) { manifest = marketplace.manifest; } else {
     const bytes = await fetchIntegrationSourceDocument(
       input.transport,
       input.url,
@@ -338,6 +370,7 @@ async function resolvePluginPackage(input: {
     manifest = PluginManifest.parse(
       JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
     );
+    }
   } catch (error) {
     if (error instanceof HTTPException) throw error;
     throw new HTTPException(422, {
@@ -346,6 +379,7 @@ async function resolvePluginPackage(input: {
   }
   const manifestDigest = sha256(stableJson(manifest));
   const components: ResolvedPluginComponent[] = [];
+  const catalog = marketplace ? await buildCapabilityCatalog({ db: input.deps.db, workspaceId: input.workspaceId, settings: input.deps.settings, subjectId: input.subjectId }) : null;
   for (const component of manifest.components) {
     if (component.kind === "skill") {
       const resolved = await resolveSkillImport(component.url, input.github);
@@ -511,7 +545,27 @@ async function resolvePluginPackage(input: {
       });
       continue;
     }
-    const server = configuredMcpServer(input.deps.settings.mcpServers, component.serverId);
+    const server = configuredMcpServer([...(marketplace?.servers ?? []), ...input.deps.settings.mcpServers], component.serverId);
+    if (marketplace) {
+      const endpoint = mcpEndpointIdentity(server.url)!;
+      const matches = (catalog?.items ?? []).filter(item => item.kind === "mcp" && mcpEndpointIdentity(item.endpointUrl) === endpoint);
+      // Prefer the original catalogue connection over legacy plugin-created duplicates.
+      matches.sort((a, b) => Number(a.id.startsWith("mcp:configured:marketplace-")) - Number(b.id.startsWith("mcp:configured:marketplace-")) || Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id));
+      const existing = matches[0];
+      const capabilityId = existing?.id ?? "mcp:endpoint:" + sha256(endpoint).slice(0, 24);
+      const digest = sha256(stableJson({ endpoint, capabilityId }));
+      components.push({
+        preview: { key: component.key, kind: "mcp", name: existing?.name ?? server.name ?? server.id, capabilityId, digest, connectionRequired: !existing?.enabled, connectionId: null, instanceKey: null, displayName: null, facts: { endpointUrl: endpoint, connectionManagedSeparately: true } },
+        install: async () => {
+          if (!existing) await createCatalogItem({ db: input.deps.db, accountId: input.accountId, workspaceId: input.workspaceId, payload: {
+            id: capabilityId, kind: "mcp", source: "manual", name: server.name ?? server.id, endpointUrl: endpoint, category: "integrations", tags: ["mcp"], metadata: { authDiscovery: "unknown" },
+          } });
+          // Connections are independently owned: installing/removing a plugin never signs in or disconnects an account.
+          return { facetInstallationIds: [] };
+        },
+      });
+      continue;
+    }
     const digest = sha256(stableJson(safeMcpFacts(server)));
     components.push({
       preview: {
@@ -584,7 +638,7 @@ async function resolvePluginPackage(input: {
       components: components.map((component) => component.preview),
       diff,
     }),
-    storedManifest: { ...manifest, sourceUrl: input.url, manifestDigest, bom },
+    storedManifest: { ...manifest, ...(marketplace ? { discovery: marketplace.discovery } : {}), sourceUrl: input.url, manifestDigest, bom },
     components,
   };
 }

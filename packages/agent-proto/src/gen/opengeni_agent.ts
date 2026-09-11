@@ -1031,6 +1031,11 @@ export interface Capabilities {
    * CPU quota that an older memory-only runner would ignore as an unknown field.
    */
   operationCpuQuota: boolean;
+  /**
+   * Transactional uploads via OpStart.fs_write / WriteChunk / OpQuery / OpCancel.
+   * Independent of op_stream. Absent/false runners MUST NOT receive this path.
+   */
+  transactionalFsWrite: boolean;
 }
 
 /**
@@ -1867,21 +1872,36 @@ export interface OpExit_FailureDetailEntry {
 }
 
 /**
- * The op-begin for a STREAMING fs_write (M7): the target is set up here; the bytes
- * arrive as chunked, idempotent WriteChunk request/replies (no reverse streaming).
+ * Transactional upload begin. Requires transactional_fs_write, not op_stream.
+ * The op_id must use the fsw- namespace; bytes arrive as sequential WriteChunk
+ * requests. This path emits no OpFrames and supports no OpAttach/OpAck.
  */
 export interface FsWriteBegin {
   path: string;
-  /** Create parent directories as needed. */
+  /**
+   * Reserved compatibility field. Transactional writes require existing parent
+   * directories; even true never creates visible directories during staging.
+   */
   createParents: boolean;
   /** POSIX mode for a newly created file (0 => platform default). */
   mode: number;
   /**
-   * Editor safety (M6): the expected blake3 hex digest of the file's CURRENT
-   * content for a read-modify-write; empty for a plain write. On a re-dispatch a
-   * mismatch REFUSES rather than double-applying a diff.
+   * Expected lowercase BLAKE3 hex digest of CURRENT content for replacement.
+   * Required unless expected_absent. Checked with opened inode identity before
+   * commit; optimistic against unrelated writers, NOT an atomic filesystem CAS.
    */
   expectedBaseDigest: string;
+  /** Required lowercase BLAKE3 hex digest of the complete intended content. */
+  contentDigest: string;
+  /** Required presence, including an explicitly present zero for empty content. */
+  contentSize?:
+    | string
+    | undefined;
+  /**
+   * Exactly one of expected_absent / expected_base_digest is required.
+   * Creation publishes atomically without replacing a concurrently created file.
+   */
+  expectedAbsent: boolean;
 }
 
 /**
@@ -1967,21 +1987,29 @@ export interface OpStatus {
     | undefined;
   /** Present iff state == OP_STATE_LOST. */
   lostReason: OpLostReason;
+  /**
+   * Transactional fs_write only: accepted byte offset. next_seq is the next
+   * chunk sequence, not an output frame sequence. Complete echoes verified
+   * content in exit.digests["content"] / exit.totals["content"]. No OpFrames.
+   */
+  writeOffset: string;
 }
 
 /**
  * One chunk of a streaming upload (server→runner): plain idempotent request/reply
- * per chunk (≤512 KiB). A duplicate (op_id, seq) is acked WITHOUT re-applying.
+ * per chunk (≤512 KiB). An exact duplicate of the most recently accepted chunk
+ * is acked WITHOUT re-applying (including a lost final ack). Older sequences or
+ * changed duplicate bodies are refused, never silently accepted or re-applied.
  */
 export interface WriteChunk {
   opId: string;
   /** The op-scoped monotonic chunk sequence. */
   seq: string;
   bytes: Uint8Array;
-  /** The final chunk: commit = digest-verify then atomic rename (M7). */
+  /** Final chunk: verify intended size/digest and base, then atomic publication. */
   last: boolean;
   /**
-   * Byte offset this chunk writes at (M7: writes land in an op-scoped temp file,
+   * Byte offset this chunk writes at (writes land in an op-scoped temp file,
    * committed on the last chunk — an aborted transfer leaves no visible file).
    */
   offset: string;
@@ -2826,6 +2854,7 @@ function createBaseCapabilities(): Capabilities {
     browserBridge: false,
     operationResourcePolicy: false,
     operationCpuQuota: false,
+    transactionalFsWrite: false,
   };
 }
 
@@ -2869,6 +2898,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.operationCpuQuota !== false) {
       writer.uint32(104).bool(message.operationCpuQuota);
+    }
+    if (message.transactionalFsWrite !== false) {
+      writer.uint32(112).bool(message.transactionalFsWrite);
     }
     return writer;
   },
@@ -2984,6 +3016,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.operationCpuQuota = reader.bool();
           continue;
         }
+        case 14: {
+          if (tag !== 112) {
+            break;
+          }
+
+          message.transactionalFsWrite = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3036,6 +3076,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         : isSet(object.operation_cpu_quota)
         ? globalThis.Boolean(object.operation_cpu_quota)
         : false,
+      transactionalFsWrite: isSet(object.transactionalFsWrite)
+        ? globalThis.Boolean(object.transactionalFsWrite)
+        : isSet(object.transactional_fs_write)
+        ? globalThis.Boolean(object.transactional_fs_write)
+        : false,
     };
   },
 
@@ -3080,6 +3125,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.operationCpuQuota !== false) {
       obj.operationCpuQuota = message.operationCpuQuota;
     }
+    if (message.transactionalFsWrite !== false) {
+      obj.transactionalFsWrite = message.transactionalFsWrite;
+    }
     return obj;
   },
 
@@ -3103,6 +3151,7 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.browserBridge = object.browserBridge ?? false;
     message.operationResourcePolicy = object.operationResourcePolicy ?? false;
     message.operationCpuQuota = object.operationCpuQuota ?? false;
+    message.transactionalFsWrite = object.transactionalFsWrite ?? false;
     return message;
   },
 };
@@ -11917,7 +11966,15 @@ export const OpExit_FailureDetailEntry: MessageFns<OpExit_FailureDetailEntry> = 
 };
 
 function createBaseFsWriteBegin(): FsWriteBegin {
-  return { path: "", createParents: false, mode: 0, expectedBaseDigest: "" };
+  return {
+    path: "",
+    createParents: false,
+    mode: 0,
+    expectedBaseDigest: "",
+    contentDigest: "",
+    contentSize: undefined,
+    expectedAbsent: false,
+  };
 }
 
 export const FsWriteBegin: MessageFns<FsWriteBegin> = {
@@ -11933,6 +11990,15 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     }
     if (message.expectedBaseDigest !== "") {
       writer.uint32(34).string(message.expectedBaseDigest);
+    }
+    if (message.contentDigest !== "") {
+      writer.uint32(42).string(message.contentDigest);
+    }
+    if (message.contentSize !== undefined) {
+      writer.uint32(48).uint64(message.contentSize);
+    }
+    if (message.expectedAbsent !== false) {
+      writer.uint32(56).bool(message.expectedAbsent);
     }
     return writer;
   },
@@ -11976,6 +12042,30 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
           message.expectedBaseDigest = reader.string();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.contentDigest = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.contentSize = reader.uint64().toString();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.expectedAbsent = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -11999,6 +12089,21 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
         : isSet(object.expected_base_digest)
         ? globalThis.String(object.expected_base_digest)
         : "",
+      contentDigest: isSet(object.contentDigest)
+        ? globalThis.String(object.contentDigest)
+        : isSet(object.content_digest)
+        ? globalThis.String(object.content_digest)
+        : "",
+      contentSize: isSet(object.contentSize)
+        ? globalThis.String(object.contentSize)
+        : isSet(object.content_size)
+        ? globalThis.String(object.content_size)
+        : undefined,
+      expectedAbsent: isSet(object.expectedAbsent)
+        ? globalThis.Boolean(object.expectedAbsent)
+        : isSet(object.expected_absent)
+        ? globalThis.Boolean(object.expected_absent)
+        : false,
     };
   },
 
@@ -12016,6 +12121,15 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     if (message.expectedBaseDigest !== "") {
       obj.expectedBaseDigest = message.expectedBaseDigest;
     }
+    if (message.contentDigest !== "") {
+      obj.contentDigest = message.contentDigest;
+    }
+    if (message.contentSize !== undefined) {
+      obj.contentSize = message.contentSize;
+    }
+    if (message.expectedAbsent !== false) {
+      obj.expectedAbsent = message.expectedAbsent;
+    }
     return obj;
   },
 
@@ -12028,6 +12142,9 @@ export const FsWriteBegin: MessageFns<FsWriteBegin> = {
     message.createParents = object.createParents ?? false;
     message.mode = object.mode ?? 0;
     message.expectedBaseDigest = object.expectedBaseDigest ?? "";
+    message.contentDigest = object.contentDigest ?? "";
+    message.contentSize = object.contentSize ?? undefined;
+    message.expectedAbsent = object.expectedAbsent ?? false;
     return message;
   },
 };
@@ -12540,7 +12657,7 @@ export const OpAttach: MessageFns<OpAttach> = {
 };
 
 function createBaseOpStatus(): OpStatus {
-  return { opId: "", state: 0, nextSeq: "0", exit: undefined, lostReason: 0 };
+  return { opId: "", state: 0, nextSeq: "0", exit: undefined, lostReason: 0, writeOffset: "0" };
 }
 
 export const OpStatus: MessageFns<OpStatus> = {
@@ -12559,6 +12676,9 @@ export const OpStatus: MessageFns<OpStatus> = {
     }
     if (message.lostReason !== 0) {
       writer.uint32(40).int32(message.lostReason);
+    }
+    if (message.writeOffset !== "0") {
+      writer.uint32(48).uint64(message.writeOffset);
     }
     return writer;
   },
@@ -12610,6 +12730,14 @@ export const OpStatus: MessageFns<OpStatus> = {
           message.lostReason = reader.int32() as any;
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.writeOffset = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -12638,6 +12766,11 @@ export const OpStatus: MessageFns<OpStatus> = {
         : isSet(object.lost_reason)
         ? opLostReasonFromJSON(object.lost_reason)
         : 0,
+      writeOffset: isSet(object.writeOffset)
+        ? globalThis.String(object.writeOffset)
+        : isSet(object.write_offset)
+        ? globalThis.String(object.write_offset)
+        : "0",
     };
   },
 
@@ -12658,6 +12791,9 @@ export const OpStatus: MessageFns<OpStatus> = {
     if (message.lostReason !== 0) {
       obj.lostReason = opLostReasonToJSON(message.lostReason);
     }
+    if (message.writeOffset !== "0") {
+      obj.writeOffset = message.writeOffset;
+    }
     return obj;
   },
 
@@ -12671,6 +12807,7 @@ export const OpStatus: MessageFns<OpStatus> = {
     message.nextSeq = object.nextSeq ?? "0";
     message.exit = (object.exit !== undefined && object.exit !== null) ? OpExit.fromPartial(object.exit) : undefined;
     message.lostReason = object.lostReason ?? 0;
+    message.writeOffset = object.writeOffset ?? "0";
     return message;
   },
 };

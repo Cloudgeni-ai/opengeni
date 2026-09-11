@@ -308,3 +308,42 @@ body {
   .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
   .session-tools-label, .session-tools-chevron { display: none; }
 }
+.capabilities-tabs { margin-top: 16px; gap: 20px; }
+.capabilities-tabs > [data-slot="tabs-list"] {
+  width: 100%; height: auto; min-height: 44px; justify-content: flex-start;
+  gap: 24px; padding: 0; border-bottom: 1px solid var(--color-border);
+  border-radius: 0; background: transparent;
+}
+.capabilities-tabs > [data-slot="tabs-list"] > [data-slot="tabs-trigger"] {
+  flex: none; height: 44px; padding: 0 2px; border: 0; border-radius: 0;
+  background: transparent; box-shadow: none;
+}
+.capabilities-tabs > [data-slot="tabs-list"] > [data-slot="tabs-trigger"]::after {
+  bottom: -1px; height: 2px; border-radius: 2px;
+}
+
+/* Skill editing controls keep a visible surface in either theme. */
+.skills-panel .skill-editor { background:var(--color-surface); }
+.skills-panel [data-variant="outline"], .skills-panel select { background:var(--color-surface); border:1px solid var(--color-border-strong); color:var(--color-fg); box-shadow:none; }
+.skills-panel [data-variant="outline"]:hover:not(:disabled), .skills-panel select:hover:not(:disabled) { background:var(--color-surface-2, var(--color-bg)); }
+.skills-panel [aria-expanded="true"] { background:var(--color-surface); color:var(--color-fg); box-shadow:inset 0 -2px var(--color-brand); border:1px solid var(--color-border-strong); }
+.skills-panel textarea, .skills-panel input { background:var(--color-bg); border-color:var(--color-border-strong); color:var(--color-fg); }
+.skills-panel button:disabled { opacity:.55; }
+
+.skills-panel [hidden] { display:none !important; }
+.skills-panel .skill-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 24px; }
+.skills-panel .skill-list-row { display:flex; align-items:center; justify-content:space-between; gap:16px; min-width:0; min-height:52px; padding:12px; border:0; border-radius:8px; background:transparent; color:var(--color-fg); text-align:left; cursor:pointer; box-shadow:none; }
+.skills-panel .skill-list-row:hover, .skills-panel .skill-list-row[aria-expanded="true"] { background:var(--color-surface-2,var(--color-surface)); border:0; box-shadow:none; }
+.skills-panel .skill-list-row:focus-visible { outline:2px solid var(--color-brand); outline-offset:2px; }
+@media (max-width:640px) { .skills-panel .skill-list { grid-template-columns:minmax(0,1fr); } }
+
+/* All-results boundaries; tab-specific layouts keep their own spacing. */
+.capability-search-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--color-border);
+}
+.capability-search-section > .og-plugin-discovery,
+.capability-search-section > section {
+  margin-top: 0;
+}

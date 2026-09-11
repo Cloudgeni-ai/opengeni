@@ -1348,6 +1348,17 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
+  failureDiagnostics?:
+    | {
+        eventId: string;
+        sequence: number;
+        turnId: string | null;
+        occurredAt: string;
+        payload: unknown;
+      }
+    | null
+    | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;
@@ -7006,6 +7017,7 @@ export type SkillImportFileSummary = {
 };
 
 export type SkillImportPreview = {
+  markdown?: string;
   source: SkillImportSource;
   sourceUrl: string;
   repositoryUrl: string;
@@ -7462,6 +7474,7 @@ export type PluginInstallationSummary = {
   description: string;
   category: string;
   tags: string[];
+  logoUrl?: string | null | undefined;
   sourceUrl: string | null;
   manifestDigest: string;
   installationVersion: number;
@@ -8051,6 +8064,7 @@ export type MachineRuntimeCapabilities = {
   browserBridge: boolean;
   operationResourcePolicy: boolean;
   operationCpuQuota: boolean;
+  transactionalFsWrite: boolean;
 };
 
 export type MachineUpdateStatus =

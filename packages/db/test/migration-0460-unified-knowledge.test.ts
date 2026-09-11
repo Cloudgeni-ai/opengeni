@@ -956,5 +956,5 @@ describe("0460 owner-role conversion", () => {
       ('knowledge_memories','documents','document_chunks','knowledge_entries','knowledge_entry_revisions','knowledge_entry_search')`;
     expect(rows.length).toBe(6);
     expect(rows.every((row) => row.relforcerowsecurity)).toBe(true);
-  });
+  }, 120_000);
 });

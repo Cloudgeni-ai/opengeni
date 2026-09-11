@@ -1383,6 +1383,8 @@ export type SelfhostedTurnSessionArgs = {
   operationResourcePolicy: EnrollmentRecord["operationPolicy"];
   operationResourcePolicySupported: boolean;
   operationCpuQuotaSupported: boolean;
+  /** Feature advertisement only; refreshed by exact live admission for each operation. */
+  transactionalFsWriteSupported?: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
   epoch: number;
   /** The run's declared sandbox environment (the SAME object fed to buildAgent +
@@ -1442,7 +1444,7 @@ function opStreamDepsFor(
 
 /** Project one enrollment read into one exact runtime route. Capability and
  * process identity must be taken from the same snapshot. */
-function connectionBindingFor(
+export function connectionBindingFor(
   services: RoutingWiringServices,
   enrollment: EnrollmentRecord | null,
 ): SelfhostedConnectionBinding | null {
@@ -1456,6 +1458,7 @@ function connectionBindingFor(
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+    transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
   };
 }
 
@@ -1526,6 +1529,7 @@ export async function establishSelfhostedTurnSession(
     operationResourcePolicy: args.operationResourcePolicy,
     operationResourcePolicySupported: args.operationResourcePolicySupported,
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
+    transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
     resolveOperationAdmission: async () => {
       const enrollment = args.personalMachineAttempt
         ? await resolvePersonalMachineConnectionForAttempt(db, {

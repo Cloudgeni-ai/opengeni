@@ -309,6 +309,10 @@ operator procedure.
 
 ## Keeping these notes current
 
+Managed production package availability is reconciled automatically after the
+runtime becomes healthy; it does not wait for later acceptance. See
+`reconcile-production-packages.yml` and `docs/deployment.md`.
+
 If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file, [`docs/architecture.md`](docs/architecture.md), and the relevant `docs/*.md` in the same change. In particular, structural changes (an app/package/sandbox backend added, removed, or renamed; a moved responsibility; a changed invariant, data-flow, or canonical source) belong in `docs/architecture.md` — see its "Keeping this current" section. An out-of-date AGENTS.md or doc is a bug, not a nicety.
 
 ## Keeping docs true

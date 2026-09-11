@@ -11,6 +11,8 @@ import {
 } from "@opengeni/contracts";
 import {
   portableSkillCapabilityId,
+  createPublicSkillSearchClient,
+  PublicSkillSearchError,
   portableSkillPluginKey,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -48,6 +50,19 @@ export function registerSkillRoutes(
 ): void {
   registerSkillContentRoutes(app, deps);
   const github = overrides.github ?? createGitHubSkillSourceClient(deps.settings);
+  const discovery = createPublicSkillSearchClient(deps.settings);
+  app.get("/v1/workspaces/:workspaceId/skills/search", async (c) => {
+    await requireAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:read");
+    try {
+      return c.json(await discovery.search({ query: c.req.query("q") ?? "", limit: 20 }));
+    } catch (error) {
+      if (!(error instanceof PublicSkillSearchError)) throw error;
+      if (error.retryAfterSeconds) c.header("Retry-After", String(error.retryAfterSeconds));
+      throw new HTTPException(error.code === "invalid_query" ? 422 : error.code === "rate_limited" ? 429 : 503, {
+        message: "Skill search is unavailable. Please try again.",
+      });
+    }
+  });
 
   app.get("/v1/workspaces/:workspaceId/skills", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -166,7 +181,7 @@ export function registerSkillRoutes(
     ) {
       throw new HTTPException(409, {
         message:
-          "The Skill source changed after preview. Review the new commit and contents before installing.",
+          "The skill changed after preview. Review its contents again before installing.",
       });
     }
     const fileSummaryByPath = new Map(

@@ -438,7 +438,9 @@ const budgets = {
   // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
   // Main 52ff56a94 is already 33,660 gzip bytes; the scroll-control gutter
   // adds 14. Preserve the measured whole-KiB envelope and 1-KiB headroom.
-  cssGzip: wholeKibEnvelope(33_674),
+  // Clean main d08dbb6029 measures 35,388 gzip CSS bytes; merged Knowledge
+  // measures 35,411 with the same Bun 1.4/macOS production configuration.
+  cssGzip: wholeKibEnvelope(35_411),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -460,6 +462,11 @@ const effectiveBudgets = {
   // with the existing raw headroom and gzip platform-skew policy.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Main d08dbb6029: 2,374,813 raw / 666,576 gzip, 34 files. The merged
+    // Knowledge graph adds receipts, review navigation and learning controls:
+    // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
+    // Preserve the established platform/configuration variance allowance.
+    wholeKibEnvelope(2_439_754, 1.5 * kib),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),
     // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
@@ -475,6 +482,7 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    wholeKibEnvelope(684_860, 1.5 * kib),
     // Same unified Knowledge measurement documented in the raw bound above.
     wholeKibEnvelope(663_198, 1.5 * kib),
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -522,9 +530,8 @@ const effectiveBudgets = {
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
-    // The shared Knowledge tabs split the graph into 34 files while reducing
-    // it to 2,365,495 raw / 661,680 gzip bytes (Bun 1.4, macOS/arm64).
-    34,
+    // Measured merged graph described above; unrelated file caps stay fixed.
+    39,
   ),
 } as const;
 

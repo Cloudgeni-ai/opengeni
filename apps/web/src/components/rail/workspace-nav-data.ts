@@ -46,7 +46,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
     to: "/workspaces/$workspaceId/plugins",
     icon: "plug",
-    label: "Plugins",
+    label: "Capabilities",
     description: "Integrations, MCP servers, skills, and packs",
   },
   {

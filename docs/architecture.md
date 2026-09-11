@@ -854,16 +854,18 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `skill_read`,
+`write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
+Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
+managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
+
 Repository `.agents/skills` contains only maintainer (`opengeni`) and external
-integration (`opengeni-client`) guidance. Runtime skills are authored directly in
-`packages/runtime/src/bundled_*_skills`; these directories are authoritative and
-shipped as runtime assets, without repository-agent copies or a synchronization step.
+integration (`opengeni-client`) guidance. Runtime skills live in
+`packages/runtime/src/bundled_*_skills`, shipped without repository-agent copies.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
@@ -1424,10 +1426,10 @@ holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
-Desktop/browser capability is layered on a compute target. The stock desktop
-image and browser daemon are separate from the ordinary headless image and
-control-plane release lifecycle. Connected Machine desktop and terminal data
-use the relay, while command authority remains in the control plane.
+Desktop/browser capabilities layer onto compute; their images and daemons have
+separate release lifecycles. Desktop/terminal data use the relay; authority remains
+in the control plane. Large edits use capability-gated transactional transfers,
+verified receipts, and no blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,
@@ -1514,6 +1516,8 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 ## 11. Build, test, and release
 
+Production npm availability reconciles independently of acceptance; see `reconcile-production-packages.yml`.
+
 The TypeScript stack uses Bun with strict TypeScript. The Rust agent and relay
 use Cargo. Unit tests and typechecking are infrastructure-free; integration,
 end-to-end, browser, artifact-runtime, and live lanes add their required
@@ -1524,9 +1528,9 @@ container images, the Helm chart, the Rust agent, and retained source identity.
 Package manifests, Changesets configuration, CI workflows, and release scripts
 own the exact closure and procedure. Web image assets compile natively for both CPU targets.
 
-Canonical commands and contribution rules are in
+Commands:
 [`../AGENTS.md`](../AGENTS.md) and [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
-Toolchain details are in [`toolchain.md`](toolchain.md).
+Toolchain: [`toolchain.md`](toolchain.md).
 
 ---
 
@@ -1617,6 +1621,7 @@ External actors and Site viewer authority: [embedding authority internals](embed
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
+| Startup loading UI and timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration and implementation Pack | `packages/sdk/`, `packages/react/`, `packages/core/src/domain/product-integration-pack.ts` | [`product-integration.md`](product-integration.md), [`packs.md`](packs.md), and [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
@@ -1655,3 +1660,29 @@ Library Skills retain workspace scope and reviewed version/hash.
 Personal MCP use requires an owner-issued exact-session grant, with shared-results
 acknowledgement for shared conversations. The composer restores only active grants
 matching visibility and authority epoch; credentials alone grant no use.
+
+### Embeddable connection presentation
+
+`@opengeni/react/connect` exports `ConnectionLogo`, `ConnectionInstalled`,
+`ConnectionServiceRow`, `ConnectionOptionRow`, `ConnectionCatalog`, and
+`ConnectionTypePicker`; scoped styling is in `@opengeni/react/connect.css`.
+These components accept data and callbacks, without app routing or provider
+credentials. `ConnectPanel` and `ConnectChooser` optionally use the catalogue
+presentation over the existing shared connection controller.
+The web Capabilities route owns tabs, global search, and curated ordering.
+`apps/web/src/components/capabilities/connection-services.ts` groups explicit
+provider identities without merging their independent authorization options.
+Northstar demonstrates the same SDK catalogue with its existing API proxy.
+
+### Public skill discovery
+
+The workspace-authorized endpoint `GET /v1/workspaces/:workspaceId/skills/search?q=...` uses the existing unauthenticated skills.sh search adapter. Self-hosters need no Vercel account, linking, or key. The upstream compatibility endpoint is undocumented; failures remain visible and retryable rather than appearing as empty results.
+
+`OpenGeniClient.searchPublicSkills` and `SkillDiscovery` from `@opengeni/react/connect` expose search to embedded products. Include `@opengeni/react/connect.css`; the host supplies its query and preview/import callback. Search is debounced, requires two characters, and never installs automatically. Results use the existing source preview and pinned installation flow. Popular and trending feeds are not part of this integration.
+
+Existing library installations remain manageable, but uninstalled legacy library entries are no longer advertised. Document parsing is included in `bundled_default_skills`, independently of editable-artifact tools.
+
+Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
+`data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities
+API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
+catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).

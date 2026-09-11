@@ -67,38 +67,73 @@ export type SessionFailureSummary = {
   failedAt: string | null;
   /** Exact durable event identity; independent of history hydration or clock precision. */
   failureEventId?: string | null;
-  /** Same-turn recovery attempts recorded by the control plane. */
-  recoveryCount: number;
-  /** Total failed turns in the log — > 1 means the session failed before and was revived. */
-  failedTurnCount: number;
+  /** Final consecutive automatic-recovery streak, not total recoveries in a turn or session. */
+  consecutiveRecoveryCount: number | null;
+  detailsTruncated?: boolean;
 };
 
 /**
  * Failure honesty for the session header/banner: the latest failure reason
- * plus the same-turn recovery history (`turn.recovery.requested`).
+ * and the final consecutive retry streak when explicitly recorded by the worker.
  */
 export function summarizeSessionFailure(
   events: SessionEvent[],
-  _sessionStatus: SessionStatus,
+  sessionStatus: SessionStatus,
+  diagnostics?: Session["failureDiagnostics"],
+  diagnosticsThrough = diagnostics?.sequence ?? 0,
 ): SessionFailureSummary {
+  // A detail read owns current failure identity even when the timeline has been
+  // cleared or paged into older history. Legacy servers omit this field.
+  events = events.filter(
+    (event) =>
+      !event.duplicateOfEventId && (!event.turnAssociation || event.turnAssociation === "current"),
+  );
+  const newerEvents = events.filter((event) => event.sequence > diagnosticsThrough);
+  const newerFailure = newerEvents.some(
+    (event) =>
+      event.type === "turn.failed" ||
+      (event.type === "session.status.changed" &&
+        (event.payload as Record<string, unknown>)?.code === "pre_claim_failure" &&
+        (event.payload as Record<string, unknown>)?.status === "failed" &&
+        (!event.turnId || event.turnId !== diagnostics?.turnId)),
+  );
+  if (sessionStatus === "failed" && diagnostics !== undefined && !newerFailure) {
+    const payload =
+      diagnostics?.payload && typeof diagnostics.payload === "object"
+        ? (diagnostics.payload as Record<string, unknown>)
+        : {};
+    const presentation = presentFailure(payload);
+    return {
+      reason:
+        presentation.reason ??
+        (payload.code === "pre_claim_failure"
+          ? "The session failed before a turn could start. No error details were recorded."
+          : null),
+      safetyRefusal: presentation.safetyRefusal,
+      failedAt: diagnostics?.occurredAt ?? null,
+      failureEventId: diagnostics?.eventId ?? null,
+      consecutiveRecoveryCount: failureRecoveryStreak(payload),
+      ...((payload.projection as { truncatedFields?: unknown[] } | undefined)?.truncatedFields
+        ?.length
+        ? { detailsTruncated: true }
+        : {}),
+    };
+  }
+  if (diagnostics !== undefined && newerFailure) events = newerEvents;
   let reason: string | null = null;
   let safetyRefusal = false;
   let failedAt: string | null = null;
   let failureEventId: string | null = null;
-  let recoveryCount = 0;
-  let failedTurnCount = 0;
+  let consecutiveRecoveryCount: number | null = null;
   let latestFailedTurnId: string | null = null;
   for (const event of events) {
-    if (event.type === "turn.recovery.requested") {
-      recoveryCount += 1;
-    }
     if (event.type === "turn.failed") {
-      failedTurnCount += 1;
       latestFailedTurnId = event.turnId ?? null;
       const payload =
         event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
           ? (event.payload as Record<string, unknown>)
           : {};
+      consecutiveRecoveryCount = failureRecoveryStreak(payload);
       const presentation = presentFailure(payload);
       reason = presentation.reason;
       safetyRefusal = presentation.safetyRefusal;
@@ -115,6 +150,7 @@ export function summarizeSessionFailure(
         // An unclaimed machine update has no turn.failed event. Its status is a
         // new failure boundary, never evidence that an older provider error
         // happened again. Preserve a paired same-turn diagnostic when present.
+        consecutiveRecoveryCount = failureRecoveryStreak(payload);
         const presentation = presentFailure(payload);
         reason =
           presentation.reason ??
@@ -125,7 +161,12 @@ export function summarizeSessionFailure(
       }
     }
   }
-  return { reason, safetyRefusal, failedAt, failureEventId, recoveryCount, failedTurnCount };
+  return { reason, safetyRefusal, failedAt, failureEventId, consecutiveRecoveryCount };
+}
+
+function failureRecoveryStreak(payload: Record<string, unknown>): number | null {
+  const value = payload.providerRecoveryCount;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export function reasoningSummaryText(payload: unknown): string {

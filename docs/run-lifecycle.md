@@ -609,7 +609,20 @@ therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing. Automatic same-turn provider/MCP recovery is finite: five
+their existing pacing. Failed session detail includes a bounded `failureDiagnostics` projection through
+its durable event cursor. The browser uses it independently of retained timeline
+pages; a newer accepted live failure supersedes it while detail refreshes. The
+banner displays `providerRecoveryCount` only as the final consecutive automatic
+retry streak, never as the total number of recoveries or failed turns. Missing
+historical counts remain unknown. Two indexed latest-event reads select this
+projection; detail polling never aggregates the session's lifetime event log.
+The initial session status and replay cursor come from one SQL statement
+snapshot, so a concurrent revival cannot pair an old failed status with a cursor
+that skips the revival event. Diagnostic text is decoded through the lossless
+storage codec before its bounded logical prefix is returned; omitted suffixes
+are disclosed and exact event bytes remain in storage.
+
+Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
@@ -864,7 +877,17 @@ their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
 sandbox session before the first model call. This performs no second clone,
 copy, or manifest materialization. With no repository resource, that workspace
-discovery capability is absent and cannot force provisioning.
+discovery capability is absent and cannot force provisioning. Repository descriptors
+carry an exact `repository:` identifier and `repository_skill_read` reader; that
+sandbox capability reads current files in place, including referenced text and
+bounded file inventories. Configured `skill_read` stays sandbox-free and does
+not resolve repository names. Identifiers cannot silently switch between these
+sources, even when names match. Repository metadata uses the same YAML parser as
+portable Skills, retaining multiline description text in the JSON descriptor.
+Discovery, inventories, and reading accept ordinary files and directories;
+symlink Skill entrypoints are excluded because portable filesystem APIs cannot
+prove target containment. The repository index is fixed for the bound capability; reads
+observe live edits or report missing files, and rebinding refreshes discovery.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves
