@@ -2206,7 +2206,10 @@ function useStableTimelineGroupKeys(
         // skipped the settle beat (insta-collapse / content flash).
         const startupCompletion =
           previous?.group.kind === "activity" &&
-          previous.group.items.every((item) => item.kind === "startup-phase") &&
+          previous.group.items.every(
+            (item) =>
+              item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
+          ) &&
           group.kind === "turn" &&
           group.outcome === "complete" &&
           group.groups.every(
@@ -2401,7 +2404,11 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
                   key={
                     !startupDismissed &&
                     group.kind === "activity" &&
-                    group.items.every((item) => item.kind === "startup-phase")
+                    group.items.every(
+                      (item) =>
+                        item.kind === "startup-phase" ||
+                        (item.kind === "reasoning" && !item.text.trim()),
+                    )
                       ? "preparation"
                       : "content"
                   }
@@ -2533,7 +2540,10 @@ const TimelineGroupView = memo(function TimelineGroupView({
         !startupDetails &&
         !insideTurn &&
         !group.outcome &&
-        group.items.every((item) => item.kind === "startup-phase")
+        group.items.every(
+          (item) =>
+            item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
+        )
       ) {
         return (
           <ActivityRail
