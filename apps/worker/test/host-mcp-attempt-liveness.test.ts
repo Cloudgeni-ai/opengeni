@@ -74,6 +74,7 @@ test.each([
   });
   if (mode === "physical") {
     expect(result.status).toBe("ok");
+    expect(result).not.toHaveProperty("operationAuthorityDigest");
     if (result.status !== "ok") throw new Error("Expected host credentials");
     expect(checks).toBe(2);
     expect(await result.authorizeProviderRequest?.()).toBe(true);

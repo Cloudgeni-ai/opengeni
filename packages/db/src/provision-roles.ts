@@ -618,6 +618,10 @@ DECLARE
 BEGIN
   EXECUTE format('REVOKE CREATE ON DATABASE %I FROM %I', current_database(), ${literal(role)});
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
+    IF to_regprocedure(format('%I.mcp_operation_command(jsonb,text,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.mcp_operation_command(jsonb,text,jsonb) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mcp_operation_command(jsonb,text,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
@@ -2120,6 +2124,8 @@ BEGIN
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
     FOREACH routine_signature IN ARRAY ARRAY[
+      'guard_mcp_operation_immutable()',
+      'mcp_operation_command_scoped(jsonb,text,jsonb)',
       'guard_workspace_owned_skill_head_delete()',
       'guard_workspace_owned_skill_history_delete()'
     ] LOOP
