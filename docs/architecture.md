@@ -748,41 +748,27 @@ These producers all converge on the ordinary session/turn runtime:
   repositories only; file attachments require explicit selection (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Session header and sidebar schedule indicators use `Session.hasSchedules`, derived by one batched indexed lookup of non-deleted `scheduled_tasks.reusable_session_id` targets after session authorization. Paused schedules remain linked. Creation metadata is only historical run-grouping provenance. The schedules list accepts a server-side `sessionId` filter; the web route passes `targetSessionId` on navigation.
-The existing lineage refresh also carries `sessionHasSchedules` for the open header and schedule flags for its nodes, so external schedule mutations converge through the existing 30-second header / 15-second sidebar refreshes without a new polling loop or event protocol.
+Schedule indicators derive from authorized, non-deleted reusable-session targets,
+including paused schedules, through existing lineage refreshes. Creation metadata
+is historical provenance; the schedules API filters by `sessionId`.
 
-For an existing session, a scheduled turn that omits its turn-level `tools`
-field inherits the durable session tool policy; explicit `tools: []` remains an
-empty override.
+Scheduled turns inherit the session tool policy when `tools` is omitted;
+`tools: []` remains an empty override. Standalone scheduler-owned turns use a
+`user`-role task boundary with immutable task/run/update IDs. This conversation
+role grants no human authority: scheduler initiation and causal-human/connection
+snapshots remain frozen. Occurrences attached to human/API turns retain the
+internal `system` envelope.
 
-A pure scheduled-occurrence batch that creates a standalone scheduler-owned
-turn is persisted in model-facing history as a direct `user`-role task boundary
-carrying the immutable scheduled task, run, and update ids. That role is
-conversation structure only: the logical turn still freezes the scheduler
-service as initiator, retains its causal-human and personal-connection authority
-snapshots, and remains a scheduled run in audit and settlement. Scheduled
-occurrences attached to an existing human/API turn, and all other machine-input
-batches, keep the internal `system`-role envelope.
+The `skip` policy locks and admits only idle existing/reusable sessions. Status,
+goal reset, run settlement and update append share a transaction; admitted work
+sets `queued` even when pause or realtime ownership withholds its wake. New
+sessions admit their creating occurrence.
 
-For `skip`, a scheduled occurrence targeting an existing or reusable session is
-admitted only when that session's locked status is exactly `idle`. The status
-check, optional reusable-goal reset, run settlement, and pending-update append
-share the ordinary session event transaction, so concurrent occurrences cannot
-both cross the same idle boundary and a skipped occurrence cannot mutate the
-goal. An admitted occurrence persists `queued` to consume that boundary even
-when a pause or active realtime lease withholds its workflow wake. A newly
-generated session still admits the occurrence that creates it.
-
-Pausing or soft-deleting a scheduled task is a durable first-claim cutoff. The
-task lifecycle transaction locks each nonterminal agent run and marks it
-skipped only when no scheduler-owned turn exists. A concurrent deposit
-therefore either commits first and is invalidated, or observes the terminal run
-and cannot publish; a concurrent claim either creates its turn first and
-remains recoverable, or observes the skipped run and cancels the pending update
-without starting model, tool, or sandbox work. Resuming the task never revives
-those pre-pause deposits. A database delivery fence rejects `pending` to
-`delivered` transitions for terminal scheduled runs, so a rolling old worker
-cannot bypass the cutoff before the new claim logic is fully deployed.
+Pause/delete establishes a first-claim cutoff: runs without a scheduler-owned
+turn become skipped, while already claimed turns remain recoverable. Deposit,
+claim and task lifecycle locks serialize this decision. Resume never revives
+pre-pause deposits, and a delivery fence rejects updates for terminal runs even
+from old workers during a rolling deployment.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
