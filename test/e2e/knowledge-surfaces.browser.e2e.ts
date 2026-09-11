@@ -806,6 +806,39 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         .locator("summary")
         .filter({ hasText: /^Details$/ })
         .click();
+      const details = dialog
+        .locator("details")
+        .filter({ has: page.locator("summary", { hasText: /^Details$/ }) })
+        .first();
+      await details
+        .locator("summary")
+        .filter({ hasText: /^Revision history$/ })
+        .click();
+      const revisions = details.getByRole("region", { name: "Revision history", exact: true });
+      await revisions.getByRole("button", { name: /^Revision 1/ }).waitFor();
+      const historyBounds = await revisions.boundingBox();
+      const approveBounds = await dialog
+        .getByRole("button", { name: "Approve and next", exact: true })
+        .boundingBox();
+      expect(historyBounds!.y + historyBounds!.height).toBeLessThan(approveBounds!.y);
+      await page.screenshot({ path: "/tmp/opengeni-inline-history.png" });
+      await details
+        .locator("summary")
+        .filter({ hasText: /^Details$/ })
+        .click();
+      expect(await revisions.isVisible()).toBe(false);
+      await details
+        .locator("summary")
+        .filter({ hasText: /^Details$/ })
+        .click();
+      await revisions.getByRole("button", { name: /^Revision 1/ }).click();
+      await dialog.getByText("Acme pays EUR 20,000 annually.", { exact: true }).waitFor();
+      await dialog.getByRole("button", { name: "Back to review", exact: true }).click();
+      await dialog.getByRole("heading", { name: "Review Acme renewal", exact: true }).waitFor();
+      await dialog
+        .locator("summary")
+        .filter({ hasText: /^Details$/ })
+        .click();
       await dialog.getByRole("button", { name: "Review Acme contract", exact: true }).click();
       await dialog.getByRole("heading", { name: "Review Acme contract", exact: true }).waitFor();
       await dialog.getByRole("button", { name: "Back to review", exact: true }).click();

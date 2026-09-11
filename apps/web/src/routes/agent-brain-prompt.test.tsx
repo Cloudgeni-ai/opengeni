@@ -390,7 +390,7 @@ describe("AgentKnowledgePrompt", () => {
     await settle();
 
     expect(container.textContent).toContain("Describe a personal skill");
-    expect(container.textContent).toContain("using your Agent learning settings");
+    expect(container.textContent).toContain("Uses your Agent learning settings.");
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     await setValue(textarea, "Lead with the outcome.");
     await act(async () => {

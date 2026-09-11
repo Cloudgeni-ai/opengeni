@@ -822,7 +822,9 @@ function KnowledgeInspector(props: {
   const [record, setRecord] = useState<KnowledgeEntryRecord | null>(null);
   const [history, setHistory] = useState<KnowledgeEntrySummary[]>([]);
   const [before, setBefore] = useState<number | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyRequest = useRef(0);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -838,6 +840,11 @@ function KnowledgeInspector(props: {
   useEffect(() => {
     let current = true;
     setRecord(null);
+    ++historyRequest.current;
+    setHistory([]);
+    setBefore(null);
+    setHistoryLoading(false);
+    setHistoryError(null);
     setError(null);
     void (async () => {
       try {
@@ -916,22 +923,23 @@ function KnowledgeInspector(props: {
   }
   async function loadHistory(more = false) {
     const generation = lifetime.current;
-    setBusy(true);
-    setError(null);
+    const request = ++historyRequest.current;
+    const isCurrent = () => generation === lifetime.current && request === historyRequest.current;
+    setHistoryLoading(true);
+    setHistoryError(null);
     try {
       const result = await client.listKnowledgeEntryHistory(
         props.workspaceId,
         props.selection.id,
         more && before ? before : undefined,
       );
-      if (generation !== lifetime.current) return;
+      if (!isCurrent()) return;
       setHistory((prior) => (more ? [...prior, ...result.entries] : result.entries));
       setBefore(result.beforeRevision);
-      setHistoryOpen(true);
     } catch (reason) {
-      if (generation === lifetime.current) setError(message(reason));
+      if (isCurrent()) setHistoryError(message(reason));
     } finally {
-      if (generation === lifetime.current) setBusy(false);
+      if (isCurrent()) setHistoryLoading(false);
     }
   }
   const entry = record?.revision.entry;
@@ -1122,17 +1130,60 @@ function KnowledgeInspector(props: {
                     ))}
                   </section>
                 ) : null}
-                {pending ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="justify-self-start"
-                    disabled={busy}
-                    onClick={() => void loadHistory()}
-                  >
+                <details
+                  key={`history:${record.version}`}
+                  onToggle={(event) => {
+                    if (event.currentTarget.open && !historyLoading) void loadHistory();
+                  }}
+                >
+                  <summary className="cursor-pointer text-sm font-medium text-fg">
                     Revision history
-                  </Button>
-                ) : null}
+                  </summary>
+                  <section aria-label="Revision history" className="mt-3 grid gap-2">
+                    {historyLoading ? (
+                      <p role="status" className="text-sm text-fg-muted">
+                        Loading revisions…
+                      </p>
+                    ) : null}
+                    {historyError ? (
+                      <div role="alert" className="text-sm text-status-error">
+                        {historyError}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={historyLoading}
+                          onClick={() => void loadHistory()}
+                        >
+                          Retry history
+                        </Button>
+                      </div>
+                    ) : null}
+                    {history.map((item) => (
+                      <button
+                        key={item.revision.id}
+                        className="text-left text-sm text-fg-muted hover:text-fg"
+                        onClick={() =>
+                          props.onOpen({
+                            id: item.id,
+                            revisionId: item.revision.id,
+                          })
+                        }
+                      >
+                        Revision {item.revision.number} · {item.revision.outcome} ·{" "}
+                        {relativeTimeLabel(item.revision.createdAt)}
+                      </button>
+                    ))}
+                    {before ? (
+                      <Button
+                        variant="ghost"
+                        disabled={historyLoading}
+                        onClick={() => void loadHistory(true)}
+                      >
+                        Earlier revisions
+                      </Button>
+                    ) : null}
+                  </section>
+                </details>
               </div>
             </details>
             <div className="flex flex-wrap gap-2 border-t border-border pt-4">
@@ -1248,42 +1299,7 @@ function KnowledgeInspector(props: {
                   Restore this revision
                 </Button>
               ) : null}
-              {!pending ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void loadHistory()}
-                >
-                  History
-                </Button>
-              ) : null}
             </div>
-            {historyOpen ? (
-              <section className="grid gap-2">
-                <h3 className="text-sm font-medium">Revision history</h3>
-                {history.map((item) => (
-                  <button
-                    key={item.revision.id}
-                    className="text-left text-sm text-fg-muted hover:text-fg"
-                    onClick={() =>
-                      props.onOpen({
-                        id: item.id,
-                        revisionId: item.revision.id,
-                      })
-                    }
-                  >
-                    Revision {item.revision.number} · {item.revision.outcome} ·{" "}
-                    {relativeTimeLabel(item.revision.createdAt)}
-                  </button>
-                ))}
-                {before ? (
-                  <Button variant="ghost" disabled={busy} onClick={() => void loadHistory(true)}>
-                    Earlier revisions
-                  </Button>
-                ) : null}
-              </section>
-            ) : null}
           </>
         ) : null}
       </div>

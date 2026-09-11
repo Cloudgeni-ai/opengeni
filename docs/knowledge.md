@@ -168,7 +168,8 @@ published version, and approves or rejects it to move to the next change. Pendin
 prerequisites are shown first, even outside the loaded page. Sources and
 collection placement are separated under Details, collapsed until requested;
 following an evidence link keeps a Back path to
-the proposal. New entries show their proposed text, with long text expandable.
+the proposal. Revision history expands in place inside Details, above entry
+actions. New entries show their proposed text, with long text expandable.
 Editing before approval and optional bulk selection remain available. A
 selection of up to 100 exact revisions can be reviewed atomically. A complete
 loaded group of up to 100 entries has an Approve all action; larger groups use
