@@ -19,13 +19,6 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -522,13 +515,13 @@ export function KnowledgeBrowser({
           </TabsContent>
         ))}
       </Tabs>
-      <Sheet
+      <Dialog
         open={selection !== null}
         onOpenChange={(open) => {
           if (!open) setSelection(null);
         }}
       >
-        <SheetContent className="w-full overflow-y-auto bg-bg sm:max-w-2xl">
+        <DialogContent className="min-w-0 bg-bg sm:max-w-3xl">
           {selection ? (
             <KnowledgeInspector
               key={`${selection.id}:${selection.revisionId ?? selection.view ?? "published"}`}
@@ -544,8 +537,8 @@ export function KnowledgeBrowser({
               onChanged={() => setRefresh((n) => n + 1)}
             />
           ) : null}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
       {copying ? (
         <CopyKnowledgeDialog
           key={copying.id}
@@ -798,15 +791,17 @@ function KnowledgeInspector(props: {
   const historical = record && !pending && record.revision.id !== record.publishedRevisionId;
   return (
     <>
-      <SheetHeader>
-        <SheetTitle>{entry?.title ?? "Knowledge entry"}</SheetTitle>
-        <SheetDescription>
+      <DialogHeader className="min-w-0 pr-6 text-left">
+        <DialogTitle className="break-words leading-snug">
+          {entry?.title ?? "Knowledge entry"}
+        </DialogTitle>
+        <DialogDescription>
           {record
             ? `${KIND[record.revision.entry.kind]} · Revision ${record.revision.number} · ${record.scope === "personal" ? "Only me" : record.scope === "organization" ? "Company" : "Workspace"}`
             : "Loading entry…"}
-        </SheetDescription>
-      </SheetHeader>
-      <div className="grid gap-5 px-4 pb-6">
+        </DialogDescription>
+      </DialogHeader>
+      <div className="grid min-w-0 gap-5">
         {error ? (
           <p role="alert" className="text-sm text-status-error">
             {error}
