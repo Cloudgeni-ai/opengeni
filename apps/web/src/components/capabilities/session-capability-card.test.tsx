@@ -107,9 +107,14 @@ afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
-async function render(personalAccount = false, currentCatalogItem = catalogItem) {
+async function render(
+  personalAccount = false,
+  currentCatalogItem = catalogItem,
+  cachedCatalogItem = catalogItem,
+) {
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
+  context.workspaceCapabilityCatalog = [cachedCatalogItem];
   enabled = personalAccount;
   connections = personalAccount ? [{ ...row, subjectId: "owner", authorityId: "authority" }] : [];
   issueUserResourceGrant.mockClear();
@@ -139,6 +144,27 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("OAuth CTA retains the live provider name after renamed setup is opened and cancelled", async () => {
+    const cached = { ...catalogItem, authKind: "oauth2" as const };
+    const h = await render(false, { ...cached, name: "Current Example" }, cached);
+    try {
+      expect(button(h.container, "Connect Example").textContent).toBe("Connect Example");
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
+      await act(async () => button(h.container, "Cancel").click());
+      expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+      expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
+      expect(button(h.container, "Connect Current Example").textContent).toBe(
+        "Connect Current Example",
+      );
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(updateConnection).not.toHaveBeenCalled();
+      expect(enableCapability).not.toHaveBeenCalled();
+      expect(issueUserResourceGrant).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
   test("expanded header reflects the live provider identity rather than stale recommendation copy", async () => {
     const h = await render(false, {
       ...catalogItem,

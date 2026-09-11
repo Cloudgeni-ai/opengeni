@@ -71,7 +71,7 @@ export function SessionCapabilityCard({
             ? "Review skill"
             : apiKey
               ? "Add API key"
-              : `Connect ${recommendation.name}`
+              : `Connect ${catalogItem?.name ?? recommendation.name}`
       }
       note={
         skill
