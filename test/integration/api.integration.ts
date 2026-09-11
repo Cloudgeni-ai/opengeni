@@ -26,15 +26,11 @@ import {
   getActiveSessionHistoryItems,
   getBillingBalance,
   getCapabilityInstallation,
-  getKnowledgeMemory,
-  hashMemoryText,
-  MEMORY_VISIBLE_RECORD_CAP,
   getSession,
   getPackInstallation,
   getScheduledTask,
   getSessionGoal,
   getVariableSetValuesForRun,
-  grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
   listInstalledPortableSkills,
@@ -48,14 +44,12 @@ import {
   recordStripeWebhookEvent,
   recordUsageEvent,
   persistAttemptToolCatalog,
-  requireFile,
   requireSession,
   saveRunState,
   setSessionGoalStatus,
   sumUsageQuantity,
   synchronizeCanonicalHumanLoginBindings,
   updateScheduledTask,
-  updateWorkspaceSettings,
   upsertCapabilityCatalogItem,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
@@ -93,13 +87,6 @@ import {
 import { prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
-import {
-  createDocumentServices,
-  DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
-  DEFAULT_DOCUMENT_EMBEDDING_MODEL,
-  getDocumentChunk,
-  searchDocuments,
-} from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
 async function setSessionStatus(

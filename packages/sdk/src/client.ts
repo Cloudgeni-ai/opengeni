@@ -4835,9 +4835,19 @@ export class OpenGeniClient {
     return this.requestJson<{
       provider: "skills_sh";
       query: string;
-      items: Array<{ id: string; name: string; source: string; skillId: string; url: string; installs: number }>;
+      items: Array<{
+        id: string;
+        name: string;
+        source: string;
+        skillId: string;
+        url: string;
+        installs: number;
+      }>;
       nextCursor: null;
-    }>("GET", `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/search?q=${encodeURIComponent(query)}`);
+    }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/search?q=${encodeURIComponent(query)}`,
+    );
   }
 
   async listWorkspaces(): Promise<Workspace[]> {
@@ -6910,20 +6920,36 @@ export class OpenGeniClient {
     );
   }
 
-  async discoverPlugins(workspaceId: string, options: { id?: string; query?: string; provider?: string; offset?: number } = {}): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
-    return this.requestJson("GET", "/v1/workspaces/" + workspaceId + "/capabilities/discovery/plugins", undefined, {
-      ...(options.id ? { id: options.id } : {}),
+  async discoverPlugins(
+    workspaceId: string,
+    options: { id?: string; query?: string; provider?: string; offset?: number } = {},
+  ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
+    return this.requestJson(
+      "GET",
+      "/v1/workspaces/" + workspaceId + "/capabilities/discovery/plugins",
+      undefined,
+      {
+        ...(options.id ? { id: options.id } : {}),
 
-      ...(options.query ? { query: options.query } : {}),
-      ...(options.provider ? { provider: options.provider } : {}),
-      ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
-    });
+        ...(options.query ? { query: options.query } : {}),
+        ...(options.provider ? { provider: options.provider } : {}),
+        ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
+      },
+    );
   }
 
-  async inspectMcpAuthentication(workspaceId: string, url: string): Promise<{
-    kind: "oauth2" | "none" | "unknown"; message?: string;
+  async inspectMcpAuthentication(
+    workspaceId: string,
+    url: string,
+  ): Promise<{
+    kind: "oauth2" | "none" | "unknown";
+    message?: string;
   }> {
-    return await this.requestJson("POST", `/v1/workspaces/${workspaceId}/capabilities/discovery/mcp-auth`, { url });
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/capabilities/discovery/mcp-auth`,
+      { url },
+    );
   }
 
   /** List installed protocol-neutral OpenAPI and GraphQL Integrations. */
@@ -7139,8 +7165,13 @@ export class OpenGeniClient {
     );
   }
 
-  async getInstalledPluginDetails(workspaceId: string, pluginKey: string): Promise<import("@opengeni/contracts").PluginDiscoveryItem> {
-    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/plugins/details`, undefined, { pluginKey });
+  async getInstalledPluginDetails(
+    workspaceId: string,
+    pluginKey: string,
+  ): Promise<import("@opengeni/contracts").PluginDiscoveryItem> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/plugins/details`, undefined, {
+      pluginKey,
+    });
   }
 
   async listInstalledPlugins(workspaceId: string): Promise<ListInstalledPluginsResponse> {

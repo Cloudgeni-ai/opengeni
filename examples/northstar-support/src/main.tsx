@@ -33,11 +33,16 @@ const SupportAgentPanel = lazy(async () => {
 });
 
 const ConnectionsDialog = lazy(async () => {
-  const [{ ConnectionsDialog }, { OpenGeniClient }] = await Promise.all([
-    import("./connections-dialog"), import("@opengeni/sdk"),
+  const [{ ConnectionsDialog: LoadedConnectionsDialog }, { OpenGeniClient }] = await Promise.all([
+    import("./connections-dialog"),
+    import("@opengeni/sdk"),
   ]);
   const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-  return { default: (props: { workspaceId: string; open: boolean; onClose: () => void }) => <ConnectionsDialog {...props} client={client} /> };
+  return {
+    default: (props: { workspaceId: string; open: boolean; onClose: () => void }) => (
+      <LoadedConnectionsDialog {...props} client={client} />
+    ),
+  };
 });
 
 declare global {
@@ -86,7 +91,10 @@ function NorthstarApp() {
       data-og-theme="light"
     >
       <SupportInbox
-        onOpenConnections={() => { setConnectionsVisited(true); setConnectionsOpen(true); }}
+        onOpenConnections={() => {
+          setConnectionsVisited(true);
+          setConnectionsOpen(true);
+        }}
         state={demo.state}
         selectedTicketId={selectedCase.ticket.id}
         agentEnabled={agentEnabled}
@@ -151,9 +159,15 @@ function NorthstarApp() {
           </motion.div>
         ) : null}
       </AnimatePresence>
-      {connectionsVisited && demo.health?.workspaceId ? <Suspense fallback={null}>
-        <ConnectionsDialog workspaceId={demo.health.workspaceId} open={connectionsOpen} onClose={() => setConnectionsOpen(false)} />
-      </Suspense> : null}
+      {connectionsVisited && demo.health?.workspaceId ? (
+        <Suspense fallback={null}>
+          <ConnectionsDialog
+            workspaceId={demo.health.workspaceId}
+            open={connectionsOpen}
+            onClose={() => setConnectionsOpen(false)}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

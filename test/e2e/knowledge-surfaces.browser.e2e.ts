@@ -1497,6 +1497,12 @@ async function expectNoAxeViolations(
   include: string,
   auditLabel: string,
 ): Promise<void> {
+  // Dialog exit can leave the page aria-hidden until its focus/overlay cleanup.
+  // Audit the restored page, not that transient hidden accessibility tree.
+  await page.waitForFunction((selector) => {
+    const element = document.querySelector(selector);
+    return element !== null && !element.closest('[aria-hidden="true"], [inert]');
+  }, include);
   const results = await new AxeBuilder({ page })
     .include(include)
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa", "best-practice"])

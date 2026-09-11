@@ -20,12 +20,6 @@ import {
 import { useAppContext, type AppContextValue } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
-const SCOPE_LABEL: Record<SkillScope, string> = {
-  workspace: "Workspace",
-  organization: "Company",
-  user: "Only me",
-};
-
 /** Both product destinations use this catalog and the same folder write API. */
 export function SkillsPanel({
   workspaceId,
