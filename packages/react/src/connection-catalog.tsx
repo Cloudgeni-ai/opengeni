@@ -26,10 +26,23 @@ export type ConnectionCatalogProps = {
   emptyMessage?: string;
 };
 
-function ConnectionDetailsAction({ option, name = option.name }: { option: ConnectionCatalogOption; name?: string }) {
-  return <button type="button" className="og-connection-details-action" aria-label={`View ${name} details`} onClick={option.onOpen}>
-    <span aria-hidden>{option.connected ? "›" : "+"}</span>
-  </button>;
+function ConnectionDetailsAction({
+  option,
+  name = option.name,
+}: {
+  option: ConnectionCatalogOption;
+  name?: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="og-connection-details-action"
+      aria-label={`View ${name} details`}
+      onClick={option.onOpen}
+    >
+      <span aria-hidden>{option.connected ? "›" : "+"}</span>
+    </button>
+  );
 }
 
 export function ConnectionOptionRow({ option }: { option: ConnectionCatalogOption }) {
@@ -79,13 +92,17 @@ export function ConnectionServiceRow({ service }: { service: ConnectionCatalogSe
       >
         {identity}
       </button>
-      {service.options[0]?.action ?? <ConnectionDetailsAction option={service.options[0]!} name={service.name} />}
+      {service.options[0]?.action ?? (
+        <ConnectionDetailsAction option={service.options[0]!} name={service.name} />
+      )}
     </div>
   ) : (
     <details className="og-connection-catalog-service">
       <summary className="og-connection-catalog-row">
         {identity}
-        <span aria-hidden className="og-connection-group-chevron">⌄</span>
+        <span aria-hidden className="og-connection-group-chevron">
+          ⌄
+        </span>
       </summary>
       <div className="og-connection-catalog-options">
         {service.options.map((option) => (
@@ -105,15 +122,19 @@ export function ConnectionCatalog({
   emptyMessage = "No connections match your search.",
 }: ConnectionCatalogProps) {
   const search = query.trim().toLowerCase();
-  const entries = grouped ? services : services.flatMap(service =>
-    service.options.map(option => ({
-      ...service,
-      id: `${service.id}/${option.id}`,
-      name: service.options.length > 1 && option.name !== service.name
-        ? `${service.name} · ${option.name}` : service.name,
-      options: [option],
-    })),
-  );
+  const entries = grouped
+    ? services
+    : services.flatMap((service) =>
+        service.options.map((option) => ({
+          ...service,
+          id: `${service.id}/${option.id}`,
+          name:
+            service.options.length > 1 && option.name !== service.name
+              ? `${service.name} · ${option.name}`
+              : service.name,
+          options: [option],
+        })),
+      );
   const visible = entries.filter((service) =>
     [service.name, ...service.options.flatMap((option) => [option.name, option.description ?? ""])]
       .join(" ")

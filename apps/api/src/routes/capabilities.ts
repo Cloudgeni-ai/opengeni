@@ -18,7 +18,9 @@ import {
 import { boundedLimit } from "../http/common";
 import { z } from "zod";
 import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
-const discoverablePlugins = pluginSnapshot.sources.flatMap(source => source.entries.map(entry => ({ ...entry, provider: source.provider }))).sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+const discoverablePlugins = pluginSnapshot.sources
+  .flatMap((source) => source.entries.map((entry) => ({ ...entry, provider: source.provider })))
+  .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
 
 export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -28,10 +30,39 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
     const query = (c.req.query("query") ?? "").trim().toLowerCase();
     const provider = c.req.query("provider");
     const id = c.req.query("id");
-    const offset = z.coerce.number().int().min(0).max(10000).parse(c.req.query("offset") ?? 0);
-    const matches = discoverablePlugins.filter(item => (!id || item.id === id) && (!provider || item.provider === provider) && query.split(/\s+/).every(term => [item.displayName, item.name, item.description, item.category, item.author?.name, ...item.keywords, ...(item.components ?? [])].join(" ").toLowerCase().includes(term)));
+    const offset = z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(10000)
+      .parse(c.req.query("offset") ?? 0);
+    const matches = discoverablePlugins.filter(
+      (item) =>
+        (!id || item.id === id) &&
+        (!provider || item.provider === provider) &&
+        query
+          .split(/\s+/)
+          .every((term) =>
+            [
+              item.displayName,
+              item.name,
+              item.description,
+              item.category,
+              item.author?.name,
+              ...item.keywords,
+              ...(item.components ?? []),
+            ]
+              .join(" ")
+              .toLowerCase()
+              .includes(term),
+          ),
+    );
     const end = offset + 40;
-    return c.json({ items: matches.slice(offset, end), total: matches.length, nextOffset: end < matches.length ? end : null });
+    return c.json({
+      items: matches.slice(offset, end),
+      total: matches.length,
+      nextOffset: end < matches.length ? end : null,
+    });
   });
   app.post("/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth", async (c) => {
     await requireAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:read");

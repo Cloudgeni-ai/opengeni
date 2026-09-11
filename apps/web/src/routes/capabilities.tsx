@@ -222,10 +222,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const [searchScope, setSearchScope] = useState("all");
   const hasQuery = query.trim().length > 0;
   const searchingAll = hasQuery && searchScope === "all";
-  const setQuery = useCallback((value: string) => {
-    if (!query.trim() || !value.trim()) setSearchScope("all");
-    updateQuery(value);
-  }, [query]);
+  const setQuery = useCallback(
+    (value: string) => {
+      if (!query.trim() || !value.trim()) setSearchScope("all");
+      updateQuery(value);
+    },
+    [query],
+  );
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const browseLoadMoreRef = useRef<HTMLDivElement | null>(null);
 
@@ -323,7 +326,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   const logoUrl = useCallback(
     (item: CapabilityCatalogItem) =>
-      item.name === "Gmail" ? "/capability-logos/gmail.ico" : capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
+      item.name === "Gmail"
+        ? "/capability-logos/gmail.ico"
+        : capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
     [client],
   );
   const connectionsLoaded = connections !== null;
@@ -467,8 +472,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     })),
   ]);
   const { featuredServices, remainingServices } = partitionConnectionServices(
-    connectionServices, showFeatured, featured,
-    integrations.map(({ model }) => model.id), connectorItems,
+    connectionServices,
+    showFeatured,
+    featured,
+    integrations.map(({ model }) => model.id),
+    connectorItems,
   );
   const openIntegrationModel =
     integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
@@ -476,32 +484,56 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // aren't in `items` until persisted, so they fall back to their snapshot; a
   // non-registry selection with no live row resolves to null and the effect
   // below closes the sheet rather than render a ghost.
-  const [authInspection, setAuthInspection] = useState<{ id: string; url: string; kind: "oauth2" | "none" | "unknown" } | null>(null);
+  const [authInspection, setAuthInspection] = useState<{
+    id: string;
+    url: string;
+    kind: "oauth2" | "none" | "unknown";
+  } | null>(null);
   const rawSelectedItem: CapabilityCatalogItem | null = useMemo(
     () => resolveSheetItem(selected, items),
     [selected, items],
   );
   const inspectUrl = rawSelectedItem?.mcpUrl ?? rawSelectedItem?.endpointUrl;
   const selectedItemId = rawSelectedItem?.id;
-  const needsAuthInspection = rawSelectedItem?.kind === "mcp" && !rawSelectedItem.enabled &&
-    capabilityConnectPlan(rawSelectedItem).mode === "setup_required" && Boolean(inspectUrl);
+  const needsAuthInspection =
+    rawSelectedItem?.kind === "mcp" &&
+    !rawSelectedItem.enabled &&
+    capabilityConnectPlan(rawSelectedItem).mode === "setup_required" &&
+    Boolean(inspectUrl);
   useEffect(() => {
     if (!needsAuthInspection || !selectedItemId || !inspectUrl) return;
     let active = true;
     const id = selectedItemId;
     setAuthInspection(null);
     void client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
-      (result) => { if (active) setAuthInspection({ id, url: inspectUrl, kind: result.kind }); },
-      () => { if (active) setAuthInspection({ id, url: inspectUrl, kind: "unknown" }); },
+      (result) => {
+        if (active) setAuthInspection({ id, url: inspectUrl, kind: result.kind });
+      },
+      () => {
+        if (active) setAuthInspection({ id, url: inspectUrl, kind: "unknown" });
+      },
     );
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [client, workspaceId, selectedItemId, inspectUrl, needsAuthInspection]);
-  const inspection = authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl ? authInspection : null;
-  const selectedItem = rawSelectedItem && needsAuthInspection ? {
-    ...rawSelectedItem,
-    authKind: inspection?.kind === "oauth2" ? "oauth2" as const : inspection?.kind === "none" ? "none" as const : null,
-    metadata: { ...rawSelectedItem.metadata, authDiscovery: inspection?.kind ?? "checking" },
-  } : rawSelectedItem;
+  const inspection =
+    authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl
+      ? authInspection
+      : null;
+  const selectedItem =
+    rawSelectedItem && needsAuthInspection
+      ? {
+          ...rawSelectedItem,
+          authKind:
+            inspection?.kind === "oauth2"
+              ? ("oauth2" as const)
+              : inspection?.kind === "none"
+                ? ("none" as const)
+                : null,
+          metadata: { ...rawSelectedItem.metadata, authDiscovery: inspection?.kind ?? "checking" },
+        }
+      : rawSelectedItem;
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
@@ -574,13 +606,22 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   useEffect(() => {
     const target = browseLoadMoreRef.current;
-    if (!target || searchingAll || activeTab !== "connections" ||
-        visibleCount >= remainingServices.length || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (!entry?.isIntersecting) return;
-      observer.disconnect();
-      setVisibleCount(count => Math.min(count + PAGE_SIZE, remainingServices.length));
-    }, { root: capabilityFocusFallbackRef.current, rootMargin: "0px 0px 300px 0px" });
+    if (
+      !target ||
+      searchingAll ||
+      activeTab !== "connections" ||
+      visibleCount >= remainingServices.length ||
+      typeof IntersectionObserver === "undefined"
+    )
+      return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        observer.disconnect();
+        setVisibleCount((count) => Math.min(count + PAGE_SIZE, remainingServices.length));
+      },
+      { root: capabilityFocusFallbackRef.current, rootMargin: "0px 0px 300px 0px" },
+    );
     observer.observe(target);
     return () => observer.disconnect();
   }, [activeTab, searchingAll, visibleCount, remainingServices.length]);
@@ -1364,7 +1405,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           icon={<PlugIcon className="size-4" />}
           title="Capabilities"
           description="Connect your favorite tools and extend OpenGeni's capabilities."
-
         />
 
         <PluginSearch query={query} onQueryChange={setQuery} />
@@ -1385,44 +1425,54 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
           <TabsContent value={hasQuery ? searchScope : activeTab} forceMount>
             <div hidden={!searchingAll && activeTab !== "connections"}>
-              {!searchingAll ? <div className="mb-6 mt-6 flex items-center justify-between gap-4">
-                <h2 className="text-lg font-semibold text-fg">Connections</h2>
-                <Button type="button" onClick={() => setAddOpen(true)}><PlusIcon />Add connection</Button>
-              </div> : null}
+              {!searchingAll ? (
+                <div className="mb-6 mt-6 flex items-center justify-between gap-4">
+                  <h2 className="text-lg font-semibold text-fg">Connections</h2>
+                  <Button type="button" onClick={() => setAddOpen(true)}>
+                    <PlusIcon />
+                    Add connection
+                  </Button>
+                </div>
+              ) : null}
               <InstalledStrip
                 title="Connected"
-                items={hasQuery ? [] : [
-                  ...integrations
-                    .filter(
-                      ({ model }) =>
-                        model.chip.label === "Connected" || model.chip.label === "Needs attention",
-                    )
-                    .map(({ model }) => ({
-                      id: model.id,
-                      name: model.name,
-                      status: model.chip.label,
-                      logoSrc: "logoSrc" in model.mark ? model.mark.logoSrc : null,
-                      onOpen: () => {
-                        integrationOpenerRef.current =
-                          document.activeElement instanceof HTMLElement
-                            ? document.activeElement
-                            : null;
-                        setOpenIntegration(model.id);
-                      },
-                    })),
-                  ...connectorItems
-                    .filter((item) => item.enabled)
-                    .map((item) => ({
-                      id: item.id,
-                      name: item.name,
-                      status: capabilityStateChip(
-                        item,
-                        connectionHealth(item, connections ?? [], connectionsLoaded),
-                      ).label,
-                      logoSrc: logoUrl(item),
-                      onOpen: () => openItem(item),
-                    })),
-                ]}
+                items={
+                  hasQuery
+                    ? []
+                    : [
+                        ...integrations
+                          .filter(
+                            ({ model }) =>
+                              model.chip.label === "Connected" ||
+                              model.chip.label === "Needs attention",
+                          )
+                          .map(({ model }) => ({
+                            id: model.id,
+                            name: model.name,
+                            status: model.chip.label,
+                            logoSrc: "logoSrc" in model.mark ? model.mark.logoSrc : null,
+                            onOpen: () => {
+                              integrationOpenerRef.current =
+                                document.activeElement instanceof HTMLElement
+                                  ? document.activeElement
+                                  : null;
+                              setOpenIntegration(model.id);
+                            },
+                          })),
+                        ...connectorItems
+                          .filter((item) => item.enabled)
+                          .map((item) => ({
+                            id: item.id,
+                            name: item.name,
+                            status: capabilityStateChip(
+                              item,
+                              connectionHealth(item, connections ?? [], connectionsLoaded),
+                            ).label,
+                            logoSrc: logoUrl(item),
+                            onOpen: () => openItem(item),
+                          })),
+                      ]
+                }
               />
               {showFeatured && featuredServices.length > 0 ? (
                 <section aria-label="Featured" className="mt-6">
@@ -1447,20 +1497,37 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                     query={query}
                   />
                 )}
-                {hasQuery && !remainingServices.length && !featuredServices.length ? <div className="mt-3 flex flex-wrap gap-2">
-                  {!searchingAll ? <Button variant="outline" size="sm" onClick={() => setSearchScope("all")}>Search all categories</Button> : null}
-                  <Button variant="ghost" size="sm" onClick={() => setQuery("")}>Clear search</Button>
-                </div> : null}
+                {hasQuery && !remainingServices.length && !featuredServices.length ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {!searchingAll ? (
+                      <Button variant="outline" size="sm" onClick={() => setSearchScope("all")}>
+                        Search all categories
+                      </Button>
+                    ) : null}
+                    <Button variant="ghost" size="sm" onClick={() => setQuery("")}>
+                      Clear search
+                    </Button>
+                  </div>
+                ) : null}
                 {!hasQuery && remainingServices.length > visibleCount ? (
-                  <div ref={browseLoadMoreRef} className="mt-4 flex flex-col items-center gap-2 py-3">
-                  <Button
-                    variant="outline"
-                    className="min-h-11 w-full border-border-strong bg-surface font-medium sm:w-auto sm:min-w-56"
-                    onClick={() => setVisibleCount((count) => Math.min(count + PAGE_SIZE, remainingServices.length))}
+                  <div
+                    ref={browseLoadMoreRef}
+                    className="mt-4 flex flex-col items-center gap-2 py-3"
                   >
-                    Load more connections
-                  </Button>
-                  <p className="text-xs text-fg-muted">{visibleCount} of {remainingServices.length} connections</p>
+                    <Button
+                      variant="outline"
+                      className="min-h-11 w-full border-border-strong bg-surface font-medium sm:w-auto sm:min-w-56"
+                      onClick={() =>
+                        setVisibleCount((count) =>
+                          Math.min(count + PAGE_SIZE, remainingServices.length),
+                        )
+                      }
+                    >
+                      Load more connections
+                    </Button>
+                    <p className="text-xs text-fg-muted">
+                      {visibleCount} of {remainingServices.length} connections
+                    </p>
                   </div>
                 ) : null}
               </section>
@@ -1505,7 +1572,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       disabled={registryBusy}
                       onClick={() => void searchRegistry()}
                     >
-                      {registryBusy ? "Searching registry…" : "Search the broader public MCP registry"}
+                      {registryBusy
+                        ? "Searching registry…"
+                        : "Search the broader public MCP registry"}
                     </button>
                   </p>
                   {visibleRegistry.length ? (
@@ -1528,7 +1597,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }))}
                     />
                   ) : registrySearched === query.trim() ? (
-                    <p className="text-sm text-fg-muted">No compatible remote MCP servers found. Servers that require a local install aren’t included.</p>
+                    <p className="text-sm text-fg-muted">
+                      No compatible remote MCP servers found. Servers that require a local install
+                      aren’t included.
+                    </p>
                   ) : null}
                 </div>
               ) : null}
@@ -1541,18 +1613,51 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 </p>
               ) : null}
             </div>
-            {searchingAll ? <div className="capability-search-section"><PluginDiscovery onOpenConnection={item => openItem(item, false, true)} client={client} workspaceId={workspaceId} query={query} canManage={canManageSkills} onChanged={() => { void refresh(); onRuntimeChanged(); }} /></div> : null}
-            <div className={searchingAll ? "capability-search-section" : undefined} hidden={!searchingAll && activeTab !== "skills"}>
-              <SkillsPanel key={workspaceId} workspaceId={workspaceId} query={query} onImportSkill={() => importSkillRef.current?.()} onFindSkill={() => {
-                const search = capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>('input[type="search"]');
-                search?.scrollIntoView({ block: "center", behavior: "smooth" });
-                search?.focus({ preventScroll: true });
-              }} />
+            {searchingAll ? (
+              <div className="capability-search-section">
+                <PluginDiscovery
+                  onOpenConnection={(item) => openItem(item, false, true)}
+                  client={client}
+                  workspaceId={workspaceId}
+                  query={query}
+                  canManage={canManageSkills}
+                  onChanged={() => {
+                    void refresh();
+                    onRuntimeChanged();
+                  }}
+                />
+              </div>
+            ) : null}
+            <div
+              className={searchingAll ? "capability-search-section" : undefined}
+              hidden={!searchingAll && activeTab !== "skills"}
+            >
+              <SkillsPanel
+                key={workspaceId}
+                workspaceId={workspaceId}
+                query={query}
+                onImportSkill={() => importSkillRef.current?.()}
+                onFindSkill={() => {
+                  const search =
+                    capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                      'input[type="search"]',
+                    );
+                  search?.scrollIntoView({ block: "center", behavior: "smooth" });
+                  search?.focus({ preventScroll: true });
+                }}
+              />
             </div>
-            <div ref={bundlesRef} className={searchingAll ? "capability-search-section" : undefined} hidden={!searchingAll && activeTab === "connections"}>
+            <div
+              ref={bundlesRef}
+              className={searchingAll ? "capability-search-section" : undefined}
+              hidden={!searchingAll && activeTab === "connections"}
+            >
               <BundlesSection
                 onSearchSkills={() => {
-                  const search = capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>('input[type="search"]');
+                  const search =
+                    capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                      'input[type="search"]',
+                    );
                   search?.scrollIntoView({ block: "center", behavior: "smooth" });
                   search?.focus({ preventScroll: true });
                 }}
@@ -1566,7 +1671,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 items={items}
                 logoUrl={logoUrl}
                 busyCatalogId={busyId}
-                onOpenCatalogItem={item => openItem(item, false, true)}
+                onOpenCatalogItem={(item) => openItem(item, false, true)}
                 packs={packs}
                 variableSets={variableSets.variableSets.map((variableSet) => ({
                   id: variableSet.id,

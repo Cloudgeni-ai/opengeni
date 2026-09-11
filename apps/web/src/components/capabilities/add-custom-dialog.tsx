@@ -58,9 +58,7 @@ export function AddCustomDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Add connection</DialogTitle>
-          <DialogDescription>
-            Choose how to connect your tools.
-          </DialogDescription>
+          <DialogDescription>Choose how to connect your tools.</DialogDescription>
         </DialogHeader>
 
         {onCustomApi ? (

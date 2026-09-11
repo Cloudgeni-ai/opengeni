@@ -67,15 +67,26 @@ export function SourceImportDialog({
 
   return (
     <Dialog open={state.open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto" style={{ maxWidth: state.skillPreview ? "800px" : "var(--container-2xl)" }}>
+      <DialogContent
+        className="max-h-[90dvh] overflow-y-auto"
+        style={{ maxWidth: state.skillPreview ? "800px" : "var(--container-2xl)" }}
+      >
         <DialogHeader>
           <DialogTitle>
-            {state.skillPreview ? state.skillPreview.name : state.directPreview ? "Skill preview" : state.intent === "update"
-              ? `Review ${state.kind === "skill" ? "Skill" : "Plugin"} update`
-              : "Import Skill or Plugin"}
+            {state.skillPreview
+              ? state.skillPreview.name
+              : state.directPreview
+                ? "Skill preview"
+                : state.intent === "update"
+                  ? `Review ${state.kind === "skill" ? "Skill" : "Plugin"} update`
+                  : "Import Skill or Plugin"}
           </DialogTitle>
           <DialogDescription>
-            {state.skillPreview ? `${state.skillPreview.owner}/${state.skillPreview.repository}` : state.directPreview ? "" : "Import from a URL."}
+            {state.skillPreview
+              ? `${state.skillPreview.owner}/${state.skillPreview.repository}`
+              : state.directPreview
+                ? ""
+                : "Import from a URL."}
           </DialogDescription>
         </DialogHeader>
 
@@ -159,7 +170,26 @@ export function SourceImportDialog({
 
         {state.directPreview && !review ? (
           <div className="py-8">
-            {busy ? <p role="status" className="flex items-center gap-2 text-sm text-fg-muted"><Loader2Icon className="size-4 animate-spin" />Loading skill…</p> : <div className="flex items-center gap-4"><Button variant="outline" onClick={onPreview}>Retry</Button><a href={state.url} target="_blank" rel="noopener noreferrer" className="text-sm text-fg-muted underline underline-offset-4">View source ↗</a></div>}
+            {busy ? (
+              <p role="status" className="flex items-center gap-2 text-sm text-fg-muted">
+                <Loader2Icon className="size-4 animate-spin" />
+                Loading skill…
+              </p>
+            ) : (
+              <div className="flex items-center gap-4">
+                <Button variant="outline" onClick={onPreview}>
+                  Retry
+                </Button>
+                <a
+                  href={state.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-fg-muted underline underline-offset-4"
+                >
+                  View source ↗
+                </a>
+              </div>
+            )}
           </div>
         ) : null}
 
@@ -208,21 +238,46 @@ function SkillReview({
   onBack: () => void;
 }) {
   const preview = state.skillPreview!;
-  const markdown = preview.markdown?.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim();
+  const markdown = preview.markdown
+    ?.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "")
+    .trim();
   return (
     <div className="grid gap-5">
       <p className="text-sm leading-6 text-fg-muted">{preview.description}</p>
-      {markdown ? <div className="min-w-0 border-t border-border pt-5"><Markdown streaming={false}>{markdown}</Markdown></div> : null}
+      {markdown ? (
+        <div className="min-w-0 border-t border-border pt-5">
+          <Markdown streaming={false}>{markdown}</Markdown>
+        </div>
+      ) : null}
       <details className="border-t border-border pt-3 text-xs text-fg-muted">
         <summary className="cursor-pointer py-1">Included files · {preview.files.length}</summary>
         <ul className="mt-2 space-y-1">
-          {preview.files.map((file) => <li key={file.path} className="break-all py-1 font-mono">{file.path}</li>)}
+          {preview.files.map((file) => (
+            <li key={file.path} className="break-all py-1 font-mono">
+              {file.path}
+            </li>
+          ))}
         </ul>
       </details>
       <DialogFooter className="sticky bottom-0 border-t border-border bg-bg py-3">
-        <a href={preview.sourceUrl} target="_blank" rel="noopener noreferrer" className="mr-auto self-center text-sm text-fg-muted underline underline-offset-4">View source ↗</a>
-        {!state.directPreview ? <Button type="button" variant="ghost" onClick={onBack} disabled={busy}>Back</Button> : null}
-        <Button type="button" onClick={onInstall} disabled={!canManage || busy || !!validationError}>
+        <a
+          href={preview.sourceUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mr-auto self-center text-sm text-fg-muted underline underline-offset-4"
+        >
+          View source ↗
+        </a>
+        {!state.directPreview ? (
+          <Button type="button" variant="ghost" onClick={onBack} disabled={busy}>
+            Back
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          onClick={onInstall}
+          disabled={!canManage || busy || !!validationError}
+        >
           {busy ? <Loader2Icon className="animate-spin" /> : null}
           {preview.installed ? "Update" : "Install"}
         </Button>
