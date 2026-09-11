@@ -223,6 +223,7 @@ export function CapabilityDetailSheet({
 export function DetailBody({
   item,
   inline = false,
+  showIdentity = true,
   onCancel,
   health,
   logoSrc,
@@ -235,6 +236,8 @@ export function DetailBody({
 }: {
   item: CapabilityCatalogItem;
   inline?: boolean;
+  /** A conversation card keeps its identity visible while setup expands. */
+  showIdentity?: boolean;
   onCancel?: (() => void) | undefined;
   health: ConnectionHealth;
   logoSrc: string | null;
@@ -276,18 +279,13 @@ export function DetailBody({
       className={cn(
         "flex min-h-0 flex-col",
         inline
-          ? "[&_form]:flex [&_form]:flex-col [&_form>button]:ml-auto [&_form>button]:w-auto"
+          ? "[&_form]:flex [&_form]:flex-col [&_form>button]:ml-auto [&_form>button]:w-auto [&_[data-slot=button]]:text-xs [&_[data-slot=button]]:pointer-coarse:min-h-11"
           : "h-full",
       )}
     >
-      {inline ? (
+      {inline && !showIdentity ? null : inline ? (
         <div className="flex items-start gap-3">
-          <CapabilityLogo
-            src={logoSrc}
-            name={item.name}
-            size="lg"
-            fallback={item.kind === "skill" ? <SparklesIcon className="size-5" /> : undefined}
-          />
+          <CapabilityLogo src={logoSrc} name={item.name} className="size-[41px] rounded-[10px]" />
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-medium text-fg">{item.name}</h3>
             {item.providerDomain ? (
@@ -322,7 +320,8 @@ export function DetailBody({
       <div
         className={cn(
           "min-h-0 flex-1",
-          inline ? "mt-3 space-y-3" : "space-y-5 overflow-y-auto p-5",
+          inline ? "space-y-3 text-xs" : "space-y-5 overflow-y-auto p-5",
+          inline && showIdentity && "mt-3",
         )}
       >
         {item.stale ? (
@@ -331,7 +330,7 @@ export function DetailBody({
           </Notice>
         ) : null}
 
-        {item.description ? (
+        {item.description && (!inline || showIdentity) ? (
           <p className="text-sm leading-6 text-fg-muted">{item.description}</p>
         ) : null}
 
@@ -364,7 +363,26 @@ export function DetailBody({
           </dl>
         ) : null}
 
-        <CuratedSkillProvenanceSection item={item} />
+        {inline && item.kind === "skill" ? (
+          <div className="space-y-3 border-t border-border pt-3">
+            <h4 className="text-xs font-medium text-fg">What this skill adds</h4>
+            <p className="text-xs leading-[1.8] text-fg-muted">
+              {item.description || "Review this skill's source and version before installing."}
+            </p>
+            {curatedSkillProvenance(item) ? (
+              <details className="text-[11px] text-fg-subtle">
+                <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
+                  Review source and version
+                </summary>
+                <div className="pt-3">
+                  <CuratedSkillProvenanceSection item={item} />
+                </div>
+              </details>
+            ) : null}
+          </div>
+        ) : (
+          <CuratedSkillProvenanceSection item={item} />
+        )}
 
         {/* Action — flows directly after the content so a sparse item stays a
             compact top-flowing column, with no dead void before a bottom-pinned
@@ -447,6 +465,7 @@ export function DetailBody({
                   </Button>
                 ) : reconnecting ? (
                   <CredentialForm
+                    compact={inline}
                     onCancel={onCancel}
                     fields={reconnectFields}
                     itemName={item.name}
@@ -502,17 +521,24 @@ export function DetailBody({
               {personalOnly ? (
                 <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
-                <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+                <OwnershipSelector
+                  compact={inline}
+                  value={connectionOwnership}
+                  onChange={setConnectionOwnership}
+                />
               )}
               <CredentialForm
+                compact={inline}
                 onCancel={onCancel}
                 fields={plan.fields}
                 itemName={item.name}
                 keyPageUrl={keyPageUrl}
                 submitLabel={
-                  connectionOwnership === "workspace"
-                    ? "Connect for workspace"
-                    : "Connect only for me"
+                  inline
+                    ? "Verify & connect"
+                    : connectionOwnership === "workspace"
+                      ? "Connect for workspace"
+                      : "Connect only for me"
                 }
                 submitIcon={<PlugIcon />}
                 busy={busy}
@@ -535,9 +561,13 @@ export function DetailBody({
               {personalOnly ? (
                 <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
-                <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+                <OwnershipSelector
+                  compact={inline}
+                  value={connectionOwnership}
+                  onChange={setConnectionOwnership}
+                />
               )}
-              <p className="text-center text-xs text-fg-subtle">
+              <p className={cn("text-xs leading-[1.7] text-fg-subtle", !inline && "text-center")}>
                 {connectionOwnership === "workspace"
                   ? `You'll authorize ${item.name} once for this workspace. Provider actions may appear as the account you connect.`
                   : `You'll authorize ${item.name} for your personal use, then return here.`}
@@ -555,16 +585,20 @@ export function DetailBody({
                     })
                   }
                 >
-                  {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-                  {connectionOwnership === "workspace"
-                    ? "Connect for workspace"
-                    : "Connect only for me"}
+                  {busy ? <Loader2Icon className="animate-spin" /> : !inline ? <PlugIcon /> : null}
+                  {inline
+                    ? "Continue authorization"
+                    : connectionOwnership === "workspace"
+                      ? "Connect for workspace"
+                      : "Connect only for me"}
                 </Button>
               </ConnectionActions>
             </div>
           ) : plan.mode === "setup_required" ? (
             <p role="status" className="text-sm text-fg-muted">
-              {item.metadata.authDiscovery === "checking" ? "Checking sign-in requirements…" : "Setup required. Check the provider’s instructions, or reopen to retry."}
+              {item.metadata.authDiscovery === "checking"
+                ? "Checking sign-in requirements…"
+                : "Setup required. Check the provider’s instructions, or reopen to retry."}
             </p>
           ) : item.kind === "mcp" ? (
             <ConnectionActions onCancel={onCancel} busy={busy}>
@@ -612,6 +646,20 @@ function SkillControls({
   const updateAvailable = item.metadata.updateAvailable === true;
   return (
     <div className="space-y-3">
+      {setupOnly && !item.enabled ? (
+        <div className="space-y-2">
+          <p className="text-[11px] font-medium text-fg">Install for</p>
+          <p className="inline-flex rounded-md border border-border bg-surface-2 px-[9px] py-[7px] text-[11px] text-fg">
+            Workspace
+          </p>
+          <p className="text-[11px] leading-[1.6] text-fg-subtle">
+            Available to everyone on the team in this workspace.
+          </p>
+          <p className="text-[11px] leading-[1.6] text-fg-subtle">
+            This library skill can currently be installed for the workspace only.
+          </p>
+        </div>
+      ) : null}
       {item.enabled ? (
         <div className="flex items-center gap-2 text-sm text-status-idle">
           <span className="size-2 rounded-full bg-status-idle" />
@@ -626,8 +674,14 @@ function SkillControls({
             disabled={busy || !canManage || !item.runtime.available}
             onClick={() => onAction({ type: "install_skill", item })}
           >
-            {busy ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
-            {item.enabled ? "Update Skill" : setupOnly ? "Install for workspace" : "Install Skill"}
+            {busy ? <Loader2Icon className="animate-spin" /> : !setupOnly ? <SparklesIcon /> : null}
+            {busy && setupOnly
+              ? "Installing…"
+              : item.enabled
+                ? "Update Skill"
+                : setupOnly
+                  ? "Install & use"
+                  : "Install Skill"}
           </Button>
         </ConnectionActions>
       ) : null}
@@ -763,7 +817,7 @@ export function SocialConnectorControls({
   const canConnect = ownership === "personal" || canManage;
   return (
     <div className="space-y-3">
-      <OwnershipSelector value={ownership} onChange={onOwnershipChange} />
+      <OwnershipSelector compact={setupOnly} value={ownership} onChange={onOwnershipChange} />
       {visibleConnections.length > 0 ? (
         <div className="divide-y divide-border rounded-lg border border-border" role="list">
           {visibleConnections.map((connection) => (
@@ -877,6 +931,7 @@ export function FikenConnectorControls({
 
   const tokenForm = (submitLabel: string, submitIcon: ReactNode) => (
     <CredentialForm
+      compact={setupOnly}
       fields={[FIKEN_TOKEN_FIELD]}
       itemName={item.name}
       keyPageUrl={keyPageUrl}
@@ -1011,11 +1066,43 @@ function socialConnectionStatusLabel(status: SocialConnection["status"]): string
 export function OwnershipSelector({
   value,
   onChange,
+  compact = false,
 }: {
   value: ConnectionOwnership;
   onChange: (value: ConnectionOwnership) => void;
+  compact?: boolean;
 }) {
   const groupName = useId();
+  if (compact) {
+    const descriptionId = `${groupName}-description`;
+    return (
+      <fieldset className="space-y-2" aria-describedby={descriptionId}>
+        <legend className="text-[11px] font-medium text-fg">Connect for</legend>
+        <div className="flex flex-wrap gap-[5px]">
+          {(["workspace", "personal"] as const).map((ownership) => (
+            <label key={ownership} className="relative cursor-pointer">
+              <input
+                className="peer sr-only"
+                type="radio"
+                name={groupName}
+                value={ownership}
+                checked={value === ownership}
+                onChange={() => onChange(ownership)}
+              />
+              <span className="inline-flex min-h-8 items-center rounded-[6px] border border-border px-[9px] py-[7px] text-[11px] text-fg-muted peer-checked:bg-surface-2 peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-ring pointer-coarse:min-h-11">
+                {ownership === "workspace" ? "Workspace" : "Only me"}
+              </span>
+            </label>
+          ))}
+        </div>
+        <p id={descriptionId} className="text-[11px] leading-[1.6] text-fg-subtle">
+          {value === "workspace"
+            ? "Shared with agents and automations in this workspace."
+            : "Used only when work is authorized to act as you."}
+        </p>
+      </fieldset>
+    );
+  }
   return (
     <fieldset className="space-y-2">
       <legend className="text-xs font-medium text-fg-muted">Who can use this connection?</legend>
@@ -1156,6 +1243,7 @@ function CredentialForm({
   busy,
   onSubmit,
   onCancel,
+  compact = false,
 }: {
   fields: { name: string; label: string }[];
   itemName: string;
@@ -1164,6 +1252,7 @@ function CredentialForm({
   submitIcon: ReactNode;
   busy: boolean;
   onCancel?: (() => void) | undefined;
+  compact?: boolean;
   onSubmit: (headers: Record<string, string>) => void;
 }) {
   const inputId = useId();
@@ -1205,18 +1294,25 @@ function CredentialForm({
           rel="noreferrer noopener"
           className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
         >
-          Get your {fields[0]?.label ?? "credentials"}
+          {compact
+            ? `Where do I find my ${fields[0]?.label ?? "credentials"}?`
+            : `Get your ${fields[0]?.label ?? "credentials"}`}
           <ExternalLinkIcon className="size-3" />
         </a>
-      ) : (
+      ) : !compact ? (
         <p className="text-xs text-fg-subtle">
           Stored encrypted and used only to reach {itemName}.
         </p>
-      )}
+      ) : null}
+      {compact ? (
+        <p className="text-[11px] leading-[1.6] text-fg-subtle">
+          Your credential is stored encrypted, never in the conversation.
+        </p>
+      ) : null}
       <ConnectionActions onCancel={onCancel} busy={busy}>
         <Button type="submit" className="w-full" disabled={busy || !ready}>
-          {busy ? <Loader2Icon className="animate-spin" /> : submitIcon}
-          {submitLabel}
+          {busy ? <Loader2Icon className="animate-spin" /> : compact ? null : submitIcon}
+          {busy && compact ? "Connecting…" : submitLabel}
         </Button>
       </ConnectionActions>
     </form>

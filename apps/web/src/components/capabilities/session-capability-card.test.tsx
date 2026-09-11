@@ -17,6 +17,7 @@ const catalogItem = CapabilityCatalogItem.parse({
   tools: [{ kind: "mcp", id: "example" }],
 });
 let personal = false;
+let liveCatalogItem = catalogItem;
 let enabled = false;
 let connections: unknown[] = [];
 const row = {
@@ -40,7 +41,7 @@ const context = {
     listCapabilities: async () => ({
       items: [
         {
-          ...catalogItem,
+          ...liveCatalogItem,
           enabled,
           ...(personal
             ? {
@@ -106,8 +107,9 @@ afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
-async function render(personalAccount = false) {
+async function render(personalAccount = false, currentCatalogItem = catalogItem) {
   personal = personalAccount;
+  liveCatalogItem = currentCatalogItem;
   enabled = personalAccount;
   connections = personalAccount ? [{ ...row, subjectId: "owner", authorityId: "authority" }] : [];
   issueUserResourceGrant.mockClear();
@@ -137,10 +139,27 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("expanded header reflects the live provider identity rather than stale recommendation copy", async () => {
+    const h = await render(false, {
+      ...catalogItem,
+      name: "Current Example",
+      providerDomain: "current.example.com",
+    });
+    await act(async () => button(h.container, "Add API key").click());
+    expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
+    expect(h.container.textContent).toContain("current.example.com");
+    expect(h.container.textContent).not.toContain("api.example.com");
+    expect(h.container.querySelectorAll("h3")).toHaveLength(1);
+    await h.close();
+  });
   test("opens the actual credential form inline and cancellation writes nothing", async () => {
     const h = await render();
-    await act(async () => button(h.container, "Connect Example").click());
+    expect(h.container.textContent).toContain("You choose what to authorize");
+    expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
+    await act(async () => button(h.container, "Add API key").click());
     expect(h.container.querySelector('input[type="password"]')).not.toBeNull();
+    expect(h.container.querySelectorAll("h3")).toHaveLength(1);
+    expect(h.container.textContent).toContain("Verify & connect");
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     await act(async () => button(h.container, "Cancel").click());
     expect(h.container.querySelector("form")).toBeNull();
@@ -149,7 +168,7 @@ describe("conversation connection card", () => {
   });
   test("credentials go only to the connection API and success follows enable", async () => {
     const h = await render();
-    await act(async () => button(h.container, "Connect Example").click());
+    await act(async () => button(h.container, "Add API key").click());
     const input = h.container.querySelector('input[type="password"]') as HTMLInputElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
@@ -164,17 +183,19 @@ describe("conversation connection card", () => {
     );
     expect(createConnection).toHaveBeenCalledTimes(1);
     expect(enableCapability).toHaveBeenCalledTimes(1);
-    expect(h.container.textContent).toContain("Setup complete");
+    expect(h.container.textContent).toContain("Connected · Available in this conversation");
+    expect(h.container.querySelector('[data-state="complete"]')).not.toBeNull();
+    expect(h.container.querySelector("button")).toBeNull();
     expect(h.container.textContent).not.toContain("secret-for-provider-only");
     await h.close();
   });
   test("a personal account requires explicit shared-results consent before completion", async () => {
     const h = await render(true);
-    await act(async () => button(h.container, "Connect Example").click());
+    await act(async () => button(h.container, "Add API key").click());
     const use = button(h.container, "Use in this");
     expect(use.disabled).toBe(true);
     expect(issueUserResourceGrant).not.toHaveBeenCalled();
-    expect(h.container.textContent).not.toContain("Setup complete");
+    expect(h.container.querySelector('[data-state="complete"]')).toBeNull();
     await act(async () =>
       (h.container.querySelector('input[type="checkbox"]') as HTMLInputElement).click(),
     );
@@ -187,7 +208,7 @@ describe("conversation connection card", () => {
       expectedAuthorityEpoch: 4,
       workspaceSharedAcknowledged: true,
     });
-    expect(h.container.textContent).toContain("Setup complete");
+    expect(h.container.textContent).toContain("Connected · Available in this conversation");
     await h.close();
   });
   test("retry after a partial save reuses the persisted Connection", async () => {
@@ -195,7 +216,7 @@ describe("conversation connection card", () => {
     enableCapability.mockImplementationOnce(async () => {
       throw new Error("Enable failed");
     });
-    await act(async () => button(h.container, "Connect Example").click());
+    await act(async () => button(h.container, "Add API key").click());
     const input = h.container.querySelector('input[type="password"]') as HTMLInputElement;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
@@ -213,11 +234,11 @@ describe("conversation connection card", () => {
     };
     await submit();
     expect(h.container.textContent).toContain("Enable failed");
-    expect(h.container.textContent).not.toContain("Setup complete");
+    expect(h.container.querySelector('[data-state="complete"]')).toBeNull();
     await submit();
     expect(createConnection).toHaveBeenCalledTimes(1);
     expect(updateConnection).toHaveBeenCalledTimes(1);
-    expect(h.container.textContent).toContain("Setup complete");
+    expect(h.container.textContent).toContain("Connected · Available in this conversation");
     await h.close();
   });
 });

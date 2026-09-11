@@ -2,18 +2,18 @@ import { authorizeSessionPersonalConnection } from "./session-connection-authori
 import { attachSessionCapability } from "./attach-session-capability";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "@opengeni/react";
-import { CheckIcon, Loader2Icon, PlugIcon, SparklesIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { CapabilityLogo } from "./capability-logo";
+import { SessionCapabilityFrame } from "./session-capability-frame";
 import { capabilityLogoSource } from "./capability-logo-source";
 import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
-import { capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
+import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import type { CapabilityCatalogItem } from "@/types";
 
 const CodexSubscriptionsCard = lazy(async () => ({
   default: (await import("@/components/codex-connection")).CodexSubscriptionsCard,
@@ -38,69 +38,53 @@ export function SessionCapabilityCard({
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
+  const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
-  const catalogItem = context.workspaceCapabilityCatalog.find(
-    (entry) => entry.id === recommendation.id,
-  );
+  const cardRef = useRef<HTMLElement>(null);
+  const catalogItem =
+    resolvedItem ??
+    context.workspaceCapabilityCatalog.find((entry) => entry.id === recommendation.id);
   const logo = catalogItem
     ? capabilityLogoSource(catalogItem, (path) => context.client.catalogAssetUrl(path))
     : null;
   const close = () => {
     setExpanded(false);
-    requestAnimationFrame(() => opener.current?.focus());
+    requestAnimationFrame(() => (opener.current ?? cardRef.current)?.focus());
   };
+  const skill = recommendation.kind === "skill";
+  const plan = catalogItem ? capabilityConnectPlan(catalogItem) : null;
+  const apiKey = plan?.mode === "api_key";
   return (
-    <section
-      className="rounded-xl border border-border p-4"
-      aria-label={`${recommendation.name} setup`}
+    <SessionCapabilityFrame
+      name={catalogItem?.name ?? recommendation.name}
+      subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
+      logo={logo}
+      typeLabel={skill ? "Skill" : recommendation.kind === "mcp" ? "MCP server" : "API"}
+      description={catalogItem?.description || recommendation.rationale}
+      skill={skill}
+      expanded={expanded}
+      complete={complete}
+      actionLabel={
+        catalogItem?.enabled
+          ? "Review"
+          : skill
+            ? "Review skill"
+            : apiKey
+              ? "Add API key"
+              : `Connect ${recommendation.name}`
+      }
+      note={
+        skill
+          ? "Skill content is reviewed separately from permission to use any integration."
+          : apiKey
+            ? "Add credentials in the protected form, not in a chat message."
+            : "Review access before signing in. You'll return to this conversation after authorization."
+      }
+      onOpen={() => setExpanded(true)}
+      opener={opener}
+      cardRef={cardRef}
     >
-      {!expanded ? (
-        <>
-          <div className="flex items-start gap-3">
-            <CapabilityLogo
-              src={logo}
-              name={recommendation.name}
-              size="lg"
-              fallback={
-                recommendation.kind === "skill" ? <SparklesIcon className="size-5" /> : undefined
-              }
-            />
-            <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium text-fg">{recommendation.name}</h3>
-              <p className="mt-0.5 text-xs text-fg-subtle">{item.providerDomain}</p>
-            </div>
-            <MetaChip>
-              {recommendation.kind === "skill"
-                ? "Skill"
-                : recommendation.kind === "mcp"
-                  ? "MCP server"
-                  : "Integration"}
-            </MetaChip>
-          </div>
-          <p className="mt-3 text-sm leading-6 text-fg-muted">{recommendation.rationale}</p>
-          <div className="mt-3 flex items-center justify-end gap-2">
-            {complete ? (
-              <span role="status" className="mr-auto flex items-center gap-2 text-xs text-fg-muted">
-                <CheckIcon className="size-4" />
-                Setup complete
-              </span>
-            ) : null}
-            <Button
-              ref={opener}
-              size="sm"
-              variant={complete ? "outline" : "default"}
-              onClick={() => setExpanded(true)}
-            >
-              {recommendation.kind === "skill" ? <SparklesIcon /> : <PlugIcon />}
-              {complete || catalogItem?.enabled
-                ? "Review"
-                : recommendation.kind === "skill"
-                  ? "Review Skill"
-                  : `Connect ${recommendation.name}`}
-            </Button>
-          </div>
-        </>
-      ) : recommendation.id === "api:github-app" ? (
+      {recommendation.id === "api:github-app" ? (
         <SessionGitHubSetup
           workspaceId={workspaceId}
           sessionId={sessionId}
@@ -124,6 +108,7 @@ export function SessionCapabilityCard({
         <SessionCapabilitySetup
           key={`${workspaceId}:${sessionId}:${recommendation.id}`}
           capabilityId={recommendation.id}
+          onResolvedItem={setResolvedItem}
           visibility={visibility}
           onConfigured={onConfigured}
           workspaceId={workspaceId}
@@ -135,12 +120,13 @@ export function SessionCapabilityCard({
           }}
         />
       )}
-    </section>
+    </SessionCapabilityFrame>
   );
 }
 
 function SessionCapabilitySetup({
   capabilityId,
+  onResolvedItem,
   visibility,
   onConfigured,
   workspaceId,
@@ -149,6 +135,7 @@ function SessionCapabilitySetup({
   onComplete,
 }: {
   capabilityId: string;
+  onResolvedItem: (item: CapabilityCatalogItem) => void;
   visibility: "private" | "workspace";
   onConfigured?: (() => Promise<void>) | undefined;
   workspaceId: string;
@@ -174,6 +161,9 @@ function SessionCapabilitySetup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context.client, workspaceId, sessionId]);
   const item = catalog.items.find((entry) => entry.id === capabilityId);
+  useEffect(() => {
+    if (item) onResolvedItem(item);
+  }, [item, onResolvedItem]);
   const refreshRuntime = useCallback(() => {
     void context.refreshWorkspaceMcpServers(workspaceId);
   }, [context, workspaceId]);
@@ -309,6 +299,7 @@ function SessionCapabilitySetup({
       ) : (
         <DetailBody
           inline
+          showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}
           item={item}
           health={connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)}
@@ -438,8 +429,7 @@ function SessionGitHubSetup({
   }
   return (
     <div className="space-y-3">
-      <h3 className="text-sm font-medium">Connect GitHub</h3>
-      <p className="text-sm leading-6 text-fg-muted">
+      <p className="text-xs leading-[1.7] text-fg-muted">
         Choose the account and repositories to share with this workspace on GitHub, then return to
         this conversation.
       </p>
@@ -449,7 +439,7 @@ function SessionGitHubSetup({
           Cancel
         </Button>
         <Button size="sm" disabled={busy} onClick={() => void connect()}>
-          {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}Continue to GitHub
+          {busy ? <Loader2Icon className="animate-spin" /> : null}Continue to GitHub
         </Button>
       </div>
     </div>
