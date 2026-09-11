@@ -343,7 +343,9 @@ export async function managedActorFetch(
       acceptedEpoch !== managedActorEpoch ||
       (acceptedEpoch !== null && responseEpoch !== null && responseEpoch !== acceptedEpoch);
     if (responseIsStale()) {
-      void response.body?.cancel();
+      // Actor rotation may already have errored the native body. Own the
+      // cleanup rejection while preserving the caller's stale-account error.
+      void response.body?.cancel().catch(() => undefined);
       throw new DOMException("Ignored a response from the previous browser account", "AbortError");
     }
     if (!response.body) {
