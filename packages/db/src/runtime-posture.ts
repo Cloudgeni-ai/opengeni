@@ -662,7 +662,6 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
-  "mcp_operations",
   "additional_organization_creation_receipts",
   "agent_run_states",
   "api_keys",
@@ -826,6 +825,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
@@ -1365,7 +1365,6 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
-  "mcp_operations",
   "additional_organization_creation_receipts",
   "canonical_human_identities",
   "canonical_human_identity_operations",
@@ -1401,6 +1400,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_invitation_binding_events",
