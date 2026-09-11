@@ -8154,6 +8154,54 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("optional Gmail with no personal grant posts recovery and skips tools without provider traffic", async () => {
+    const events: unknown[] = [];
+    let fetched = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "gmail",
+            name: "Gmail",
+            url: "https://gmailmcp.googleapis.com/mcp/v1",
+            cacheToolsList: false,
+            connectionRef: {
+              providerDomain: "gmailmcp.googleapis.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "gmail", optional: true }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        credentialSubjectId: "subject-a",
+        resolveCredential: async () => ({
+          status: "auth_needed",
+          reason: "personal_authority_unavailable",
+          providerDomain: "gmailmcp.googleapis.com",
+        }),
+        onAuthNeeded: (payload) => {
+          events.push(payload);
+        },
+        mcpFetchImpl: async () => {
+          fetched++;
+          throw new Error("unauthorized provider traffic");
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(fetched).toBe(0);
+      expect(events).toEqual([
+        expect.objectContaining({ serverId: "gmail", reason: "personal_authority_unavailable" }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("routes every official-Gmail turn through the REST bridge, never the hosted preview MCP", async () => {
     const resolved: ResolveConnectionCredentialInput[] = [];
     const fetched: string[] = [];

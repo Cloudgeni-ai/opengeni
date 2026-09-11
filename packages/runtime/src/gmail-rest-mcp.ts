@@ -354,7 +354,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       forceRefresh: false,
       ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
     });
-    if (result.status !== "ok") {
+    if (result.status === "auth_needed") {
+      await this.reportAuthNeeded(result);
       throw new GmailRestAuthError("Authentication required for Gmail");
     }
     this.options.onResolvedConnectionId?.(result.connectionId);
@@ -683,6 +684,28 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     };
   }
 
+  private async reportAuthNeeded(
+    result: Extract<ResolveCredentialResult, { status: "auth_needed" }>,
+    toolName?: string,
+  ): Promise<void> {
+    await this.options.onAuthNeeded?.({
+      serverId: this.options.serverId,
+      ...(toolName ? { toolName } : {}),
+      providerDomain: result.providerDomain,
+      ...(result.provider ? { provider: result.provider } : {}),
+      reason: result.reason,
+      ...(result.connectionId ? { connectionId: result.connectionId } : {}),
+      ...(result.authoritySource === "host" || this.options.connectionRef.authoritySource === "host"
+        ? { authoritySource: "host" as const }
+        : {}),
+      ...(result.scopes ? { scopes: result.scopes } : {}),
+      ...(result.resource ? { resource: result.resource } : {}),
+      ...(result.selectedResources ? { selectedResources: result.selectedResources } : {}),
+      ...(result.authorizationUrl ? { authorizationUrl: result.authorizationUrl } : {}),
+      ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
+    });
+  }
+
   private async request<T>(
     toolName: string,
     urlInput: string | URL,
@@ -708,23 +731,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
       });
       if (result.status === "auth_needed") {
-        await this.options.onAuthNeeded?.({
-          serverId: this.options.serverId,
-          toolName,
-          providerDomain: result.providerDomain,
-          ...(result.provider ? { provider: result.provider } : {}),
-          reason: result.reason,
-          ...(result.connectionId ? { connectionId: result.connectionId } : {}),
-          ...(result.authoritySource === "host" ||
-          this.options.connectionRef.authoritySource === "host"
-            ? { authoritySource: "host" as const }
-            : {}),
-          ...(result.scopes ? { scopes: result.scopes } : {}),
-          ...(result.resource ? { resource: result.resource } : {}),
-          ...(result.selectedResources ? { selectedResources: result.selectedResources } : {}),
-          ...(result.authorizationUrl ? { authorizationUrl: result.authorizationUrl } : {}),
-          ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
-        });
+        await this.reportAuthNeeded(result, toolName);
         throw new GmailRestAuthError("Authentication required for Gmail");
       }
       this.options.onResolvedConnectionId?.(result.connectionId);
