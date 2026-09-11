@@ -1,5 +1,5 @@
-import { GovernedLearningEvaluationAuthorityError, GovernedLearningEvaluationConflictError, evaluateGovernedLearningProposal } from "../../../../db/test/fixtures/pre-0459/governed-learning-evaluator";
-// Historical pre-0459 protocol implementation, retained for migration fixtures.
+import { GovernedLearningEvaluationAuthorityError, GovernedLearningEvaluationConflictError, evaluateGovernedLearningProposal } from "../../../../db/test/fixtures/pre-knowledge/governed-learning-evaluator";
+// Historical pre-knowledge protocol implementation, retained for migration fixtures.
 // Not exported by @opengeni/core or registered in the live agent tool surface.
 import {
   CompanyBrainLearningPolicyRouteReceipt,

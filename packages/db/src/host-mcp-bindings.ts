@@ -588,7 +588,19 @@ export async function inheritChildHostMcpTurnAuthorities(
 export async function authorizeDirectHostMcpUse(
   db: Database,
   request: McpCredentialsRequest,
+  /** Internal metadata observer; called only after every live authorization fence succeeds. */
+  onAuthorized?: (snapshot: HostMcpAcceptedAuthority) => void,
 ): Promise<boolean> {
+  const snapshot = await resolveDirectHostMcpUseAuthority(db, request);
+  if (!snapshot) return false;
+  onAuthorized?.(snapshot);
+  return true;
+}
+
+async function resolveDirectHostMcpUseAuthority(
+  db: Database,
+  request: McpCredentialsRequest,
+): Promise<HostMcpAcceptedAuthority | false> {
   if (!request.attemptId || !request.connectionRef.hostBinding) return false;
   const current = await getHostMcpLiveAttempt(
     db,
@@ -735,7 +747,8 @@ export async function authorizeDirectHostMcpUse(
     return (
       live !== null &&
       live.id === request.turnId &&
-      live.executionGeneration === request.executionGeneration
+      live.executionGeneration === request.executionGeneration &&
+      a
     );
   });
 }

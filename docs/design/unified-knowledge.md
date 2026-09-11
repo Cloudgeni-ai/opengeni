@@ -146,7 +146,7 @@ pending replacement visibility, batch review, replay and undo.
 
 ## Implementation boundaries
 
-Migration 0459 converts Memory, retained document content and scoped knowledge
+Migration 0460 converts Memory, retained document content and scoped knowledge
 into the canonical graph, preserves restrictive legacy scopes, and disables the
 old authoring/retrieval paths. Historical inspection and exact pre-cutover
 confirmation recovery remain; conversation history and task notes are separate.

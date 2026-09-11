@@ -1225,10 +1225,10 @@ describe("scheduled task personal MCP authority", () => {
     if (!historical) throw new Error("Historical migration test requires PostgreSQL");
     const historicalAdmin = postgres(historical.databaseUrl, { max: 1, onnotice: () => undefined });
     try {
-      // 0459 deliberately extends this function for ordinary private source
+      // 0460 deliberately extends this function for ordinary private source
       // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
       await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0459_unified_knowledge.sql')`;
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0460_unified_knowledge.sql')`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
         new URL(

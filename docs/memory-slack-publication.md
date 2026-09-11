@@ -1,6 +1,6 @@
 # Durable workspace decision publication to Slack
 
-This document describes the pre-0459 publication lane and its retained outbox
+This document describes the pre-knowledge publication lane and its retained outbox
 receipts. That lane does not subscribe to new canonical Knowledge writes.
 Historical queued deliveries retain their original access and idempotency checks;
 new Knowledge is available through [Agent Knowledge](knowledge.md). Do not tell

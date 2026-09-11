@@ -195,18 +195,18 @@ export async function executeMigrationFile(
     return;
   }
   if (sqlText.includes(KNOWLEDGE_MIGRATION_MARKER)) {
-    if (file !== "0459_unified_knowledge.sql")
-      throw new Error("Knowledge conversion is restricted to migration 0459");
+    if (file !== "0460_unified_knowledge.sql")
+      throw new Error("Knowledge conversion is restricted to migration 0460");
     const parts = sqlText.split(KNOWLEDGE_MIGRATION_MARKER);
-    if (parts.length !== 2) throw new Error("0459 requires exactly one Knowledge conversion stage");
+    if (parts.length !== 2) throw new Error("0460 requires exactly one Knowledge conversion stage");
     await sql.begin(async (transaction) => {
-      await transaction`CREATE TEMP TABLE knowledge_conversion_0459(completed boolean NOT NULL) ON COMMIT DROP`;
+      await transaction`CREATE TEMP TABLE knowledge_conversion_0460(completed boolean NOT NULL) ON COMMIT DROP`;
       await transaction`SELECT
         pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
         pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
       await transaction.unsafe(parts[0]!);
       await migrateRetainedKnowledge(transaction);
-      await transaction`INSERT INTO pg_temp.knowledge_conversion_0459 VALUES(true)`;
+      await transaction`INSERT INTO pg_temp.knowledge_conversion_0460 VALUES(true)`;
       await transaction.unsafe(parts[1]!);
       await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
     });

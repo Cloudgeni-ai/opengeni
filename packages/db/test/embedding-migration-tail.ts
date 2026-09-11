@@ -23,5 +23,9 @@ export const embeddingMigrationTail = [
   "0456_social_connection_versions.sql",
   "0457_canonical_session_scope_subject.sql",
   "0458_skill_review_wire_compatibility.sql",
-  "0459_unified_knowledge.sql",
+  // Compiles against the linked-authority row type from 0449 and validates
+  // scheduled/host authority. It must not run while those prerequisites are
+  // marked applied but deliberately absent in a historical cutover fixture.
+  "0459_mcp_operations.sql",
+  "0460_unified_knowledge.sql",
 ];

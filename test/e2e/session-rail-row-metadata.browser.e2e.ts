@@ -47,6 +47,32 @@ describe("Session rail row metadata in Chromium", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
+  test("puts truthful sorting first and grouping in a keyboard-accessible submenu", async () => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.getByRole("button", { name: "Session view", exact: true }).click();
+    const menu = page.getByRole("menu").first();
+    const text = await menu.innerText();
+    expect(text.indexOf("Sort by")).toBeLessThan(text.indexOf("Group by"));
+    expect(text).toContain("Last activity · newest first");
+    expect(text).toContain("Sort order is fixed.");
+    expect(await page.getByRole("menuitemradio").count()).toBe(0);
+    await page.getByRole("menuitem", { name: /Group by/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio", { name: "Created date", exact: true }).click();
+    await page.getByRole("button", { name: "Session view", exact: true }).click();
+    expect(await menu.innerText()).toContain("Created date · newest first");
+    expect(await menu.innerText()).toContain("Within loaded date groups.");
+    expect(await menu.innerText()).toContain("More sessions load by activity, not creation date.");
+    expect(await menu.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.screenshot({ path: "/tmp/opengeni-session-menu-desktop.png", fullPage: true });
+    await page.keyboard.press("Escape");
+    expect(
+      await page
+        .getByRole("button", { name: "Session view", exact: true })
+        .evaluate((el) => el === document.activeElement),
+    ).toBe(true);
+  });
+
   test("shows scheduled work and overdue rechecks, then clears waiting on completion", async () => {
     const preview = page.getByTestId("wait-preview");
     for (const width of [1280, 390]) {

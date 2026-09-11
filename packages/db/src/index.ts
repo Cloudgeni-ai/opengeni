@@ -64329,6 +64329,7 @@ export async function claimSessionWorkForAttempt(
       stage: "session_attempts.claim",
       eventTypes: ["session.turn.attempt_claimed"],
       maxAttempts: 3,
+      organizationMembershipFence: true,
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {

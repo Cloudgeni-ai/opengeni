@@ -53,6 +53,7 @@ export function SessionWorkspace(props: {
   trailingTabs?: WorkspaceTab[];
   /** The landing tab id (the app defaults to its Run tab). */
   initialTab?: string;
+  openTabRequest?: { tab: string; requestId: number } | null;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   mobileLeadingControl?: ReactNode;
@@ -121,6 +122,7 @@ export function SessionWorkspace(props: {
       {...(props.trailingTabs ? { trailingTabs: props.trailingTabs } : {})}
       {...(initialTab ? { initialTab } : {})}
       onActiveTabChange={rememberActiveTab}
+      openTabRequest={props.openTabRequest}
       initialFilePath={navigation.filePath}
       onFilePathChange={rememberFilePath}
       initialBrowserSessionId={navigation.browserSessionId}

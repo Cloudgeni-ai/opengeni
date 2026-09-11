@@ -19,7 +19,7 @@ import {
 export const KNOWLEDGE_MIGRATION_MARKER = "-- opengeni:unified-knowledge-copy-v1";
 export function knowledgeMigrationId(kind: string, id: string): string {
   const hash = createHash("sha256")
-    .update(`opengeni:knowledge:0459:${kind}:${id}`)
+    .update(`opengeni:knowledge:0460:${kind}:${id}`)
     .digest("hex")
     .slice(0, 32);
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20)}`;
@@ -153,7 +153,7 @@ async function importEntry(tx: postgres.TransactionSql, input: Imported) {
       ? "pending"
       : "rejected";
   const archived = !["active", "approved", "ready", "proposed"].includes(input.status);
-  const migrationActor = { kind: "migration", subjectId: "service:knowledge-migration:0459" };
+  const migrationActor = { kind: "migration", subjectId: "service:knowledge-migration:0460" };
   const actor = input.originalActor ?? migrationActor;
   const batchId =
     outcome === "pending"
@@ -272,7 +272,7 @@ async function migratePendingLegacySkills(tx: postgres.TransactionSql): Promise<
         created_by_subject_id,corrects_revision_id,skill_files,skill_activation_mode)
         SELECT ${revisionId}::uuid,account_id,preference_id,${folder.name},${folder.description},${main},
           ${createHash("sha256").update(main, "utf8").digest("hex")},precedence_rank,conflict_strategy,conflicts_with,
-          provenance_source,provenance_source_id,trust,expires_at,'service:knowledge-migration:0459',id,
+          provenance_source,provenance_source_id,trust,expires_at,'service:knowledge-migration:0460',id,
           ${tx.json(folder.files)},'workspace_managed'
         FROM preference_registry_revisions WHERE id=${candidate.revision_id}::uuid`;
       await tx`INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt)
@@ -280,7 +280,7 @@ async function migratePendingLegacySkills(tx: postgres.TransactionSql): Promise<
           ${createHash("sha256").update(operationId).digest("hex")},
           ${tx.json({
             kind: "migration",
-            subjectId: "service:knowledge-migration:0459",
+            subjectId: "service:knowledge-migration:0460",
             legacyProposalReceiptId: candidate.id,
             legacyRevisionId: candidate.revision_id,
             sessionId: candidate.session_id,

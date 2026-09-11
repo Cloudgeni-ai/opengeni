@@ -1,5 +1,5 @@
 // Historical schema coverage only. New runtime Knowledge coverage is in
-// unified-knowledge-postgres.test.ts and migration-0459-unified-knowledge.test.ts.
+// unified-knowledge-postgres.test.ts and migration-0460-unified-knowledge.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as dbSchema from "../src/schema";
 import {
@@ -26,7 +26,7 @@ import {
   listKnowledgeMemories,
 } from "@opengeni/db";
 
-describe("pre-0459 Memory storage compatibility", () => {
+describe("pre-knowledge Memory storage compatibility", () => {
   let owned: OwnerMigratedTestDatabase;
   let dbClient: ReturnType<typeof createDb>;
   let services: { databaseUrl: string };
@@ -37,7 +37,7 @@ describe("pre-0459 Memory storage compatibility", () => {
     const owner = postgres(owned.ownerUrl, { max: 1 });
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      await owner`INSERT INTO schema_migrations(name) VALUES('0459_unified_knowledge.sql')`;
+      await owner`INSERT INTO schema_migrations(name) VALUES('0460_unified_knowledge.sql')`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();

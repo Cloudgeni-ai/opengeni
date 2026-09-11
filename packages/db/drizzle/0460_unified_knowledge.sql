@@ -6,21 +6,21 @@ SET LOCAL statement_timeout = '10min';
 DO $drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
-  IF to_regclass('pg_temp.knowledge_conversion_0459') IS NULL THEN
-    RAISE EXCEPTION '0459 requires the codec-aware TypeScript migration runner' USING ERRCODE='55000';
+  IF to_regclass('pg_temp.knowledge_conversion_0460') IS NULL THEN
+    RAISE EXCEPTION '0460 requires the codec-aware TypeScript migration runner' USING ERRCODE='55000';
   END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0459 requires explicit application database roles' USING ERRCODE='55000';
+    RAISE EXCEPTION '0460 requires explicit application database roles' USING ERRCODE='55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR octet_length(item #>> '{}') NOT BETWEEN 1 AND 63
       OR item #>> '{}' <> btrim(item #>> '{}')
-  ) THEN RAISE EXCEPTION '0459 received invalid application roles' USING ERRCODE='55000'; END IF;
+  ) THEN RAISE EXCEPTION '0460 received invalid application roles' USING ERRCODE='55000'; END IF;
   IF EXISTS (SELECT 1 FROM pg_stat_activity a
     JOIN jsonb_array_elements_text(roles) r ON r.value=a.usename
     WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()) THEN
-    RAISE EXCEPTION '0459 requires drained application sessions' USING ERRCODE='55000';
+    RAISE EXCEPTION '0460 requires drained application sessions' USING ERRCODE='55000';
   END IF;
 END $drain$;
 
@@ -64,7 +64,7 @@ BEGIN
           OR task_snapshot#>>'{agentConfig,knowledgeSource,connection,ownerSubjectId}' IS DISTINCT FROM accepted->>'causalHumanSubjectId'
           OR accepted#>>'{causalHumanAuthority,subjectId}' IS DISTINCT FROM accepted->>'causalHumanSubjectId'
           OR task_snapshot->>'runMode'<>'new_session_per_run'))$new$;
-  IF strpos(definition,old_fragment)=0 THEN RAISE EXCEPTION 'Scheduled generated-session fence changed before 0459'; END IF;
+  IF strpos(definition,old_fragment)=0 THEN RAISE EXCEPTION 'Scheduled generated-session fence changed before 0460'; END IF;
   EXECUTE replace(definition,old_fragment,new_fragment);
 END $source_session_fence$;
 
@@ -91,7 +91,7 @@ BEGIN
                 AND run.accepted_execution_snapshot#>>'{task,agentConfig,knowledgeSource,connection,ownerSubjectId}'=capability.actor_subject_id
                 AND run.accepted_execution_snapshot#>>'{task,agentConfig,knowledgeSource,initiatingSubjectId}'=capability.actor_subject_id
             )))$new$;
-  IF strpos(definition,old_fragment)=0 THEN RAISE EXCEPTION 'Private-create authority fence changed before 0459'; END IF;
+  IF strpos(definition,old_fragment)=0 THEN RAISE EXCEPTION 'Private-create authority fence changed before 0460'; END IF;
   EXECUTE replace(definition,old_fragment,new_fragment);
 END $source_private_create$;
 
@@ -114,7 +114,7 @@ ALTER TABLE generated_image_artifacts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE generated_video_artifacts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE retained_screenshot_artifacts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE organization_memberships NO FORCE ROW LEVEL SECURITY;
-CREATE TEMP TABLE knowledge_session_file_owners_0459 ON COMMIT DROP AS
+CREATE TEMP TABLE knowledge_session_file_owners_0460 ON COMMIT DROP AS
 
   SELECT s.id,s.account_id,s.resources,CASE
     WHEN s.visibility='user_private' THEN s.owner_subject_id
@@ -123,8 +123,8 @@ CREATE TEMP TABLE knowledge_session_file_owners_0459 ON COMMIT DROP AS
   FROM sessions s LEFT JOIN organization_memberships personal
     ON personal.account_id=s.account_id AND personal.personal_workspace_id=s.workspace_id
 ;
-CREATE TEMP TABLE knowledge_file_owners_0459 ON COMMIT DROP AS
-WITH session_owners AS (SELECT * FROM knowledge_session_file_owners_0459), original_references AS (
+CREATE TEMP TABLE knowledge_file_owners_0460 ON COMMIT DROP AS
+WITH session_owners AS (SELECT * FROM knowledge_session_file_owners_0460), original_references AS (
   SELECT d.file_id,d.account_id,
     CASE WHEN d.authority_kind='personal' THEN d.authority_subject_id END AS owner
   FROM documents d WHERE d.file_id IS NOT NULL
@@ -151,7 +151,7 @@ SELECT file_id,account_id,array_agg(DISTINCT owner ORDER BY owner) AS owners FRO
 GROUP BY file_id,account_id
 HAVING bool_and(owner IS NOT NULL);
 UPDATE files f SET private_owner_subject_ids=ownership.owners
-FROM knowledge_file_owners_0459 ownership WHERE f.id=ownership.file_id AND f.account_id=ownership.account_id;
+FROM knowledge_file_owners_0460 ownership WHERE f.id=ownership.file_id AND f.account_id=ownership.account_id;
 -- Async upload/media settlement and cleanup retain the accepted file owner
 -- even after the source session/turn is removed. This is operation provenance,
 -- never a grant for a user or agent to read another person's originals.
@@ -167,9 +167,9 @@ ALTER TABLE video_generation_operations ADD COLUMN private_file_owner_subject_id
 ALTER TABLE retained_screenshot_artifacts ADD COLUMN private_file_owner_subject_id text
   DEFAULT nullif(current_setting('opengeni.private_file_owner',true),'');
 UPDATE video_generation_operations o SET private_file_owner_subject_id=s.owner
-  FROM knowledge_session_file_owners_0459 s WHERE o.session_id=s.id AND o.account_id=s.account_id;
+  FROM knowledge_session_file_owners_0460 s WHERE o.session_id=s.id AND o.account_id=s.account_id;
 UPDATE retained_screenshot_artifacts a SET private_file_owner_subject_id=s.owner
-  FROM knowledge_session_file_owners_0459 s WHERE a.session_id=s.id AND a.account_id=s.account_id;
+  FROM knowledge_session_file_owners_0460 s WHERE a.session_id=s.id AND a.account_id=s.account_id;
 ALTER TABLE video_generation_operations FORCE ROW LEVEL SECURITY;
 CREATE FUNCTION knowledge_media_file_owner_immutable() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog AS $$
@@ -747,7 +747,7 @@ SELECT w.account_id,w.id,'workspace:'||w.id,1,
   jsonb_build_object('knowledge',CASE WHEN w.settings->>'memoryEnabled'='false' THEN 'off' ELSE 'automatic' END,
     'instructions',CASE WHEN coalesce(r.workspace_mode,'suggest')='suggest' THEN 'review_first' ELSE r.workspace_mode END,
     'skills',CASE WHEN coalesce(r.workspace_mode,'suggest')='suggest' THEN 'review_first' ELSE r.workspace_mode END),
-  gen_random_uuid(),'migration:0459','service:knowledge-migration:0459','epoch'::timestamptz
+  gen_random_uuid(),'migration:0460','service:knowledge-migration:0460','epoch'::timestamptz
 FROM workspaces w LEFT JOIN workspace_learning_policy_heads h ON h.workspace_id=w.id AND h.account_id=w.account_id
 LEFT JOIN workspace_learning_policy_revisions r ON r.id=h.revision_id AND r.account_id=w.account_id;
 -- The Personal workspace's explicit settings become its owner's defaults.
@@ -757,7 +757,7 @@ ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
 INSERT INTO agent_learning_revisions(account_id,origin_workspace_id,owner_key,subject_id,version,settings,
   operation_id,request_hash,actor_subject_id,created_at)
 SELECT m.account_id,w.id,'personal:'||m.subject_id,m.subject_id,1,r.settings,
-  gen_random_uuid(),'migration:0459:personal','service:knowledge-migration:0459','epoch'::timestamptz
+  gen_random_uuid(),'migration:0460:personal','service:knowledge-migration:0460','epoch'::timestamptz
 FROM organization_memberships m JOIN workspaces w ON w.account_id=m.account_id AND w.id=m.personal_workspace_id
 JOIN agent_learning_revisions r ON r.account_id=m.account_id AND r.owner_key='workspace:'||w.id AND r.context_key='defaults';
 INSERT INTO agent_learning_revisions(account_id,origin_workspace_id,owner_key,subject_id,context_key,version,settings,
@@ -766,7 +766,7 @@ SELECT s.account_id,s.workspace_id,
   CASE WHEN (s.visibility='user_private' OR s.memory_scope='user' OR pm.id IS NOT NULL) AND coalesce(s.owner_subject_id,s.scope_subject_id,pm.subject_id) IS NOT NULL
     THEN 'personal:'||coalesce(s.owner_subject_id,s.scope_subject_id,pm.subject_id) ELSE 'workspace:'||s.workspace_id END,
   CASE WHEN s.visibility='user_private' OR s.memory_scope='user' OR pm.id IS NOT NULL THEN coalesce(s.owner_subject_id,s.scope_subject_id,pm.subject_id) END,
-  'chat:'||s.id,1,'{"knowledge":"off"}',gen_random_uuid(),'migration:0459:chat','service:knowledge-migration:0459','epoch'::timestamptz
+  'chat:'||s.id,1,'{"knowledge":"off"}',gen_random_uuid(),'migration:0460:chat','service:knowledge-migration:0460','epoch'::timestamptz
 FROM sessions s JOIN workspaces w ON w.account_id=s.account_id AND w.id=s.workspace_id
 LEFT JOIN organization_memberships pm ON pm.account_id=w.account_id AND pm.personal_workspace_id=w.id
 WHERE s.memory_scope='off' OR (w.settings->>'memoryEnabled'='false'
@@ -1878,7 +1878,7 @@ CREATE FUNCTION knowledge_instruction_context(p_revision workspace_instruction_p
 RETURNS jsonb LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
   SELECT coalesce(p_revision.agent_learning_context,(SELECT op.actor->'legacyInstructionContext'
     FROM agent_instruction_operations op WHERE op.account_id=p_revision.account_id AND op.revision_id=p_revision.id
-      AND op.request_hash='migration:0459:instruction-review' AND op.actor->>'kind'='migration' LIMIT 1))
+      AND op.request_hash='migration:0460:instruction-review' AND op.actor->>'kind'='migration' LIMIT 1))
 $$;
 
 CREATE FUNCTION agent_instruction_apply(p_account uuid,p_workspace uuid,p_actor jsonb,p_request jsonb)
@@ -2452,7 +2452,7 @@ BEGIN
       JOIN session_human_input_requests q ON q.account_id=d.account_id AND q.workspace_id=d.workspace_id
         AND q.session_id=d.session_id AND q.turn_id=d.turn_id AND q.status='answered'
       WHERE imported.account_id=p_account AND imported.origin_workspace_id=p_workspace
-        AND imported.request_hash='migration:0459:instruction-review' AND imported.actor->>'kind'='migration'
+        AND imported.request_hash='migration:0460:instruction-review' AND imported.actor->>'kind'='migration'
         AND d.session_id=(p_actor->>'sessionId')::uuid AND d.turn_id=(p_actor->>'turnId')::uuid
         AND q.responded_by=d.initiating_human_subject_id
         AND EXISTS(SELECT 1 FROM jsonb_array_elements(q.response->'answers') a
@@ -2461,7 +2461,7 @@ BEGIN
     LOOP
       BEGIN
         recovered:=knowledge_instruction_confirm_legacy(p_account,p_workspace,p_actor,jsonb_build_object(
-          'operationId',overlay(overlay(md5('0459:instruction-confirm:'||candidate.request_id||':'||candidate.decision_id) placing '5' from 13 for 1) placing '8' from 17 for 1)::uuid,
+          'operationId',overlay(overlay(md5('0460:instruction-confirm:'||candidate.request_id||':'||candidate.decision_id) placing '5' from 13 for 1) placing '8' from 17 for 1)::uuid,
           'proposalId',candidate.proposal_id,'decisionReceiptId',candidate.decision_id,'humanInputRequestId',candidate.request_id));
         receipts:=receipts||jsonb_build_array(recovered);
       EXCEPTION WHEN insufficient_privilege OR serialization_failure OR unique_violation OR check_violation THEN unavailable:=unavailable+1;
@@ -2478,7 +2478,7 @@ BEGIN
     JOIN governed_learning_decision_receipts d ON d.account_id=r.account_id AND d.workspace_id=r.workspace_id
       AND d.proposal_id::text=imported.actor#>>'{legacyInstructionContext,legacyProposalId}'
     WHERE r.account_id=p_account AND r.workspace_id=p_workspace
-      AND imported.request_hash='migration:0459:instruction-review' AND imported.actor->>'kind'='migration'
+      AND imported.request_hash='migration:0460:instruction-review' AND imported.actor->>'kind'='migration'
       AND d.id=(p_request->>'decisionReceiptId')::uuid AND d.proposal_id=(p_request->>'proposalId')::uuid
       AND d.initiating_human_subject_id=subject AND d.session_id=(p_actor->>'sessionId')::uuid
       AND d.turn_id=(p_actor->>'turnId')::uuid
@@ -2682,13 +2682,13 @@ ALTER TABLE workspace_instruction_policy_activation_events NO FORCE ROW LEVEL SE
 ALTER TABLE governed_learning_decision_receipts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE agent_instruction_operations NO FORCE ROW LEVEL SECURITY;
 INSERT INTO agent_instruction_operations(account_id,origin_workspace_id,operation_id,revision_id,request_hash,actor,receipt,created_at)
-SELECT r.account_id,r.workspace_id,md5('0459:instruction-review:'||r.id)::uuid,r.id,'migration:0459:instruction-review',
-  jsonb_build_object('kind','migration','subjectId','service:knowledge-migration:0459','legacyInstructionContext',
+SELECT r.account_id,r.workspace_id,md5('0460:instruction-review:'||r.id)::uuid,r.id,'migration:0460:instruction-review',
+  jsonb_build_object('kind','migration','subjectId','service:knowledge-migration:0460','legacyInstructionContext',
     jsonb_build_object('actor',jsonb_build_object('kind','migration','sessionId',decision.session_id),
       'reason','Pending instruction from the previous review system','reviewBatchId',NULL,'evidence','[]'::jsonb,
       'legacyProposalId',proposal.id,'legacyOnboardingId',onboarding.id,
       'expectedCurrentRevisionId',onboarding.baseline_revision_id,'expectedActivationVersion',onboarding.baseline_activation_version)),
-  jsonb_build_object('operationId',md5('0459:instruction-review:'||r.id)::uuid,'revisionId',r.id,
+  jsonb_build_object('operationId',md5('0460:instruction-review:'||r.id)::uuid,'revisionId',r.id,
     'outcome','pending','reviewBatchId',NULL,'replayed',false),r.created_at
 FROM workspace_instruction_policy_revisions r
 JOIN workspace_instruction_policy_onboarding_proposals onboarding ON onboarding.account_id=r.account_id
@@ -2723,8 +2723,8 @@ ALTER TABLE company_brain_preference_proposal_receipts FORCE ROW LEVEL SECURITY;
 ALTER TABLE skill_write_receipts FORCE ROW LEVEL SECURITY;
 DO $copied$
 BEGIN
-  IF (SELECT count(*) FROM pg_temp.knowledge_conversion_0459 WHERE completed)<>1 THEN
-    RAISE EXCEPTION '0459 Knowledge conversion did not complete' USING ERRCODE='55000';
+  IF (SELECT count(*) FROM pg_temp.knowledge_conversion_0460 WHERE completed)<>1 THEN
+    RAISE EXCEPTION '0460 Knowledge conversion did not complete' USING ERRCODE='55000';
   END IF;
 END $copied$;
 -- Validate deferred head/revision references before restoring table posture.

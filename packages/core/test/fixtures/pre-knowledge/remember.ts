@@ -1,4 +1,4 @@
-// Historical pre-0459 protocol implementation, retained for migration fixtures.
+// Historical pre-knowledge protocol implementation, retained for migration fixtures.
 // Not exported by @opengeni/core or registered in the live agent tool surface.
 import {
   CompanyBrainGovernedWriteAttempt,

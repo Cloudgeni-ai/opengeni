@@ -1,5 +1,29 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
+import {
+  captureMcpOperationDispatch,
+  hasActiveRecoverableMcpOperation,
+  runRecoverableMcpOperation,
+  type McpOperationPersistence,
+} from "./mcp-operation-dispatch";
+export {
+  captureMcpOperationDispatch,
+  hasActiveRecoverableMcpOperation,
+  McpOperationOutcomeUnknownError,
+  runRecoverableMcpOperation,
+  type CapturedMcpOperation,
+  type McpOperationPersistence,
+  type RecoverableMcpOperation,
+} from "./mcp-operation-dispatch";
+import { assertMcpOperationObservationAuthority } from "./mcp-operation-observation";
+export {
+  assertMcpOperationObservationAuthority,
+  observeMcpOperation,
+  runMcpOperationObservationWithAuthority,
+  type McpOperationObservationAuthority,
+  type McpObservationBinding,
+  type McpObservationReceipt,
+} from "./mcp-operation-observation";
 import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
 export { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
 import {
@@ -11,6 +35,7 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   configuredProviders,
+  McpOperationRecoverySchema,
   firstPartyMcpInternalBaseUrl,
   firstPartyMcpInternalWorkspaceUrl,
   resolveFirstPartyDelegationSecret,
@@ -683,6 +708,8 @@ export type ResolveConnectionCredentialResult =
       connectionId: string;
       authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
+      /** Metadata-only immutable authority binding supplied by the trusted worker resolver. */
+      operationAuthorityDigest?: string;
       expiresAt?: Date | null;
     }
   | {
@@ -1723,6 +1750,11 @@ type ModelToolInvocation = {
 };
 
 const modelToolInvocation = new AsyncLocalStorage<ModelToolInvocation>();
+// Correlation must not activate the separate approval-only invocation guard.
+const modelMcpCallIdentity = new AsyncLocalStorage<{
+  modelName: string;
+  callId: string;
+} | null>();
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
@@ -2655,6 +2687,7 @@ export function buildOpenGeniAgent(
       agent as unknown as ApprovalCapableAgent,
       options.approvedToolCallId,
     );
+    installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
 
@@ -2783,6 +2816,7 @@ export function buildOpenGeniAgent(
     agent as unknown as ApprovalCapableAgent,
     options.approvedToolCallId,
   );
+  installModelMcpCallIdentity(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
 
@@ -2873,6 +2907,42 @@ type ApprovalCapableAgent = {
   getMcpTools: (runContext: unknown) => Promise<Tool<any>[]>;
   clone?: (config: unknown) => ApprovalCapableAgent;
 };
+
+/** Preserve SDK correlation through MCP projection without granting approval.
+ * SandboxAgent clones rebuild instance methods, so reinstall on every clone. */
+function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) =>
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function") return tool;
+      const invoke = tool.invoke.bind(tool);
+      return {
+        ...tool,
+        invoke: async (runContext, input, details) => {
+          const callId = details?.toolCall?.callId;
+          return await modelMcpCallIdentity.run(
+            typeof callId === "string" && callId.length > 0
+              ? { modelName: tool.name, callId }
+              : null,
+            async () => await invoke(runContext, input, details),
+          );
+        },
+      };
+    });
+  const clone = agent.clone?.bind(agent);
+  if (clone) {
+    agent.clone = (config: unknown) => {
+      const cloned = clone(config);
+      installModelMcpCallIdentity(cloned);
+      return cloned;
+    };
+  }
+}
+
+function modelMcpSourceCallId(modelName: string): string | undefined {
+  const identity = modelMcpCallIdentity.getStore();
+  return identity?.modelName === modelName ? identity.callId : undefined;
+}
 
 /**
  * Install the approval wrap on a single agent instance: replace `getMcpTools`
@@ -3610,6 +3680,8 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
+  mcpOperationPersistence?: McpOperationPersistence;
   /** Live exact-owner control refresh; API remains read/observation authority. */
   refreshOwnedCommand?: (commandId: string) => Promise<boolean>;
   accountId?: string;
@@ -3984,24 +4056,30 @@ export async function prepareAgentTools(
           }
           const optional = tool.optional === true;
           return {
-            server: new PrefixedMcpServer(
-              local.server,
-              config.id,
-              config.allowedTools,
-              optional || Boolean(config.connectionRef),
-              aggregateToolBudget,
-              `${config.id}:${index}`,
-              false,
-              buildConnectorAttachmentAuthority(
-                config,
-                options,
-                resolvedMcpToolConnectionIds,
-                config.url,
-                local.resolvedConnectionId,
+            server: configureMcpOperationRecovery(
+              new PrefixedMcpServer(
+                local.server,
+                config.id,
+                config.allowedTools,
+                optional || Boolean(config.connectionRef),
+                aggregateToolBudget,
+                `${config.id}:${index}`,
+                false,
+                buildConnectorAttachmentAuthority(
+                  config,
+                  options,
+                  resolvedMcpToolConnectionIds,
+                  config.url,
+                  local.resolvedConnectionId,
+                ),
+                tool.eager !== true,
+                local.preflightCall,
+                local.approvalAuthority,
               ),
-              tool.eager !== true,
-              local.preflightCall,
-              local.approvalAuthority,
+              config,
+              options,
+              config.url,
+              false,
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
@@ -4119,24 +4197,30 @@ export async function prepareAgentTools(
                 }
               : {}),
           });
-        const server = new PrefixedMcpServer(
-          innerServer,
-          config.id,
-          config.allowedTools,
-          bestEffort,
-          aggregateToolBudget,
-          `${config.id}:${index}`,
-          firstParty && !bestEffort,
-          buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
-          tool.eager !== true,
-          undefined,
-          undefined,
-          firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
-            ? inputWaitYield
-            : undefined,
-          firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
-            ? options.refreshOwnedCommand
-            : undefined,
+        const server = configureMcpOperationRecovery(
+          new PrefixedMcpServer(
+            innerServer,
+            config.id,
+            config.allowedTools,
+            bestEffort,
+            aggregateToolBudget,
+            `${config.id}:${index}`,
+            firstParty && !bestEffort,
+            buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
+            tool.eager !== true,
+            undefined,
+            undefined,
+            firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
+              ? inputWaitYield
+              : undefined,
+            firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
+              ? options.refreshOwnedCommand
+              : undefined,
+          ),
+          config,
+          options,
+          url,
+          Boolean(config.connectionRef) && !bridge && !isCodexAppsMcpServer(config),
         );
         return {
           server,
@@ -4786,18 +4870,42 @@ async function prepareToolGatewayDefinitionsFromServers(
                   }),
               }
             : {}),
-          execute: async (args, context) =>
-            await server.executeCatalogTool(
-              toolName,
-              args,
+          execute: async (args, context) => {
+            const execute = async () =>
+              await server.executeCatalogTool(
+                toolName,
+                args,
+                {
+                  ...(context.transportMeta ?? {}),
+                  opengeniOperationId: context.operationId,
+                },
+                {
+                  ...(context.signal ? { signal: context.signal } : {}),
+                },
+              );
+            const recovery = configuredMcpOperationRecovery(server, toolName);
+            if (!recovery) return await execute();
+            if (!recovery.supported || !["model", "codemode"].includes(context.caller.kind)) {
+              throw new Error(
+                "MCP operation recovery requires an exact attempt and remote brokered execution",
+              );
+            }
+            return await runRecoverableMcpOperation(
               {
-                ...(context.transportMeta ?? {}),
-                opengeniOperationId: context.operationId,
+                operationId: context.operationId,
+                ...(context.sourceCallId === undefined
+                  ? {}
+                  : { sourceCallId: context.sourceCallId }),
+                serverId: server.registryId,
+                originalTool: toolName,
+                observerTool: recovery.policy[toolName]!.observerTool,
+                destinationDigest: recovery.destinationDigest,
+                argumentDigest: digestCanonicalJson(args),
               },
-              {
-                ...(context.signal ? { signal: context.signal } : {}),
-              },
-            ),
+              recovery.persistence,
+              execute,
+            );
+          },
         };
       });
     },
@@ -4814,6 +4922,38 @@ function attemptToolCodemodePath(serverId: string, toolName: string): readonly s
     if (path) return path;
   }
   return [serverId, toolName];
+}
+
+type PreparedMcpOperationRecovery = {
+  policy: NonNullable<Settings["mcpServers"][number]["operationRecovery"]>;
+  persistence: McpOperationPersistence;
+  destinationDigest: string;
+  supported: boolean;
+};
+
+const mcpOperationRecoveryByServer = new WeakMap<PrefixedMcpServer, PreparedMcpOperationRecovery>();
+
+function configureMcpOperationRecovery(
+  server: PrefixedMcpServer,
+  config: Settings["mcpServers"][number],
+  options: PrepareToolsOptions,
+  destinationUrl: string,
+  brokered: boolean,
+): PrefixedMcpServer {
+  if (config.operationRecovery && options.mcpOperationPersistence) {
+    mcpOperationRecoveryByServer.set(server, {
+      policy: McpOperationRecoverySchema.parse(config.operationRecovery),
+      persistence: options.mcpOperationPersistence,
+      destinationDigest: digestCanonicalJson(new URL(destinationUrl).toString()),
+      supported: brokered && attemptToolScope(options) !== null,
+    });
+  }
+  return server;
+}
+
+function configuredMcpOperationRecovery(server: PrefixedMcpServer, toolName: string) {
+  const recovery = mcpOperationRecoveryByServer.get(server);
+  return recovery && Object.hasOwn(recovery.policy, toolName) ? recovery : undefined;
 }
 
 function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
@@ -4886,6 +5026,35 @@ function connectionBrokerFetch(
         connectionRef,
         suppressSetupAuthNeeded,
       );
+    }
+    if (request.method === "tools/call") {
+      assertMcpOperationObservationAuthority({
+        serverId: config.id,
+        ...(request.toolName === undefined ? {} : { toolName: request.toolName }),
+        destinationDigest: digestCanonicalJson(destinationUrl),
+        ...(first.operationAuthorityDigest === undefined
+          ? {}
+          : { authorityDigest: first.operationAuthorityDigest }),
+      });
+      if (
+        hasActiveRecoverableMcpOperation() &&
+        (request.batch ||
+          request.id === undefined ||
+          request.id === null ||
+          !request.operationId ||
+          !request.toolName)
+      ) {
+        throw new Error("Recoverable MCP request is missing its exact dispatch identity");
+      }
+      // The helper is a no-op without its private context. Always enter it for
+      // tools/call so a late transport continuation cannot bypass a closed context.
+      await captureMcpOperationDispatch({
+        operationId: request.operationId ?? "",
+        serverId: config.id,
+        toolName: request.toolName ?? "",
+        destinationDigest: digestCanonicalJson(destinationUrl),
+        authorityDigest: first.operationAuthorityDigest ?? "",
+      });
     }
     const response = await baseFetch(
       fetchInputForAttempt(input),
@@ -6385,9 +6554,11 @@ class AttemptDefinitionMcpServer implements MCPServer {
   ): Promise<any> {
     if (this.closed) throw new Error("local model tool server is closed");
     const environment = await this.requiredAttemptToolEnvironment();
+    const sourceCallId = modelMcpSourceCallId(toolName);
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
+        ...(sourceCallId === undefined ? {} : { sourceCallId }),
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -6709,8 +6880,10 @@ export class PrefixedMcpServer implements MCPServer {
     }
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) => {
       if (this.attemptToolEnvironment) {
+        const sourceCallId = modelMcpSourceCallId(toolName);
         return await this.attemptToolEnvironment.callModel({
           modelName: toolName,
+          ...(sourceCallId === undefined ? {} : { sourceCallId }),
           arguments: cleanArgs ?? {},
           subjectId: this.attemptToolSubjectId,
           ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -6738,6 +6911,9 @@ export class PrefixedMcpServer implements MCPServer {
   ): Promise<AttemptToolResultValue> {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
+    }
+    if (configuredMcpOperationRecovery(this, unprefixed) && !hasActiveRecoverableMcpOperation()) {
+      throw new Error("MCP operation recovery requires its trusted attempt execution context");
     }
     // Nested prefix wrappers are a projection seam around one physical
     // tools/call. The innermost wrapper owns the single metric observation.
@@ -6812,6 +6988,16 @@ export class PrefixedMcpServer implements MCPServer {
       // state. The broker refreshed credentials for future requests but did not
       // replay this call. Preserve that ambiguity as an explicit model-visible
       // error for required and best-effort servers alike.
+      if (hasActiveRecoverableMcpOperation()) {
+        recordOutcome(
+          isToolOutcomeUncertainMcpError(error)
+            ? "outcome_uncertain"
+            : isAuthNeededMcpError(error)
+              ? "auth_needed"
+              : mcpThrownToolCallOutcome(error, options?.signal),
+        );
+        throw error;
+      }
       if (isToolOutcomeUncertainMcpError(error)) {
         recordOutcome("outcome_uncertain");
         return boundedMcpToolResult({

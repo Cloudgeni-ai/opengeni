@@ -1635,6 +1635,43 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     );
   }
 
+  test("host tab requests open artifacts once per request without warming compute", async () => {
+    const { client, spy } = coldClient();
+    const selected: string[] = [];
+    const collapsed: boolean[] = [];
+    const workspace = (openTabRequest?: { tab: string; requestId: number }) =>
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          trailingTabs={[{ id: "artifacts", label: "Artifacts", content: <div>Site preview</div> }]}
+          onActiveTabChange={(tab) => selected.push(tab)}
+          onCollapsedChange={(value) => collapsed.push(value)}
+          openTabRequest={openTabRequest}
+          autoSaveId="og.test.prewarm.artifact-request"
+        />,
+      );
+    const rendered = await renderComponent(workspace());
+    try {
+      await rendered.rerender(workspace({ tab: "artifacts", requestId: 1 }));
+      await flush(60);
+      expect(selectedTabName(rendered.container)).toBe("Artifacts");
+      expect(selected).toEqual(["artifacts"]);
+      expect(collapsed).toEqual([false]);
+      await rendered.rerender(workspace({ tab: "artifacts", requestId: 1 }));
+      expect(selected).toEqual(["artifacts"]);
+      await rendered.rerender(workspace({ tab: "artifacts", requestId: 2 }));
+      expect(selected).toEqual(["artifacts", "artifacts"]);
+      await rendered.rerender(workspace({ tab: "missing", requestId: 3 }));
+      expect(selected).toEqual(["artifacts", "artifacts"]);
+      expect(spy.attachCalls).toBe(0);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("a host file request selects Files and creates one exact cold-workspace warm intent", async () => {
     const selectedTabs: string[] = [];
     const selectedPaths: Array<string | null> = [];

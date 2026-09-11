@@ -53,7 +53,11 @@ const withheldMigrationNames = [
   "0456_social_connection_versions.sql",
   "0457_canonical_session_scope_subject.sql",
   "0458_skill_review_wire_compatibility.sql",
-  "0459_unified_knowledge.sql",
+  // The ledger's protected writer compiles against linked authority from 0449
+  // and validates scheduled/host authority withheld above. Replay it only once
+  // those actual prerequisites exist; do not weaken its production checks.
+  "0459_mcp_operations.sql",
+  "0460_unified_knowledge.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

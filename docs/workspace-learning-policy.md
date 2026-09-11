@@ -1,6 +1,6 @@
 # Historical workspace learning policy
 
-Maintenance migration 0459 freezes this former policy authority for historical
+Maintenance migration 0460 freezes this former policy authority for historical
 accepted-attempt proof. New work uses [Agent learning](knowledge.md#agent-learning-settings):
 separate Knowledge, workspace instruction and Skill categories with workspace or
 personal defaults and sparse per-chat or per-scheduled-task overrides.
@@ -25,4 +25,4 @@ installation remain separate permissions. Review is a publication decision, not
 an additional tool approval prompt. See [review and corrections](knowledge.md#review-and-corrections).
 
 Original lifecycle/lock-order details remain in migrations 0199 and 0364 and the
-pre-0459 fixtures. Do not restore their retired runtime authoring routes.
+pre-knowledge fixtures. Do not restore their retired runtime authoring routes.

@@ -308,7 +308,7 @@ legacy full-session top-level `id` during migration.
 
 ## Measured byte and context reduction
 
-These historical pre-0459 measurements include the retired Memory tool; they do
+These historical pre-knowledge measurements include the retired Memory tool; they do
 not describe the current Knowledge API or impose its former content limit.
 The deterministic regression fixture uses production-style pretty-printed JSON
 and UTF-8 byte measurement. Approximate tokens are `ceil(bytes / 4)`; they are a

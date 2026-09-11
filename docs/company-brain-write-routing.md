@@ -1,6 +1,6 @@
 # Durable context write routing
 
-After maintenance migration 0459, [Knowledge and Agent learning](knowledge.md)
+After maintenance migration 0460, [Knowledge and Agent learning](knowledge.md)
 is the canonical durable retrieval and review contract. The former Memory,
 reviewed-claim and evidence-to-behavior authoring routes are retired.
 

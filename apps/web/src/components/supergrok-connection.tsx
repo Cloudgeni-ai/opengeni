@@ -12,8 +12,7 @@ import { SparklesIcon, Loader2Icon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { DeviceAuthorization } from "@opengeni/react/connect";
-import "@opengeni/react/connect.css";
+import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
 import { ModelConnectionSection } from "@/components/model-connection-section";
 import { Button } from "@/components/ui/button";
@@ -30,13 +29,7 @@ type PendingDeviceCode = {
 };
 
 export function SuperGrokDeviceCodePanel(props: PendingDeviceCode) {
-  return (
-    <DeviceAuthorization
-      {...props}
-      providerLabel="xAI"
-      codeAttributes={{ "data-supergrok-device-code": "" }}
-    />
-  );
+  return <SubscriptionDeviceCodePanel {...props} provider="supergrok" />;
 }
 
 function accountLabel(account: SuperGrokAccount): string {

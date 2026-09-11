@@ -41,6 +41,7 @@ export default defineConfig({
     "session-command-output": "src/session-command-output.ts",
     "retained-provider-commands": "src/retained-provider-commands.ts",
     "session-event-slices": "src/session-event-slices.ts",
+    "mcp-operations": "src/mcp-operations.ts",
   },
   format: ["esm"],
   target: "es2022",

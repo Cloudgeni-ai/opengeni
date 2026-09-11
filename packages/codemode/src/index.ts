@@ -48,6 +48,8 @@ export type AttemptToolScope = Pick<
 export type AttemptToolExecutionContext = {
   operationId: string;
   caller: AttemptToolCaller;
+  /** Trusted in-process SDK correlation; not operation identity or approval authority. */
+  sourceCallId?: string;
   /** In-process transport metadata; never part of catalog identity or digest. */
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
@@ -81,6 +83,8 @@ export type CreateAttemptToolEnvironmentInput = {
 
 export type ModelAttemptToolCall = {
   operationId?: string;
+  /** Exact SDK call id supplied by the host, never inferred from arguments or metadata. */
+  sourceCallId?: string;
   modelName: string;
   arguments: Record<string, unknown>;
   subjectId: string;

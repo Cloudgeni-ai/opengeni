@@ -511,6 +511,13 @@ const effectiveBudgets = {
     // Linux/x64 Bun 1.4. Restore the established 1.5 KiB platform-skew
     // envelope; all other caps stay unchanged.
     wholeKibEnvelope(653_717, 1.5 * kib),
+    // Session artifact navigation, Bun 1.4 Linux/x64, identical lock/config:
+    // base 199d3046 measures 655,699 gzip bytes; the repaired candidate
+    // measures 656,741 (+1,042) after removing its eager session dependency.
+    // With a five-digit loopback API URL these are 655,719 / 656,774.
+    // Retain the established 1.5 KiB variance allowance (643 KiB total).
+    // Initial, raw, file-count, per-file, lazy, and CSS caps stay unchanged.
+    wholeKibEnvelope(656_741, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

@@ -39,7 +39,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import {
   parseRootWorkspaceSearch,
   readLastWorkspaceId,
@@ -437,11 +437,13 @@ const workspaceArtifactsRoute = createRoute({
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: EditableArtifact,
 });
 const workspaceOrganizationRoute = createRoute({
@@ -735,11 +737,15 @@ function IdentityLink() {
 }
 
 function ArtifactDetail() {
-  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
+  const params = workspaceArtifactDetailRoute.useParams();
+  const { fromSession } = workspaceArtifactDetailRoute.useSearch();
+  return <LazyArtifactsRoute {...params} fromSession={fromSession} />;
 }
 
 function EditableArtifact() {
-  return <LazyEditableArtifactRoute {...workspaceEditableArtifactRoute.useParams()} />;
+  const params = workspaceEditableArtifactRoute.useParams();
+  const { fromSession } = workspaceEditableArtifactRoute.useSearch();
+  return <LazyEditableArtifactRoute {...params} fromSession={fromSession} />;
 }
 
 function Organization() {

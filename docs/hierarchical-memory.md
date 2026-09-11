@@ -1,6 +1,6 @@
 # Historical Memory storage
 
-Maintenance migration 0459 replaces the former Memory retrieval and authoring
+Maintenance migration 0460 replaces the former Memory retrieval and authoring
 system with [Knowledge and Agent learning](knowledge.md). Use that document for
 all new integrations, agent tools, storage, review and UI behavior.
 
@@ -9,7 +9,7 @@ immutable historical evidence. They are not a live retrieval corpus or a write
 destination. The conversion preserves exact content, stable entry IDs, restrictive
 scope selectors, relationships, source references and lifecycle snapshots in
 canonical Knowledge. Unknown ownership is not converted into shared authority.
-Original schema and lifecycle details remain in the pre-0459 SQL migrations and
+Original schema and lifecycle details remain in the pre-knowledge SQL migrations and
 migration test fixtures.
 
 Legacy `memoryScope` is a compatibility field on session creation. `user` selects

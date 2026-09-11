@@ -326,6 +326,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/workbench.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/session-artifact-navigation.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/opstream-runner.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
   "test/e2e/channel-a.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
   "test/e2e/rig-setup.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],

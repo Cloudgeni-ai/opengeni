@@ -1410,7 +1410,7 @@ describe("DB integration", () => {
 
   // Current Knowledge scope, revision, review and retrieval contracts run through
   // the provisioned runtime role in packages/db/test/unified-knowledge-postgres.test.ts.
-  // Historical Memory behavior is exercised only against the pre-0459 schema.
+  // Historical Memory behavior is exercised only against the pre-knowledge schema.
 
   test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
