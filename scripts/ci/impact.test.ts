@@ -111,6 +111,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
+      "test/e2e/session-artifact-navigation.browser.e2e.ts",
       SESSION_RAIL_ROW_METADATA_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       SITE_CONVERSATIONS_E2E,
@@ -255,6 +256,18 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("session artifact navigation selects impacted E2E coverage", () => {
+    const regression = "test/e2e/session-artifact-navigation.browser.e2e.ts";
+    for (const path of [
+      "apps/web/src/components/session/artifact-session-page.tsx",
+      "packages/react/src/components/sandbox-workspace.tsx",
+      regression,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.e2eTests).toContain(regression);
+    }
+  });
+
   test("timeline pagination changes select protected interaction browser coverage", () => {
     for (const path of [
       "packages/react/src/components/message-timeline.tsx",
@@ -370,6 +383,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
+      "test/e2e/session-artifact-navigation.browser.e2e.ts",
       SESSION_RAIL_ROW_METADATA_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       SITE_CONVERSATIONS_E2E,

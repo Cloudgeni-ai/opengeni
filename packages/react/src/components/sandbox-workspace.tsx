@@ -1002,6 +1002,8 @@ export type SandboxWorkspaceProps = ClientOverride & {
    *  omitted the workbench decides from the durable workspace capture. */
   initialTab?: string | undefined;
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
+  /** Open a built-in or host-injected tab. A new requestId reopens the same tab. */
+  openTabRequest?: { tab: string; requestId: number } | null | undefined;
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
   /** Presentation-only filter for Files tree nodes and selected-file viewing. */
@@ -1061,6 +1063,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     trailingTabs,
     initialTab,
     onActiveTabChange,
+    openTabRequest,
     initialFilePath,
     onFilePathChange,
     isFileNodeVisible,
@@ -1102,6 +1105,32 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const nextFileRequestId = useRef(0);
   const nextComputerRequestId = useRef(0);
   const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
+  const handledTabRequest = useRef<{ sessionId: string; requestId: number } | null>(null);
+  useEffect(() => {
+    if (
+      !openTabRequest ||
+      (handledTabRequest.current?.sessionId === sessionId &&
+        handledTabRequest.current.requestId === openTabRequest.requestId)
+    )
+      return;
+    const available =
+      [...(leadingTabs ?? []), ...(trailingTabs ?? [])].some(
+        (tab) => tab.id === openTabRequest.tab,
+      ) || (surfaces ?? WORKBENCH_SURFACES).some((tab) => tab === openTabRequest.tab);
+    if (!available) return;
+    handledTabRequest.current = { sessionId, requestId: openTabRequest.requestId };
+    setStoredSelection({ sessionId, tab: openTabRequest.tab });
+    onActiveTabChange?.(openTabRequest.tab);
+    onCollapsedChange?.(false);
+  }, [
+    openTabRequest,
+    sessionId,
+    leadingTabs,
+    trailingTabs,
+    surfaces,
+    onActiveTabChange,
+    onCollapsedChange,
+  ]);
   const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
     (path: string, line?: number | null) => {

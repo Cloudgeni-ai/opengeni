@@ -176,6 +176,7 @@ being observed.
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
 | `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench chooses **Changes for reviewable durable capture changes, else Files**. A pending signed capture manifest leaves the initial choice unresolved; metadata arriving before the manifest must not be mistaken for an empty capture. Default selection never triggers live Git work. The choice latches before real content paints, so later edits never steal the current tab. |
 | `openFileRequest` | a host request `{ path, line?, requestId }` that opens Files, passes the exact path to the selected session target, reveals its lazy tree ancestors, selects and scrolls the file, and optionally focuses a 1-based line. Change `requestId` to repeat the same open. |
+| `openTabRequest` | a host request `{ tab, requestId }` that selects an available built-in or host-injected tab and expands the dock. Change `requestId` to repeat an open; ordinary rerenders do not steal the user's selection. Unknown tab IDs are ignored. This is presentation state, not artifact or compute authority. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 
 For chat or timeline Markdown, wire `Markdown.onSandboxFile` to

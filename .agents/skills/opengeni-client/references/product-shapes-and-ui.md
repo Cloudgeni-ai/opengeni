@@ -1,3 +1,13 @@
+# Opening host-owned workbench tabs
+
+Use `SandboxWorkspace.openTabRequest={{ tab, requestId }}` to open a built-in or
+host-injected tab from the host's UI. Increment `requestId` for each intentional
+open, including repeated clicks on the same item. Keep artifact selection and
+internal-link recognition in the host; the workbench only selects an available
+tab and expands the dock. Preserve modified clicks and external navigation.
+When handing off to a full-page artifact route, retain an explicit originating
+session return path rather than relying on browser history.
+
 # Product shapes and UI
 
 ## Choose the smallest suitable surface
