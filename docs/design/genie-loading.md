@@ -16,3 +16,18 @@ Run `bun run --cwd packages/react demo`, then open `/genie-loading.html` for
 replayable quick, unhurried, long-wait, and failure scenarios, a light/dark switch,
 and diagnostics. The studio renders the production MessageTimeline from simulated
 SessionEvents and requires no model calls. The full stack runs with `bun run dev`.
+
+Hosts can customize the SDK without editing its source:
+
+```tsx
+<MessageTimeline
+  events={events}
+  genieLoading={{
+    phrases: ["Polishing the lamp…", "Consulting the carpet…"],
+    orb: { state: "searching", size: 64, speed: 0.8 },
+  }}
+/>
+```
+
+Orb states use the `thinking-orbs` component's typed options. Omitted settings
+keep the defaults; an empty phrase list also falls back to the defaults.

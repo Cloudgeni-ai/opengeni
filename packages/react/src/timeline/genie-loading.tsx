@@ -1,6 +1,12 @@
 import { ThinkingOrb } from "thinking-orbs";
 import { useThemeType } from "../lib/use-theme-type";
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState, type ComponentProps } from "react";
+
+export type GenieLoadingOptions = {
+  phrases?: readonly string[];
+  orb?: Pick<ComponentProps<typeof ThinkingOrb>, "state" | "size" | "speed">;
+};
+export const GenieLoadingOptionsContext = createContext<GenieLoadingOptions | undefined>(undefined);
 
 const PHRASES = [
   "Polishing the lamp…",
@@ -30,6 +36,8 @@ export function GenieLoading({
   onShowDetails: () => void;
   detailsOpen?: boolean;
 }) {
+  const options = useContext(GenieLoadingOptionsContext);
+  const phrases = options?.phrases?.length ? options.phrases : PHRASES;
   const theme = useThemeType(undefined);
   const [phrase, setPhrase] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
@@ -38,23 +46,23 @@ export function GenieLoading({
     const update = () => {
       setShowDetails(Date.now() - Date.parse(startedAt) >= 15_000);
       setSlow(Date.now() - Date.parse(startedAt) >= 30_000);
-      if (!document.hidden) setPhrase(Math.floor(Math.random() * PHRASES.length));
+      if (!document.hidden) setPhrase(Math.floor(Math.random() * phrases.length));
     };
     update();
     const timer = window.setInterval(update, 5_000);
     return () => window.clearInterval(timer);
-  }, [startedAt]);
+  }, [startedAt, phrases]);
   return (
     <div className="og-genie-loading">
       <div className="og-genie-orb" aria-hidden="true">
-        <ThinkingOrb state="searching" size={64} theme={theme} speed={0.8} />
+        <ThinkingOrb state="searching" size={64} theme={theme} speed={0.8} {...options?.orb} />
       </div>
       <div className="og-genie-copy">
         <span className="sr-only" role="status">
           {slow ? "Preparing your task. Taking longer than usual." : "Preparing your task."}
         </span>
         <span key={slow ? "slow" : phrase} className="og-genie-phrase" aria-hidden="true">
-          {slow ? "A little longer than usual…" : PHRASES[phrase]}
+          {slow ? "A little longer than usual…" : phrases[phrase % phrases.length]}
         </span>
         {showDetails || detailsOpen ? (
           <button

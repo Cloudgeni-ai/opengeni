@@ -1,3 +1,4 @@
+import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import type {
@@ -192,6 +193,7 @@ export type MessageTimelineProps = {
    */
   computeLabel?: string | null | undefined;
   /** Customize collapsed turn facets for this timeline instance. */
+  genieLoading?: GenieLoadingOptions | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
@@ -418,6 +420,7 @@ export function MessageTimeline({
   loadRetainedArtifact,
   loadVideoArtifactPlayback,
   computeLabel = null,
+  genieLoading,
   turnSummary,
   autoFollow = true,
   onAnnotate,
@@ -934,6 +937,7 @@ export function MessageTimeline({
         loadRetainedScreenshot,
         loadRetainedArtifact,
         loadVideoArtifactPlayback,
+        genieLoading,
         turnSummary,
       },
     }),
@@ -949,6 +953,7 @@ export function MessageTimeline({
       renderMessageText,
       resolveProviderLogo,
       toolRegistry,
+      genieLoading,
       turnSummary,
       userMessageDisclosureContext,
     ],
@@ -2356,6 +2361,7 @@ type TimelineGroupBehaviorProps = {
   loadRetainedScreenshot: MessageTimelineProps["loadRetainedScreenshot"];
   loadRetainedArtifact: MessageTimelineProps["loadRetainedArtifact"];
   loadVideoArtifactPlayback: MessageTimelineProps["loadVideoArtifactPlayback"];
+  genieLoading: MessageTimelineProps["genieLoading"];
   turnSummary: MessageTimelineProps["turnSummary"];
 };
 
@@ -2384,24 +2390,26 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         ? 1
         : 0;
   return (
-    <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
-      <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
-        <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
-          <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
-            <TimelineGroupView
-              {...behavior}
-              group={group}
-              foldLiveCluster={isAgentProgress(nextGroup)}
-              startupDismissed={startupDismissed}
-              trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
-              contextCompactionCount={
-                contextCompactionCount > 0 ? contextCompactionCount : undefined
-              }
-            />
-          </UserMessageDisclosureProvider>
-        </TimelineGroupRenderBoundary>
-      </EntranceAnimationProvider>
-    </div>
+    <GenieLoadingOptionsContext.Provider value={behavior.genieLoading}>
+      <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
+        <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
+          <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
+            <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
+              <TimelineGroupView
+                {...behavior}
+                group={group}
+                foldLiveCluster={isAgentProgress(nextGroup)}
+                startupDismissed={startupDismissed}
+                trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+                contextCompactionCount={
+                  contextCompactionCount > 0 ? contextCompactionCount : undefined
+                }
+              />
+            </UserMessageDisclosureProvider>
+          </TimelineGroupRenderBoundary>
+        </EntranceAnimationProvider>
+      </div>
+    </GenieLoadingOptionsContext.Provider>
   );
 });
 
