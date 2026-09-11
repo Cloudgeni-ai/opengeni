@@ -1661,9 +1661,10 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 ### In-conversation connection setup
 
 `SessionCapabilityCard` uses `MessageTimeline.renderAuthNeeded`; hosts retain
-authorization. Forms share `performCapabilityAction` and the human-authorized
+authorization. Forms share `performCapabilityAction` and human-authorized
 Connection API. OAuth never replays tools; `attachSessionCapability` preserves
-selection through CAS. Library Skills retain workspace scope and reviewed hashes.
-Personal MCP requires owner-issued session grants and shared-results acknowledgement.
-Gmail startup failures prompt review; discovery checks exact attempt tools for readiness.
-The composer restores active grants matching visibility and authority epoch.
+selection through CAS. Skills retain workspace scope and reviewed hashes.
+Gmail failures prompt review; discovery checks attempt tools for readiness.
+Personal MCP use requires an owner-issued exact-session grant, with shared-results
+acknowledgement for shared conversations. The composer restores only active grants
+matching visibility and authority epoch; credentials alone grant no use.
