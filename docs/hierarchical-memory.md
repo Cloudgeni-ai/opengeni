@@ -1,5 +1,7 @@
 # Hierarchical memory foundation
 
+> **After migration 0459:** The `knowledge_memories` writer and Memory tools are retired. Existing rows are immutable migration/audit evidence. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+
 This document is the canonical current contract for the database/domain
 foundation beneath composable workspace knowledge memory. The storage slice
 adds typed scopes, namespaces, labels, relationships, lifecycle evidence,

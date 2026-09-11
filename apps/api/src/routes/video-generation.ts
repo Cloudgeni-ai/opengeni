@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import {
   getVideoGenerationOperationSummary,
+  withSessionRlsActorContext,
   getWorkspaceVercelAiGatewayConnectionMetadata,
   getWorkspaceVideoGenerationPolicy,
   updateWorkspaceVideoGenerationPolicy,
@@ -14,6 +15,8 @@ import {
 } from "@opengeni/db";
 import {
   requireAccessGrant,
+  requireAccessGrantAuthorization,
+  fileOwnerContextForAccess,
   requireWorkspaceSettingsGrant,
   VIDEO_GENERATION_MODEL_CATALOG,
   videoGenerationModelSupportsFundingSource,
@@ -108,11 +111,10 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
 
   app.get("/v1/workspaces/:workspaceId/video-generation/operations/:operationId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const summary = await getVideoGenerationOperationSummary(
-      deps.db,
-      workspaceId,
-      c.req.param("operationId"),
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    const actor = await fileOwnerContextForAccess(deps, access, "workspace:read");
+    const summary = await withSessionRlsActorContext(actor, () =>
+      getVideoGenerationOperationSummary(deps.db, workspaceId, c.req.param("operationId")),
     );
     if (!summary)
       throw new HTTPException(404, {

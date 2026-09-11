@@ -98,6 +98,7 @@ export function rememberedMachineFolder(
 }
 
 export type SessionDraft = {
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
   visibility: "private" | "workspace";
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
@@ -205,6 +206,7 @@ export type BuildCreateSessionRequestInput = {
   workingDir?: string | null;
   channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
   /** Prevent a partially hydrated capability catalog from becoming a pin. */
@@ -320,6 +322,9 @@ export function buildCreateSessionRequest(
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.channelId ? { channelId: input.channelId } : {}),
+    ...(input.agentLearning && Object.keys(input.agentLearning).length
+      ? { agentLearning: input.agentLearning }
+      : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
           expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
@@ -454,6 +459,7 @@ export function newSessionDraftOptionsFromSessionDraft(
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
       visibility: effectiveVisibility,
+      ...(draft.agentLearning ? { agentLearning: draft.agentLearning } : {}),
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -464,6 +470,7 @@ export function newSessionDraftOptionsFromSessionDraft(
 
   return {
     visibility: effectiveVisibility,
+    ...(draft.agentLearning ? { agentLearning: draft.agentLearning } : {}),
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
     ...(draft.variableSetIds.length
       ? {
@@ -496,6 +503,7 @@ export function sessionDraftFromNewSessionDraftOptions(
   return {
     ...base,
     visibility: options.visibility ?? "workspace",
+    ...(options.agentLearning ? { agentLearning: options.agentLearning } : {}),
     compute: machine
       ? {
           kind: "machine",

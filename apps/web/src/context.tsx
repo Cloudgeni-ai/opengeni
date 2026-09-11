@@ -388,6 +388,7 @@ export type AppContextValue = {
       channelId?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
+      agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
       /** Create a session shell without starting an underlying agent turn. */
       startMode?: "realtime";
       /** Atomic create-time session visibility. */
@@ -1870,6 +1871,7 @@ export function RootRouteComponent() {
       channelId?: string | null;
       omitWorkspaceResources?: boolean;
       expectedNewSessionDraftRevision?: number;
+      agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
       startMode?: "realtime";
       visibility?: "private" | "workspace";
       onFailure?: (failure: StartSessionFailure) => void;
@@ -1945,6 +1947,7 @@ export function RootRouteComponent() {
           workingDir: options?.workingDir,
           channelId: options?.channelId,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
+          agentLearning: options?.agentLearning,
           startMode: options?.startMode,
           visibility: options?.visibility,
         }),

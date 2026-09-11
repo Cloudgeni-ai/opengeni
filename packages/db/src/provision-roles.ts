@@ -822,6 +822,17 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.skill_files_valid(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
+    IF to_regprocedure(format('%I.knowledge_entry_apply(uuid,uuid,jsonb,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_claim(text,integer,integer) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_index_work(uuid,uuid,uuid,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.agent_instruction_apply(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_entry_apply(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_entry_confirm_legacy(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_entry_read(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_entry_prepare_file(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.knowledge_document_prepare(uuid,uuid,uuid,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.agent_learning_manage(uuid,uuid,jsonb,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regprocedure(
       format('%I.preference_registry_lock_heads(uuid[])', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -831,30 +842,8 @@ BEGIN
         ${literal(role)}
       );
     END IF;
-    IF to_regprocedure(
-      format(
-        '%I.knowledge_memory_apply_operation(jsonb,text,text,text,uuid,uuid,uuid,integer)',
-        ${literal(schema)}
-      )
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.knowledge_memory_apply_operation(jsonb, text, text, text, uuid, uuid, uuid, integer) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-    END IF;
-    IF to_regprocedure(
-      format(
-        '%I.knowledge_memory_revert_operation(uuid,uuid,text,text,text,uuid,uuid,uuid,integer)',
-        ${literal(schema)}
-      )
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.knowledge_memory_revert_operation(uuid, uuid, text, text, text, uuid, uuid, uuid, integer) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-    END IF;
+
+
     IF to_regprocedure(
       format(
         '%I.preference_registry_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
@@ -940,6 +929,9 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Older-schema fixtures and the maintenance conversion can still prepare
+    -- historical evidence; current runtimes receive only the undo/read seam.
+    IF to_regclass(format('%I.knowledge_entries', ${literal(schema)})) IS NULL THEN
     IF to_regprocedure(
       format(
         '%I.evaluate_governed_learning_proposal(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid,uuid,uuid)',
@@ -970,28 +962,10 @@ BEGIN
         ${literal(role)}
       );
     END IF;
-    IF to_regprocedure(
-      format('%I.confirm_remember_knowledge_claim(uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid)', ${literal(schema)})
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
+
+
     END IF;
-    IF to_regprocedure(
-      format('%I.materialize_remember_knowledge_memory(uuid,uuid,uuid)', ${literal(schema)})
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.materialize_remember_knowledge_memory(uuid, uuid, uuid) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.materialize_remember_knowledge_memory(uuid, uuid, uuid) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-    END IF;
+
     IF to_regprocedure(
       format('%I.undo_governed_learning_activation(uuid,uuid,uuid,uuid)', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -1161,18 +1135,7 @@ BEGIN
         ${literal(role)}
       );
     END IF;
-    IF to_regprocedure(
-      format(
-        '%I.workspace_learning_policy_apply_activation(uuid,text,uuid,uuid,uuid,uuid,bigint,text,text,text)',
-        ${literal(schema)}
-      )
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.workspace_learning_policy_apply_activation(uuid, text, uuid, uuid, uuid, uuid, bigint, text, text, text) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-    END IF;
+
     IF to_regprocedure(
       format('%I.workspace_learning_policy_source_overrides_valid(jsonb)', ${literal(schema)})
     ) IS NOT NULL THEN

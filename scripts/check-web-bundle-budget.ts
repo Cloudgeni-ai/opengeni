@@ -465,6 +465,11 @@ const effectiveBudgets = {
     // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
     // Restore the existing whole-KiB headroom; all other caps stay unchanged.
     wholeKibEnvelope(2_335_755),
+    // Unified Knowledge receipts, file ownership, and chat learning controls:
+    // Bun 1.4 macOS/arm64, base e1a50bae5b is 2,348,286 raw / 655,699 gzip;
+    // candidate is 2,368,385 / 663,198 with lazy settings and Knowledge pages.
+    // Bound the measured +20,099 raw / +7,499 gzip delta only.
+    wholeKibEnvelope(2_368_385),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -502,6 +507,7 @@ const effectiveBudgets = {
     // Linux/x64 Bun 1.4. Restore the established 1.5 KiB platform-skew
     // envelope; all other caps stay unchanged.
     wholeKibEnvelope(653_717, 1.5 * kib),
+    wholeKibEnvelope(663_198, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

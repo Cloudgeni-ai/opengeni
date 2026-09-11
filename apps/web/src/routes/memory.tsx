@@ -1,56 +1,40 @@
-import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
-import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, BrainCircuitIcon } from "lucide-react";
-
+import { BrainCircuitIcon } from "lucide-react";
 import { PageHeader } from "@/components/common";
-import { MemoryPane } from "@/components/knowledge/memory-pane";
+import { KnowledgeBrowser } from "@/components/knowledge/knowledge-browser";
 import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 
-/** First-class workspace memory: presentation only; hierarchy stays an API concern. */
+/** The historical Memory URL remains a link-compatible entry into Knowledge. */
 export function MemoryRoute({
   workspaceId,
   focusMemoryId,
-  returnToBrain = false,
+  fileId,
 }: {
   workspaceId: string;
   focusMemoryId?: string | undefined;
+  fileId?: string;
   returnToBrain?: boolean;
 }) {
   const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const memoryEnabled = workspace ? resolveWorkspaceMemoryEnabled(workspace.settings) : false;
-  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
-
+  const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
+  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   return (
     <ContentPage width="standard">
       <PageHeader
         icon={<BrainCircuitIcon className="size-4" />}
-        title={personalWorkspace ? "Your Memory" : "Memory"}
-        description={
-          personalWorkspace
-            ? "Review the private facts, incidents, decisions, and outcomes agents remember inside your personal workspace."
-            : "Review and curate durable facts, incidents, decisions, and outcomes agents carry across sessions."
-        }
+        title={personal ? "Your Knowledge" : "Agent Knowledge"}
+        description="Sources and useful findings, connected across files, conversations and agent work."
       />
-      {returnToBrain ? (
-        <Link
-          to="/workspaces/$workspaceId/state"
-          params={{ workspaceId }}
-          search={{}}
-          className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-        >
-          <ArrowLeftIcon className="size-3" />
-          Back to Agent Knowledge
-        </Link>
-      ) : null}
-      <MemoryPane
-        workspaceId={workspaceId}
-        memoryEnabled={memoryEnabled}
-        personalWorkspace={personalWorkspace}
-        focusMemoryId={focusMemoryId}
-      />
+      <div className="mt-6">
+        <KnowledgeBrowser
+          key={workspaceId}
+          workspaceId={workspaceId}
+          personal={personal}
+          {...(fileId ? { fileId } : {})}
+          {...(focusMemoryId ? { focusEntryId: focusMemoryId } : {})}
+        />
+      </div>
     </ContentPage>
   );
 }

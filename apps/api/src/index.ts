@@ -1,3 +1,4 @@
+import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
   getSettings,
@@ -692,7 +693,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
 
 function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
   if (task.status === "paused") return true;
-  if (task.action.kind !== "knowledge_source_sync") return false;
+  if (!scheduledTaskKnowledgeSource(task)) return false;
   const control = task.metadata.knowledgeSourceSync;
   if (!control || typeof control !== "object") return false;
   const record = control as Record<string, unknown>;

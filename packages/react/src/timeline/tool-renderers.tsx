@@ -1,3 +1,4 @@
+import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import {
   parseSandboxFileArtifactReceipt,
   type GitFileDiff,
@@ -2370,7 +2371,53 @@ function GenericToolIcon({ name }: { name: string }) {
 
 /* ---- the default registry -------------------------------------------------- */
 
+function KnowledgeSaveRenderer({ item }: ToolRendererProps) {
+  const output = unwrapMcpOutput(item.output);
+  const parsed = tryParseJson(output.text);
+  if (item.status === "running" || output.isError || !parsed || typeof parsed !== "object")
+    return <GenericRenderer item={item} />;
+  const value = parsed as Record<string, unknown>;
+  const receipt = (value.status === "retained" ? value.receipt : value) as
+    | Record<string, unknown>
+    | undefined;
+  if (
+    !receipt ||
+    typeof receipt.entryId !== "string" ||
+    !["published", "pending", "rejected", "archived"].includes(String(receipt.outcome))
+  )
+    return <GenericRenderer item={item} />;
+  const args = parseToolArgs(item.arguments);
+  const entry = args.entry as Record<string, unknown> | undefined;
+  return (
+    <KnowledgeReceiptRow
+      outcome={receipt.outcome as "published" | "pending" | "rejected" | "archived"}
+      entryId={receipt.entryId}
+      title={
+        typeof entry?.title === "string"
+          ? entry.title
+          : typeof value.filename === "string"
+            ? value.filename
+            : undefined
+      }
+      source={value.status === "retained"}
+    />
+  );
+}
+
 const BASE_ENTRIES: ToolRegistryEntry[] = [
+  ...[
+    "knowledge_save",
+    "knowledge_archive",
+    "knowledge_retain_file",
+    "task_note_promote_knowledge",
+  ].flatMap((name) =>
+    [name, `opengeni__${name}`, `mcp__opengeni__${name}`].map((trustedName) => ({
+      match: "name" as const,
+      name: trustedName,
+      matchPrefixedLeaf: false,
+      render: KnowledgeSaveRenderer,
+    })),
+  ),
   // Provider-native items carry `raw.type` on the wire — this is their source of
   // truth and is consulted first by the registry.
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },

@@ -1,5 +1,7 @@
 # Company Brain write routing
 
+> **After migration 0459:** The old remember/proposal authoring routes are retired. Exact already-answered confirmation recovery remains a compatibility lifecycle. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+
 > **Naming:** The user-facing product surface is **Agent Knowledge**. This
 > document and several code identifiers retain the historical Company Brain
 > name for protocol continuity. The structured preference destination is shown

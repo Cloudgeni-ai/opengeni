@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { HumanInputQuestion } from "@opengeni/contracts";
-import { rememberConfirmationLabel } from "@opengeni/core";
+import { rememberConfirmationLabel } from "./fixtures/pre-0459/remember";
 
 /**
  * The confirmation card has to make the cost of a durable write visible before

@@ -59,43 +59,38 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("Company Brain first-party MCP policy", () => {
-  test("enabled workspace Memory exposes autonomous agent read and write tools", async () => {
+  test("legacy Memory selection registers the canonical tools, with their own permission checks", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant([...Permission.options], ["memory_search", "memory_save", "memory_correct"]),
-      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "memory-containment-description-test", version: "1" });
+    const client = new Client({ name: "knowledge-tools-test", version: "1" });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
-      const tools = (await client.listTools()).tools;
-      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "All existing Memory kinds are searchable",
-      );
-      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "historical context, not active instructions",
-      );
-      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "use memory_save autonomously",
-      );
-      expect(tools.find((tool) => tool.name === "memory_save")?.description).toContain(
-        "Autonomously save",
-      );
-      expect(tools.find((tool) => tool.name === "memory_correct")?.description).toContain(
-        "Autonomously correct",
-      );
+      expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+        "knowledge_browse",
+        "knowledge_get",
+        "knowledge_retain_file",
+        "knowledge_save",
+        "knowledge_search",
+      ]);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+    const narrowed = buildOpenGeniMcpServer(
+      deps(),
+      grant(["workspace:read"], ["memory_search", "memory_save", "memory_correct"]),
+    );
+    expect(registeredToolNames(narrowed)).toEqual([]);
   });
 
-  test("enabled workspace Memory honors an explicit autonomous write selection", async () => {
+  test("a legacy write selection remains canonical when the old Memory toggle is off", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant([...Permission.options], ["memory_search", "memory_save", "memory_correct"]),
-      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
+      { workspaceMemoryEnabled: false, workspaceMemoryPromptMode: "retrieval_only" },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "memory-autonomous-writes-test", version: "1" });
@@ -103,13 +98,19 @@ describe("Company Brain first-party MCP policy", () => {
     await client.connect(clientTransport);
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
-      expect(names).toEqual(["memory_correct", "memory_save", "memory_search"]);
+      expect(names).toEqual([
+        "knowledge_browse",
+        "knowledge_get",
+        "knowledge_retain_file",
+        "knowledge_save",
+        "knowledge_search",
+      ]);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
   });
 
-  test("non-agent principals may search but cannot mutate workspace Memory", () => {
+  test("non-agent principals use the Knowledge API and cannot impersonate agent tools", () => {
     const selected: FirstPartyMcpToolName[] = ["memory_search", "memory_save", "memory_correct"];
     const humanGrant = grant([...Permission.options], selected);
     humanGrant.principalKind = "human";
@@ -120,7 +121,7 @@ describe("Company Brain first-party MCP policy", () => {
           workspaceMemoryPromptMode: "retrieval_only",
         }),
       ),
-    ).toEqual(["memory_search"]);
+    ).toEqual([]);
   });
 
   test("task-tree note tools require exact agent-attempt authority and their own permissions", () => {
@@ -163,7 +164,7 @@ describe("Company Brain first-party MCP policy", () => {
     expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
   });
 
-  test("governed write tools are production-registered and permission filtered", () => {
+  test("legacy instruction selection uses the native adapter and task-note promotion stays permission filtered", () => {
     const selected: FirstPartyMcpToolName[] = [
       "knowledge_propose",
       "knowledge_correct",
@@ -177,15 +178,20 @@ describe("Company Brain first-party MCP policy", () => {
       deps(),
       grant(["documents:search", "workspace:read"], selected),
     );
-    expect(registeredToolNames(readOnly)).toEqual(
-      selected.filter((name) => !name.startsWith("task_note_promote_")).sort(),
-    );
+    expect(registeredToolNames(readOnly)).toEqual([
+      "instruction_policy_get",
+      "instruction_policy_save",
+    ]);
 
     const admitted = buildOpenGeniMcpServer(
       deps(),
       grant(["documents:search", "workspace:read", "sessions:control"], selected),
     );
-    expect(registeredToolNames(admitted)).toEqual([...selected].sort());
+    expect(registeredToolNames(admitted)).toEqual([
+      "instruction_policy_get",
+      "instruction_policy_save",
+      "task_note_promote_knowledge",
+    ]);
 
     const humanGrant = grant(["documents:search", "workspace:read", "sessions:control"], selected);
     humanGrant.principalKind = "human";

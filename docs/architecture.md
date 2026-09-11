@@ -38,7 +38,7 @@ Surfaces (canonical sources in §13):
   uncertain attempts pin it. See [transcription](transcription.md).
 - **Compute:** provisioned sandboxes and user-owned Connected Machines.
 - **Tools:** MCP, capabilities, Codemode, connections, and authorized adapters.
-- **Knowledge:** Documents/RAG, Agent Knowledge, typed Memory, preferences,
+- **Knowledge:** structured source/finding/group entries, Skills,
   instructions, organization identity, and learning policy retain distinct authority.
 - **Artifacts:** files, media, editable documents, browser/ComputerSession control,
   terminals, and published outputs.
@@ -48,7 +48,7 @@ Surfaces (canonical sources in §13):
   linking never merges identities. Inline credentials remain supported and
   durable renewal is opt-in. `asUser()` supplies canonical identity, not a second
   session end-user label. Human private/shared visibility is distinct from optional
-  cross-tree `agentAccess`; user Memory follows the verified active-turn user,
+  cross-tree `agentAccess`; personal Knowledge follows the verified active-turn user,
   while task notes cover temporary tree-local coordination. Site SDK forwarding
   binds the workspace destination and uses ordinary API authorization, not a
   fixed page-operation list; tool calls retain version-pinned catalogs.
@@ -202,16 +202,23 @@ The similar-looking stores are not interchangeable:
 | `session_system_updates` | Durable machine-origin inputs such as child results and schedules | Synthetic human messages |
 | `session_goals` | The standing objective and continuation obligation | Workflow-local state |
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
-| Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
+| Knowledge entries, instructions, Skills, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | Conversation history or temporary task notes |
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Workspace Memory stores retrieval context. It is enabled by default: exact
-live agent attempts autonomously save and correct active facts, decisions,
-incidents, fixes, and outcomes independently of Learning mode. A workspace
-opt-out disables agent writes. Private sessions can read shared facts, but
-mutations require their exact writable scope. Memory is distinct from Skills,
-instructions, organization profiles, and reviewed Knowledge.
+Knowledge is the canonical retrieval system after maintenance migration 0459.
+Original file bytes stay in object storage; exact source/finding/group revisions,
+pinned evidence, relationships, publication decisions and review receipts live
+in Postgres. Keyword and embedding indexes are rebuildable. The same schema
+serves personal, workspace and organization scopes; access precedes ranking and
+relationships never grant access. Conversation history and task notes are separate.
+
+Agent learning centralizes Knowledge, instructions and Skills in Automatic,
+Review first and Off settings, with sparse chat/task overrides and immutable
+accepted-turn policy snapshots. Review first queues inactive changes without
+pausing the agent. Instructions and Skills retain their native authorities.
+The old Memory and reviewed-Knowledge authoring lanes are retired; historical
+records remain audit/compatibility evidence. See [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy. Off
 rejects agent-authored identity changes before proposal creation, Require approval
@@ -913,15 +920,17 @@ explicitly when needed. Generated images and video follow paid-operation and
 artifact-retention fences; provider bytes do not become permanent prompt
 history.
 
-Documents/RAG and scoped Knowledge are retrieval systems whose authority is
-checked before ranking. Agent Knowledge is the product view over workspace
-instructions, Skills, accepted Memory, organization knowledge, and related
-governance sources; those underlying authorities remain separate. Editable
-documents, spreadsheets, and presentations use a canonical artifact model with
-native and WASM kernels; Office formats are import/export forms, not the mutable
-source of truth.
+Knowledge is the product destination for retained sources and findings, with
+instructions and Skills adjacent in the UI. File previews, revision-pinned
+citations and shared groups connect information from different sources without
+changing its ownership. Connector ingestion runs through ordinary scheduled
+agents with frozen source selections and Agent learning policy. Attempt-bound
+source tools retain files and prepare canonical source entries; agents save the
+useful findings. Parsing and indexing remain mechanical services. Original bytes
+and search caches have separate storage jobs. Review controls
+publication, while action permissions remain independent.
 
-Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
+Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
 [`image-generation.md`](image-generation.md),
 [`artifact-engine.md`](artifact-engine.md), and
@@ -1474,7 +1483,7 @@ but do not replace access control.
 
 Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 `packages/storage/src/index.ts`, `packages/documents/src/index.ts`,
-[`knowledge-retrieval.md`](knowledge-retrieval.md), and
+[`knowledge.md`](knowledge.md), and
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
 
 ---
@@ -1616,8 +1625,8 @@ External actors and Site viewer authority: [embedding authority internals](embed
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Documents, RAG, or Knowledge retrieval | `packages/documents/`, `apps/api/src/routes/documents.ts` | [`knowledge-retrieval.md`](knowledge-retrieval.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
-| Agent Knowledge, Memory, preferences, instructions, organization identity, or learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
+| Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
+| Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |

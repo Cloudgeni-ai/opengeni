@@ -26,6 +26,7 @@ import type {
 } from "@opengeni/contracts";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
+export * from "./knowledge-entries-schema";
 import type { SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
@@ -5479,13 +5480,15 @@ export const sessionMcpServers = pgTable(
 export const files = pgTable(
   "files",
   {
+    privateOwnerSubjectIds: text("private_owner_subject_ids").array().default(sql`CASE
+      WHEN nullif(current_setting('opengeni.private_file_owner',true),'') IS NULL THEN NULL
+      ELSE ARRAY[current_setting('opengeni.private_file_owner',true)] END`),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
+    // Origin only for personal originals; SQL owns the generated retention FK.
+    workspaceId: uuid("workspace_id").notNull(),
     status: text("status").notNull().default("pending_upload"),
     filename: text("filename").notNull(),
     safeFilename: text("safe_filename").notNull(),
@@ -5522,6 +5525,9 @@ export const fileUploads = pgTable(
     fileId: uuid("file_id")
       .notNull()
       .references(() => files.id, { onDelete: "cascade" }),
+    privateFileOwnerSubjectId: text("private_file_owner_subject_id").default(
+      sql`nullif(current_setting('opengeni.private_file_owner',true),'')`,
+    ),
     status: text("status").notNull().default("pending"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -5809,6 +5815,9 @@ export const videoGenerationOperations = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    privateFileOwnerSubjectId: text("private_file_owner_subject_id").default(
+      sql`nullif(current_setting('opengeni.private_file_owner',true),'')`,
+    ),
     sessionId: uuid("session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
@@ -6121,6 +6130,9 @@ export const retainedScreenshotArtifacts = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    privateFileOwnerSubjectId: text("private_file_owner_subject_id").default(
+      sql`nullif(current_setting('opengeni.private_file_owner',true),'')`,
+    ),
     sessionId: uuid("session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),

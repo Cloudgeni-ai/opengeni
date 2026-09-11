@@ -1,3 +1,7 @@
+import { knowledgeContextForAccess } from "./knowledge";
+import { saveAgentLearningSettings } from "@opengeni/db";
+import { withSessionRlsActorContext } from "@opengeni/db";
+import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
 import {
@@ -30,6 +34,7 @@ import {
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  currentAgentLearningToolSelection,
   DraftTimelineAnnotations,
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
@@ -272,8 +277,10 @@ export function effectiveFirstPartyMcpToolCeiling(
     allowed: readonly FirstPartyMcpToolName[];
   },
 ): Set<FirstPartyMcpToolName> {
-  const allowed = new Set(policy.allowed);
-  const ceiling = new Set([...(stored ?? policy.default)].filter((tool) => allowed.has(tool)));
+  const allowed = new Set(currentAgentLearningToolSelection(policy.allowed));
+  const ceiling = new Set(
+    currentAgentLearningToolSelection(stored ?? policy.default).filter((tool) => allowed.has(tool)),
+  );
   if (ceiling.has("goal_pause") && allowed.has("goal_resume")) ceiling.add("goal_resume");
   return ceiling;
 }
@@ -300,6 +307,7 @@ export function resolveFirstPartyMcpToolsForCreate(
   },
 ): FirstPartyMcpToolName[] {
   if (requested !== undefined) {
+    requested = currentAgentLearningToolSelection(requested);
     if (parentStored !== undefined) {
       const parentCeiling = effectiveFirstPartyMcpToolCeiling(parentStored, policy);
       const widened = requested.find((tool) => !parentCeiling.has(tool));
@@ -311,9 +319,9 @@ export function resolveFirstPartyMcpToolsForCreate(
     }
     return [...requested];
   }
-  const allowed = new Set(policy.allowed);
+  const allowed = new Set(currentAgentLearningToolSelection(policy.allowed));
   const inherited = parentStored === undefined ? policy.default : (parentStored ?? policy.default);
-  return [...inherited].filter((tool) => allowed.has(tool));
+  return currentAgentLearningToolSelection(inherited).filter((tool) => allowed.has(tool));
 }
 
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
@@ -738,6 +746,7 @@ function automaticTitleForAgentChildCreate(
 }
 
 export async function createAndStartSessionWithOutcome(input: {
+  initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   requestedSessionId?: string;
   db: Database;
   bus: EventBus;
@@ -1024,6 +1033,7 @@ export async function createAndStartSessionWithOutcome(input: {
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
+      initialAgentLearning: input.initialAgentLearning,
       selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
@@ -1119,6 +1129,7 @@ export async function createAndStartSessionWithOutcome(input: {
       tools: input.tools,
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
+      initialAgentLearning: input.initialAgentLearning,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
       ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
@@ -2004,7 +2015,7 @@ async function withSessionCreateUsageRecording(input: {
   return { ...input.createOutcome, usageRecording };
 }
 
-export async function createSessionForRequestWithOutcome(
+async function createSessionForRequestInFileScope(
   unresolvedDeps: ApiRouteDeps,
   grant: AccessGrant,
   workspaceId: string,
@@ -2180,6 +2191,8 @@ export async function createSessionForRequestWithOutcome(
           : {}),
         createIdempotencyKey: payload.idempotencyKey,
         selectedInstalledSkillIds: payload.installedSkillIds ?? [],
+        initialAgentLearning: payload.agentLearning,
+        ...sessionScope,
         selectedHostMcpDelegations: hostSelections,
         ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
         visibility: effectiveVisibility,
@@ -2455,7 +2468,21 @@ export async function createSessionForRequestWithOutcome(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(db, grant.accountId, workspaceId, grant.subjectId, resources);
+  await validateFileResources(
+    db,
+    grant.accountId,
+    workspaceId,
+    personalResourceSubjectId,
+    resources,
+    (authorization || grant.principalKind === "agent_attempt") &&
+      (effectiveVisibility === "user_private" ||
+        sessionScope.memoryScope === "user" ||
+        workspace.kind === "personal")
+      ? authorization
+        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+        : await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+      : undefined,
+  );
   // Every selected Variable Set is independently authorized. Scope does not
   // affect precedence: explicit order is low-to-high and later sets win name
   // collisions.
@@ -3016,6 +3043,46 @@ export async function createSessionForRequestWithOutcome(
       model,
     });
   }
+  const initialLearning =
+    payload.agentLearning && Object.keys(payload.agentLearning).length
+      ? payload.agentLearning
+      : null;
+  const initialLearningContext =
+    initialLearning && authorization
+      ? await knowledgeContextForAccess(deps, authorization, "sessions:control")
+      : null;
+  if (initialLearning && initialLearningContext?.actor.kind !== "human") {
+    throw new HTTPException(403, {
+      message: "Chat learning settings require authenticated human session control",
+    });
+  }
+  const initialLearningScope =
+    effectiveVisibility === "user_private" ||
+    sessionScope.memoryScope === "user" ||
+    workspace.kind === "personal"
+      ? ("personal" as const)
+      : ("workspace" as const);
+  const initialLearningActor = initialLearningContext?.actor;
+  const beforeCreateCommit =
+    initialLearning && initialLearningContext && initialLearningActor?.kind === "human"
+      ? async (tx: Database, sessionId: string) => {
+          await externalBeforeCreateCommit?.(tx);
+          await saveAgentLearningSettings(
+            tx,
+            {
+              ...initialLearningContext,
+              actor: { ...initialLearningActor, settingsScopes: [initialLearningScope] },
+            },
+            {
+              scope: initialLearningScope,
+              source: { kind: "chat", id: sessionId },
+              operationId: sessionId,
+              expectedVersion: 0,
+              settings: initialLearning,
+            },
+          );
+        }
+      : externalBeforeCreateCommit;
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({
@@ -3050,7 +3117,7 @@ export async function createSessionForRequestWithOutcome(
       ...(effectiveSandboxOs ? { sandboxOs: effectiveSandboxOs } : {}),
       sandboxGroupId,
       metadata: creationMetadata ?? {},
-      ...(externalBeforeCreateCommit ? { beforeCreateCommit: externalBeforeCreateCommit } : {}),
+      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       selectedHostMcpDelegations: hostSelections,
       ...(captureSelectedHostAuthority || captureLinkedAuthority
         ? {
@@ -3098,6 +3165,7 @@ export async function createSessionForRequestWithOutcome(
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       selectedInstalledSkillIds,
+      initialAgentLearning: payload.agentLearning,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
       allowNestedAgentDepthIncrease: hasPermission(grant.permissions, "workspace:admin"),
       subjectId: grant.subjectId,
@@ -3357,7 +3425,7 @@ function sessionPromptBoundaryRequestHash(input: {
  * enqueue, and usage recording. `toolsProvided: false` durably preserves an
  * Tool selection is durable session state and never rides a follow-up prompt.
  */
-export async function acceptSessionUserMessageWithOutcome(
+async function acceptSessionUserMessageInFileScope(
   deps: AcceptSessionUserMessageDependencies,
   grant: AccessGrant,
   workspaceId: string,
@@ -3582,6 +3650,15 @@ export async function acceptSessionUserMessageWithOutcome(
       workspaceId,
       grant.subjectId,
       requestedResources,
+      (input.authorization || grant.principalKind === "agent_attempt") &&
+        ((await getSessionAuthorityProjection(db, workspaceId, sessionId))?.visibility ===
+          "user_private" ||
+          existingSession.memoryScope === "user" ||
+          (await requireWorkspace(db, workspaceId)).kind === "personal")
+        ? input.authorization
+          ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
+          : await fileOwnerContextForAgent({ db }, grant, "sessions:control")
+        : undefined,
     );
     await validateGitHubRepositorySelection(db, workspaceId, [
       ...existingSession.resources,
@@ -4214,4 +4291,29 @@ function hasOwnProperty(value: unknown, key: string): boolean {
   return Boolean(
     value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
   );
+}
+
+/** Keep original-file ownership scoped across admission, history hydration and setup. */
+export async function createSessionForRequestWithOutcome(
+  ...args: Parameters<typeof createSessionForRequestInFileScope>
+): Promise<CreateSessionRequestOutcome> {
+  const [deps, grant, , , authorization] = args;
+  const actor = authorization
+    ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
+    : grant.principalKind === "agent_attempt"
+      ? await fileOwnerContextForAgent(deps, grant, "sessions:create")
+      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, () => createSessionForRequestInFileScope(...args));
+}
+
+export async function acceptSessionUserMessageWithOutcome(
+  ...args: Parameters<typeof acceptSessionUserMessageInFileScope>
+): ReturnType<typeof acceptSessionUserMessageInFileScope> {
+  const [deps, grant, , , input] = args;
+  const actor = input.authorization
+    ? await fileOwnerContextForAccess(deps, input.authorization, "sessions:control")
+    : grant.principalKind === "agent_attempt"
+      ? await fileOwnerContextForAgent(deps, grant, "sessions:control")
+      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, () => acceptSessionUserMessageInFileScope(...args));
 }

@@ -86,7 +86,7 @@ Then open the smallest source files that answer the question:
   `packages/runtime/src/run-events.ts` owns SDK stream/usage/interruption normalization.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
-- Documents/retrieval/knowledge memory: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`, and the `knowledge_memories` schema/helpers in `packages/db`.
+- Knowledge, source preparation, retrieval and learning policy: read `docs/knowledge.md`, then `apps/api/src/routes/knowledge.ts`, `packages/core/src/domain/knowledge*.ts`, and `packages/db/src/knowledge-entries.ts`. Old Memory and reviewed-Knowledge authoring are retired; conversation history and temporary task notes remain separate.
 - GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured OpenGeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
@@ -163,7 +163,7 @@ Keep these concepts straight while working:
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
 - **Scheduled task**: persisted schedule plus agent config that dispatches one or more session turns through Temporal scheduling.
 - **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters and Packs over this substrate.
-- **Knowledge memory**: reviewed workspace memory records stored separately from per-session conversation history. First-party docs MCP can search approved memories and propose new ones; approval/rejection lives in workspace API/UI review paths.
+- **Knowledge**: canonical source content, findings and groups in Postgres, with original files in object storage and rebuildable search indexes. First-party `knowledge_*` tools use accepted Agent learning policy: Automatic publishes, Review first stages a nonblocking revision, and Off disables agent writes. Connected-source schedules run ordinary agents with frozen source selections; source fetching is an attempt-bound tool. Conversation history and temporary task notes remain separate. See `docs/knowledge.md`.
 
 ## Source Discovery Workflow
 
@@ -334,7 +334,7 @@ Use careful wording:
 - "Agents SDK runs in worker activities" if runtime calls remain in worker activity code.
 - "Sandbox backend is pluggable" if backend selection and SDK client wiring remain configurable.
 - "MCP tools are pluggable" if MCP server config and tool refs remain.
-- "The first-party docs MCP exposes retrieval/memory tools" only after verifying the `docs` allowed tool list in `packages/config/src/index.ts`.
+- "The first-party docs MCP exposes Knowledge retrieval tools" only after verifying the `docs` allowed tool list in `packages/config/src/index.ts`.
 
 Avoid absolute claims until verified in current code:
 

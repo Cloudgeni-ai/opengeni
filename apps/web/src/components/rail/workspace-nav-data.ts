@@ -53,7 +53,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
     label: "Agent Knowledge",
-    description: "Instructions, skills, documents, and memory",
+    description: "Knowledge, instructions, and skills",
   },
   {
     to: "/workspaces/$workspaceId/schedules",

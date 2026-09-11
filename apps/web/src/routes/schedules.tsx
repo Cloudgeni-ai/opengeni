@@ -1,3 +1,8 @@
+import {
+  AgentLearningDraftEditor,
+  AgentLearningSettingsEditor,
+} from "@/components/knowledge/agent-learning-settings";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { loadSessionSchedules } from "@/lib/scheduled-tasks";
 // Shared schedules for agent turns and deterministic knowledge-source syncs,
@@ -458,7 +463,18 @@ export function SchedulesRoute({
     }
     setBusyTaskId("new");
     try {
+      const scope = scheduledLearningScope(
+        form,
+        sessions,
+        isPersonalWorkspace(
+          context.workspaces.find((item) => item.id === workspaceId) ?? null,
+          context.managedSelfContext,
+        ),
+      );
       await client.createScheduledTask(workspaceId, {
+        ...(form.agentLearning && Object.keys(form.agentLearning).length
+          ? { agentLearning: { scope, settings: form.agentLearning } }
+          : {}),
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
@@ -634,6 +650,8 @@ export function SchedulesRoute({
               />
             ) : (
               <ScheduledTaskForm
+                workspaceId={workspaceId}
+                taskId={task.id}
                 key={task.id}
                 initialState={formStateFromScheduledTask(task, {
                   model: context.model,
@@ -695,6 +713,7 @@ export function SchedulesRoute({
             </Notice>
           ) : null}
           <ScheduledTaskForm
+            workspaceId={workspaceId}
             key={recurringSourceSessionId ?? "new"}
             initialState={
               recurringSourceSessionId
@@ -744,7 +763,7 @@ export function SchedulesRoute({
           <EmptyState
             icon={<CalendarClockIcon className="size-4" />}
             title="No schedules yet"
-            description="Schedule an agent run or connector sync."
+            description="Schedule recurring agent work."
             action={
               <Button
                 type="button"
@@ -803,6 +822,7 @@ export function SchedulesRoute({
         onOpenChange={(next) => (next ? undefined : setConfirmDelete(null))}
         title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
         description={
+          confirmDelete?.agentConfig.knowledgeSource ||
           confirmDelete?.action.kind === "knowledge_source_sync"
             ? "Deletes this schedule and disables its source. Re-enable it from the connector."
             : "Deletes future runs; existing sessions are kept."
@@ -947,9 +967,15 @@ function ScheduledTaskCard(props: {
                 </span>
               </button>
             </CollapsibleTrigger>
-            {task.action.kind === "knowledge_source_sync" ? (
+            {task.agentConfig.knowledgeSource || task.action.kind === "knowledge_source_sync" ? (
               <div className="mt-1 text-2xs text-fg-subtle">
-                {knowledgeSyncSourceLabel(task.action)}
+                {knowledgeSyncSourceLabel(
+                  task.agentConfig.knowledgeSource ??
+                    (task.action as Extract<
+                      ScheduledTask["action"],
+                      { kind: "knowledge_source_sync" }
+                    >),
+                )}
               </div>
             ) : (
               <SchedulePersonalConnectionDisclosure connections={task.personalConnections} />
@@ -1242,7 +1268,26 @@ function ScheduleTimeField(props: {
   );
 }
 
+function scheduledLearningScope(
+  form: ScheduledTaskFormState,
+  sessions: Session[],
+  personal: boolean,
+): "personal" | "workspace" {
+  const target =
+    form.runMode === "existing_session"
+      ? sessions.find((session) => session.id === form.targetSessionId)
+      : null;
+  return form.knowledgeSource?.destination.kind === "personal" ||
+    personal ||
+    target?.tenancy?.visibility === "private" ||
+    target?.memoryScope === "user"
+    ? "personal"
+    : "workspace";
+}
+
 function ScheduledTaskForm(props: {
+  workspaceId: string;
+  taskId?: string;
   initialState: ScheduledTaskFormState;
   submitLabel: string;
   busy: boolean;
@@ -1259,7 +1304,17 @@ function ScheduledTaskForm(props: {
   onSubmit: (form: ScheduledTaskFormState) => void;
   onCancel?: () => void;
 }) {
+  const context = useAppContext();
   const [form, setForm] = useState(props.initialState);
+  const [learningOpen, setLearningOpen] = useState(false);
+  const learningScope = scheduledLearningScope(
+    form,
+    props.sessions,
+    isPersonalWorkspace(
+      context.workspaces.find((item) => item.id === props.workspaceId) ?? null,
+      context.managedSelfContext,
+    ),
+  );
   const [cadence, setCadenceState] = useState<ScheduledTaskCadence>(() =>
     scheduledTaskCadence(props.initialState),
   );
@@ -1525,6 +1580,30 @@ function ScheduledTaskForm(props: {
             />
           </button>
         </div>
+      </FormDisclosure>
+
+      <FormDisclosure
+        title="Agent learning"
+        summary="Optional defaults for this task"
+        open={learningOpen}
+        onOpenChange={setLearningOpen}
+      >
+        {props.taskId ? (
+          <AgentLearningSettingsEditor
+            key={`${props.taskId}:${learningScope}`}
+            workspaceId={props.workspaceId}
+            scope={learningScope}
+            source={{ kind: "scheduled_task", id: props.taskId }}
+          />
+        ) : (
+          <AgentLearningDraftEditor
+            workspaceId={props.workspaceId}
+            scope={learningScope}
+            value={form.agentLearning ?? {}}
+            disabled={props.busy}
+            onChange={(value) => update("agentLearning", value)}
+          />
+        )}
       </FormDisclosure>
 
       <section className="grid gap-3" aria-labelledby="schedule-editor-heading">

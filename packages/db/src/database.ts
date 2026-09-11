@@ -53,6 +53,8 @@ export type RlsContext = {
 
 export type SessionRlsActorContext = {
   subjectId: string;
+  /** Host-verified personal file ownership, never a request-supplied subject. */
+  privateFileOwnerSubjectId?: string | null;
   initiatingHumanSubjectId?: string | null;
 };
 
@@ -72,6 +74,15 @@ export async function withSessionRlsActorContext<T>(
   ) {
     throw new Error(
       "withSessionRlsActorContext: initiatingHumanSubjectId must be null or non-empty",
+    );
+  }
+  if (
+    actor.privateFileOwnerSubjectId !== undefined &&
+    actor.privateFileOwnerSubjectId !== null &&
+    !actor.privateFileOwnerSubjectId.trim()
+  ) {
+    throw new Error(
+      "withSessionRlsActorContext: privateFileOwnerSubjectId must be null or non-empty",
     );
   }
   return await sessionRlsActorContext.run(actor, fn);
@@ -389,7 +400,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   if (sessionActor) {
     await setSubjectRlsContext(db, sessionActor.subjectId);
     await db.execute(
-      sql`select set_config(
+      sql`select set_config('opengeni.private_file_owner', ${sessionActor.privateFileOwnerSubjectId ?? ""}, true), set_config(
         'opengeni.initiating_human_subject_id',
         ${sessionActor.initiatingHumanSubjectId ?? ""},
         true

@@ -968,7 +968,7 @@ describe("first-party MCP tool visibility policy", () => {
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
-      grant([...Permission.options], [...FIRST_PARTY_MCP_TOOL_NAMES]),
+      grant([...Permission.options], [...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES]),
       { workspaceMemoryEnabled: true },
     );
 
@@ -978,6 +978,12 @@ describe("first-party MCP tool visibility policy", () => {
     expect(INTERACTION_ATTEMPT_TOOL_NAMES).not.toContain("slack_bot_post_message");
     expect(broad).not.toContain("files_get_download_url");
     expect(broad).not.toContain("github_token");
+    expect(broad).not.toContain("remember_confirm");
+    const recovery = buildOpenGeniMcpServer(
+      deps(),
+      grant([...Permission.options], ["remember_confirm"]),
+    );
+    expect(registeredToolNames(recovery)).toEqual(["remember_confirm"]);
   });
 
   test("the download URL tool exists only on the dedicated files MCP server", () => {

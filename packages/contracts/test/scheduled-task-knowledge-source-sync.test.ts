@@ -7,7 +7,7 @@ const sourceId = "33333333-3333-4333-8333-333333333333";
 const connectionId = "44444444-4444-4444-8444-444444444444";
 
 describe("knowledge-source scheduled task contracts", () => {
-  test("parses a provider-neutral action into the inert non-agent compatibility shape", () => {
+  test("normalizes the legacy source request to an ordinary agent task", () => {
     const parsed = CreateScheduledTaskRequest.parse({
       name: "Sync Drive source",
       schedule: { type: "manual" },
@@ -37,8 +37,14 @@ describe("knowledge-source scheduled task contracts", () => {
       targetSessionId: null,
       variableSetId: null,
       rigId: null,
-      agentConfig: { prompt: "Knowledge source synchronization", resources: [], tools: [] },
+      action: { kind: "agent_turn" },
+      agentConfig: {
+        knowledgeSource: { sourceId, connection: { connectionId, connectionVersion: 7 } },
+        resources: [],
+        tools: [],
+      },
     });
+    expect(parsed.agentConfig.prompt).toContain("knowledge_source_fetch");
   });
 
   test("legacy task rows default to the agent action while sync runs expose bounded outcomes", () => {

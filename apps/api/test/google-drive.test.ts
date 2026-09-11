@@ -723,16 +723,19 @@ describe("Google Drive local source preview", () => {
         expect.objectContaining({
           status: "active",
           schedule: { type: "interval", everySeconds: 3_600 },
-          action: expect.objectContaining({
-            kind: "knowledge_source_sync",
-            limits: expect.objectContaining({
-              maxItems: 321,
-              maxBytes: 654_000_000,
-              maxFileBytes: 54_000_000,
-              maxProviderRequests: 876,
-              maxElapsedSeconds: 240,
-              maxFailureDetails: 17,
-              maxConcurrency: 4,
+          action: { kind: "agent_turn" },
+          agentConfig: expect.objectContaining({
+            knowledgeSource: expect.objectContaining({
+              kind: "knowledge_source_sync",
+              limits: expect.objectContaining({
+                maxItems: 321,
+                maxBytes: 654_000_000,
+                maxFileBytes: 54_000_000,
+                maxProviderRequests: 876,
+                maxElapsedSeconds: 240,
+                maxFailureDetails: 17,
+                maxConcurrency: 4,
+              }),
             }),
           }),
           metadata: expect.objectContaining({ externalSourceId: "folder-1" }),
@@ -740,16 +743,19 @@ describe("Google Drive local source preview", () => {
         expect.objectContaining({
           status: "active",
           schedule: { type: "interval", everySeconds: 3_600 },
-          action: expect.objectContaining({
-            kind: "knowledge_source_sync",
-            limits: expect.objectContaining({
-              maxItems: 321,
-              maxBytes: 654_000_000,
-              maxFileBytes: 54_000_000,
-              maxProviderRequests: 876,
-              maxElapsedSeconds: 240,
-              maxFailureDetails: 17,
-              maxConcurrency: 4,
+          action: { kind: "agent_turn" },
+          agentConfig: expect.objectContaining({
+            knowledgeSource: expect.objectContaining({
+              kind: "knowledge_source_sync",
+              limits: expect.objectContaining({
+                maxItems: 321,
+                maxBytes: 654_000_000,
+                maxFileBytes: 54_000_000,
+                maxProviderRequests: 876,
+                maxElapsedSeconds: 240,
+                maxFailureDetails: 17,
+                maxConcurrency: 4,
+              }),
             }),
           }),
           metadata: expect.objectContaining({ externalSourceId: "root" }),
@@ -902,8 +908,8 @@ describe("Google Drive local source preview", () => {
 
     expect((await saveSelection(true)).status).toBe(200);
     const [createdTask] = await listScheduledTasks(client.db, workspace.workspaceId, 10);
-    expect(createdTask?.action.kind).toBe("knowledge_source_sync");
-    if (!createdTask || createdTask.action.kind !== "knowledge_source_sync") {
+    expect(createdTask?.action.kind).toBe("agent_turn");
+    if (!createdTask?.agentConfig.knowledgeSource) {
       throw new Error("knowledge source schedule was not created");
     }
     const wrongSubjectDelete = await app(google.fetch).request(
@@ -944,7 +950,7 @@ describe("Google Drive local source preview", () => {
     >`
       select lifecycle_state as "lifecycleState",
         lifecycle_generation::int as "lifecycleGeneration"
-      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+      from knowledge_sources where id = ${createdTask.agentConfig.knowledgeSource.sourceId}`;
     expect(deletedSource).toEqual({ lifecycleState: "deleted", lifecycleGeneration: 2 });
 
     expect((await saveSelection(false)).status).toBe(200);
@@ -954,15 +960,15 @@ describe("Google Drive local source preview", () => {
     >`
       select lifecycle_state as "lifecycleState",
         lifecycle_generation::int as "lifecycleGeneration"
-      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+      from knowledge_sources where id = ${createdTask.agentConfig.knowledgeSource.sourceId}`;
     expect(stillDeleted).toEqual({ lifecycleState: "deleted", lifecycleGeneration: 2 });
 
     expect((await saveSelection(true)).status).toBe(200);
     const recreatedTasks = await listScheduledTasks(client.db, workspace.workspaceId, 10);
     expect(recreatedTasks).toHaveLength(1);
-    expect(recreatedTasks[0]?.action).toMatchObject({
+    expect(recreatedTasks[0]?.agentConfig.knowledgeSource).toMatchObject({
       kind: "knowledge_source_sync",
-      sourceId: createdTask.action.sourceId,
+      sourceId: createdTask.agentConfig.knowledgeSource.sourceId,
       sourceLifecycleGeneration: 3,
     });
     const [restoredSource] = await shared!.admin<
@@ -970,7 +976,7 @@ describe("Google Drive local source preview", () => {
     >`
       select lifecycle_state as "lifecycleState",
         lifecycle_generation::int as "lifecycleGeneration"
-      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+      from knowledge_sources where id = ${createdTask.agentConfig.knowledgeSource.sourceId}`;
     expect(restoredSource).toEqual({ lifecycleState: "active", lifecycleGeneration: 3 });
   });
 

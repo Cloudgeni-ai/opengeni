@@ -609,3 +609,6 @@ export {
   tryParseJson,
 } from "./lib/format";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
+
+export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";

@@ -43,3 +43,6 @@ export type {
   SessionChromeSignalTone,
 } from "./components/session-chrome";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
+
+export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";

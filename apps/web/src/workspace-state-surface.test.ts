@@ -15,57 +15,7 @@ describe("Agent Knowledge surface", () => {
     expect(app).toContain('search.view === "instructions" || search.view === "skills"');
     expect(navigation).toContain('to: "/workspaces/$workspaceId/state"');
     expect(navigation).toContain('label: "Agent Knowledge"');
-    expect(navigation).toContain('description: "Instructions, skills, documents, and memory"');
-  });
-
-  test("keeps the default page to four understandable destinations", async () => {
-    const [route, overview, skills] = await Promise.all([
-      source("routes/workspace-state.tsx"),
-      source("routes/agent-brain-overview.tsx"),
-      source("routes/skills-panel.tsx"),
-    ]);
-    for (const required of [
-      "Agent Knowledge",
-      "Loading Agent Knowledge",
-      "Couldn't load Agent Knowledge",
-      "Back to Agent Knowledge",
-      "Workspace instructions",
-      "Current instruction",
-      "Loading current instruction",
-      "Edit manually",
-      "Skills",
-      "Documents",
-      "Memory",
-      "How agents work",
-      "What agents can find",
-    ]) {
-      expect(`${route}\n${overview}`).toContain(required);
-    }
-    for (const removed of [
-      "Always followed",
-      "Available when needed",
-      "Needs attention",
-      "Recent changes",
-      "Learning & autonomy",
-      "Company profile & goals",
-      "Advanced & diagnostics",
-      "LazyCompanyBrainInspector",
-      "CompanyBrainExportButton",
-    ]) {
-      expect(`${route}\n${overview}`).not.toContain(removed);
-    }
-    expect(overview).toContain('view="instructions"');
-    expect(overview).toContain('view="skills"');
-    expect(route).toContain("<SkillsPanel");
-    expect(route).not.toContain("PreferenceRegistryAdministration");
-    expect(skills).toContain("Save Skill");
-    expect(skills).toContain("SKILL.md");
-    expect(skills).toContain("personalWorkspace");
-    expect(route).toContain("Your Agent Knowledge");
-    expect(overview).toContain("Your personal workspace");
-    expect(overview).toContain("Personal workspace instructions");
-    expect(skills).toContain('personalWorkspace ? "user" : "workspace"');
-    expect(skills).toContain('scope === "organization"');
+    expect(navigation).toContain('description: "Knowledge, instructions, and skills"');
   });
 
   test("routes organization profile and instruction and Skill autonomy to settings", async () => {
@@ -74,7 +24,7 @@ describe("Agent Knowledge surface", () => {
       source("components/settings/organization-settings-shell.tsx"),
       source("routes/workspace-settings.tsx"),
       source("routes/workspace-learning-admin.tsx"),
-      source("components/knowledge/memory-pane.tsx"),
+      source("components/knowledge/knowledge-browser.tsx"),
     ]);
     expect(shell).toContain('id: "knowledge"');
     expect(shell).toContain('title: "Knowledge"');
@@ -83,37 +33,31 @@ describe("Agent Knowledge surface", () => {
     expect(organization).toContain("Organization identity");
     expect(organization).toContain("Open documents");
     expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
-    expect(workspaceSettings).toContain("resolveWorkspaceMemoryEnabled");
-    expect(workspaceSettings).toContain("Let agents autonomously save and correct durable facts");
+    expect(workspaceSettings).not.toContain("resolveWorkspaceMemoryEnabled");
+    expect(learning).toContain("Agent learning");
     expect(workspaceSettings).not.toContain("editable on Documents");
-    expect(learning).toContain("Workspace instruction &amp; Skill autonomy");
-    expect(learning).toContain("Require approval");
-    expect(memory).toContain('preference: "Legacy preference"');
-    expect(memory).toContain('procedural: "Legacy procedure"');
-    expect(memory).toContain('episodic: "Incident or outcome"');
+    expect(learning).toContain("AgentLearningSettingsEditor");
+    expect(memory).toContain("KnowledgeOriginalFile");
+    expect(memory).toContain("Workspace instructions");
+    expect(memory).toContain("Skills");
   });
 
   test("teaches agents the three durable destinations and compact instruction budget", async () => {
-    const [prompt, remember, governance] = await Promise.all([
-      source("routes/agent-brain-prompt.tsx"),
-      source("../../api/src/mcp/remember.ts"),
-      source("../../api/src/mcp/company-brain-governed-writes.ts"),
-    ]);
+    const prompt = await source("routes/agent-brain-prompt.tsx");
     expect(prompt).toContain("normally 1–3 sentences and no more than 600 characters");
     expect(prompt).toContain("fact, decision, incident, bug fix, or outcome");
     expect(prompt).toContain("Describe a reusable skill");
     expect(prompt).toContain("one-sentence always-visible summary");
     expect(prompt).toContain("necessary prerequisites, executable steps, verification");
-    expect(prompt).toContain("Under Autonomous it may activate immediately");
+    expect(prompt).toContain("Automatic activates it");
     expect(prompt).toContain("discover the lazy skill_save tool");
-    expect(prompt).toContain("Require approval leaves it pending in the Skills editor");
+    expect(prompt).toContain(
+      "Review first leaves it pending in Knowledge > Needs review while the chat continues",
+    );
     expect(prompt).not.toContain("call remember with lane=preference");
-    expect(remember).toContain("use it for ordinary durable facts");
-    expect(remember).toContain("independent of Learning mode");
-    expect(remember).toContain("lane=knowledge only when memory_save is unavailable");
-    expect(remember).toContain("Skills now use skill_save");
-    expect(governance).toContain("Use this only for a minimal universal rule");
-    expect(governance).toContain("Autonomous may activate an eligible proposal");
-    expect(governance).toContain("Returns a redirect without writing");
+    expect(prompt).toContain("instruction_policy_get");
+    expect(prompt).toContain("instruction_policy_save");
+    expect(prompt).toContain("Off prevents agent authoring");
+    expect(prompt).toContain("Report the actual receipt");
   });
 });

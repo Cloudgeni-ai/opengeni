@@ -1,6 +1,6 @@
 ---
 name: opengeni-skills
-description: Find, install, create, and edit workspace Skills; understand reading, file changes, Learning modes, and optional sandbox checkout.
+description: Find, install, create, and edit workspace Skills; understand reading, file changes, Agent learning settings, and optional sandbox checkout.
 ---
 
 # Managing Skills
@@ -65,11 +65,14 @@ but they do not freeze a directory another process is changing.
 
 ## Persistent changes
 
-Shared workspace Skills are available to workspace agents. Learning mode
-governs persistent changes: Off refuses them; Require approval leaves a change
-inactive; Autonomous makes an authorized valid change live. An agent saying
-“the user asked” does not bypass the mode. Report whether the change is pending
-or live. Do not change Learning settings to make a save succeed.
+Shared workspace Skills are available to workspace agents. Private chats and
+Personal workspaces save personal Skills for their verified initiating user.
+Settings > Agent learning controls persistent agent changes, with a sparse chat
+or scheduled-task override when configured. Automatic publishes a valid authorized
+change; Review first saves an inactive revision and the task continues; Off
+prevents agent authoring. Existing Skills remain readable and usable, and an
+authorized human can still manage or install Skills in the UI. Do not change
+settings or infer an override from “the user asked.” Report the actual receipt.
 
 Saved history supports restoration. Upstream updates must preserve workspace
 customizations; report an available update instead of replacing customized
@@ -77,15 +80,12 @@ content silently. Platform-owned built-in Skills are not workspace-editable.
 
 Do not encode binary files as text to bypass the text-only boundary. Unsupported
 files and size limits are explicit errors, not permission to drop files silently.
-## One chat approval
+## Nonblocking review
 
-When save, publish, or install returns `humanInput`, call
-`request_human_input` with that exact payload. The card displays the complete
-immutable Skill files. The initiating human's Save activates that exact revision
-in the response transaction, before the session resumes. No follow-up activation
-tool or second review is needed. The runtime owns the review card's wording and
-Save/Don't save choices; do not combine it with other questions. Don't save does
-not activate the Skill, and Other is not a valid Skill decision.
-If the Skill changes before Save, make a new proposal for a fresh decision.
-Autonomous saves return applied and need no confirmation. Off refuses durable
-agent changes.
+A pending save, publish, or install is retained in Knowledge > Needs review.
+Continue the task and link the pending revision. Do not call request_human_input
+or a second activation tool to turn a pending receipt into a chat interruption.
+The human reviews the exact revision in the shared review surface. Approval
+publishes it; rejection leaves any previously published revision in place. A
+stale review cannot overwrite a newer revision. Automatic receipts are available
+immediately; Off creates no durable agent change.

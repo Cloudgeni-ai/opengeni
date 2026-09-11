@@ -41,7 +41,6 @@ import {
   getScheduledTaskRunAcceptedExecution,
   getScheduledTaskRunByProducerKey,
   getScheduledTargetSessionExecution,
-  ensureKnowledgeSourceSyncState,
   getScheduledTaskPersonalConnectionDelegations,
   getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskPersonalResourceAuthoritySubject,
@@ -62,14 +61,12 @@ import {
   listInstalledApiIntegrationServerIdsForDelegations,
   markScheduledTaskRunFailedIfQueued,
   markScheduledTaskRunSkippedIfQueued,
-  recordKnowledgeSourceSyncWake,
   recordUsageEvent,
   requireScheduledTaskIncidentAuthorityInTransaction,
   requireSession,
   requireWorkspace,
   settleScheduledTaskRunInTransaction,
   SessionSpawnDeniedDbError,
-  updateScheduledTaskRun,
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
@@ -364,68 +361,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
-      if (task.action.kind === "knowledge_source_sync") {
-        if (knowledgeSourceSyncEffectivelyPaused(task)) {
-          return { action: "blocked", reason: "knowledge_source_paused" };
-        }
-        const run = await createScheduledTaskRun(db, {
-          workspaceId: task.workspaceId,
-          taskId: task.id,
-          taskAuthorityRevision: task.authorityRevision,
-          taskExecutionDigest: task.executionDigest,
-          triggerType: input.triggerType,
-          producerKey: stableProducerKey,
-          scheduledAt: null,
-        });
-        await ensureKnowledgeSourceSyncState(db, task);
-        await recordKnowledgeSourceSyncWake(db, {
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          sourceId: task.action.sourceId,
-          scheduledTaskId: task.id,
-          scheduledTaskRunId: run.id,
-          cause: input.triggerType,
-          producerKey: stableProducerKey,
-          sourceConfigGeneration: task.action.sourceConfigGeneration,
-          sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
-        });
-        await recordUsageEvent(db, {
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          eventType: "knowledge_source_sync.fired",
-          quantity: 1,
-          unit: "run",
-          sourceResourceType: "scheduled_task_run",
-          sourceResourceId: run.id,
-          initiator: input.initiator ?? {
-            kind: "service",
-            subjectId: "scheduler",
-          },
-          initiatorContext: {
-            scheduledTaskId: task.id,
-            scheduledTaskRunId: run.id,
-          },
-          origin: "scheduled_task",
-          idempotencyKey: `usage:knowledge_source_sync.fired:${run.id}`,
-        });
-        if (run.status === "queued") {
-          await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-            status: "dispatched",
-            actionKind: "knowledge_source_sync",
-          });
-        }
-        return {
-          action: "knowledge_source_sync",
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          taskId: task.id,
-          scheduledTaskRunId: run.id,
-          sourceId: task.action.sourceId,
-          overlapPolicy: task.overlapPolicy as "skip" | "buffer_one",
-        };
+      if (task.action.kind !== "agent_turn") {
+        return { action: "blocked", reason: "legacy_source_schedule_requires_migration" };
       }
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
+      }
+      if (task.agentConfig.knowledgeSource && knowledgeSourceSyncEffectivelyPaused(task)) {
+        return { action: "blocked", reason: "knowledge_source_paused" };
       }
       const structuredAlertOccurrence = scheduledAlertOccurrenceIdentity({
         workspaceId: task.workspaceId,
@@ -778,6 +721,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         throw new Error("scheduled authority classes have different causal humans");
       }
       const causalHumanSubjectId = taskAuthoritySubjectId ?? xaiAuthoritySubjectId;
+      if (
+        task.agentConfig.knowledgeSource &&
+        causalHumanSubjectId !== task.agentConfig.knowledgeSource.initiatingSubjectId
+      ) {
+        throw new Error(
+          "Source schedule requires its connection owner's current human authorization; update the source schedule to authorize it",
+        );
+      }
       // Workspace/organization Variable Sets and Rigs run through ordinary
       // workspace authority; only a user-owned resource needs the exact frozen
       // human, and the database admission fence re-proves the same rule for
@@ -1084,6 +1035,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
                 ...creatorSessionPolicy,
+                ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
+                  ? {
+                      visibility: "user_private" as const,
+                      scheduledSourceRunId: run.id,
+                    }
+                  : {}),
                 metadata: {
                   ...taskMetadata,
                   model,
@@ -2110,6 +2067,12 @@ async function recoverBoundScheduledTaskDispatch(input: {
       firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
       ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
+      ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
+        ? {
+            visibility: "user_private" as const,
+            scheduledSourceRunId: input.run.id,
+          }
+        : {}),
       metadata: {
         ...taskMetadata,
         model: input.acceptedExecution.resolvedModel,

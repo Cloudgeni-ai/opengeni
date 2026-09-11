@@ -31,9 +31,10 @@ import {
   registerHostExportConsumer,
   recordPendingSessionToolCallResult,
   registerPendingSessionToolCall,
-  saveWorkspaceMemory,
-  searchWorkspaceMemories,
-  updateKnowledgeMemory,
+  saveKnowledgeEntry,
+  getKnowledgeEntry,
+  listKnowledgeEntries,
+  type KnowledgeContext,
   withWorkspaceRls,
   type Database,
 } from "../src/index";
@@ -1025,123 +1026,45 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       unsafeText,
     );
 
-    const memoryText = `searchable${nul}needle ${loneHigh} exact memory`;
-    const savedMemory = await saveWorkspaceMemory(app.db, {
+    const knowledgeText = `searchable${nul}needle ${loneHigh} exact retained knowledge`;
+    const knowledgeContext: KnowledgeContext = {
       accountId: grant.accountId,
       workspaceId,
-      text: memoryText,
-      sessionId: session.id,
-      origin: "agent",
-    });
-    expect(savedMemory.memory.text).toBe(memoryText);
-    const duplicateMemory = await saveWorkspaceMemory(app.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      text: memoryText,
-      sessionId: session.id,
-      origin: "agent",
-    });
-    expect(duplicateMemory).toMatchObject({
-      deduped: true,
-      dedupeReason: "exact",
-      memory: { id: savedMemory.memory.id, text: memoryText },
-    });
-    const memorySearch = await searchWorkspaceMemories(app.db, workspaceId, {
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: grant.subjectId,
+        writeScopes: ["workspace"],
+        settingsScopes: [],
+        review: true,
+      },
+    };
+    const knowledgeRequest = {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: { kind: "fact" as const, title: "Exact retained content", content: knowledgeText },
+    };
+    const savedKnowledge = await saveKnowledgeEntry(app.db, knowledgeContext, knowledgeRequest);
+    const repeatedKnowledge = await saveKnowledgeEntry(app.db, knowledgeContext, knowledgeRequest);
+    expect(repeatedKnowledge).toEqual({ ...savedKnowledge, replayed: true });
+    const retained = await getKnowledgeEntry(app.db, knowledgeContext, savedKnowledge.entryId);
+    expect(retained?.revision.entry.content).toBe(knowledgeText);
+    const knowledgeSearch = await listKnowledgeEntries(app.db, knowledgeContext, {
       query: "searchable needle",
-      mode: "keyword",
     });
-    expect(memorySearch.map((entry) => entry.memory.id)).toContain(savedMemory.memory.id);
+    expect(knowledgeSearch.entries.map((entry) => entry.id)).toContain(savedKnowledge.entryId);
+    const correctedText = `${knowledgeText} corrected${nul}exact`;
+    await saveKnowledgeEntry(app.db, knowledgeContext, {
+      ...knowledgeRequest,
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      entry: { ...knowledgeRequest.entry, content: correctedText },
+    });
     expect(
-      memorySearch.find((entry) => entry.memory.id === savedMemory.memory.id)?.memory.text,
-    ).toBe(memoryText);
-
-    const publicBoundarySentinel = "SECRET_SENTINEL_123";
-    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
-    const exactEmbeddingError = Object.assign(
-      new SecretSentinelError(`embedding failed ${publicBoundarySentinel}`),
-      {
-        name: publicBoundarySentinel,
-        code: publicBoundarySentinel,
-        cause: { exact: publicBoundarySentinel },
-      },
-    );
-    const failingEmbedder = {
-      model: `model-${publicBoundarySentinel}`,
-      embedMany: async () => {
-        throw exactEmbeddingError;
-      },
-    };
-    const publicWarnings: Array<[unknown, unknown]> = [];
-    const originalWarn = console.warn;
-    console.warn = (message?: unknown, attributes?: unknown) => {
-      publicWarnings.push([message, attributes]);
-    };
-    let fallbackMemory: Awaited<ReturnType<typeof saveWorkspaceMemory>> | undefined;
-    let updatedFallbackMemory: Awaited<ReturnType<typeof updateKnowledgeMemory>> | undefined;
-    let fallbackSearch: Awaited<ReturnType<typeof searchWorkspaceMemories>> | undefined;
-    try {
-      fallbackMemory = await saveWorkspaceMemory(
-        app.db,
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          text: "public boundary memory save",
-          sessionId: session.id,
-          origin: "agent",
-        },
-        failingEmbedder,
-      );
-      updatedFallbackMemory = await updateKnowledgeMemory(
-        app.db,
-        workspaceId,
-        fallbackMemory.memory.id,
-        { text: "public boundary memory edit" },
-        failingEmbedder,
-      );
-      fallbackSearch = await searchWorkspaceMemories(
-        app.db,
-        workspaceId,
-        { query: "public boundary memory edit", mode: "hybrid" },
-        failingEmbedder,
-      );
-    } finally {
-      console.warn = originalWarn;
-    }
-    expect(fallbackMemory!.memory.text).toBe("public boundary memory save");
-    expect(updatedFallbackMemory!.text).toBe("public boundary memory edit");
-    expect(fallbackSearch!.map((entry) => entry.memory.id)).toContain(fallbackMemory!.memory.id);
-    expect(publicWarnings).toEqual([
-      [
-        "workspace memory save: embedding failed; saving keyword-only",
-        {
-          errorClass: "MemoryEmbeddingOperationError",
-          errorCode: "memory_save_embedding_failed",
-          origin: "db",
-        },
-      ],
-      [
-        "workspace memory edit: embedding failed; storing keyword-only",
-        {
-          errorClass: "MemoryEmbeddingOperationError",
-          errorCode: "memory_edit_embedding_failed",
-          origin: "db",
-        },
-      ],
-      [
-        "workspace memory hybrid search vector component failed; falling back to keyword",
-        {
-          errorClass: "MemorySearchOperationError",
-          errorCode: "memory_hybrid_vector_failed",
-          origin: "db",
-        },
-      ],
-    ]);
-    expect(JSON.stringify(publicWarnings)).not.toContain(publicBoundarySentinel);
-    expect(JSON.stringify(publicWarnings)).not.toContain(workspaceId);
-    expect(JSON.stringify(publicWarnings)).not.toContain(session.id);
-    expect(exactEmbeddingError.message).toBe(`embedding failed ${publicBoundarySentinel}`);
-    expect(exactEmbeddingError.constructor.name).toBe(publicBoundarySentinel);
-    expect(exactEmbeddingError.code).toBe(publicBoundarySentinel);
+      (await getKnowledgeEntry(app.db, knowledgeContext, savedKnowledge.entryId))?.revision.entry
+        .content,
+    ).toBe(correctedText);
 
     const legacyPayload = {
       [LEGACY_LOSSLESS_JSON_ENVELOPE_KEY]: {

@@ -58,6 +58,8 @@ export function normalizeCalendarDays(
 }
 
 export type ScheduledTaskFormState = {
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  knowledgeSource?: ScheduledTaskAgentConfig["knowledgeSource"];
   name: string;
   description: string;
   prompt: string;
@@ -99,7 +101,7 @@ export function scheduledTaskStateLabel(task: ScheduledTask): {
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
   }
-  if (task.action?.kind === "knowledge_source_sync") {
+  if (task.agentConfig?.knowledgeSource || task.action?.kind === "knowledge_source_sync") {
     const value = task.metadata?.knowledgeSourceSync;
     if (value && typeof value === "object") {
       const control = value as Record<string, unknown>;
@@ -219,6 +221,7 @@ export function formStateFromScheduledTask(
   return {
     ...base,
     name: task.name,
+    knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
     prompt: task.agentConfig.prompt,
     model: task.agentConfig.model ?? defaults.model ?? "",
@@ -345,6 +348,9 @@ export function agentConfigFromFormState(
   }
   return {
     prompt: form.prompt.trim(),
+    ...(existingTask?.agentConfig.knowledgeSource
+      ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
+      : {}),
     resources: form.resources,
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},

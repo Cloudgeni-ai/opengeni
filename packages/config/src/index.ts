@@ -2,6 +2,7 @@ import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  currentAgentLearningToolSelection,
   Entitlements,
   EntitlementsMode,
   KnowledgeSourceSyncLimits,
@@ -3304,9 +3305,13 @@ export type FirstPartyMcpToolPolicy = {
 export function resolveFirstPartyMcpToolPolicy(
   settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
 ): FirstPartyMcpToolPolicy {
-  const allowed = settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES];
+  const allowed = currentAgentLearningToolSelection(
+    settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES],
+  );
   const allowedSet = new Set(allowed);
-  const defaults = settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
+  const defaults = currentAgentLearningToolSelection(
+    settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+  );
   return {
     default: defaults.filter((tool) => allowedSet.has(tool)),
     allowed: [...allowed],
@@ -3320,7 +3325,7 @@ export function allowedFirstPartyMcpToolsForSession(
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
   const allowed = new Set(policy.allowed);
-  const tools = new Set(selected ?? policy.default);
+  const tools = new Set(currentAgentLearningToolSelection(selected ?? policy.default));
   // Existing sessions with pause authority also receive its resume counterpart.
   if (tools.has("goal_pause")) tools.add("goal_resume");
   return [...tools].filter((tool) => allowed.has(tool));
@@ -6244,20 +6249,9 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       : [
           {
             id: "docs",
-            name: "Document Search",
+            name: "Knowledge",
             url: firstPartyDocsMcpUrl,
-            allowedTools: [
-              "search_documents",
-              "fetch_document_chunk",
-              "list_document_bases",
-              "list_indexed_documents",
-              "knowledge_search",
-              "knowledge_get",
-              "knowledge_browse",
-              "knowledge_fetch",
-              "memory_search",
-              "memory_propose",
-            ],
+            allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
             cacheToolsList: false,
           },
         ]),

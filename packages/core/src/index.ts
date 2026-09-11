@@ -1,4 +1,6 @@
 export * from "./domain/skills";
+export * from "./domain/knowledge";
+export * from "./domain/knowledge-search";
 // @opengeni/core — the framework-agnostic OpenGeni core.
 //
 // WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved
@@ -101,10 +103,6 @@ export * from "./domain/governed-learning-slack-publication";
 export * from "./domain/slack-publication-secret-safety";
 export * from "./domain/company-profile-durable-learning-adapter";
 export * from "./domain/company-profile-agent-admin";
-export * from "./domain/company-brain-governed-writes";
-export * from "./domain/governed-learning-evaluator";
-export * from "./domain/governed-learning-activation";
-export * from "./domain/remember";
 export * from "./domain/slack-bot";
 export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";
@@ -125,3 +123,7 @@ export * from "./editable-artifact-live";
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
 export { withSiteSessionOrigin } from "./site-session-origin";
+
+export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
+
+export { prepareKnowledgeFile } from "./domain/knowledge-files";

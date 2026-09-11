@@ -1,8 +1,9 @@
+import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   correctWorkspaceMemory,
@@ -38,7 +39,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("company-brain-context-selection");
+  shared = await acquirePreKnowledgeTestDatabase("company-brain-context-selection");
   if (!shared && requireRealDatabase) {
     throw new Error("[company-brain-context-selection] real PostgreSQL is required");
   }

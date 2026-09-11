@@ -55,8 +55,6 @@ const legacyBrowserUnusedMethods = [
   "revokeUserResourceGrant",
   "rollbackGoalRevision",
   "rollbackWorkspaceInstructionPolicyRevision",
-  "rollbackWorkspaceLearningPolicyRevision",
-  "searchDocuments",
   "setAtlassianLifecycle",
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",

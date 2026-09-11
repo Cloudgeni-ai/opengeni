@@ -598,13 +598,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     const catalog = await resolveWorkspaceCatalogSettings(db, settings, {
       accountId: grant.accountId,
       workspaceId,
     });
     return c.json(
-      await getActorNewSessionDraft({ settings: catalog.settings, db }, grant, workspaceId),
+      await getActorNewSessionDraft(
+        { settings: catalog.settings, db },
+        grant,
+        workspaceId,
+        authorization,
+      ),
     );
   });
 
@@ -3977,12 +3988,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/publish", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "files:upload",
+    );
     const ctx = await channelAPreamble(c, "files:read", "artifact.publish");
     const request = await parseChannelABody(c, PublishSandboxFileArtifactRequest);
     return c.json(
       await publishSandboxFileArtifact(deps, {
         grant: ctx.grant,
+        authorization,
         session: ctx.session,
         path: request.path,
         signal: ctx.waitSignal,

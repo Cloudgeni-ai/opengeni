@@ -22,4 +22,6 @@ export const embeddingMigrationTail = [
   "0455_external_link_inventory_labels.sql",
   "0456_social_connection_versions.sql",
   "0457_canonical_session_scope_subject.sql",
+  "0458_skill_review_wire_compatibility.sql",
+  "0459_unified_knowledge.sql",
 ];

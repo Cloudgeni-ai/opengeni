@@ -1,3 +1,4 @@
+import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { ArrowRightIcon, BotIcon, BrainCircuitIcon } from "lucide-react";
 import { lazy, Suspense, useLayoutEffect, useRef } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
@@ -184,6 +185,16 @@ function renderActivity(
     }
     case "worker":
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;
+    case "knowledge":
+      return (
+        <KnowledgeReceiptRow
+          outcome={item.outcome}
+          entryId={item.entryId}
+          fileId={item.fileId}
+          title={item.filename}
+          source={Boolean(item.fileId)}
+        />
+      );
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     case "fleet-decision":

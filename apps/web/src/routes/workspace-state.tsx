@@ -26,7 +26,7 @@ import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions"
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 
-import { BrainOverview } from "./agent-brain-overview";
+import { MemoryRoute } from "./memory";
 import { AgentKnowledgePrompt } from "./agent-brain-prompt";
 import {
   useCompanyProfileInventory,
@@ -643,7 +643,7 @@ export function OnboardingProposalInventory({
   return (
     <StateCard
       title="Onboarding proposals"
-      description="Create provenance-linked instruction-policy drafts only. Proposals never activate themselves and do not promote Documents or Memory into prompt authority."
+      description="Create provenance-linked instruction-policy drafts only. Proposals never activate themselves and do not promote Knowledge into prompt authority."
     >
       {canCreate ? (
         <form
@@ -1256,7 +1256,7 @@ export function FocusedInstructions({
           }
         >
           {personalWorkspace
-            ? "You can see the instruction currently applied here. Personal Skills, Documents, and Memory are available now; editing this personal instruction needs the upcoming personal-policy authority."
+            ? "You can see the instruction currently applied here. Personal Skills and Knowledge are available now; editing this personal instruction needs the upcoming personal-policy authority."
             : "You can see the instruction currently applied here. A workspace administrator can change it."}
         </Notice>
       )}
@@ -1267,9 +1267,29 @@ export function FocusedInstructions({
 export function WorkspaceStateRoute({
   workspaceId,
   view,
+  fileId,
 }: {
   workspaceId: string;
   view?: "instructions" | "skills";
+  fileId?: string;
+}) {
+  if (!view)
+    return (
+      <MemoryRoute
+        key={`${workspaceId}:${fileId ?? "all"}`}
+        workspaceId={workspaceId}
+        {...(fileId ? { fileId } : {})}
+      />
+    );
+  return <WorkspaceBehaviorRoute key={workspaceId} workspaceId={workspaceId} view={view} />;
+}
+
+function WorkspaceBehaviorRoute({
+  workspaceId,
+  view,
+}: {
+  workspaceId: string;
+  view: "instructions" | "skills";
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -1307,7 +1327,7 @@ export function WorkspaceStateRoute({
                 ? "Manage personal Skills that follow you, alongside other Skills available here."
                 : "Create reusable instructions agents can fetch when relevant."
               : personalWorkspace
-                ? "Your private instructions, Skills, documents, and Memory, together with company knowledge you can access."
+                ? "Your private Knowledge, instructions, and Skills, together with company knowledge you can access."
                 : "The instructions, skills, documents, and memories available to agents in this workspace."
         }
       />
@@ -1351,13 +1371,6 @@ export function WorkspaceStateRoute({
             ) : null}
             {view === "skills" ? (
               <SkillsPanel workspaceId={workspaceId} personalWorkspace={personalWorkspace} />
-            ) : null}
-            {!view ? (
-              <BrainOverview
-                state={state}
-                workspaceId={workspaceId}
-                personalWorkspace={personalWorkspace}
-              />
             ) : null}
           </div>
         ) : null}

@@ -1487,20 +1487,10 @@ describe("sandbox preparation profiles", () => {
       allowedTools: ["files_get_download_url"],
     });
     expect(settings.mcpServers.find((server) => server.id === "docs")).toMatchObject({
-      name: "Document Search",
+      name: "Knowledge",
       url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp/docs`,
-      allowedTools: [
-        "search_documents",
-        "fetch_document_chunk",
-        "list_document_bases",
-        "list_indexed_documents",
-        "knowledge_search",
-        "knowledge_get",
-        "knowledge_browse",
-        "knowledge_fetch",
-        "memory_search",
-        "memory_propose",
-      ],
+      allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
+      cacheToolsList: false,
     });
   });
 

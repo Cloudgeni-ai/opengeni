@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import {
-  skillReviewHumanInput,
-  type SkillActor,
-  type SkillWriteReceipt,
-} from "@opengeni/contracts";
+import { type SkillActor, type SkillWriteReceipt } from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
   skillReviewResolution,
@@ -101,16 +97,13 @@ export function createWorkspaceSkillTools(input: {
       files: record.files,
     };
   };
-  const withConfirmation = async (receipt: SkillWriteReceipt) => {
+  const withReviewState = async (receipt: SkillWriteReceipt) => {
     const reviewResolution = receipt.skillReview
       ? await skillReviewResolution(input.db, context, receipt.skillReview)
       : undefined;
     return {
       ...receipt,
       ...(reviewResolution ? { reviewResolution } : {}),
-      ...(receipt.skillReview && reviewResolution === "pending"
-        ? { humanInput: skillReviewHumanInput(receipt.skillReview) }
-        : {}),
     };
   };
   const save = async (request: SkillSaveRequest) => {
@@ -118,7 +111,7 @@ export function createWorkspaceSkillTools(input: {
     const base = request.expectedRevisionId
       ? await readSkill(input.db, context, request.skillId, request.expectedRevisionId)
       : null;
-    return withConfirmation(
+    return withReviewState(
       await saveSkill(input.db, {
         ...context,
         ...request,
@@ -181,7 +174,7 @@ export function createWorkspaceSkillTools(input: {
           operationId: request.operationId,
           requestIdentity,
         });
-        if (replay) return withConfirmation(replay.skillReceipt);
+        if (replay) return withReviewState(replay.skillReceipt);
         let source: Omit<InstallPortableSkillInput, "accountId" | "workspaceId" | "subjectId">;
         if (request.source.startsWith("library:")) {
           const loaded = loadSkillLibrarySkill(request.source.slice("library:".length));
@@ -242,7 +235,7 @@ export function createWorkspaceSkillTools(input: {
               }
             : {}),
         });
-        return withConfirmation(installed.skillReceipt);
+        return withReviewState(installed.skillReceipt);
       },
     }),
     createSkillCheckoutAttemptToolDefinition({

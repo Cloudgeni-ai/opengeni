@@ -1,5 +1,7 @@
 # Workspace Learning Policy
 
+> **After migration 0459:** This authority is frozen for historical accepted-attempt proof. New work uses Agent learning defaults and chat/task overrides; per-record source exceptions do not configure new work. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+
 The workspace learning-policy domain controls whether evidence from one source may produce a durable **derived change**. It does not decide which durable authority receives a write and it never turns source evidence into prompt authority by itself.
 
 ## Modes

@@ -4,57 +4,6 @@ import type {
   WorkspaceInstructionPolicyScope,
 } from "./workspace-instruction-policies";
 
-export type WorkspaceStateDocumentStatusCounts = {
-  queued: number;
-  indexing: number;
-  ready: number;
-  failed: number;
-};
-
-export type WorkspaceStateSourceKindCounts = {
-  manual_upload: number;
-  meeting_transcript: number;
-  repository: number;
-  email: number;
-  chat: number;
-  document: number;
-  web: number;
-  other: number;
-};
-
-export type WorkspaceStateDocumentAuthorityKindCounts = {
-  organization: number;
-  workspace: number;
-  personal: number;
-};
-
-export type WorkspaceStateMemoryStatusCounts = {
-  proposed: number;
-  approved: number;
-  rejected: number;
-  active: number;
-  superseded: number;
-  archived: number;
-};
-
-export type WorkspaceStateMemoryKindCounts = {
-  semantic: number;
-  episodic: number;
-  procedural: number;
-  decision: number;
-  preference: number;
-};
-
-export type WorkspaceStateGapCode =
-  | "no_document_bases"
-  | "no_visible_documents"
-  | "failed_documents"
-  | "processing_documents"
-  | "missing_topic_coverage"
-  | "no_memory_records"
-  | "pending_memory_review"
-  | "partial_inventory";
-
 export type WorkspaceStateGovernanceDriftStatus =
   | "identical"
   | "changed"
@@ -188,39 +137,16 @@ export type WorkspaceStateResponse = {
       }
     | {
         availability: "available";
+        authority: "knowledge_entries";
         coverage: "complete" | "partial";
-        baseCount: number;
-        bases: Array<{
+        sampleLimit: 50;
+        entries: Array<{
           id: string;
-          name: string;
-          visibleDocumentCount: number;
-          statusCounts: WorkspaceStateDocumentStatusCounts;
-          latestUpdatedAt: string | null;
-        }>;
-        basesTruncated: boolean;
-        inspectedVisibleDocumentCount: number;
-        documentStatusCounts: WorkspaceStateDocumentStatusCounts;
-        sourceKindCounts: WorkspaceStateSourceKindCounts;
-        authorityKindCounts: WorkspaceStateDocumentAuthorityKindCounts;
-        topics: Array<{ name: string; documentCount: number }>;
-        topicsTruncated: boolean;
-        latestDocumentUpdatedAt: string | null;
-        memorySample: {
-          recordCount: number;
-          sampleLimit: 100;
-          limitReached: boolean;
-          statusCounts: WorkspaceStateMemoryStatusCounts;
-          kindCounts: WorkspaceStateMemoryKindCounts;
-          preferenceAuthority: {
-            kindCountSource: "knowledge_memories_legacy_observations";
-            activeAuthority: "structured_preference_registry";
-          };
-          latestUpdatedAt: string | null;
-        };
-        gaps: Array<{
-          code: WorkspaceStateGapCode;
-          severity: "info" | "warning";
-          relatedCount: number | null;
+          revisionId: string;
+          title: string;
+          kind: "source" | "fact" | "decision" | "requirement" | "incident" | "note" | "group";
+          scope: "organization" | "workspace" | "personal";
+          updatedAt: string;
         }>;
       };
 };

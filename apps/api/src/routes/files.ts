@@ -1,8 +1,11 @@
+import { ZodError } from "zod";
 import {
   CompleteFileUploadResponse,
   CreateFileUploadRequest,
   CreateFileUploadResponse,
   FileAsset,
+  FileListRequest,
+  FileListResponse,
   FileDownloadUrlResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
@@ -17,6 +20,7 @@ import {
   type RetainedOutputUnavailableReason,
 } from "@opengeni/contracts";
 import {
+  withSessionRlsActorContext,
   claimFileUploadCleanup,
   completeFileUploadCleanup,
   completeFileUpload,
@@ -26,6 +30,7 @@ import {
   recordAuditEvent,
   getGeneratedVideoArtifact,
   getFilesForSubject,
+  listFilesForSubject,
   getRetainedFileArtifact,
   getRetainedScreenshotArtifact,
   requireFileForSubject,
@@ -37,6 +42,8 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  fileOwnerContextForAccess,
+  requireAccessGrantAuthorization,
   grantHasAgentAttemptAuthority,
   requireAccessGrant,
   requireLiveAgentAttemptAuthorization,
@@ -58,6 +65,31 @@ import {
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
+
+  const fileRequestAuthority = new WeakMap<Request, { owner: string | null; agent: boolean }>();
+  // This scope covers metadata, original bytes, range reads and finalization.
+  // A service/agent subject string alone cannot unlock a personal attachment.
+  for (const path of [
+    "/v1/workspaces/:workspaceId/files",
+    "/v1/workspaces/:workspaceId/files/*",
+    "/v1/workspaces/:workspaceId/artifacts/*",
+  ]) {
+    app.use(path, async (c, next) => {
+      const permission = c.req.path.includes("/files/uploads") ? "files:upload" : "files:read";
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        c.req.param("workspaceId") ?? "",
+        permission,
+      );
+      const actor = await fileOwnerContextForAccess(deps, access, permission);
+      fileRequestAuthority.set(c.req.raw, {
+        owner: actor.privateFileOwnerSubjectId ?? null,
+        agent: access.grant.principalKind === "agent_attempt",
+      });
+      return withSessionRlsActorContext(actor, next);
+    });
+  }
 
   app.all("/v1/workspaces/:workspaceId/mcp/files", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -93,20 +125,21 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         }
       });
     }
-    let grant: Awaited<ReturnType<typeof requireAccessGrant>>;
+    let access: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>;
     try {
-      grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+      access = await requireAccessGrantAuthorization(c, deps, workspaceId, "files:read");
     } catch (error) {
       if (deps.settings.mcpOauthEnabled && error instanceof HTTPException && error.status === 401) {
         c.header("www-authenticate", mcpOAuthAuthenticateHeader(deps, new URL(c.req.url).pathname));
       }
       throw error;
     }
+    const { grant } = access;
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
-      const server = buildFilesMcpServer(deps, grant);
+      const server = buildFilesMcpServer(deps, access);
       await server.connect(transport);
       return await transport.handleRequest(c.req.raw);
     });
@@ -121,6 +154,12 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const payload = CreateFileUploadRequest.parse(await c.req.json());
+    const privateOwner = fileRequestAuthority.get(c.req.raw)?.owner ?? null;
+    const personal =
+      payload.scope === "personal" ||
+      (fileRequestAuthority.get(c.req.raw)?.agent && privateOwner !== null);
+    if (personal && !privateOwner)
+      throw new HTTPException(403, { message: "Personal uploads require the authenticated owner" });
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
@@ -144,6 +183,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       fileId,
+      privateOwnerSubjectId: personal ? privateOwner : null,
       filename: payload.filename,
       safeFilename,
       contentType: payload.contentType,
@@ -338,6 +378,31 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const file = await completeAndRecordUsage();
     return c.json(CompleteFileUploadResponse.parse({ file }));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/files", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const parsed = FileListRequest.safeParse({
+      ...c.req.query(),
+      ...(c.req.query("limit") !== undefined ? { limit: Number(c.req.query("limit")) } : {}),
+    });
+    if (!parsed.success) throw new HTTPException(422, { message: "Invalid file list request" });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      FileListResponse.parse(
+        await listFilesForSubject(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          ...parsed.data,
+        }).catch((error: unknown) => {
+          if (error instanceof ZodError)
+            throw new HTTPException(422, { message: "Invalid file cursor" });
+          throw error;
+        }),
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/files/:fileId", async (c) => {

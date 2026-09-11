@@ -5,15 +5,13 @@ import type {
   WorkspaceLearningPolicySnapshot,
 } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
-import {
-  GovernedLearningActivationConflictError,
-  GovernedLearningEvaluationAuthorityError,
-} from "@opengeni/db";
+import { GovernedLearningEvaluationAuthorityError } from "../../db/test/fixtures/pre-0459/governed-learning-evaluator";
+import { GovernedLearningActivationConflictError } from "@opengeni/db";
 import {
   createCompanyBrainGovernedWriteRouter,
   createCompanyBrainLearningPolicyRouter,
   derivedGovernedLearningOperationId,
-} from "../src/domain/company-brain-governed-writes";
+} from "./fixtures/pre-0459/company-brain-governed-writes";
 
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000101";
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000102";
