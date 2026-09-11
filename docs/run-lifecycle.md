@@ -869,7 +869,14 @@ their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
 sandbox session before the first model call. This performs no second clone,
 copy, or manifest materialization. With no repository resource, that workspace
-discovery capability is absent and cannot force provisioning.
+discovery capability is absent and cannot force provisioning. Repository descriptors
+carry an exact `repository:` identifier and `repository_skill_read` reader; that
+sandbox capability reads current files in place, including referenced text and
+bounded file inventories. Configured `skill_read` stays sandbox-free and does
+not resolve repository names. Identifiers cannot silently switch between these
+sources, even when names match. Repository metadata uses the same YAML parser as
+portable Skills. The repository index is fixed for the bound capability; reads
+observe live edits or report missing files, and rebinding refreshes discovery.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
 materialization when lazy provisioning is enabled. The worker binds and resolves

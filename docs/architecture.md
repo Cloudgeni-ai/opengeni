@@ -870,16 +870,18 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `skill_read`,
+`write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
+Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
+managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
+
 Repository `.agents/skills` contains only maintainer (`opengeni`) and external
-integration (`opengeni-client`) guidance. Runtime skills are authored directly in
-`packages/runtime/src/bundled_*_skills`; these directories are authoritative and
-shipped as runtime assets, without repository-agent copies or a synchronization step.
+integration (`opengeni-client`) guidance. Runtime skills live in
+`packages/runtime/src/bundled_*_skills`, shipped without repository-agent copies.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
