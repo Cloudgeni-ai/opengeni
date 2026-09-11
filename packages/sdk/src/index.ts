@@ -1,4 +1,9 @@
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
+export type {
+  PluginDiscoveryItem,
+  PluginDiscoveryPage,
+} from "@opengeni/contracts/plugin-discovery";
 export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
 export type {
   SiteToolBridge,

@@ -8,6 +8,7 @@ import { PluginDiscovery as Catalog, PluginDetails } from "@opengeni/react/conne
 import type { PluginDiscoveryItem } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Sheet, SheetContent, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import { Button } from "@/components/ui/button";
 
 const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
 
@@ -18,10 +19,12 @@ export function PluginDiscovery({
   canManage = false,
   onChanged,
   onOpenConnection,
+  onManageInstalled,
   installedPlugins = EMPTY_INSTALLED_PLUGINS,
 }: {
   installedPlugins?: PluginInstallationSummary[];
   onOpenConnection?: (item: CapabilityCatalogItem) => void;
+  onManageInstalled?: (plugin: PluginInstallationSummary, opener: HTMLElement) => void;
   canManage?: boolean;
   onChanged?: () => void;
   client: OpenGeniBrowserClient;
@@ -29,6 +32,8 @@ export function PluginDiscovery({
   query: string;
 }) {
   const [selected, setSelected] = useState<PluginDiscoveryItem | null>(null);
+  const [selectedInstallation, setSelectedInstallation] =
+    useState<PluginInstallationSummary | null>(null);
   const [connections, setConnections] = useState<CapabilityCatalogItem[]>([]);
   useEffect(() => {
     let active = true;
@@ -101,6 +106,7 @@ export function PluginDiscovery({
       const item = await client.getInstalledPluginDetails(workspaceId, plugin.pluginKey);
       setInstalled((previous) => new Set([...previous, item.id]));
       setError(null);
+      setSelectedInstallation(plugin);
       setSelected(item);
     } catch {
       setError("Could not load plugin details.");
@@ -190,6 +196,7 @@ export function PluginDiscovery({
           opener.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
           setError(null);
+          setSelectedInstallation(null);
           setSelected(item);
         }}
       />
@@ -237,6 +244,22 @@ export function PluginDiscovery({
                 error={error}
                 {...(canManage ? { onInstall: () => void install(selected) } : {})}
               />
+              {selectedInstallation && onManageInstalled ? (
+                <div className="border-t border-border p-4">
+                  <Button
+                    variant="outline"
+                    onClick={(event) => {
+                      setSelected(null);
+                      onManageInstalled(
+                        selectedInstallation,
+                        opener.current ?? event.currentTarget,
+                      );
+                    }}
+                  >
+                    Manage installation
+                  </Button>
+                </div>
+              ) : null}
             </>
           ) : null}
         </SheetContent>

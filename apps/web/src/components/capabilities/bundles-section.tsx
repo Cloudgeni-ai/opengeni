@@ -441,6 +441,10 @@ export function BundlesSection({
           ) : null}
           <PluginDiscovery
             installedPlugins={source.plugins}
+            onManageInstalled={(plugin, element) => {
+              const row = rows.find((candidate) => candidate.id === `plugin:${plugin.pluginKey}`);
+              if (row) open(row, element);
+            }}
             onOpenConnection={onOpenCatalogItem}
             client={client}
             workspaceId={workspaceId}

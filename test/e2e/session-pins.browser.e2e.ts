@@ -333,14 +333,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       await workspaceFromPage(page);
-      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
       expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
       await page.setViewportSize({ width: 1280, height: 600 });
       await page.getByRole("button", { name: "More", exact: true }).click();
-      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
       await page.getByRole("button", { name: "Less", exact: true }).click();
-      expect(await page.getByRole("link", { name: "Plugins", exact: true }).count()).toBe(0);
+      expect(await page.getByRole("link", { name: "Capabilities", exact: true }).count()).toBe(0);
       for (const height of [400, 300]) {
         await page.setViewportSize({ width: 1280, height });
         const viewport = page.locator("[data-rail-scroll-viewport]");
@@ -385,7 +385,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         expect(layout.settingsClickable).toBe(true);
       }
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      await page.getByRole("link", { name: "Capabilities", exact: true }).waitFor();
       expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
       expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
     } finally {
