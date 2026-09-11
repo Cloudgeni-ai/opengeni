@@ -4118,8 +4118,15 @@ describe("runtime event normalization", () => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
     return instructions;
   };
-  const withOperationalInstructions = (instructions: string) =>
-    `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions}`;
+  const DEFAULT_SKILL_CATALOG = [
+    "## Skills",
+    "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
+    "Management tools are lazy and available through tool search.",
+    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
+    '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+  ].join("\n");
+  const withOperationalInstructions = (instructions: string, sessionInstructions?: string) =>
+    `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions} ${DEFAULT_SKILL_CATALOG}${sessionInstructions ? ` ${sessionInstructions}` : ""}`;
   const EXPECTED_DEFAULT_INSTRUCTIONS = withOperationalInstructions(
     HISTORICAL_DEFAULT_INSTRUCTIONS,
   );
@@ -4215,7 +4222,8 @@ describe("runtime event normalization", () => {
     // Exact ordering: workspace persona + CORE first, session instructions last.
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`,
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")}`,
+        "SESSION RULE: always answer in French.",
       ),
     );
     // And it rides the same application-owned instructions string, never a message.
@@ -4278,7 +4286,8 @@ describe("runtime event normalization", () => {
 
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory}`,
+        "SESSION RULE: always answer in French.",
       ),
     );
     expect(staticInstructions(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
@@ -4491,7 +4500,8 @@ describe("runtime event normalization", () => {
     // then the session slice last (host/session specificity wins).
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE}`,
+        "SESSION RULE: always answer in French.",
       ),
     );
     expect(
@@ -4512,7 +4522,8 @@ describe("runtime event normalization", () => {
 
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory}`,
+        "SESSION RULE: always answer in French.",
       ),
     );
     expect(
@@ -11377,10 +11388,10 @@ describe("runtime Skill activation", () => {
     ],
   };
 
-  test("without explicit activation the domain Skill index is empty", () => {
+  test("without explicit activation only default document parsing is indexed", () => {
     const composition = composeRuntimeSkills([]);
-    const index = composition.index;
-    expect(index).toEqual([]);
+    expect(composition.configuredNames).toEqual([]);
+    expect(composition.index.map((entry) => entry.name)).toEqual(["document-parsing"]);
   });
 
   test("artifact skills join the index when their canonical tool surface is available", () => {

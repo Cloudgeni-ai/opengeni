@@ -11,25 +11,25 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   const markdown = await Bun.file(
     new URL("../src/bundled_project_skills/opengeni-projects/SKILL.md", import.meta.url),
   ).text();
-  const [artifact] = loadNativeToolSkillArtifacts({
+  const artifact = loadNativeToolSkillArtifacts({
     projects: true,
     editableArtifacts: false,
     videoGeneration: false,
-  });
+  }).find((entry) => entry.name === "opengeni-projects");
   expect(artifact?.name).toBe("opengeni-projects");
   expect(artifact?.files).toEqual([{ path: "SKILL.md", content: markdown }]);
   const composition = composeRuntimeSkills([]);
   expect(composition.nativeToolNames).not.toContain("opengeni-projects");
-  expect(composition.selections).toEqual([]);
-  expect(composition.index).toEqual([]);
+  expect(composition.configuredNames).toEqual([]);
+  expect(composition.index.map((entry) => entry.name)).toEqual(["document-parsing"]);
 });
 
 test("every compute backend inspects only selected Project descriptors with no eager loader", () => {
-  const [artifact] = loadNativeToolSkillArtifacts({
+  const artifact = loadNativeToolSkillArtifacts({
     projects: true,
     editableArtifacts: false,
     videoGeneration: false,
-  });
+  }).find((entry) => entry.name === "opengeni-projects");
   if (!artifact) throw new Error("Missing Projects artifact");
   for (const sandboxBackend of ["none", "local", "docker", "modal", "selfhosted"] as const) {
     for (const selected of [false, true]) {

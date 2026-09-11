@@ -207,7 +207,7 @@ describe("custom API control center browser acceptance", () => {
       const dialog = page.getByRole("dialog");
       await expectVisible(dialog);
       await dialog.getByLabel("API URL or domain").fill("linear.example.test/graphql");
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await dialog.getByRole("button", { name: "Find tools" }).click();
 
       await expectText(dialog, "GraphQL introspection requires authentication");
       await expectText(dialog, "Create a new Connection");
@@ -234,7 +234,7 @@ describe("custom API control center browser acceptance", () => {
       const finance = page.locator('[data-custom-api-instance="finance"]');
       await finance.getByRole("button", { name: "Check for updates" }).click();
       const dialog = page.getByRole("dialog");
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await dialog.getByRole("button", { name: "Find tools" }).click();
 
       await expectText(dialog, "Immutable preview ready");
       await expectText(dialog, "1 added, 0 removed, 2 unchanged tools");
@@ -293,7 +293,7 @@ describe("custom API control center browser acceptance", () => {
       await loading.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "domcontentloaded",
       });
-      await expectVisible(loading.locator("[data-capability-catalog-skeleton]"));
+      await expectVisible(loading.getByRole("status").filter({ hasText: "Loading connections" }));
       expect(await loading.getByRole("button", { name: "Refresh", exact: true }).count()).toBe(0);
       await loading.screenshot({ path: `${evidenceDir}pass-5c-loading.png`, fullPage: true });
     } finally {
@@ -429,7 +429,7 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const row = page.getByRole("button", { name: "Outlook Mail. Connected", exact: true });
+      const row = page.getByRole("button", { name: "View Outlook Mail details", exact: true });
       await expectVisible(row);
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
@@ -528,7 +528,7 @@ async function openCapabilities(page: Page): Promise<void> {
 
 /** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
-  const row = page.getByRole("button", { name: /^Outlook Mail\. / });
+  const row = page.getByRole("button", { name: "View Outlook Mail details", exact: true });
   await expectVisible(row);
   await row.click();
   const sheet = page.locator('[data-integration-sheet="outlook-mail"]');
@@ -633,6 +633,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {

@@ -1225,10 +1225,10 @@ describe("scheduled task personal MCP authority", () => {
     if (!historical) throw new Error("Historical migration test requires PostgreSQL");
     const historicalAdmin = postgres(historical.databaseUrl, { max: 1, onnotice: () => undefined });
     try {
-      // 0460 deliberately extends this function for ordinary private source
+      // 0461 deliberately extends this function for ordinary private source
       // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
       await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0460_unified_knowledge.sql')`;
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0461_unified_knowledge.sql')`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
         new URL(
@@ -1246,7 +1246,7 @@ describe("scheduled task personal MCP authority", () => {
         await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
       expect(after).toEqual(before);
       await expect(
-        admin.begin(async (tx) => {
+        historicalAdmin.begin(async (tx) => {
           const drifted = String(before!.definition).replace(
             "receipt.source_execution_digest = OLD.task_execution_digest",
             "receipt.source_execution_digest <> OLD.task_execution_digest",

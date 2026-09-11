@@ -1,6 +1,6 @@
 const EMPTY_CONNECTIONS: Record<string, boolean> = {};
 import { useState } from "react";
-import { pluginMcpUnavailableReason, type PluginDiscoveryItem } from "@opengeni/contracts";
+import { pluginMcpUnavailableReason, type PluginDiscoveryItem } from "@opengeni/sdk";
 import { Markdown } from "./components/markdown";
 
 const componentLabels: Record<string, string> = {

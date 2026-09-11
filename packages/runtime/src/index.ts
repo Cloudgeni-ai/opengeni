@@ -2433,6 +2433,7 @@ export function buildOpenGeniAgent(
   // are equivalent. Reading supplied Skill files never needs either.
   const filesystemAvailable = (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    defaults: !hostSuppliedSkillCatalog,
     editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
     sites: !hostSuppliedSkillCatalog && filesystemAvailable,
     videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),

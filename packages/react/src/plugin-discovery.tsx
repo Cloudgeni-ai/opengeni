@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/contracts";
+import type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/sdk";
 export type PluginDiscoveryProps = {
   client: {
     discoverPlugins(

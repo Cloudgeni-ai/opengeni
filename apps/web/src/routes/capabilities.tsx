@@ -30,7 +30,7 @@ import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
 import { usePacks, useVariableSets } from "@opengeni/react";
-import { PlugIcon, PlusIcon } from "lucide-react";
+import { PlugIcon, PlusIcon, Loader2Icon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
@@ -1466,6 +1466,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                     Add connection
                   </Button>
                 </div>
+              ) : null}
+              {loading ? (
+                <p role="status" className="my-4 flex items-center gap-2 text-sm text-fg-muted">
+                  <Loader2Icon aria-hidden="true" className="size-4 animate-spin" />
+                  Loading connections…
+                </p>
               ) : null}
               <InstalledStrip
                 title="Connected"

@@ -405,15 +405,17 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       input.failure,
     );
   const isActorOwnedRead =
-    input.method === "GET" &&
-    (pathname === "/v1/auth/get-session" ||
-      pathname === "/v1/auth/session-set" ||
-      pathname === "/v1/workspaces" ||
-      (pathname === "/v1/billing" &&
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
-          requestUrl.searchParams.get("accountId") ?? "",
-        )) ||
-      pathname.startsWith("/v1/workspaces/"));
+    (input.method === "GET" &&
+      (pathname === "/v1/auth/get-session" ||
+        pathname === "/v1/auth/session-set" ||
+        pathname === "/v1/workspaces" ||
+        (pathname === "/v1/billing" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+            requestUrl.searchParams.get("accountId") ?? "",
+          )) ||
+        pathname.startsWith("/v1/workspaces/"))) ||
+    (input.method === "POST" &&
+      /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname));
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
   );

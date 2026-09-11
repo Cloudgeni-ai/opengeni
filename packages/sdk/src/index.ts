@@ -1235,3 +1235,6 @@ export type {
   FeedbackSubmissionResponse,
 } from "./feedback";
 export type * from "./knowledge";
+
+export type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/contracts";
+export { pluginMcpUnavailableReason } from "@opengeni/contracts/mcp-endpoint";

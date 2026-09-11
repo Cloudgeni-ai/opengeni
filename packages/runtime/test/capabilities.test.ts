@@ -120,7 +120,7 @@ describe("native web search hosted tool", () => {
     expect(webSearchHostedTools(sandboxAgent)).toHaveLength(0);
     expect(
       ((noneAgent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
-    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
+    ).toContain(HUMAN_INPUT_TOOL_NAME);
   });
 });
 

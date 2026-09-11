@@ -114,8 +114,9 @@ describe("Slack installation binding browser acceptance", () => {
 });
 
 async function openSlackSettings(page: Page, chip: string) {
-  const row = page.getByRole("button", { name: `Slack. ${chip}`, exact: true });
+  const row = page.getByRole("button", { name: "View Slack details", exact: true });
   await row.waitFor({ state: "visible", timeout: 15_000 });
+  await expectText(row.locator(".."), chip);
   await row.click();
   const settings = page.getByRole("region", { name: "Slack settings" });
   await settings.waitFor({ state: "visible", timeout: 15_000 });
@@ -197,6 +198,8 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       return json({ definitions: [] });
     }

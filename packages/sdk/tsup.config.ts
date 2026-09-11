@@ -5,8 +5,8 @@ import { defineConfig } from "tsup";
 // artifact entries import canonical bounds/codecs from @opengeni/contracts.
 //
 // Every @opengeni/* specifier stays external except the dependency-free,
-// client-safe session-title policy leaf. Bundle that exact leaf so browser
-// display titles and durable titles share one implementation without making
+// client-safe policy leaves. Bundle these exact leaves so browser
+// display titles, site paths, and MCP endpoint checks share implementations without making
 // the contracts package runtime reachable from the ordinary SDK root. Keeping
 // every other workspace edge external remains load-bearing for the publish
 // closure guard: a stray server import stays visible in dist.
@@ -41,5 +41,9 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: [/^@opengeni\//],
-  noExternal: ["@opengeni/contracts/session-titles", "@opengeni/contracts/site-session-http"],
+  noExternal: [
+    "@opengeni/contracts/mcp-endpoint",
+    "@opengeni/contracts/session-titles",
+    "@opengeni/contracts/site-session-http",
+  ],
 });

@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./mcp-endpoint": {
+      "types": "./src/mcp-endpoint.ts",
+      "default": "./src/mcp-endpoint.ts"
+    },
     "./host-mcp-bindings": {
       "types": "./src/host-mcp-bindings.ts",
       "default": "./src/host-mcp-bindings.ts"
