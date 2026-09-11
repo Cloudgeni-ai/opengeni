@@ -15,6 +15,15 @@ describe("public repository hygiene", () => {
     ).toEqual([]);
   });
 
+  test("does not mistake repository URL path segments for local home directories", () => {
+    expect(
+      auditPublicText(
+        "catalog.json",
+        "https://github.com/example/plugins/blob/main/skills/home/SKILL.md",
+      ),
+    ).toEqual([]);
+  });
+
   test("rejects personal paths, mail, private worktrees, issues, and agent docs", () => {
     const personalHome = ["/home/", "alice/private-repo"].join("");
     const personalMail = ["alice@", "gmail.com"].join("");

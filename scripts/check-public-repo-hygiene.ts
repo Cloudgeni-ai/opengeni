@@ -41,7 +41,8 @@ const RAW_EVIDENCE_EXTENSIONS = new Set([
 ]);
 const PERSONAL_MAIL =
   /\b[A-Z0-9._%+-]+@(?:fastmail|gmail|googlemail|hey|hotmail|icloud|live|mac|me|outlook|protonmail|proton|yahoo)\.(?:com|me|net|org|[A-Z]{2})\b/gi;
-const HOME_PATH = /\/(?:home|Users)\/([A-Za-z0-9._-]+)(?=\/|[^A-Za-z0-9._-]|$)/g;
+const HOME_PATH =
+  /(?<![A-Za-z0-9._~%/\-])\/(?:home|Users)\/([A-Za-z0-9._-]+)(?=\/|[^A-Za-z0-9._-]|$)/g;
 const PERSONAL_DEVICE = new RegExp(
   ["\\bjor", "gen?-(?:desktop|laptop|macbook|mbp|workstation)\\b"].join(""),
   "gi",
