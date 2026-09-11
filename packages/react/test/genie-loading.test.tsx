@@ -212,3 +212,29 @@ test("work mixed with startup receipts uses the normal Steps disclosure", async 
   expect(r.container.querySelector("button[aria-expanded]")).not.toBeNull();
   await r.unmount();
 });
+
+test("hosts can replace loading with an arbitrary component", async () => {
+  const r = await renderComponent(
+    <MessageTimeline
+      items={[phase()]}
+      genieLoading={{
+        render: ({ startedAt }) => <div data-start={startedAt}>Custom preparation</div>,
+      }}
+    />,
+  );
+  expect(r.container.textContent).toContain("Custom preparation");
+  expect(r.container.querySelector("canvas")).toBeNull();
+  await r.unmount();
+});
+
+test("hosts can customize phrases and orb dimensions", async () => {
+  const r = await renderComponent(
+    <MessageTimeline
+      items={[phase()]}
+      genieLoading={{ phrases: ["Custom wish"], orb: { size: 96 } }}
+    />,
+  );
+  expect(r.container.textContent).toContain("Custom wish");
+  expect((r.container.querySelector(".og-genie-orb") as HTMLElement).style.width).toBe("96px");
+  await r.unmount();
+});

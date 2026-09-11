@@ -28,7 +28,7 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
   Component,
@@ -2379,6 +2379,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
   liveEntranceEnabled,
   context,
 }: TimelineGroupEntryProps) {
+  const reducedMotion = useReducedMotion();
   const { behavior, userMessageDisclosureContext } = context;
   const contextCompactionCount =
     group.kind === "turn"
@@ -2395,16 +2396,31 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
         <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
           <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
             <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
-              <TimelineGroupView
-                {...behavior}
-                group={group}
-                foldLiveCluster={isAgentProgress(nextGroup)}
-                startupDismissed={startupDismissed}
-                trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
-                contextCompactionCount={
-                  contextCompactionCount > 0 ? contextCompactionCount : undefined
-                }
-              />
+              <AnimatePresence initial={false}>
+                <motion.div
+                  key={
+                    !startupDismissed &&
+                    group.kind === "activity" &&
+                    group.items.every((item) => item.kind === "startup-phase")
+                      ? "preparation"
+                      : "content"
+                  }
+                  initial={false}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: reducedMotion ? 0 : 0.2 }}
+                >
+                  <TimelineGroupView
+                    {...behavior}
+                    group={group}
+                    foldLiveCluster={isAgentProgress(nextGroup)}
+                    startupDismissed={startupDismissed}
+                    trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+                    contextCompactionCount={
+                      contextCompactionCount > 0 ? contextCompactionCount : undefined
+                    }
+                  />
+                </motion.div>
+              </AnimatePresence>
             </UserMessageDisclosureProvider>
           </TimelineGroupRenderBoundary>
         </EntranceAnimationProvider>

@@ -31,3 +31,16 @@ Hosts can customize the SDK without editing its source:
 
 Orb states use the `thinking-orbs` component's typed options. Omitted settings
 keep the defaults; an empty phrase list also falls back to the defaults.
+
+For an entirely different visual, supply `genieLoading.render`:
+
+```tsx
+<MessageTimeline
+  events={events}
+  genieLoading={{ render: () => <MyLoadingIndicator /> }}
+/>
+```
+
+The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optionally
+keep the diagnostics affordance. The SDK still owns loading visibility and exit
+transitions. Returning `null` hides the visual.

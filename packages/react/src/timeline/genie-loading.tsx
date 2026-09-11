@@ -1,8 +1,23 @@
 import { ThinkingOrb } from "thinking-orbs";
 import { useThemeType } from "../lib/use-theme-type";
-import { createContext, useContext, useEffect, useState, type ComponentProps } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
+
+export type GenieLoadingRenderProps = {
+  startedAt: string;
+  detailsOpen: boolean;
+  onShowDetails: () => void;
+};
 
 export type GenieLoadingOptions = {
+  /** Replace the visual while preserving SDK loading visibility and transitions. */
+  render?: (props: GenieLoadingRenderProps) => ReactNode;
   phrases?: readonly string[];
   orb?: Pick<ComponentProps<typeof ThinkingOrb>, "state" | "size" | "speed">;
 };
@@ -52,9 +67,18 @@ export function GenieLoading({
     const timer = window.setInterval(update, 5_000);
     return () => window.clearInterval(timer);
   }, [startedAt, phrases]);
+  if (options?.render) return options.render({ startedAt, detailsOpen, onShowDetails });
   return (
     <div className="og-genie-loading">
-      <div className="og-genie-orb" aria-hidden="true">
+      <div
+        className="og-genie-orb"
+        aria-hidden="true"
+        style={{
+          width: options?.orb?.size ?? 64,
+          height: options?.orb?.size ?? 64,
+          flexBasis: options?.orb?.size ?? 64,
+        }}
+      >
         <ThinkingOrb state="searching" size={64} theme={theme} speed={0.8} {...options?.orb} />
       </div>
       <div className="og-genie-copy">
