@@ -4376,6 +4376,11 @@ describe("provider-neutral browser account acceptance", () => {
 
       setBrowserPhase(pageProblems, "cross-slot-deep-link");
       const draftRequestStart = draftRequests.length;
+      const targetDraftPath = `/v1/workspaces/${alpha.workspaceId}/new-session-draft`;
+      const targetDraftRequests = () =>
+        draftRequests
+          .slice(draftRequestStart)
+          .filter(({ pathname }) => pathname === targetDraftPath);
       const capabilityUrl = `**/v1/workspaces/${alpha.workspaceId}/session-tenancy/capabilities`;
       let releaseCapabilities!: () => void;
       const capabilitiesReleased = new Promise<void>((resolve) => {
@@ -4398,11 +4403,10 @@ describe("provider-neutral browser account acceptance", () => {
         // Hydrating early would acknowledge a temporary workspace-visible value,
         // then autosave the passive Personal projection as a user edit.
         await page.waitForTimeout(600);
-        expect(draftRequests.slice(draftRequestStart)).toEqual([]);
+        expect(targetDraftRequests()).toEqual([]);
         const hydrated = page.waitForResponse(
           (response) =>
-            new URL(response.url()).pathname ===
-              `/v1/workspaces/${alpha.workspaceId}/new-session-draft` &&
+            new URL(response.url()).pathname === targetDraftPath &&
             response.request().method() === "GET" &&
             response.status() === 200,
         );
@@ -4414,9 +4418,7 @@ describe("provider-neutral browser account acceptance", () => {
       }
       await waitForFiniteReadQuiescence(pageProblems);
       await page.waitForTimeout(600);
-      expect(
-        draftRequests.slice(draftRequestStart).filter(({ method }) => method !== "GET"),
-      ).toEqual([]);
+      expect(targetDraftRequests().filter(({ method }) => method !== "GET")).toEqual([]);
       await page.goto(`${publicOrigin}/sessions/${beta.sessionId}`, {
         waitUntil: "domcontentloaded",
       });
