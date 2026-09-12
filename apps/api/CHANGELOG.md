@@ -1,5 +1,45 @@
 # @opengeni/api-router
 
+## 2.13.0
+
+### Minor Changes
+
+- 935af4e: Add an authorized standalone session inline MCP credential rotation operation with durable idempotent receipts, exact destination and credential-version fencing, and atomic quiescence checks. Expose the operation through HTTP and the SDK without sending messages, scheduling work, retrying external mutations, or widening connection or attempt authority. Keep existing message-bound credential updates unchanged.
+
+### Patch Changes
+
+- 8a60104: Record Gmail startup authorization failures in diagnostics and let agents request in-conversation consent for enabled personal integrations whose tools are unavailable. Personal access continues to require the owner's explicit session grant.
+- d08dbb6: Support capability-gated transactional large-file edits on Connected Machines,
+  with bounded transfers, verified outcomes, and live authorization checks. Keep
+  legacy agent writes compatible and report oversized outbound requests accurately
+  instead of marking a healthy agent offline. Native agent support is required;
+  unsupported filesystem semantics fail closed.
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4661bbd]
+- Updated dependencies [8a60104]
+- Updated dependencies [a1bb8db]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [e41027c]
+- Updated dependencies [1598498]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [22a9e4d]
+- Updated dependencies [d08dbb6]
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@2.6.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/config@1.2.0
+  - @opengeni/tool-gateway@0.1.8
+  - @opengeni/codemode@0.5.7
+  - @opengeni/core@2.10.0
+  - @opengeni/agent-proto@0.6.0
+  - @opengeni/documents@0.8.28
+  - @opengeni/events@0.4.26
+  - @opengeni/artifact-tool@0.3.27
+  - @opengeni/github@0.7.11
+  - @opengeni/observability@0.8.27
+  - @opengeni/storage@0.2.128
+
 ## 2.12.4
 
 ### Patch Changes

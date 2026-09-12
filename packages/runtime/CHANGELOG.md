@@ -1,5 +1,37 @@
 # @opengeni/runtime
 
+## 2.6.0
+
+### Minor Changes
+
+- e41027c: Add opt-in MCP operation outcome recovery through a configured read-only provider receipt tool. Persist exact operation identity before dispatch, retain original invocation outcomes separately from late receipts, and revalidate current authority across accepted attempts without replaying mutations. Preserve arbitrary SDK call IDs as correlation rather than replacing UUID operation identity.
+
+  Apply the additive operation-ledger migration and runtime-role provisioning, and upgrade all claim-capable workers to the membership-first lock order before enabling provider mappings. Providers must implement the documented observation contract; unsupported providers and historical operations without captured authority are not automatically recoverable.
+
+- d08dbb6: Support capability-gated transactional large-file edits on Connected Machines,
+  with bounded transfers, verified outcomes, and live authorization checks. Keep
+  legacy agent writes compatible and report oversized outbound requests accurately
+  instead of marking a healthy agent offline. Native agent support is required;
+  unsupported filesystem semantics fail closed.
+
+### Patch Changes
+
+- 4661bbd: Recommend a 10-second default wait for foreground commands in agent instructions.
+- 8a60104: Record Gmail startup authorization failures in diagnostics and let agents request in-conversation consent for enabled personal integrations whose tools are unavailable. Personal access continues to require the owner's explicit session grant.
+- 1598498: Read repository Skill descriptions as YAML and advertise exact source-qualified identifiers with a live repository reader. Preserve sandbox-free managed Skill reading and sandbox attempt authorization. Valid multiline YAML descriptions retain their text; symlink entrypoints are excluded consistently with repository reads.
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [e41027c]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [d08dbb6]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/config@1.2.0
+  - @opengeni/tool-gateway@0.1.8
+  - @opengeni/codemode@0.5.7
+  - @opengeni/agent-proto@0.6.0
+
 ## 2.5.3
 
 ### Patch Changes

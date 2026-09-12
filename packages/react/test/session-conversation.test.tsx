@@ -74,6 +74,18 @@ test("complete conversation loads queue and provides queue actions beside compos
     pendingInputAttachment: null,
   };
   const client = fakeClient({
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          sessionId: SESSION_ID,
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "user.message",
+          occurredAt: "2026-09-07T00:00:00Z",
+          payload: { text: "A complete long message. ".repeat(80) },
+        },
+      ] as never,
     getSession: async () =>
       ({
         id: SESSION_ID,
@@ -101,10 +113,28 @@ test("complete conversation loads queue and provides queue actions beside compos
     },
   });
   const view = await renderComponent(
-    <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+    <SessionConversation
+      sessionId={SESSION_ID}
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      userMessageDisclosureLabels={{ showMore: "Afficher davantage", showLess: "Réduire" }}
+    />,
   );
   try {
     await flush(100);
+    const disclosure = view.container.querySelector<HTMLButtonElement>(
+      "[data-og-user-message-disclosure]",
+    )!;
+    expect(disclosure.textContent).toBe("Afficher davantage");
+    await actRun(() => disclosure.click());
+    expect(disclosure.textContent).toBe("Réduire");
+    await view.rerender(
+      <SessionConversation sessionId={SESSION_ID} client={client} workspaceId={WORKSPACE_ID} />,
+    );
+    expect(disclosure.textContent).toBe("Show less");
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    await actRun(() => disclosure.click());
+    expect(disclosure.textContent).toBe("Show more");
     expect(streams).toBe(1);
     expect(view.container.querySelector("textarea")).not.toBeNull();
     const surface = view.container.querySelector("[data-og-conversation]");

@@ -691,6 +691,15 @@ intentional changes should regenerate those snapshots and review the diff.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
+  Pass `disclosureLabels={{ showMore: "Afficher davantage", showLess: "Réduire" }}`
+  to localize a direct instance. For the default timeline, pass the same object
+  as `MessageTimeline.userMessageDisclosureLabels` or
+  `SessionConversation.userMessageDisclosureLabels`; custom `UserMessageBody`
+  renderers inside that timeline inherit these labels too. Each direct label
+  overrides its timeline label independently, then falls back to `Show more`
+  or `Show less`. Changing labels does not reset a message's expanded state.
+  `UserMessageDisclosureLabels` is exported from both `@opengeni/react` and
+  `@opengeni/react/session-ui`.
 - `SessionStatus` / `StatusDot` — status badges; live states breathe.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the
