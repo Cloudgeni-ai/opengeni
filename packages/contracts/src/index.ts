@@ -4476,8 +4476,12 @@ export type ConnectionCredentialPlacement = {
   prefix?: string;
 };
 
+/** Backend-only physical-use fence. Never serialized or accepted from a host response. */
+export const hostMcpCredentialUseGuard: unique symbol = Symbol("hostMcpCredentialUseGuard");
+
 export type McpCredentialResolution =
   | {
+      [hostMcpCredentialUseGuard]?: () => Promise<boolean>;
       status: "ok";
       /** Scope echoes are mandatory and verified before any header is used. */
       accountId: string;

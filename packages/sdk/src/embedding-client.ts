@@ -12,6 +12,54 @@ import type {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
+  /** Server-only organization administration. First registration opts the whole
+   * organization into exact namespace routing, including future workspaces. */
+  async putHostMcpResolver(
+    organizationId: string,
+    externalSource: string,
+    request: import("@opengeni/contracts/host-mcp-resolvers").PutHostMcpResolverRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<import("@opengeni/contracts/host-mcp-resolvers").HostMcpResolver> {
+    return this.requestJson(
+      "PUT",
+      `/v1/organizations/${organizationId}/mcp-credential-resolvers/${encodeURIComponent(externalSource)}`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async getHostMcpResolver(
+    organizationId: string,
+    externalSource: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<import("@opengeni/contracts/host-mcp-resolvers").HostMcpResolver> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-credential-resolvers/${encodeURIComponent(externalSource)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Retains registration identity and namespace opt-in. Replays never restore
+   * a previous endpoint/secret. Use put with the current generation to reactivate. */
+  async revokeHostMcpResolver(
+    organizationId: string,
+    externalSource: string,
+    request: import("@opengeni/contracts/host-mcp-resolvers").RevokeHostMcpResolverRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<import("@opengeni/contracts/host-mcp-resolvers").HostMcpResolver> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/mcp-credential-resolvers/${encodeURIComponent(externalSource)}/revoke`,
+      request,
+      {},
+      options,
+    );
+  }
+
   /** Rotate existing inline credentials only while no credential-consuming work
    * is pending or active. Reuse the operation key and exact request to reconcile
    * a lost response. This operation never schedules or retries model work. */

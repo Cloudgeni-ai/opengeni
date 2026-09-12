@@ -35,6 +35,20 @@ historical evidence: set future exceptions on the relevant chat or scheduled
 task in Settings → Agent learning. Existing category opt-outs are preserved.
 See [Knowledge](knowledge.md) for scope, review and compatibility behavior.
 
+### Native instance resolver registration (0463)
+
+`0463_host_mcp_resolver_registration.sql` adds organization-owned encrypted
+resolver configuration and append-only, metadata-only operation receipts.
+This is a maintenance-only runtime-role contract change: stop old API/control/
+turn workers, supply every application database role, migrate, provision the
+matching roles, and start only matching binaries. Do not restart pre-0463 code.
+Configure `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` consistently across API/workers.
+Thereafter instance registration and rotation require no process restart.
+No existing organization opts in automatically; the first registration enables
+exact namespace routing with no static fallback. See
+[remote host MCP credentials](remote-mcp-credentials.md#native-instance-registration)
+for the explicit legacy-migration acknowledgement and authority boundaries.
+
 ### Host MCP, native-link and Connect authority migrations (0443–0456)
 
 `0443_host_mcp_binding_registry.sql`, `0444_host_mcp_delegations.sql`, and

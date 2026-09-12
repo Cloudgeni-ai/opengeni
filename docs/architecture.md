@@ -1658,6 +1658,18 @@ resolution and every physical use retain native live authority checks. An empty
 realtime session creates no turn authority; its first text Send captures the
 current participant's selection. See [remote host MCP credentials](remote-mcp-credentials.md).
 
+Native remote MCP resolver registration is organization-owned configuration,
+keyed by the authoritative workspace `externalSource`. Only a live organization
+service-admin key administers it; participants cannot choose callback routes.
+Any retained registration opts the organization into exact namespace routing,
+with no static fallback. Endpoint/secret updates preserve registration identity
+and accepted authority but increment a live physical-use transport generation.
+The registry uses native encrypted storage and metadata-only operation receipts;
+it is not a general webhook registry. Canonical sources:
+`packages/core/src/remote-mcp-credentials.ts`,
+`packages/core/src/application/host-mcp-resolvers.ts`, and
+`packages/db/src/host-mcp-resolvers.ts`.
+
 ### Embeddable connection presentation
 
 Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).

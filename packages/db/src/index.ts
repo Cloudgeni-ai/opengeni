@@ -64,6 +64,7 @@ import {
   getExternalLinkTurnAuthorization,
 } from "./external-link-work";
 export * from "./host-mcp-bindings";
+export * from "./host-mcp-resolvers";
 import {
   inheritCausalHostMcpTurnAuthorities,
   inheritChildHostMcpTurnAuthorities,

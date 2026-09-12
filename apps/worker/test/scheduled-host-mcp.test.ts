@@ -1,5 +1,7 @@
 // opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { createNativeRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import {
   acquireOwnerMigratedTestDatabase,
   MemoryEventBus,
@@ -10,6 +12,8 @@ import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import {
   createDb,
+  createOrganizationApiKey,
+  mutateHostMcpResolver,
   createWorkspace,
   ensureExternalIdentity,
   grantWorkspaceAccess,
@@ -56,6 +60,8 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
     const workspace = await createWorkspace(client.db, {
       accountId: account!.id,
       name: "Host schedule",
+      externalSource: "instance:scheduled",
+      externalId: "customer",
     });
     const identity = await ensureExternalIdentity(client.db, {
       accountId: account!.id,
@@ -169,6 +175,7 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
       databaseUrl: shared!.appUrl,
       sandboxBackend: "none",
       hostMcpAuthoritySourceAdmissionEnabled: true,
+      environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
       mcpServers: [mcpServer],
     });
     const activities = createScheduledTaskActivities(
@@ -228,20 +235,60 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
       targetSessionId: request.sessionId,
     });
     let renewals = 0;
+    let resolverActor: { accountId: string; subjectId: string } | undefined;
+    const resolverConfig = {
+      externalSource: "instance:scheduled",
+      encryptionKey: Buffer.alloc(32, 9),
+      legacyConfigured: false,
+    };
+    if (selectionMode === "accepted_turn") {
+      const token = crypto.randomUUID();
+      const key = await createOrganizationApiKey(client.db, {
+        accountId: owner.accountId,
+        name: "Scheduled resolver",
+        prefix: "test",
+        keyHash: createHash("sha256").update(token).digest("hex"),
+        permissions: ["account:admin"],
+      });
+      resolverActor = { accountId: owner.accountId, subjectId: `api_key:${key.id}` };
+      await mutateHostMcpResolver(client.db, resolverActor, {
+        ...resolverConfig,
+        kind: "put",
+        request: {
+          operationId: crypto.randomUUID(),
+          expectedGeneration: 0,
+          url: "https://resolver.example/credentials",
+          bearerToken: "scheduled-secret",
+        },
+      });
+    }
+    const hostCredential = async () => {
+      renewals++;
+      return {
+        status: "ok" as const,
+        accountId: owner.accountId,
+        workspaceId: workspace.id,
+        sessionId: dispatched.sessionId,
+        providerDomain: "host.fixture.invalid",
+        connectionId: "product-account",
+        headers: { Authorization: `Bearer synthetic-${renewals}` },
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      };
+    };
+    const port = createNativeRemoteMcpCredentialsPort(settings, client.db, async (url, init) => {
+      expect(String(url)).toBe("https://resolver.example/credentials");
+      const envelope = JSON.parse(String(init?.body));
+      expect(envelope.request.initiator).toEqual(claim.turn.initiator);
+      expect(envelope.request.connectionRef.hostBinding).toEqual(connectionRef.hostBinding);
+      return Response.json({
+        version: 1,
+        requestId: envelope.requestId,
+        destinationUrl: envelope.request.destinationUrl,
+        resolution: await hostCredential(),
+      });
+    });
     const resolve = buildHostConnectionTokenResolver(
-      async () => {
-        renewals++;
-        return {
-          status: "ok",
-          accountId: owner.accountId,
-          workspaceId: workspace.id,
-          sessionId: dispatched.sessionId,
-          providerDomain: "host.fixture.invalid",
-          connectionId: "product-account",
-          headers: { Authorization: `Bearer synthetic-${renewals}` },
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        };
-      },
+      resolverActor ? port.mcpCredentials! : hostCredential,
       {
         ...request,
         authorizeDurableBinding: (candidate) => authorizeDirectHostMcpUse(client.db, candidate),
@@ -252,6 +299,28 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
     expect(credential.status).toBe("ok");
     if (credential.status !== "ok") throw new Error("No scheduled host credential");
     expect(await credential.authorizeProviderRequest?.()).toBe(true);
+    if (resolverActor) {
+      await mutateHostMcpResolver(client.db, resolverActor, {
+        ...resolverConfig,
+        kind: "revoke",
+        request: { operationId: crypto.randomUUID(), expectedGeneration: 1 },
+      });
+      expect(await credential.authorizeProviderRequest?.()).toBe(false);
+      expect((await resolve({ ...request, connectionRef: configuredRef })).status).toBe(
+        "auth_needed",
+      );
+      await mutateHostMcpResolver(client.db, resolverActor, {
+        ...resolverConfig,
+        kind: "put",
+        request: {
+          operationId: crypto.randomUUID(),
+          expectedGeneration: 2,
+          url: "https://resolver.example/credentials",
+          bearerToken: "rotated-scheduled-secret",
+        },
+      });
+      expect((await resolve({ ...request, connectionRef: configuredRef })).status).toBe("ok");
+    }
     const sourceActor = {
       type: "agent_attempt" as const,
       sessionId: dispatched.sessionId,
@@ -349,7 +418,7 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
     expect(snapshots).toHaveLength(1);
     expect(await credential.authorizeProviderRequest?.()).toBe(false);
     expect((await resolve({ ...request, connectionRef: configuredRef })).status).not.toBe("ok");
-    expect(renewals).toBe(1);
+    expect(renewals).toBe(resolverActor ? 2 : 1);
   }
 }
 

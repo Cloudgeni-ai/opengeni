@@ -212,6 +212,9 @@ describe("release schema contract", () => {
     const agentInstructionNonDestructiveEdits = completeSourceContract.migrations.some(
       (migration) => migration.path === "0462_agent_instruction_non_destructive_edits.sql",
     );
+    const hostMcpResolverRegistration = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0463_host_mcp_resolver_registration.sql",
+    );
     const externalWorkspaceMembershipOperations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0464_external_workspace_membership_operations.sql",
     );
@@ -245,6 +248,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (externalWorkspaceMembershipOperations ? 1 : 0) +
+        (hostMcpResolverRegistration ? 1 : 0) +
         (agentInstructionNonDestructiveEdits ? 1 : 0) +
         (organizationScopedExternalWorkspaces ? 1 : 0) +
         (durableConnectAttempts ? 1 : 0) +
@@ -349,6 +353,9 @@ describe("release schema contract", () => {
                                                                         : "0428_scheduled_task_creator_policy.sql",
       ...(agentInstructionNonDestructiveEdits
         ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
+        : {}),
+      ...(hostMcpResolverRegistration
+        ? { latestMigration: "0463_host_mcp_resolver_registration.sql" }
         : {}),
       ...(externalWorkspaceMembershipOperations
         ? { latestMigration: "0464_external_workspace_membership_operations.sql" }
@@ -1453,6 +1460,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0464_external_workspace_membership_operations.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
       "0459_mcp_operations.sql",
@@ -1730,6 +1738,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
       "0459_mcp_operations.sql",
@@ -1897,6 +1906,7 @@ describe("release schema contract", () => {
       "0436_unobservable_command_idle_drain.sql",
       "0435_skill_chat_confirmation.sql",
       "0462_agent_instruction_non_destructive_edits.sql",
+      "0463_host_mcp_resolver_registration.sql",
       "0464_external_workspace_membership_operations.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),

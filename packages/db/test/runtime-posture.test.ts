@@ -633,6 +633,11 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 2
+            : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+              ? 1
+              : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 12 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
@@ -648,7 +653,9 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1 + 2;
+      expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_resolvers).toEqual(["SELECT", "INSERT", "UPDATE"]);
+      expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_resolver_operations).toEqual(["SELECT", "INSERT"]);
       expect(FORCE_RLS_TABLES).toContain("mcp_operations");
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("mcp_operations");
       expect(RUNTIME_TABLE_PRIVILEGES.mcp_operations).toBeUndefined();

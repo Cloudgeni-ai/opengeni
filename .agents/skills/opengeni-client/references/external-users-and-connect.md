@@ -89,18 +89,37 @@ shared workspace. An explicitly authorized service onboarding operation may use:
 await serviceClient.addExternalWorkspaceMember(authorizedWorkspaceId, {
   identity: { externalId: authenticatedUser.id, source: "my-product" },
   permissions: ["workspace:read", "connections:read", "connections:write"],
+  operationId: onboardingOperationId,
 });
 ```
 
 Do this only after the host has approved membership, not on every arbitrary
 browser request. The service needs `members:manage` and may not grant authority
-beyond its ceiling. Identical onboarding replays safely; different permissions
-conflict instead of overwriting a subsequently reduced grant. Installation also
+beyond its ceiling. Persist `onboardingOperationId` before the call. Exact keyed
+replays return historical identity without restoring removed membership; different
+permissions conflict instead of overwriting a subsequently reduced grant. Installation also
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
 
 ### Removal and account-wide lifecycle
+
+For recoverable onboarding, establish and retain the identity anchor before
+granting membership. Service `lookupExternalIdentity(organizationId, identity)`
+is non-provisioning and returns content-free identity/membership IDs, statuses and
+separate revisions, including suspended/offboarded identities. It requires
+`members:manage` and does not reactivate an identity. A missing result is not proof
+that an earlier unkeyed request cannot still provision one.
+
+To withdraw this external member's workspace access while fencing a pending keyed
+grant, call `cancelExternalWorkspaceMemberGrant(organizationId, workspaceId,
+organizationMembershipId, { operationId: cancellationOperationId,
+cancelGrantOperationId: onboardingOperationId })`. Persist both distinct UUIDs;
+retry the exact cancellation body after response loss. This reuses native
+teardown and fences the named grant even if membership is absent. It withdraws
+current workspace membership, not just one session. New grant IDs are explicit
+new onboarding, never retries. Legacy requests without `operationId` remain
+unfenced: drain old writers before claiming late-grant protection.
 
 Use the service client's existing `removeWorkspaceMember(workspaceId, subjectId)`
 to remove an external actor from a shared workspace. It requires `members:manage`,
@@ -287,6 +306,25 @@ binding provenance; it is not required to use `asUser` or Connect. See
 `docs/remote-mcp-credentials.md` when source is available. The host must validate
 live actor/binding authority; the remote adapter alone does not implement
 offboarding, native linking or a complete external execution gateway.
+
+For independent backend instances, the server-only organization admin client
+can use `putHostMcpResolver(organizationId, externalSource, request)` once per
+stable workspace source. Future `ensureWorkspace` calls use the exact registered
+source without workspace-specific resolver setup. PUT requires `operationId`,
+`expectedGeneration` (0 for create), `url`, and a complete `bearerToken`.
+`getHostMcpResolver` returns metadata only; `revokeHostMcpResolver` requires an
+operation ID/current generation. `asUser`, `asLinkedUser`, workspace keys and
+browser cookies cannot administer routes. Existing bindings/grants and accepted
+initiators do not change when an admin rotates transport.
+
+The first registration opts the whole organization into namespace routing; a
+configured legacy resolver requires `acknowledgeLegacyRoutingReplacement: true`.
+Any retained row, even revoked, prevents static fallback. Missing/inactive
+sources deny rather than choosing another instance. Retried operations return
+historical metadata without restoring old configuration. Always GET current
+state before a new CAS update, and explicitly supply the secret for a new URL.
+Generation checks invalidate old resolved credentials before physical use;
+already-dispatched requests cannot be recalled. Keep every secret server-side.
 
 The request-time workspace tool gateway accepts verified external users and
 organization service keys. Tool catalog/operation permission filtering and
