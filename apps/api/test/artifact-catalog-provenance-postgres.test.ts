@@ -29,7 +29,9 @@ postgresTest(
     let client: ReturnType<typeof createDb> | undefined;
     try {
       await migrate(owned.ownerUrl);
-      await provisionRoles(owned.ownerUrl, { appPassword: owned.appPassword });
+      // Provision cluster roles with the harness administrator; migrations
+      // above still exercise the restricted NOSUPERUSER/NOBYPASSRLS owner.
+      await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
       const appUrl = new URL(owned.ownerUrl);
       appUrl.username = "opengeni_app";
       appUrl.password = owned.appPassword;

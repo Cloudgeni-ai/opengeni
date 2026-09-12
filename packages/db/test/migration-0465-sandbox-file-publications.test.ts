@@ -65,7 +65,9 @@ postgresTest(
     let client: ReturnType<typeof createDb> | undefined;
     try {
       await migrate(owned.ownerUrl);
-      await provisionRoles(owned.ownerUrl, { appPassword: owned.appPassword });
+      // Role administration is not migration-owner authority. Keep the owner
+      // restricted and preserve the harness's shared application password.
+      await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword });
       const appUrl = new URL(owned.ownerUrl);
       appUrl.username = "opengeni_app";
       appUrl.password = owned.appPassword;
