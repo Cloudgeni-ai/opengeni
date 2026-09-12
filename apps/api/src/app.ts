@@ -153,6 +153,7 @@ import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerConnectRoutes } from "./routes/connect";
 import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
+import { registerHostMcpResolverRoutes } from "./routes/host-mcp-resolvers";
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerKnowledgeRoutes } from "./routes/knowledge";
@@ -1254,6 +1255,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerConnectionRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
   registerHostMcpBindingRoutes(app, routeDeps);
+  registerHostMcpResolverRoutes(app, routeDeps);
   registerExternalIdentityLinkRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
