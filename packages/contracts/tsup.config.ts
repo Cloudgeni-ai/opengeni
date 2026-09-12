@@ -10,6 +10,7 @@ export default defineConfig({
     "src/plugin-discovery.ts",
     "src/external-identities.ts",
     "src/host-mcp-bindings.ts",
+    "src/host-mcp-resolvers.ts",
     "src/atlassian.ts",
     "src/canonical-human-identities.ts",
     "src/connection-authority.ts",
