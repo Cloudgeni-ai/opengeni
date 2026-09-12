@@ -1,323 +1,39 @@
-# Company Brain write routing
+# Durable context write routing
 
-> **Naming:** The user-facing product surface is **Agent Knowledge**. This
-> document and several code identifiers retain the historical Company Brain
-> name for protocol continuity. The structured preference destination is shown
-> to users and described to agents as **Skills**.
+After maintenance migration 0461, [Knowledge and Agent learning](knowledge.md)
+is the canonical durable retrieval and review contract. The former Memory,
+reviewed-claim and evidence-to-behavior authoring routes are retired.
 
-OpenGeni does not use one generic `memory_save` destination for every reusable
-observation. Destination selects authority, visibility, lifetime, and review
-semantics; content labels do not. This document records the target routing
-model and the implemented workspace-local slices: root-task-tree coordination
-notes plus governed Knowledge and Ways-of-working proposals.
+| Information | Destination | How agents use it |
+| --- | --- | --- |
+| Source text, facts, decisions, requirements, incidents and outcomes | Knowledge entries and immutable revisions | Search published entries; explicitly inspect pending proposals before updating the same entry with `knowledge_save` |
+| Related information about a customer, product or system | Knowledge collections and relationships | Reuse collections across sources; membership does not copy content or grant access |
+| Short unconditional rules | Workspace instruction revisions and active heads | Compose only the active rules; author through `instruction_policy_save` |
+| Reusable conditional procedures | Native Skill folders and revisions | Load relevant published Skills; author through the Skill lifecycle |
+| Organization identity and mission | Company profile | Separate organization-owner policy and lifecycle |
+| Temporary coordination in a session tree | Task notes | Explicit read/save/replace; no automatic prompt composition |
 
-## Destination matrix
+Knowledge, instructions and Skills each use their accepted Agent learning policy:
+Automatic publishes, Review first stages an inactive revision without pausing the
+agent, and Off refuses agent authoring. A pending Knowledge entry is readable
+with `view: "needs_review"` but is not accepted fact or instruction authority.
+Evidence does not grant permission to change behavior. Human review publishes
+through the destination's own lifecycle.
 
-| Destination               | Purpose                                                         | Authority                                                                | Model access                                                                                                                     | Current status                                                                                                                                |
-| ------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workspace Memory          | Agent-retained facts, decisions, incidents, fixes, and outcomes | Canonical workspace Memory gate                                           | `memory_search`; never standing prompt context                                                                                    | `memory_save` and `memory_correct` write active Memory autonomously whenever workspace Memory is enabled                                      |
-| Organization identity     | Two stable statements: who the organization is and why it exists | Company-profile head plus separate organization-owner agent policy         | Always composed in root-session governance context                                                                                | Direct owner administration, or explicit owner-initiated agent administration in Off, Require approval, or Autonomous mode                     |
-| Scoped Knowledge evidence | Inferred or sourced facts and normalized claims                 | Documents/scoped-knowledge authority                                     | Permission-first Document retrieval where surfaced; normalized claims are governance evidence, not a standalone retrieval corpus | Workspace-local claim proposal/correction and rooted Task-note promotion use the append-only review/relation lifecycle                        |
-| Workspace instructions    | Minimal, always-on workspace rules                              | Existing instruction-policy heads                                        | Bounded body is always composed                                                                                                  | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Require approval keeps drafts inactive, Off blocks |
-| Skills                    | Reusable conditional how-to guidance                            | Existing preference-registry heads                                       | Bounded descriptors by default; full bodies on demand                                                                            | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Require approval keeps drafts inactive, Off blocks |
-| Task notes                | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility                 | Explicit `task_notes_list`; never prompt-injected                                                                                | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0260                                         |
-| Reviewed Knowledge        | User-requested reviewed facts when autonomous Memory is unavailable | Reviewed scoped-Knowledge claim plus confirmation-to-Memory materialization | `memory_search` after confirmation                                                                                              | `remember lane=knowledge` remains a human-confirmed fallback and preserves claim/evidence provenance                                           |
+Preserve exact source references and uncertainty. Reuse the entry ID and current
+version when correcting a finding. A reviewed source revision must be reconciled
+explicitly when a pending finding still cites an older revision. Knowledge save
+receipts survive a replacement attempt in the same logical turn, but the new
+attempt must independently pass the live authority checks.
 
-One item should have one canonical destination. A specific incident uses
-`memory_save` when workspace Memory is enabled, with compact content that can be
-found later through `memory_search`. It does not become a Skill or workspace
-instruction. A conditional procedure
-belongs in Skills. A universal rule that must apply in every turn belongs in
-Workspace instructions and should use the shortest wording that fully states
-the rule.
+## Historical proof
 
-The router must preserve the selected destination's provenance and may propose
-promotion, but it must not convert an agent observation into active company
-policy, organization identity, or a preference. Organization identity changes
-use only the explicit `company_profile_propose` path and its separate
-organization-owner policy. Personal and organization cross-workspace routing
-stay inactive until their tenancy authorities are activated; workspace-local
-task notes do not widen those scopes.
-
-## Governed workspace proposals
-
-`writeCompanyBrainGovernedProposal` accepts one explicit destination operation:
-
-- propose one existing workspace Knowledge claim with exact supporting evidence;
-- propose a correction by linking one replacement claim to a different replaced
-  claim with `supersedes`, then appending a proposed review;
-- materialize an exact Knowledge change proposal as an inactive instruction
-  charter/policy draft against an exact active-head baseline;
-- materialize an exact Knowledge change proposal as an inactive workspace
-  preference with `knowledge_proposal` provenance and `untrusted_proposal` trust;
-- promote an exact rooted Task note into proposed workspace Knowledge;
-- atomically promote an exact rooted Task note through proposed Knowledge into
-  an inactive instruction-policy draft; or
-- atomically promote an exact rooted Task note through proposed Knowledge into
-  an inactive workspace preference.
-
-The request carries an operation UUID plus the exact account, workspace,
-session, turn, attempt, and execution generation. One transaction locks and
-revalidates that active attempt, its immutable initiating human, and the absence
-of a live interruption. It then requires a workspace-scoped claim and exact
-supporting evidence. Organization, personal, generic Memory, and caller-selected
-active authority are not valid inputs.
-
-Instruction-policy proposals acquire their destination's exclusive workspace
-lock before any rooted Task-note session locks. The nested policy lifecycle
-therefore re-enters an already-held workspace lock instead of upgrading after a
-root lock; concurrent independent roots serialize without deadlock. Knowledge
-and preference routes retain their less-exclusive workspace lock path.
-
-Every route first appends one `proposed` Knowledge review using a deterministic
-sub-operation UUID. Its immutable input hash binds the complete request and
-exact attempt through a content-free service actor identity. This common guard
-makes the top-level operation UUID idempotent across every explicit operation: an
-exact retry reconstructs the same receipt, while changed destination, content,
-attempt, generation, evidence, or reason conflicts. Corrections add an immutable
-relation; Ways-of-working routes add an immutable Knowledge change proposal and
-the destination's normal inactive proposal/revision records.
-
-The preference adapter additionally records an immutable workspace-local
-destination receipt keyed by the top operation UUID and full input hash. Replay
-returns the original preference/revision IDs even if a human later activates,
-rejects, deactivates, supersedes, or changes the scope of the preference. This
-is a write-destination receipt only; it does not select context, freeze a
-logical-turn snapshot, or overlap the permission-first selector's context
-receipt ownership.
-
-A new operation that selects a workspace preference stable key already owned by
-another proposal returns the bounded `preference_stable_key_conflict` tool
-outcome. The database adapter maps the collision to the preference registry's
-domain error before the MCP surface renders it, so SQL text and parameters are
-never part of the public failure.
-
-Migration `0255_company_brain_governed_write_proposals.sql` broadens the
-historically named onboarding-proposal validator without changing its table. A
-Knowledge-backed instruction draft is admitted only when its provenance source
-ID, workspace scope, target, and content hash match the exact immutable
-`knowledge_change_proposals` row. Existing onboarding validation is unchanged.
-The same migration adds the immutable FORCE-RLS preference destination receipt
-and an exact-attempt security-definer proposal writer.
-Migration `0261_preference_knowledge_proposal_actor_binding.sql` is the rolling
-repair that makes both existing Knowledge-backed adapters executable against
-their canonical constraints: instruction change proposals retain the exact
-`global | role` target shape, and the preference security-definer writer uses
-an unambiguous local actor binding. It changes no privilege, authority, or
-receipt shape.
-
-Receipts expose only operation/input hashes and audit/resource IDs. They report
-`human_review_required`; because the write is proposal-only, immediate rollback
-is `not_applicable_proposal_only` and no authority rollback token exists.
-Rejection/revocation and the existing human-governed destination lifecycle are
-the only later rollback/review mechanisms. No selector snapshot,
-logical-turn context receipt, generic Task-note write surface, or external
-REST/UI is part of this slice. Automatic instruction-policy and Skill activation
-is routed through the governed-learning evaluator and controller as described
-below.
-
-The transport-neutral learning-policy router resolves an exact
-`scoped-knowledge-evidence/<evidenceId>` source from the immutable policy
-snapshot owned by the accepted attempt. Callers cannot supply another source
-key to select a more permissive override. `off` produces no destination write;
-`suggest` and `automatic` both create the same auditable proposal. After the
-proposal commits, a Ways-of-working proposal (one that materialized a
-`knowledge_change_proposals` row: instruction policy or preference) is passed to
-the migration 0268 evaluator with the same frozen snapshot, the exact accepted
-attempt, and the turn's immutable initiating human; the evaluator records a
-content-free decision receipt that the receipt's `learning` summary reports
-(`outcome`, `automaticEligible`, ordered `reasons`). Under `automatic`, a final
-eligible decision for a **preference or instruction policy** is handed to the migration 0269
-activation controller, which revalidates current authority and applies the
-change only through the destination-owned lifecycle; the receipt then reports
-`decision: "activated"` with the activation receipt id, destination revision,
-and effective boundary, and the change is undoable through the `/learning`
-API/SDK undo operation (the Workspace instruction & Skill autonomy web view exposes only the
-learning mode). Require approval records the proposal and decision but keeps the
-draft inactive for a human; Off creates no derived change. Knowledge
-destinations create no change proposal and are never evaluated; the human
-Knowledge review lifecycle owns them. Evaluator or controller failures never
-roll back the durable proposal; they surface as a bounded content-free
-`learningFailure` and the proposal remains for review. Evaluation and
-activation operation ids are derived deterministically from the proposal
-operation id, so exact retries converge on the same receipts. The public
-receipt exposes only the effective source-specific decision and snapshot
-identity/hash, not the snapshot's other source overrides.
-
-Optional post-activation Slack publication starts only after the activation
-receipt is durable and is never awaited by the proposal or `remember` router. A
-stalled notification sink therefore cannot withhold the activated receipt.
-Exact retries return the same durable activation outcome and may dispatch the
-publication again; the publication outbox deduplicates on the activation
-receipt identity.
-
-The first-party proposal surface is intentionally explicit:
-`knowledge_propose`, `knowledge_correct`, `task_note_promote_knowledge`,
-`task_note_promote_instruction_policy`, `task_note_promote_preference`,
-`instruction_policy_propose`, and `preference_propose`. The signed host supplies
-the exact attempt tuple. Tool input cannot select authority scope, active
-authority, a different learning-policy source, or replacement evidence bytes.
-
-## Explicit user-directed remember
-
-`remember` (`apps/api/src/mcp/remember.ts`, router
-`packages/core/src/domain/remember.ts`) is the tool for governed Knowledge, a
-Skill, or a workspace instruction. Ordinary facts, decisions, incidents, fixes,
-and confirmed outcomes use autonomous `memory_save` whenever that tool is
-available. The `knowledge` lane remains the reviewed fallback when autonomous
-Memory is unavailable; `preference` creates a Skill and `instruction_policy`
-creates a Workspace instruction. V1 supports the workspace scope only. The
-content becomes one exact task note (the evidence, expiring after 90 days), the
-note is promoted through the learning-policy router above with full user
-confidence, and the receipt is one of:
-
-- `blocked` - the frozen learning policy is `off` for this source; nothing durable
-  was written;
-- (Knowledge facts also return `confirmation_required`, bound to the claim id
-  rather than a change proposal; the same one-click answer approves the claim
-  through the Knowledge review lifecycle, see below);
-- `activated` - an eligible Skill or workspace instruction under `automatic` was activated by the governed
-  controller and is undoable through the `/learning` API/SDK undo operation;
-- `confirmation_required` - the proposal is durable but the policy will not
-  activate it (Require approval mode or an ineligible decision). The receipt carries the exact
-  `request_human_input` payload: one `single_select` question whose id is
-  `remember:<proposalId>` with options `save` / `skip`. The agent asks the human
-  through the built-in tool, then calls `remember_confirm` with the proposal id,
-  the decision receipt id, and the returned `requestId`.
-
-### Budgets and authoring style
-
-Durable text an agent authors is prompt cost, so each lane carries an explicit,
-enforced budget from
-[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts):
-
-| Lane                 | Where it lands                                                                                                                                                                                            | Agent budget                                    |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `instruction_policy` | composed verbatim into the prompt of every session it applies to (every session for a global charter or policy, every session bound to the role for a role policy; at most three entries compose at once) | 600 characters                                  |
-| `preference`         | short title and description composed into every session prompt; content retrieved on demand                                                                                                               | 1,200 characters                                |
-| `knowledge`          | retrieval evidence, never in the always-composed prefix                                                                                                                                                   | 4,000 characters (`REMEMBER_CONTENT_MAX_CHARS`) |
-
-The preference budget exists for a different reason than the rule budget, and the
-obvious wording is wrong: shortening a preference's content does not shrink any
-prompt, because only its descriptor pair is composed. Its length is retrieval
-cost, which is why it gets more room than a rule rather than less.
-
-The same bounds apply to the other agent-only surfaces that reach the same
-destinations: `instruction_policy_propose`, `preference_propose`, and the two
-task-note promotions. Promotion is bounded in the database layer
-(`packages/db/src/company-brain-governed-writes.ts`) rather than in the request
-contract, because there the content is the note rather than a request field; a
-note is bounded only by `TASK_NOTE_TEXT_MAX_BYTES` and promotion materializes
-into exactly the same destination as a direct proposal, so without that check a
-long note would be a way around the cap. The human editor limits
-(`WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS`,
-`PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`) are unchanged, and stored revisions are
-never rewritten. An over-budget write is refused, never truncated, before any
-durable row is written, with an actionable message naming the actual length, the
-limit, and the shape to use instead: one imperative rule in 1-3 sentences, no
-numbered procedure, no examples, no rationale essay, several small entries rather
-than one long one, and procedure kept in a Document or Skill that the rule
-references. The note bytes themselves stay exact evidence, and a convergent
-replay of an already-accepted promotion is not re-checked.
-
-The confirmation card names that cost before a human agrees to it. The question
-`label` carries the character count and where the text lands, as a heading rather
-than a sentence ("Remember (612 chars, in every session prompt)", or "in every
-prompt for this role" for a role-scoped rule). `HumanInputForm` renders a single
-question's `label` as the card heading and its `prompt` as the sub-text, so the
-label has to stay title-shaped or it demotes the question the human is answering.
-It is deliberately `label` and not `helpText`: migrations 0272 / 0274 / 0284 /
-0293 / 0316 byte-verify the reconstructed `prompt`, `helpText`, and `options`
-against the exact Task-note text before authorizing an activation, and `label` is
-the one field of the canonical question those capabilities do not constrain.
-
-`remember_confirm` invokes migration 0272's
-`activate_human_confirmed_learning_decision`. That SECURITY DEFINER capability
-requires the exact initiating human's `session_human_input_requests` row: same
-session and logical turn (at the decision receipt's execution generation or a
-later one of that turn), status `answered`, `responded_by` equal to the turn's initiating human, and the bound
-question answered with exactly `save`. The question the human saw is not
-trusted from the agent: the capability reconstructs the canonical prompt from
-the proposal lane, the help text from the exact Task-note text, and the fixed
-`Save` / `Don't save` options, and refuses any human-input row whose question
-differs, so a misleading agent-authored prompt cannot obtain confirmation (only
-Task-note-backed proposals, i.e. those created by `remember`, are confirmable).
-It accepts `suggest`, `automatic`, and
-`confidence` decision receipts (never `off`, `revoked`, `stale`, or `conflict`),
-revalidates the current learning policy (not `off`), evidence, review, and
-destination CAS, and writes only through the destination-native lifecycle. The
-activation receipt records `authorityKind = human_confirmed` and the human-input
-request id, so the `/learning` history API shows who authorized it and exact
-undo remains available through the API/SDK (not the web view). Because the
-receipt is minted before the human-input pause and the turn resumes on a new
-attempt at a later execution generation (and a recovery re-claim before the
-pause or another interruption answered first likewise advances the pending
-request row's generation), the capability requires the turn's current live
-attempt of the same logical turn at the minting generation or later rather than
-the minting attempt (migration 0316); neither the answered row nor the live
-attempt may belong to another turn or an earlier generation. Agents cannot
-fabricate that answer: the human-input row is written only by the authenticated
-human's response route.
-
-For the Knowledge lane, `remember_confirm` invokes migration 0274's
-`confirm_remember_knowledge_claim`. It performs the same live-turn,
-responder, canonical-prompt (`Save this as workspace knowledge for everyone in
-this workspace?`), exact-note-text, fixed-options, and `save` checks bound to
-`remember:<claimId>`, requires the claim's latest review to still be
-`proposed` and its Task-note evidence to be active and uncontradicted, then
-appends an `approved` service review through the guarded
-`governed_learning_apply_knowledge_review` path (service actor, causal human
-retained; since migration 0284 the reason-carrying overload records a truthful
-human-confirmed reason instead of the automatic wording) and records an
-immutable content-free `remember_knowledge_confirmation_receipts` row. Migration
-0361's dedicated materialization capability resolves the exact
-claim/fact/evidence/review tuple named by that receipt, verifies the Task-note
-text hash, and inserts exact text in a receipt-specific Memory namespace inside
-the same outer transaction as approval. Its immutable
-`remember_knowledge_memory_materializations` row makes replay return the same
-`memoryId` after archival and prevents a normalized lookalike in general Memory
-from substituting for the content the human approved. A failed Memory write
-therefore rolls back approval rather than leaving a write-only claim. The
-returned activation names the resulting `memoryId`;
-correction or archival uses the Memory lifecycle, not Workspace instruction & Skill autonomy
-history. Reviewed Knowledge is never approved or materialized automatically,
-even under the `automatic` learning mode. This does not apply to agent-only
-Workspace Memory writes, which are governed solely by the workspace Memory
-toggle.
-
-`task_note_promote_knowledge` accepts an active, unexpired version-one note from
-the exact caller's root tree plus normalized entity/predicate metadata. The note
-text becomes the proposed workspace Knowledge fact value. Migration
-`0260_task_note_knowledge_promotion.sql` extends claim evidence with exactly one
-Document-version or Task-note source shape. Task-note evidence stores only the
-note/root/version/content-hash facts; it never copies note
-text into evidence metadata. The security-definer resolver revalidates the
-current attempt, immutable initiating human, and exact source-specific
-learning-policy snapshot, locks the note, and rejects policy-off, another root,
-workspace, tenant, archived note, expired note, or stale version. A value-free,
-one-transaction capability binds the exact evidence/claim operations and is
-consumed by the insert trigger; the runtime role has no direct capability-table
-DML and cannot forge Task-note evidence onto another claim. Migration 0260 pins
-`pg_catalog`, the deployment target schema, then `pg_temp` for every new
-definer and the complete invoked Task-note closure: the legacy attempt resolver,
-create/archive/list lifecycle, mutation/event guards, session-reference RLS
-helper, and private-actor visibility helper. A runtime caller with database
-`TEMP` privilege therefore cannot shadow session, turn, attempt, interruption,
-membership, Task-note, event, or capability authority relations.
-The migration 0261 preference-adapter repair preserves that same explicit
-`pg_catalog`, deployment target schema, `pg_temp` definer boundary.
-The resulting claim is `proposed`, never approved or prompt-active. Exact retry
-reconstructs the same receipt even after the short-lived note is archived;
-changed input conflicts, and source cleanup cannot silently widen authority.
-
-The two direct Task-note-to-Ways tools use the same rooted source admission and
-first materialize that exact note text as proposed workspace Knowledge. In the
-same outer transaction they pass those unchanged bytes to the selected inactive
-destination adapter. Callers supply bounded descriptor/target metadata but no
-replacement content. Exact concurrent retries converge, archival replay reads
-the immutable fact/evidence lineage rather than the expired note row, and a
-different root or changed input fails closed. Neither path activates a head or
-injects the result into a prompt.
+Pre-0459 claim, proposal, learning-policy and confirmation rows remain immutable
+migration and audit evidence. Already accepted legacy confirmations recover only
+against their original exact proof. They are not alternative authoring routes.
+See [the cutover](knowledge.md#cutover-and-historical-compatibility). Old migration
+files and their fixtures preserve the historical contract; runtime guidance must
+never direct agents to those retired writers.
 
 ## Root-task-tree notes
 
@@ -379,33 +95,3 @@ changed input, another tree/attempt, or a stale old version fails closed. Undo i
 the same explicit operation in reverse: replace the correction with a fresh note
 whose body is copied from the retained archived original. History is never edited
 or reactivated, and failure of either half rolls back the entire replacement.
-
-## Deployment and deferred work
-
-Migrations `0239_task_tree_notes.sql`,
-`0260_task_note_knowledge_promotion.sql`, and
-`0261_preference_knowledge_proposal_actor_binding.sql` are rolling and additive. Migration 0260
-also adds immutable replacement receipts and the exact replacement lifecycle
-function. Neither activates organization or personal cross-workspace reads,
-changes goal behavior, injects prompt context, or replaces any Knowledge,
-policy, preference, Memory, or learning authority.
-
-Still required outside this workspace-local slice:
-
-- Personal/Organization promotion and explicit scope commands after their
-  canonical cross-workspace authorities are active;
-- automatic activation destinations beyond workspace-scoped Skills and
-  instruction policy (Knowledge remains review-owned); and
-- bounded expiry cleanup and user-facing Advanced/search/export surfaces.
-
-Canonical implementation: `packages/contracts/src/task-notes.ts`,
-`packages/db/src/task-notes-schema.ts`, `packages/db/src/task-notes.ts`,
-`packages/db/drizzle/0239_task_tree_notes.sql`, and
-`apps/api/src/mcp/server.ts` for task notes; and
-`packages/contracts/src/company-brain-governed-writes.ts`,
-`packages/db/src/company-brain-governed-writes.ts`,
-`packages/core/src/domain/company-brain-governed-writes.ts`, plus migration
-`0255_company_brain_governed_write_proposals.sql` for governed proposals and
-`0260_task_note_knowledge_promotion.sql` for exact Task-note evidence, with
-`0261_preference_knowledge_proposal_actor_binding.sql` repairing the two
-Knowledge-backed Ways adapter predicates.

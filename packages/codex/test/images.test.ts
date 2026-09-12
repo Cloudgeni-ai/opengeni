@@ -44,7 +44,7 @@ describe("generateCodexSubscriptionImage", () => {
     expect(JSON.parse(String(captured?.init?.body))).toEqual({
       prompt: "a blue sphere",
       background: "auto",
-      model: "gpt-image-2",
+      model: "gpt-image-2.5-sunburst",
       quality: "auto",
       size: "auto",
     });
@@ -78,7 +78,7 @@ describe("generateCodexSubscriptionImage", () => {
       ],
       prompt: "Use the first image's subject and the second image's style",
       background: "auto",
-      model: "gpt-image-2",
+      model: "gpt-image-2.5-sunburst",
       quality: "auto",
       size: "auto",
     });

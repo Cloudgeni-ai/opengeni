@@ -68,6 +68,7 @@
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
     "@opengeni/storage": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",

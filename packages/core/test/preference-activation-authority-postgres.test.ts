@@ -2,10 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   activatePreferenceRegistryRevision,
   getCurrentPreferenceRegistryGovernanceMetadata,
-  activateWorkspaceLearningPolicyRevision,
   createDb,
   createSession,
-  createWorkspaceLearningPolicyRevision,
+  saveAgentLearningSettings,
   ensureManagedAccessForUser,
   withSessionRlsActorContext,
   type DbClient,
@@ -54,23 +53,29 @@ async function fixture(mode: "off" | "suggest" | "automatic") {
       createdByContext: {},
     }),
   );
-  const revision = await createWorkspaceLearningPolicyRevision(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    workspaceMode: mode,
-    actorSubjectId: ownerSubjectId,
-    principalKind: "human_session",
-  });
-  await activateWorkspaceLearningPolicyRevision(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    revisionId: revision.id,
-    expectedCurrentRevisionId: null,
-    expectedActivationVersion: 0,
-    actorSubjectId: ownerSubjectId,
-    principalKind: "human_session",
-    reason: `Enable ${mode} learning in this fixture.`,
-  });
+  await saveAgentLearningSettings(
+    client.db,
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: ownerSubjectId,
+        settingsScopes: ["workspace"],
+      },
+    },
+    {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: {
+        knowledge: "automatic",
+        instructions: "review_first",
+        skills: mode === "suggest" ? "review_first" : mode,
+      },
+    },
+  );
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (sql) => {

@@ -17,7 +17,7 @@ export function createSkillInstallAttemptToolDefinition(input: {
     codemodePath: ["opengeni", "skill_install"],
     title: "Install a Skill",
     description:
-      "Install a Skill from a public skills.sh or GitHub URL, or library:<id> returned by skill_search. The server resolves and pins the source; no prior preview or invented hash is required. Learning mode controls activation. Replacing an existing installation requires its current installation version, and preserves workspace customizations.",
+      "Install a Skill from a public skills.sh or GitHub URL, or library:<id> returned by skill_search. The server resolves and pins the source; no prior preview or invented hash is required. The effective Skills setting governs agent installation: Automatic publishes, Review first leaves a pending change in Knowledge > Needs review while the task continues, and Off prevents agent installation. Human installation from the UI remains available. Do not ask an approval question for a pending receipt. Replacing an existing installation requires its current installation version, and preserves workspace customizations.",
     inputSchema: {
       type: "object",
       properties: {

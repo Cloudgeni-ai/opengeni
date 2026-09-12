@@ -97,7 +97,7 @@ describe("OpenGeni Product Integration Pack", () => {
     const external = files.get("references/external-users-and-connect.md")!.replace(/\s+/g, " ");
 
     expect(entrypoint.replace(/\s+/g, " ")).toContain(
-      "Memory settings and prompt instructions do not create a tenant boundary",
+      "Knowledge settings and prompt instructions do not create a tenant boundary",
     );
     expect(entrypoint).toContain("defense in depth");
     expect(isolation).toContain("One workspace per end user");

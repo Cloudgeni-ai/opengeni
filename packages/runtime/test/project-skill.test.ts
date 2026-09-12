@@ -18,6 +18,7 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   });
   expect(artifacts.map((artifact) => artifact.name)).toEqual([
     "document-parsing",
+    "opengeni-visualize",
     "opengeni-projects",
   ]);
   const artifact = artifacts.find((entry) => entry.name === "opengeni-projects");
@@ -25,8 +26,15 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   expect(artifact?.files).toEqual([{ path: "SKILL.md", content: markdown }]);
   const composition = composeRuntimeSkills([]);
   expect(composition.nativeToolNames).not.toContain("opengeni-projects");
-  expect(composition.selections.map((selection) => selection.name)).toEqual(["document-parsing"]);
-  expect(composition.index.map((entry) => entry.name)).toEqual(["document-parsing"]);
+  expect(composition.configuredNames).toEqual([]);
+  expect(composition.selections.map((selection) => selection.name)).toEqual([
+    "document-parsing",
+    "opengeni-visualize",
+  ]);
+  expect(composition.index.map((entry) => entry.name)).toEqual([
+    "document-parsing",
+    "opengeni-visualize",
+  ]);
 });
 
 test("every compute backend inspects only selected Project descriptors with no eager loader", () => {

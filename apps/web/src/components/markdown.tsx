@@ -1,4 +1,4 @@
-import { Markdown } from "@opengeni/react";
+import { Markdown, type MarkdownProps } from "@opengeni/react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -11,8 +11,12 @@ export function MarkdownText({
   compact = false,
   streaming = false,
   onSandboxFile,
+  renderInteractiveBlock,
+  renderImage,
 }: {
   text: string;
+  renderImage?: MarkdownProps["renderImage"];
+  renderInteractiveBlock?: MarkdownProps["renderInteractiveBlock"];
   compact?: boolean;
   streaming?: boolean;
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
@@ -20,6 +24,8 @@ export function MarkdownText({
   return (
     <Markdown
       streaming={streaming}
+      renderImage={renderImage}
+      renderInteractiveBlock={renderInteractiveBlock}
       onSandboxFile={onSandboxFile}
       className={cn("markdown-stream", compact && "markdown-stream-compact")}
     >

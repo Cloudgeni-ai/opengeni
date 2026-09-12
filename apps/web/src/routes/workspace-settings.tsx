@@ -3,12 +3,10 @@ import { WorkspaceRuntimeControl } from "@/components/workspace-runtime-control"
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
-import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
-  BrainCircuitIcon,
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
@@ -462,7 +460,6 @@ function OperationalWorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
                 <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
                 <VideoGenerationPreferenceRow
                   workspaceId={workspaceId}
@@ -476,9 +473,12 @@ function OperationalWorkspaceSettingsRoute({
               </div>
             </section>
 
-            <WorkspaceLearningAdministration workspaceId={workspaceId} />
             <NativeIdentityLinkAccounts workspaceId={workspaceId} />
           </>
+        ) : null}
+
+        {section === "learning" ? (
+          <WorkspaceLearningAdministration workspaceId={workspaceId} />
         ) : null}
 
         {section === "members" ? (
@@ -1235,47 +1235,6 @@ function MembersSectionFallback() {
       <Skeleton className="h-16 rounded-lg" />
       <Skeleton className="h-16 rounded-lg" />
     </div>
-  );
-}
-
-function MemoryPreferenceRow({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const enabled = workspace ? resolveWorkspaceMemoryEnabled(workspace.settings) : false;
-  const [saving, setSaving] = useState(false);
-
-  async function toggle(next: boolean) {
-    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
-    if (!acceptedTransition) return;
-    setSaving(true);
-    try {
-      const updated = await context.updateWorkspaceSettings(workspaceId, {
-        memoryEnabled: next,
-      });
-      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-        toast.success(next ? "Workspace memory enabled" : "Workspace memory disabled");
-      }
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <PreferenceToggleRow
-      icon={<BrainCircuitIcon className="size-3.5 text-brand" />}
-      label="Workspace memory"
-      description="Let agents autonomously save and correct durable facts, incidents, decisions, and outcomes across sessions."
-      checked={enabled}
-      disabled={saving || !canManage}
-      saving={saving}
-      onToggle={() => void toggle(!enabled)}
-    />
   );
 }
 

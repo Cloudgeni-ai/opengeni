@@ -954,7 +954,7 @@ registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 Accepted `user.message` events intentionally have no direct turn ID. Migration
-`0460_host_export_message_attribution.sql` derives export initiator and origin
+`0461_host_export_message_attribution.sql` derives export initiator and origin
 from the exact same-account/workspace/session turn whose `trigger_event_id`
 references the message, after the accepting transaction commits its turn. It
 never derives sender authority from payload fields or the session creator.

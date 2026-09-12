@@ -1,13 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
-  ActivateWorkspaceLearningPolicyRevisionRequest,
-  CreateWorkspaceLearningPolicyRevisionRequest,
-  RollbackWorkspaceLearningPolicyRevisionRequest,
   UndoGovernedLearningActivationHttpRequest,
   WorkspaceLearningHistoryResponse,
   WorkspaceLearningPolicyHistoryQuery,
-  WorkspaceLearningPolicyMutationResponse,
-  WorkspaceLearningPolicyRevision,
 } from "@opengeni/contracts";
 import {
   publishGovernedLearningEventToSlack,
@@ -16,8 +11,6 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  activateWorkspaceLearningPolicyRevision,
-  createWorkspaceLearningPolicyRevision,
   GovernedLearningActivationAuthorityError,
   GovernedLearningActivationConflictError,
   GovernedLearningActivationInvalidOperationError,
@@ -25,7 +18,6 @@ import {
   listGovernedLearningActivationHistory,
   listGovernedLearningDecisionReceipts,
   listWorkspaceLearningPolicyHistory,
-  rollbackWorkspaceLearningPolicyRevision,
   undoGovernedLearningActivation,
   WorkspaceLearningPolicyAuthorityError,
   WorkspaceLearningPolicyConflictError,
@@ -121,82 +113,20 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
     }
   });
 
-  app.post(`${base}/revisions`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
-    const request = await parseBody(context, CreateWorkspaceLearningPolicyRevisionRequest);
-    try {
+  for (const path of ["/revisions", "/revisions/:revisionId/activate", "/rollback"]) {
+    app.post(`${base}${path}`, async (context) => {
+      await requireWorkspaceSettingsGrant(context, deps, context.req.param("workspaceId")!);
       return context.json(
-        WorkspaceLearningPolicyRevision.parse(
-          await createWorkspaceLearningPolicyRevision(deps.db, {
-            operationId: request.operationId ?? randomUUID(),
-            accountId: grant.accountId,
-            workspaceId,
-            workspaceMode: request.workspaceMode,
-            sourceOverrides: request.sourceOverrides,
-            supersedesRevisionId: request.supersedesRevisionId,
-            actorSubjectId: grant.subjectId,
-            principalKind: grant.principalKind,
-          }),
-        ),
-        201,
+        {
+          error: {
+            code: "learning_settings_replaced",
+            message: "Configure Knowledge, instructions and Skills in Agent learning settings.",
+          },
+        },
+        410,
       );
-    } catch (error) {
-      learningError(error);
-    }
-  });
-
-  app.post(`${base}/revisions/:revisionId/activate`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const revisionId = z.string().uuid().safeParse(context.req.param("revisionId"));
-    if (!revisionId.success) throw new HTTPException(422, { message: "Invalid revision id" });
-    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
-    const request = await parseBody(context, ActivateWorkspaceLearningPolicyRevisionRequest);
-    try {
-      return context.json(
-        WorkspaceLearningPolicyMutationResponse.parse(
-          await activateWorkspaceLearningPolicyRevision(deps.db, {
-            operationId: request.operationId ?? randomUUID(),
-            accountId: grant.accountId,
-            workspaceId,
-            revisionId: revisionId.data,
-            expectedCurrentRevisionId: request.expectedCurrentRevisionId,
-            expectedActivationVersion: request.expectedActivationVersion,
-            actorSubjectId: grant.subjectId,
-            principalKind: grant.principalKind,
-            reason: request.reason,
-          }),
-        ),
-      );
-    } catch (error) {
-      learningError(error);
-    }
-  });
-
-  app.post(`${base}/rollback`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
-    const request = await parseBody(context, RollbackWorkspaceLearningPolicyRevisionRequest);
-    try {
-      return context.json(
-        WorkspaceLearningPolicyMutationResponse.parse(
-          await rollbackWorkspaceLearningPolicyRevision(deps.db, {
-            operationId: request.operationId ?? randomUUID(),
-            accountId: grant.accountId,
-            workspaceId,
-            targetRevisionId: request.targetRevisionId,
-            expectedCurrentRevisionId: request.expectedCurrentRevisionId,
-            expectedActivationVersion: request.expectedActivationVersion,
-            actorSubjectId: grant.subjectId,
-            principalKind: grant.principalKind,
-            reason: request.reason,
-          }),
-        ),
-      );
-    } catch (error) {
-      learningError(error);
-    }
-  });
+    });
+  }
 
   app.post(`${base}/activations/:activationReceiptId/undo`, async (context) => {
     const workspaceId = context.req.param("workspaceId");

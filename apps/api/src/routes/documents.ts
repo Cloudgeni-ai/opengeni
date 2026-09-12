@@ -1,7 +1,8 @@
+import { fileOwnerContextForAccess } from "@opengeni/core";
+import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
-  CreateKnowledgeMemoryRequest,
   CreateDocumentBaseRequest,
   Document,
   DocumentAuthorityReclassification,
@@ -9,12 +10,8 @@ import {
   DocumentDefaultCollectionBackfill,
   DocumentDefaultCollectionBackfillAudit,
   GetDocumentDefaultCollectionBackfillAuditQuery,
-  DocumentSearchRequest,
-  DocumentSearchResponse,
   FileAsset,
   FileDownloadUrlResponse,
-  KnowledgeMemory,
-  KnowledgeMemorySearchRequest,
   ListDocumentAuthorityReclassificationsQuery,
   ListDocumentAuthorityReclassificationsResponse,
   ListDocumentDefaultCollectionBackfillRunsResponse,
@@ -23,21 +20,8 @@ import {
   MoveDocumentRequest,
   ReclassifyDocumentAuthorityRequest,
   RunDocumentDefaultCollectionBackfillRequest,
-  UpdateKnowledgeMemoryRequest,
-  WorkspaceMemorySearchRequest,
-  WorkspaceMemorySearchResponse,
 } from "@opengeni/contracts";
-import {
-  recordAuditEvent,
-  completeFileUpload,
-  createFileUpload,
-  createKnowledgeMemory,
-  getKnowledgeMemory,
-  listKnowledgeMemories,
-  resolveSessionMemoryAgentScope,
-  updateKnowledgeMemory,
-  searchWorkspaceMemories,
-} from "@opengeni/db";
+import { recordAuditEvent, completeFileUpload, createFileUpload } from "@opengeni/db";
 import {
   addDocumentToBase,
   createDocumentBase,
@@ -57,16 +41,15 @@ import {
   queueDocumentForReindex,
   reclassifyDocumentAuthority,
   runDocumentDefaultCollectionBackfill,
-  searchEffectiveDocuments,
 } from "@opengeni/documents";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { Context, Hono } from "hono";
+import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   requireAccessGrant,
   requireAccountAdminAuthorizationStamp,
   requireAccessGrantAuthorization,
-  saveWorkspaceMemoryWithSlackPublication,
+  knowledgeContextForAccess,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -81,6 +64,31 @@ import { sanitizeFilename } from "./files";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
+  // Document compatibility uploads use the same verified personal file owner as
+  // Files and chat uploads. A delegated subject label never becomes an owner.
+  for (const path of [
+    "/v1/workspaces/:workspaceId/document-bases/*",
+    "/v1/workspaces/:workspaceId/documents/*",
+    "/v1/workspaces/:workspaceId/knowledge/drops",
+  ]) {
+    app.use(path, async (c, next) => {
+      const permission =
+        (c.req.method === "GET" && !c.req.path.includes("/authority-reclassifications")) ||
+        c.req.path.endsWith("/search")
+          ? "documents:search"
+          : "documents:manage";
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        c.req.param("workspaceId") ?? "",
+        permission,
+      );
+      return withSessionRlsActorContext(
+        await fileOwnerContextForAccess(deps, access, permission),
+        next,
+      );
+    });
+  }
 
   app.post("/v1/workspaces/:workspaceId/document-bases", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -290,19 +298,6 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               authorityWorkspaceId: document.authorityWorkspaceId,
               authoritySubjectId: document.authoritySubjectId,
             })) ?? document);
-      if (indexed.status === "ready") {
-        await recordWorkspaceUsage(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          eventType: "document.indexed",
-          quantity: indexed.chunkCount,
-          unit: "chunk",
-          sourceResourceType: "document",
-          sourceResourceId: indexed.id,
-          idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
-        });
-      }
       return c.json(Document.parse(indexed), wasCreated ? 201 : 200);
     } catch (error) {
       throw documentHttpException(error);
@@ -558,19 +553,6 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             authorityWorkspaceId: document.authorityWorkspaceId,
             authoritySubjectId: document.authoritySubjectId,
           })) ?? queued;
-        if (indexed.status === "ready") {
-          await recordWorkspaceUsage(deps, {
-            accountId: grant.accountId,
-            workspaceId,
-            subjectId: grant.subjectId,
-            eventType: "document.indexed",
-            quantity: indexed.chunkCount,
-            unit: "chunk",
-            sourceResourceType: "document",
-            sourceResourceId: indexed.id,
-            idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
-          });
-        }
         return c.json(Document.parse(indexed));
       } catch (error) {
         if (error instanceof HTTPException) {
@@ -581,68 +563,21 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     },
   );
 
-  app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/search", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const payload = DocumentSearchRequest.parse(await c.req.json());
-    const base = await getDocumentBase(db, workspaceId, c.req.param("baseId"));
-    if (!base) {
-      throw new HTTPException(404, { message: "document base not found" });
-    }
-    return c.json(
-      DocumentSearchResponse.parse({
-        results: await searchEffectiveDocuments(
-          db,
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            baseIds: [base.id],
-            query: payload.query,
-            limit: payload.limit,
-            mode: payload.mode,
-            sourceKinds: payload.sourceKinds,
-            authorityKinds: payload.authorityKinds,
-            aclTags: payload.aclTags,
-            initiatingSubjectId: grant.subjectId,
-            surface: "human",
-          },
-          getDocumentServices(),
-        ),
-      }),
-    );
-  });
+  for (const path of [
+    "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
+    "/v1/workspaces/:workspaceId/knowledge/search",
+  ]) {
+    app.post(path, async (c) => {
+      await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "documents:search");
+      throw new HTTPException(410, {
+        message:
+          "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
+      });
+    });
+  }
 
-  app.post("/v1/workspaces/:workspaceId/knowledge/search", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const payload = await parseDocumentSearchRequest(c, "invalid knowledge search request");
-    return c.json(
-      DocumentSearchResponse.parse({
-        results: await searchEffectiveDocuments(
-          db,
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            query: payload.query,
-            baseIds: payload.baseIds,
-            limit: payload.limit,
-            mode: payload.mode,
-            sourceKinds: payload.sourceKinds,
-            authorityKinds: payload.authorityKinds,
-            aclTags: payload.aclTags,
-            initiatingSubjectId: grant.subjectId,
-            surface: "human",
-          },
-          getDocumentServices(),
-        ),
-      }),
-    );
-  });
-
-  // Knowledge drop: raw text or an uploaded file, no metadata required. Lands
-  // in the workspace Default base with curationStatus 'pending'; indexing then
-  // applies the configured curation provider, or leaves it as 'none' when
-  // curation is disabled.
+  // Compatibility upload endpoint. Retained originals and extracted text now
+  // enter canonical Knowledge. Agent findings use ordinary accepted turns.
   app.post("/v1/workspaces/:workspaceId/knowledge/drops", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
@@ -657,6 +592,15 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       quantity: 0,
     });
     const payload = CreateKnowledgeDropRequest.parse(await c.req.json());
+    const personalFileOwner =
+      payload.authorityKind === "personal"
+        ? (await fileOwnerContextForAccess(deps, access, "documents:manage"))
+            .privateFileOwnerSubjectId
+        : null;
+    if (payload.authorityKind === "personal" && !personalFileOwner)
+      throw new HTTPException(403, {
+        message: "Personal source retention requires verified ownership",
+      });
     const organizationAuthorityGranted =
       access.accountGrant?.permissions.includes("account:admin") === true;
     if (payload.authorityKind === "organization" && !organizationAuthorityGranted) {
@@ -685,6 +629,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           accountId: grant.accountId,
           workspaceId,
           fileId: newFileId,
+          privateOwnerSubjectId: personalFileOwner ?? null,
           filename,
           safeFilename,
           contentType: "text/plain; charset=utf-8",
@@ -731,7 +676,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         createdBy: grant.subjectId,
         initiatingSubjectId: grant.subjectId,
         organizationAuthorityGranted,
-        curationStatus: "pending",
+        curationStatus: "none",
         access: { viewerSubjectId: grant.subjectId },
       });
       const wasCreated =
@@ -747,19 +692,6 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               authorityWorkspaceId: document.authorityWorkspaceId,
               authoritySubjectId: document.authoritySubjectId,
             })) ?? document);
-      if (indexed.status === "ready") {
-        await recordWorkspaceUsage(deps, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          eventType: "document.indexed",
-          quantity: indexed.chunkCount,
-          unit: "chunk",
-          sourceResourceType: "document",
-          sourceResourceId: indexed.id,
-          idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
-        });
-      }
       return c.json(Document.parse(indexed), wasCreated ? 201 : 200);
     } catch (error) {
       if (error instanceof HTTPException) {
@@ -809,150 +741,26 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  app.get("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const parsed = KnowledgeMemorySearchRequest.safeParse({
-      query: c.req.query("query") || undefined,
-      status: c.req.query("status") || undefined,
-      kind: c.req.query("kind") || undefined,
-      scope: c.req.query("scope") || undefined,
-      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
-    });
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid knowledge memory query parameters" });
-    }
-    return c.json(
-      (await listKnowledgeMemories(db, workspaceId, parsed.data)).map((memory) =>
-        KnowledgeMemory.parse(memory),
-      ),
-    );
-  });
-
-  app.get("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const memory = await getKnowledgeMemory(db, workspaceId, c.req.param("memoryId"));
-    if (!memory) {
-      throw new HTTPException(404, { message: "knowledge memory not found" });
-    }
-    return c.json(KnowledgeMemory.parse(memory));
-  });
-
-  // Hybrid search over the workspace's agent-visible memory (active ∪ approved).
-  // Available regardless of the workspace memory setting (human/audit lane).
-  app.post("/v1/workspaces/:workspaceId/knowledge/memories/search", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const parsed = WorkspaceMemorySearchRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid workspace memory search request" });
-    }
-    const results = await searchWorkspaceMemories(
-      db,
-      workspaceId,
-      parsed.data,
-      getDocumentServices().embedder,
-    );
-    return c.json(
-      WorkspaceMemorySearchResponse.parse({
-        results: results.map((result) => ({
-          ...result,
-          memory: KnowledgeMemory.parse(result.memory),
-        })),
-      }),
-    );
-  });
-
-  app.post("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-    const parsedBody = CreateKnowledgeMemoryRequest.safeParse(await c.req.json());
-    if (!parsedBody.success) {
-      throw new HTTPException(400, { message: "invalid knowledge memory request" });
-    }
-    const payload = parsedBody.data;
-    if (payload.status !== "active" && payload.slackPublication) {
-      throw new HTTPException(400, {
-        message: "Slack publication is available only for active Workspace Memory writes",
-      });
-    }
-    // status `active` (the default) is a memory write → route through the single
-    // gate (sanitize + embed + dedup). Explicit proposed/approved/rejected keeps
-    // the legacy curated create.
-    if (payload.status === "active") {
-      try {
-        const result = await saveWorkspaceMemoryWithSlackPublication(
-          db,
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            text: payload.text,
-            kind: payload.kind,
-            confidence: payload.confidence,
-            pinned: payload.pinned,
-            replacesId: payload.replacesId ?? null,
-            metadata: payload.metadata,
-            origin: "human",
-          },
-          payload.slackPublication
-            ? {
-                distribution: payload.slackPublication,
-                actor: {
-                  kind: "human",
-                  subjectId: grant.subjectId,
-                  initiatingHumanSubjectId: grant.subjectId,
-                },
-                ownerLabel: grant.subjectLabel ?? null,
-              }
-            : null,
-          getDocumentServices().embedder,
-        );
-        return c.json(KnowledgeMemory.parse(result.memory), 201);
-      } catch (error) {
-        throw documentHttpException(error);
-      }
-    }
-    return c.json(
-      KnowledgeMemory.parse(
-        await createKnowledgeMemory(db, {
-          ...payload,
-          accountId: grant.accountId,
-          workspaceId,
-        }),
-      ),
-      201,
-    );
-  });
-
-  app.patch("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-    const payload = UpdateKnowledgeMemoryRequest.parse(await c.req.json());
-    const reviewedBy =
-      payload.reviewedBy ??
-      (payload.status === "approved" || payload.status === "rejected"
-        ? (grant.subjectLabel ?? grant.subjectId)
-        : undefined);
-    try {
+  // Old clients get an explicit cutover response instead of writing to an
+  // invisible second Knowledge store. Historical Memory IDs are entry IDs now.
+  for (const path of [
+    "/v1/workspaces/:workspaceId/knowledge/memories",
+    "/v1/workspaces/:workspaceId/knowledge/memories/*",
+  ]) {
+    app.all(path, async (c) => {
+      await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "documents:search");
       return c.json(
-        KnowledgeMemory.parse(
-          await updateKnowledgeMemory(
-            db,
-            workspaceId,
-            c.req.param("memoryId"),
-            {
-              ...payload,
-              ...(reviewedBy ? { reviewedBy } : {}),
-            },
-            getDocumentServices().embedder,
-          ),
-        ),
+        {
+          error: {
+            code: "memory_replaced",
+            message:
+              "Memory has been replaced by Knowledge entries. Use /knowledge/entries and the current SDK Knowledge methods.",
+          },
+        },
+        410,
       );
-    } catch (error) {
-      throw documentHttpException(error);
-    }
-  });
+    });
+  }
 
   app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -998,20 +806,6 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw error;
     }
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
-      const sessionId =
-        typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
-      const attemptId =
-        typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
-      // A session-bound caller reads Memory through its frozen selector
-      // (migration 0427); a missing row resolves to no Memory tools.
-      const memory =
-        sessionId !== undefined
-          ? ((await resolveSessionMemoryAgentScope(db, workspaceId, sessionId, grant.metadata)) ?? {
-              mode: "off" as const,
-              userSubjectId: null,
-              rootSessionId: null,
-            })
-          : null;
       const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
       const server = buildDocumentsMcpServer(
         db,
@@ -1019,27 +813,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         getDocumentServices(),
         {
-          createdBySessionId: sessionId,
-          attemptId,
-          initiatingSubjectId: grant.subjectId,
-          memory,
+          knowledge: await knowledgeContextForAccess(
+            deps,
+            await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:search"),
+            "documents:search",
+          ),
         },
       );
       await server.connect(transport);
       return await transport.handleRequest(c.req.raw);
     });
   });
-}
-
-async function parseDocumentSearchRequest(
-  context: Context,
-  message: string,
-): Promise<DocumentSearchRequest> {
-  const parsed = DocumentSearchRequest.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, { message });
-  }
-  return parsed.data;
 }
 
 /** Derive a .txt filename for a raw-text drop from its optional title/filename. */

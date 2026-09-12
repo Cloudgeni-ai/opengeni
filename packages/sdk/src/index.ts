@@ -335,40 +335,25 @@ export type {
   WorkspaceInstructionPolicyTarget,
 } from "./workspace-instruction-policies";
 export type {
-  WorkspaceStateDocumentStatusCounts,
-  WorkspaceStateDocumentAuthorityKindCounts,
   WorkspaceStateAttemptGovernance,
   WorkspaceStateExportOmission,
   WorkspaceStateExportResponse,
-  WorkspaceStateGapCode,
   WorkspaceStateGetOptions,
   WorkspaceStateGovernanceDriftStatus,
-  WorkspaceStateMemoryKindCounts,
-  WorkspaceStateMemoryStatusCounts,
   WorkspaceStateResponse,
-  WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
 export type {
   CompanyBrainContextReceiptListOptions,
   CompanyBrainContextReceiptPage,
   CompanyBrainInspectorTransport,
-  CompanyBrainKnowledgeBrowseRequest,
-  CompanyBrainKnowledgeBrowseResponse,
-  CompanyBrainKnowledgeGetResponse,
-  CompanyBrainKnowledgeRecord,
   CompanyBrainKnowledgeProposalListOptions,
   CompanyBrainKnowledgeProposalPage,
-  CompanyBrainKnowledgeSearchRequest,
-  CompanyBrainKnowledgeSearchResponse,
   CompanyBrainOkfDownload,
   CompanyBrainOkfPackage,
 } from "./company-brain";
 export {
-  browseCompanyBrainKnowledge,
-  getCompanyBrainKnowledge,
   listCompanyBrainContextReceipts,
   listCompanyBrainKnowledgeProposals,
-  searchCompanyBrainKnowledge,
 } from "./company-brain";
 export type {
   MemorySlackImportance,
@@ -740,6 +725,8 @@ export type {
   EntitlementValue,
   EntitlementsMode,
   FileAsset,
+  FileListRequest,
+  FileListResponse,
   HumanInputAnswer,
   HumanInputOption,
   HumanInputQuestion,
@@ -1254,3 +1241,4 @@ export type {
   Feedback,
   FeedbackSubmissionResponse,
 } from "./feedback";
+export type * from "./knowledge";

@@ -15,6 +15,8 @@ import {
 } from "../src/video-generation";
 import {
   bootstrapWorkspace,
+  withSessionRlsActorContext,
+  getFile,
   applyCreditLedgerEntry,
   claimSessionWorkForAttempt,
   createConnection,
@@ -202,175 +204,204 @@ describe("durable video generation operation", () => {
     ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
   });
 
-  test("keeps one logical paid operation and settles a distinct artifact/File atomically", async () => {
-    if (!available) return;
-    const { grant, session, claim, attemptId, connection, policy } = await fixture();
-    const operationId = crypto.randomUUID();
-    const artifactId = crypto.randomUUID();
-    const fileId = crypto.randomUUID();
-    const requestDigest = "a".repeat(64);
-    const admissionKey = "b".repeat(64);
-    const common = {
-      id: operationId,
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      turnId: claim.turn.id,
-      attemptId,
-      toolCallId: "call-video-1",
-      admissionKey,
-      requestDigest,
-      promptDigest: "c".repeat(64),
-      requestEncrypted: "encrypted-request",
-      modelId: "bytedance/seedance-2.5",
-      sourceMode: "text",
-      capabilityRevision: "e".repeat(64),
-      policyRevision: policy.revision,
-      fundingSource: "workspace_gateway" as const,
-      pricedCostMicros: 0,
-      connectionId: connection.id,
-      credentialVersion: connection.version,
-      credentialEncrypted: "encrypted-credential-lease",
-      providerIdempotencyKey: "provider-idempotency-1",
-      expectedArtifactId: artifactId,
-      expectedFileId: fileId,
-      workspaceQuotaBytes: 1024 * 1024 * 1024,
-      maxConcurrentPerWorkspace: 2,
-      recoveryDeadlineAt: new Date(Date.now() + 60_000),
-      references: [],
-    };
-    const first = await admitVideoGenerationOperation(client.db, common);
-    const replay = await admitVideoGenerationOperation(client.db, {
-      ...common,
-      id: crypto.randomUUID(),
-      expectedArtifactId: crypto.randomUUID(),
-      expectedFileId: crypto.randomUUID(),
-    });
-    expect(first.created).toBe(true);
-    expect(replay.created).toBe(false);
-    expect(replay.operation.id).toBe(operationId);
-
-    expect(
-      await registerPendingSessionToolCall(client.db, {
+  test.each([false, true])(
+    "keeps one logical paid operation and settles its owned artifact/File (personal=%s)",
+    async (personal) => {
+      if (!available) return;
+      const { grant, session, claim, attemptId, connection, policy } = await fixture();
+      const operationId = crypto.randomUUID();
+      const artifactId = crypto.randomUUID();
+      const fileId = crypto.randomUUID();
+      const requestDigest = "a".repeat(64);
+      const admissionKey = "b".repeat(64);
+      const common = {
+        id: operationId,
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
         turnId: claim.turn.id,
-        executionGeneration: claim.turn.executionGeneration,
         attemptId,
-        callId: common.toolCallId,
-        callType: "function_call",
-        callItem: {
-          type: "function_call",
-          callId: common.toolCallId,
-          name: "generate_video",
-          arguments: JSON.stringify({ prompt: "A quiet fjord at sunrise" }),
-        },
-      }),
-    ).toEqual({ accepted: true, registered: true });
-    expect(
-      await recordPendingSessionToolCallResult(client.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        turnId: claim.turn.id,
-        executionGeneration: claim.turn.executionGeneration,
-        attemptId,
-        callId: common.toolCallId,
-        resultItem: {
-          type: "function_call_result",
-          callId: common.toolCallId,
-          output: {
-            type: "text",
-            text: JSON.stringify({
-              schemaVersion: 1,
-              status: "accepted",
-              operationId,
-            }),
+        toolCallId: "call-video-1",
+        admissionKey,
+        requestDigest,
+        promptDigest: "c".repeat(64),
+        requestEncrypted: "encrypted-request",
+        modelId: "bytedance/seedance-2.5",
+        sourceMode: "text",
+        capabilityRevision: "e".repeat(64),
+        policyRevision: policy.revision,
+        fundingSource: "workspace_gateway" as const,
+        pricedCostMicros: 0,
+        connectionId: connection.id,
+        credentialVersion: connection.version,
+        credentialEncrypted: "encrypted-credential-lease",
+        providerIdempotencyKey: "provider-idempotency-1",
+        expectedArtifactId: artifactId,
+        expectedFileId: fileId,
+        workspaceQuotaBytes: 1024 * 1024 * 1024,
+        maxConcurrentPerWorkspace: 2,
+        recoveryDeadlineAt: new Date(Date.now() + 60_000),
+        references: [],
+      };
+      const withOwner = <T>(fn: () => Promise<T>) =>
+        withSessionRlsActorContext(
+          {
+            subjectId: grant.subjectId,
+            privateFileOwnerSubjectId: personal ? grant.subjectId : null,
           },
+          fn,
+        );
+      const first = await withOwner(() => admitVideoGenerationOperation(client.db, common));
+      const replay = await admitVideoGenerationOperation(client.db, {
+        ...common,
+        id: crypto.randomUUID(),
+        expectedArtifactId: crypto.randomUUID(),
+        expectedFileId: crypto.randomUUID(),
+      });
+      expect(first.created).toBe(true);
+      expect(replay.created).toBe(false);
+      expect(replay.operation.id).toBe(operationId);
+
+      expect(
+        await registerPendingSessionToolCall(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          turnId: claim.turn.id,
+          executionGeneration: claim.turn.executionGeneration,
+          attemptId,
+          callId: common.toolCallId,
+          callType: "function_call",
+          callItem: {
+            type: "function_call",
+            callId: common.toolCallId,
+            name: "generate_video",
+            arguments: JSON.stringify({ prompt: "A quiet fjord at sunrise" }),
+          },
+        }),
+      ).toEqual({ accepted: true, registered: true });
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          turnId: claim.turn.id,
+          executionGeneration: claim.turn.executionGeneration,
+          attemptId,
+          callId: common.toolCallId,
+          resultItem: {
+            type: "function_call_result",
+            callId: common.toolCallId,
+            output: {
+              type: "text",
+              text: JSON.stringify({
+                schemaVersion: 1,
+                status: "accepted",
+                operationId,
+              }),
+            },
+          },
+          videoGenerationAcceptance: { operationId, requestDigest },
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+      expect(
+        (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))?.status,
+      ).toBe("accepted");
+      expect(
+        (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))
+          ?.admissionOutputState,
+      ).toBe("recorded");
+      await markVideoGenerationSubmissionIntent(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId,
+        requestDigest,
+        encryptedProviderRequest: "encrypted-provider-request",
+        providerRequestExpiresAt: new Date(Date.now() + 60_000),
+        nextReconcileAt: new Date(),
+      });
+      await markVideoGenerationProviderStarted(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId,
+        requestDigest,
+        providerJobId: "provider-job-1",
+        nextReconcileAt: new Date(),
+      });
+      await markVideoGenerationRetaining(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId,
+        requestDigest,
+      });
+      await rescheduleVideoGenerationOperation(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId,
+        requestDigest,
+        nextReconcileAt: new Date(),
+        error: "transient retention error",
+      });
+      const settled = await settleVideoGenerationReady(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId,
+        requestDigest,
+        fileId,
+        bucket: "video-test-bucket",
+        objectKey: `video-generation/objects/sha256/${fileId}/${"d".repeat(64)}.mp4`,
+        sizeBytes: 2_000_000,
+        sha256: "d".repeat(64),
+        facts: {
+          durationSeconds: 5,
+          width: 1280,
+          height: 720,
+          fps: 24,
+          hasAudio: true,
+          videoCodec: "h264",
+          audioCodec: "aac",
         },
-        videoGenerationAcceptance: { operationId, requestDigest },
-      }),
-    ).toEqual({ accepted: true, recorded: true });
-    expect(
-      (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))?.status,
-    ).toBe("accepted");
-    expect(
-      (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))
-        ?.admissionOutputState,
-    ).toBe("recorded");
-    await markVideoGenerationSubmissionIntent(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      operationId,
-      requestDigest,
-      encryptedProviderRequest: "encrypted-provider-request",
-      providerRequestExpiresAt: new Date(Date.now() + 60_000),
-      nextReconcileAt: new Date(),
-    });
-    await markVideoGenerationProviderStarted(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      operationId,
-      requestDigest,
-      providerJobId: "provider-job-1",
-      nextReconcileAt: new Date(),
-    });
-    await markVideoGenerationRetaining(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      operationId,
-      requestDigest,
-    });
-    await rescheduleVideoGenerationOperation(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      operationId,
-      requestDigest,
-      nextReconcileAt: new Date(),
-      error: "transient retention error",
-    });
-    const settled = await settleVideoGenerationReady(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      operationId,
-      requestDigest,
-      fileId,
-      bucket: "video-test-bucket",
-      objectKey: `video-generation/objects/sha256/${"d".repeat(64)}.mp4`,
-      sizeBytes: 2_000_000,
-      sha256: "d".repeat(64),
-      facts: {
-        durationSeconds: 5,
-        width: 1280,
-        height: 720,
-        fps: 24,
-        hasAudio: true,
-        videoCodec: "h264",
-        audioCodec: "aac",
-      },
-    });
-    expect(settled.artifact.id).toBe(artifactId);
-    expect(settled.artifact.primaryFileId).toBe(fileId);
-    expect(settled.artifact.id).not.toBe(fileId);
-    expect(settled.operation.lastError).toBeNull();
-    const retained = await getGeneratedVideoArtifact(client.db, grant.workspaceId, artifactId);
-    expect(retained?.file.id).toBe(fileId);
-    const terminal = await mediaGenerationResultForStoredOperation(client.db, settled.operation);
-    expect(terminal.status).toBe("ready");
-    if (terminal.status === "ready") {
-      expect(terminal.receipt.artifact.artifactId).toBe(artifactId);
-      expect(terminal.receipt.sandboxPath).toBe(
-        `/workspace/generated-videos/generated-video-${artifactId}.mp4`,
+      });
+      expect(settled.artifact.id).toBe(artifactId);
+      expect(settled.artifact.primaryFileId).toBe(fileId);
+      expect(settled.artifact.id).not.toBe(fileId);
+      expect(settled.operation.lastError).toBeNull();
+      expect((await withOwner(() => getFile(client.db, grant.workspaceId, fileId)))?.scope).toBe(
+        personal ? "personal" : "workspace",
       );
-    }
-    expect(
-      (await getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId))?.status,
-    ).toBe("completed");
-    expect(
-      (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))?.status,
-    ).toBe("completed");
-  }, 60_000);
+      if (personal) {
+        expect(await getFile(client.db, grant.workspaceId, fileId)).toBeNull();
+        expect(
+          await getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+        ).toBeNull();
+      }
+      const retained = await withOwner(() =>
+        getGeneratedVideoArtifact(client.db, grant.workspaceId, artifactId),
+      );
+      expect(retained?.file.id).toBe(fileId);
+      const terminal = await withOwner(() =>
+        mediaGenerationResultForStoredOperation(client.db, settled.operation),
+      );
+      expect(terminal.status).toBe("ready");
+      if (terminal.status === "ready") {
+        expect(terminal.receipt.artifact.artifactId).toBe(artifactId);
+        expect(terminal.receipt.sandboxPath).toBe(
+          `/workspace/generated-videos/generated-video-${artifactId}.mp4`,
+        );
+      }
+      expect(
+        (
+          await withOwner(() =>
+            getVideoGenerationOperationSummary(client.db, grant.workspaceId, operationId),
+          )
+        )?.status,
+      ).toBe("completed");
+      expect(
+        (await getVideoGenerationOperation(client.db, grant.workspaceId, operationId))?.status,
+      ).toBe("completed");
+    },
+    60_000,
+  );
 
   test("debits one exact managed-video price, refunds failure, and retains a successful debit", async () => {
     if (!available) return;

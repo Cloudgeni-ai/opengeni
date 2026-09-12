@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenGeni · Light studies</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #101114;
+        color: #eeeef2;
+        font:
+          14px Inter,
+          system-ui,
+          sans-serif;
+        --base: #686b76;
+        --peak: #fff;
+        --warm: #ffe7c5;
+        --cool: #d9e7ff;
+        --border: #292b32;
+        --panel: #15161b;
+      }
+      body.light {
+        background: #f8f9fb;
+        color: #20212a;
+        --base: #898c94;
+        --peak: #f0f1f4;
+        --warm: #f5ede3;
+        --cool: #ecf2ff;
+        --border: #dedfe5;
+        --panel: #fff;
+      }
+      main {
+        max-width: 1160px;
+        margin: auto;
+        padding: 48px 32px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .eyebrow {
+        font-size: 11px;
+        letter-spacing: 0.15em;
+        color: #898d99;
+      }
+      h1 {
+        font-size: 42px;
+        font-weight: 500;
+        letter-spacing: -0.045em;
+        margin: 28px 0 12px;
+      }
+      p {
+        color: #9296a2;
+        line-height: 1.6;
+      }
+      nav {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 28px 0 32px;
+      }
+      button,
+      select,
+      input {
+        font: inherit;
+        background: var(--panel);
+        color: inherit;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 9px 12px;
+      }
+      button {
+        cursor: pointer;
+      }
+      input {
+        flex: 1;
+        min-width: 220px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      article {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        background: var(--panel);
+        cursor: pointer;
+      }
+      article.selected {
+        border-color: #a297bc;
+      }
+      article h2 {
+        font-size: 14px;
+        font-weight: 500;
+        margin: 0;
+      }
+      article small {
+        float: right;
+        color: #8e929d;
+        font-size: 11px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        height: 86px;
+        overflow: hidden;
+      }
+      .icon {
+        flex: none;
+        color: #858a98;
+        font-size: 17px;
+      }
+      .text {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 15px;
+        line-height: 24px;
+        background-image: linear-gradient(90deg, var(--base) 35%, var(--peak) 50%, var(--base) 65%);
+        background-size: 300% 100%;
+        background-position: 100% 0;
+        background-clip: text;
+        -webkit-background-clip: text;
+        color: transparent;
+        animation: sweep var(--speed, 3.6s) linear infinite;
+      }
+      .text b {
+        font-weight: 500;
+      }
+      .text span {
+        font-size: 13px;
+      }
+      article p {
+        font-size: 12px;
+        margin: 0;
+        min-height: 38px;
+      }
+      .v2 {
+        background-image: linear-gradient(90deg, var(--base) 26%, var(--peak) 50%, var(--base) 74%);
+      }
+      .v3 {
+        background-image: linear-gradient(90deg, var(--base) 42%, var(--peak) 50%, var(--base) 58%);
+      }
+      .v4 {
+        background-image: linear-gradient(
+          90deg,
+          var(--base) 30%,
+          var(--peak) 48%,
+          var(--peak) 53%,
+          var(--base) 70%
+        );
+        animation-timing-function: ease-in-out;
+      }
+      .v5 {
+        background-image: linear-gradient(90deg, var(--base) 28%, var(--peak) 48%, var(--base) 57%);
+      }
+      .v6 {
+        background-image: linear-gradient(90deg, var(--base) 42%, var(--peak) 52%, var(--base) 74%);
+      }
+      .v7 {
+        background-image: linear-gradient(90deg, var(--base) 33%, var(--warm) 50%, var(--base) 67%);
+      }
+      .v8 {
+        background-image: linear-gradient(90deg, var(--base) 33%, var(--cool) 50%, var(--base) 67%);
+      }
+      .v9 {
+        background-image: linear-gradient(
+          90deg,
+          var(--base) 30%,
+          var(--peak) 46%,
+          var(--peak) 54%,
+          var(--base) 70%
+        );
+        filter: drop-shadow(0 0 3px light-dark(#9993, #fff2));
+      }
+      .v10 {
+        background-image: linear-gradient(
+          90deg,
+          var(--base) 32%,
+          var(--peak) 48%,
+          var(--base) 53%,
+          var(--peak) 57%,
+          var(--base) 68%
+        );
+      }
+      @keyframes sweep {
+        from {
+          background-position: 100% 0;
+        }
+        to {
+          background-position: 0% 0;
+        }
+      }
+      .paused .text {
+        animation-play-state: paused;
+      }
+      body.light {
+        color-scheme: light;
+      }
+      body:not(.light) {
+        color-scheme: dark;
+      }
+      @media (max-width: 740px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        main {
+          padding: 28px 18px;
+        }
+        h1 {
+          font-size: 32px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .text {
+          animation: none;
+          background-position: 50% 0;
+        }
+      }
+    </style>
+  </head>
+  <body class="light">
+    <main>
+      <header>
+        <span class="eyebrow">OPENGENI / LIGHT STUDIES</span
+        ><button id="theme">Light / dark</button>
+      </header>
+      <h1>Light passing through the words.</h1>
+      <p>
+        Ten soft, left-to-right sweeps. Stationary text. One continuous light source.<br />Compare
+        the beam width, falloff and warmth. Click a favorite.
+      </p>
+      <nav>
+        <button id="pause">Pause</button
+        ><select id="speed" aria-label="Sweep duration">
+          <option value="2.8s">2.8 seconds</option>
+          <option selected value="3.6s">3.6 seconds</option>
+          <option value="4.8s">4.8 seconds</option></select
+        ><input
+          id="copy"
+          aria-label="Preview description"
+          value="Inspecting the repository and its dependencies"
+        />
+      </nav>
+      <div class="grid" id="grid"></div>
+    </main>
+    <script>
+      const variants = [
+        ["Soft flashlight", "A balanced, feathered beam. The clearest starting point."],
+        ["Wide wash", "A broader pool of light; calmer and easier to notice across a long row."],
+        ["Focused beam", "A smaller bright center with soft edges. More precise, less ambient."],
+        ["Silk sweep", "A sustained bright center, easing gently into and out of the pass."],
+        ["Trailing light", "A crisp arrival followed by a longer, soft fade behind the beam."],
+        ["Gentle approach", "The light builds gradually, then clears the letters more quickly."],
+        ["Warm porcelain", "The same soft beam, with a restrained warm highlight."],
+        ["Cool silver", "A silver-blue highlight for a slightly sharper, cooler feel."],
+        [
+          "Diffused lens",
+          "A broad bright center with a very fine optical softness on the strokes.",
+        ],
+        [
+          "Reflected light",
+          "One main beam with a close, softer reflection, like light through glass.",
+        ],
+      ];
+      grid.innerHTML = variants
+        .map(
+          ([name, desc], i) =>
+            `<article tabindex="0" role="button" aria-pressed="false"><small>${String(i + 1).padStart(2, "0")}${i === 0 ? " · START HERE" : ""}</small><h2>${name}</h2><div class="row"><span class="icon">› &nbsp;⌘</span><div class="text v${i + 1}"><b>Running</b> &nbsp; <span class="description"></span></div></div><p>${desc}</p></article>`,
+        )
+        .join("");
+      function update() {
+        document.querySelectorAll(".description").forEach((el) => (el.textContent = copy.value));
+      }
+      update();
+      copy.oninput = update;
+      theme.onclick = () => document.body.classList.toggle("light");
+      pause.onclick = () => {
+        const p = document.body.classList.toggle("paused");
+        pause.textContent = p ? "Play" : "Pause";
+      };
+      speed.onchange = () => document.body.style.setProperty("--speed", speed.value);
+      document.querySelectorAll("article").forEach((el) => {
+        const choose = () => {
+          document.querySelectorAll("article").forEach((x) => {
+            x.classList.remove("selected");
+            x.setAttribute("aria-pressed", "false");
+          });
+          el.classList.add("selected");
+          el.setAttribute("aria-pressed", "true");
+        };
+        el.onclick = choose;
+        el.onkeydown = (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            choose();
+          }
+        };
+      });
+    </script>
+  </body>
+</html>

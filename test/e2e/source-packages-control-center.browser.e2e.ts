@@ -210,6 +210,7 @@ describe("Bundles section browser acceptance", () => {
         expectedInstallationVersion: 3,
       });
 
+      await page.getByRole("tab", { name: "Skills", exact: true }).click();
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await openBundleSheet(page, `imported:${skillCapabilityId}`);
       await page
@@ -418,6 +419,15 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({
+        provider: "skills_sh",
+        query: url.searchParams.get("q"),
+        items: [],
+        nextCursor: null,
+      });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`)
+      return json({ items: [], total: 0, nextOffset: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json(capabilityCatalog(state));
     }

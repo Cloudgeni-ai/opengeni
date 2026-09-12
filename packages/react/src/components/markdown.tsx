@@ -1,5 +1,7 @@
 import {
   Children,
+  createContext,
+  useContext,
   isValidElement,
   memo,
   useEffect,
@@ -13,6 +15,7 @@ import {
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
+  type ExtraProps,
   type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -40,7 +43,17 @@ import { TooltipProvider } from "./tooltip";
  * the tokens land. Consumers who want a different renderer can still pass
  * `renderMessageText` to `MessageTimeline` to override this entirely.
  */
+export type MarkdownInteractiveBlock = { kind: "html" | "site"; content: string };
+const InteractiveContext = createContext<{
+  source: string;
+  render?: (block: MarkdownInteractiveBlock) => ReactNode;
+  renderImage?: (image: { src: string; alt: string }) => ReactNode;
+}>({ source: "" });
+
 export type MarkdownProps = {
+  renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
+  /** Host opt-in for assistant-authored interactive fences. */
+  renderInteractiveBlock?: ((block: MarkdownInteractiveBlock) => ReactNode) | undefined;
   children: string;
   className?: string | undefined;
   /**
@@ -171,7 +184,7 @@ const baseComponents: Components = {
     </code>
   ),
   // Fenced code — quiet mono block (no card / no nested vertical scroll).
-  pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
+  pre: InteractiveCodeBlock,
   // Tables stay unboxed (hairline rules); hover reveals a TSV copy control.
   table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
   thead: ({ children, ...props }) => <thead {...props}>{children}</thead>,
@@ -191,19 +204,7 @@ const baseComponents: Components = {
       {children}
     </td>
   ),
-  img: ({ alt, src, ...props }) =>
-    src ? (
-      <img
-        alt={alt ?? ""}
-        src={src}
-        className="my-3 max-w-full rounded-og-md border border-og-border"
-        {...props}
-      />
-    ) : alt ? (
-      <span className="text-og-fg-subtle" aria-disabled="true">
-        {alt}
-      </span>
-    ) : null,
+  img: MarkdownImage,
 };
 
 const MARKDOWN_LINK_CLASS =
@@ -343,8 +344,30 @@ export function sandboxFilePathFromHref(href: string | undefined): string | null
   return sandboxFileLocationFromHref(href)?.path ?? null;
 }
 
+export function retainedImageId(src: string): string | null {
+  return (
+    /^artifact:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+      .exec(src)?.[1]
+      ?.toLowerCase() ?? null
+  );
+}
+function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
+  const { renderImage } = useContext(InteractiveContext);
+  if (!src) return <span>{alt ?? "Image unavailable"}</span>;
+  if (retainedImageId(src))
+    return renderImage ? (
+      <>{renderImage({ src, alt: alt ?? "" })}</>
+    ) : (
+      <span>{alt || "Image"} (preview unavailable)</span>
+    );
+  return <img src={src} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
+}
+
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  key === "href" && node.tagName === "a" && isSandboxHref(url) ? url : defaultUrlTransform(url);
+  (key === "href" && node.tagName === "a" && isSandboxHref(url)) ||
+  (key === "src" && node.tagName === "img" && retainedImageId(url))
+    ? url
+    : defaultUrlTransform(url);
 
 /** How long after the stream ends the reveal pipeline stays for trailing animations. */
 /** Trailing ink window after stream end — keep ≥ {@link INK_FADE_MS}. */
@@ -380,6 +403,42 @@ function fenceLanguage(children: ReactNode): string | null {
     }
   });
   return found;
+}
+
+function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
+  const { source, render } = useContext(InteractiveContext);
+  const language = fenceLanguage(children);
+  if (render && (language === "opengeni-html" || language === "opengeni-site")) {
+    const start = node?.position?.start.offset;
+    const end = node?.position?.end.offset;
+    const original =
+      start !== undefined && end !== undefined && end <= source.length
+        ? source.slice(start, end)
+        : "";
+    const lines = original.trimEnd().split("\n");
+    const opening = lines[0]?.match(/^ {0,3}([\x60]{3,}|~{3,})/);
+
+    const closing = lines
+      .at(-1)
+      ?.replace(/^\s*(?:>\s*)+/, "")
+      .trim();
+    const complete =
+      opening &&
+      lines.length > 1 &&
+      closing &&
+      closing.length >= opening[1]!.length &&
+      [...closing].every((c) => c === opening[1]![0]);
+    if (!complete) return <p role="status">Preparing preview…</p>;
+    return (
+      <>
+        {render({
+          kind: language === "opengeni-html" ? "html" : "site",
+          content: nodeText(children).replace(/\n$/, ""),
+        })}
+      </>
+    );
+  }
+  return <MarkdownCodeBlock>{children}</MarkdownCodeBlock>;
 }
 
 function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
@@ -462,7 +521,14 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
-function MarkdownImpl({ children, className, streaming = false, onSandboxFile }: MarkdownProps) {
+function MarkdownImpl({
+  children,
+  className,
+  streaming = false,
+  onSandboxFile,
+  renderInteractiveBlock,
+  renderImage,
+}: MarkdownProps) {
   // Tip-ink engine for THIS body: created on the first streaming render, kept
   // through a short linger after the stream ends (so the last age window can
   // finish), then dropped so settled bodies pay zero cost. Observing during
@@ -553,28 +619,39 @@ function MarkdownImpl({ children, className, streaming = false, onSandboxFile }:
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
   const components = useMemo(() => markdownComponents(onSandboxFile), [onSandboxFile]);
 
+  const interactiveContext = useMemo(
+    () => ({
+      source: children,
+      ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
+      ...(renderImage ? { renderImage } : {}),
+    }),
+    [children, renderInteractiveBlock, renderImage],
+  );
+
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
   // long links and code blocks wrap/scroll instead of forcing overflow.
   return (
-    <TooltipProvider delayDuration={400}>
-      <div
-        ref={bodyRef}
-        className={cn(
-          "og-markdown-body min-w-0 break-words",
-          settling && "og-markdown-settle",
-          className,
-        )}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={rehypePlugins}
-          components={components}
-          urlTransform={markdownUrlTransform}
+    <InteractiveContext.Provider value={interactiveContext}>
+      <TooltipProvider delayDuration={400}>
+        <div
+          ref={bodyRef}
+          className={cn(
+            "og-markdown-body min-w-0 break-words",
+            settling && "og-markdown-settle",
+            className,
+          )}
         >
-          {parseText}
-        </ReactMarkdown>
-      </div>
-    </TooltipProvider>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={rehypePlugins}
+            components={components}
+            urlTransform={markdownUrlTransform}
+          >
+            {parseText}
+          </ReactMarkdown>
+        </div>
+      </TooltipProvider>
+    </InteractiveContext.Provider>
   );
 }
 

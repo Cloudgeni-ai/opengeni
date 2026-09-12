@@ -1,6 +1,7 @@
+import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   applyKnowledgeMemoryOperation,
@@ -195,7 +196,7 @@ beforeAll(async () => {
       },
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0152-hierarchical-memory");
+    shared = await acquirePreKnowledgeTestDatabase("migration-0152-hierarchical-memory");
   }
   if (!shared) {
     if (requireRealDatabase)

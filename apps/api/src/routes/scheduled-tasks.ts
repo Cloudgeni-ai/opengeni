@@ -150,7 +150,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
-    const task = await updateScheduledTaskForApi(db, workspaceId, taskId, update);
+    const task = await updateScheduledTaskForApi(
+      db,
+      workspaceId,
+      taskId,
+      update,
+      payload.agentLearning
+        ? { authorization, request: payload.agentLearning, restoreState: previous }
+        : undefined,
+    );
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));
   });

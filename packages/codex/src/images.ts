@@ -3,7 +3,7 @@ import type { CodexRequestContext, CodexTokenSnapshot } from "./request-context"
 import type { FetchLike } from "./fetch";
 import { pinnedFetch, readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
 
-const CODEX_IMAGE_MODEL = "gpt-image-2";
+export const CODEX_IMAGE_MODEL = "gpt-image-2.5-sunburst";
 const CODEX_IMAGE_RESPONSE_MAX_BYTES = 90 * 1024 * 1024;
 const CODEX_IMAGE_ERROR_MAX_BYTES = 64 * 1024;
 const CODEX_IMAGE_MAX_BYTES = 64 * 1024 * 1024;

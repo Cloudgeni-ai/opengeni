@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/artifact-client";
 import {
-  browseCompanyBrainKnowledge,
-  getCompanyBrainKnowledge,
   listCompanyBrainContextReceipts,
   listCompanyBrainKnowledgeProposals,
-  searchCompanyBrainKnowledge,
   type CompanyBrainOkfPackage,
 } from "../src/company-brain";
 
@@ -57,17 +54,13 @@ describe("Company Brain SDK", () => {
     ]);
   });
 
-  test("maps bounded Knowledge, receipt, and proposal inspection without using legacy search", async () => {
+  test("maps historical context and proposal inspection", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({
       baseUrl: "https://api.example.test",
       fetch: (async (input, init) => {
         const request = new Request(input, init);
         requests.push(request);
-        if (request.url.includes("/knowledge/search")) return Response.json({ results: [] });
-        if (request.url.includes("/knowledge/record"))
-          return Response.json({ record: { id: "record" } });
-        if (request.url.includes("/knowledge/browse")) return Response.json({ records: [] });
         if (request.url.includes("/context-receipts")) {
           return Response.json({ receipts: [], nextCursor: null, hasMore: false });
         }
@@ -80,13 +73,6 @@ describe("Company Brain SDK", () => {
       }) as typeof fetch,
     });
 
-    await searchCompanyBrainKnowledge(client, WORKSPACE_ID, { query: "mission", limit: 7 });
-    await getCompanyBrainKnowledge(
-      client,
-      WORKSPACE_ID,
-      "document:00000000-0000-4000-8000-000000000010",
-    );
-    await browseCompanyBrainKnowledge(client, WORKSPACE_ID, { limit: 9 });
     await listCompanyBrainContextReceipts(client, WORKSPACE_ID, {
       attemptId: "00000000-0000-4000-8000-000000000011",
       limit: 1,
@@ -94,18 +80,6 @@ describe("Company Brain SDK", () => {
     await listCompanyBrainKnowledgeProposals(client, WORKSPACE_ID, { limit: 13 });
 
     expect(requests.map((request) => [request.method, request.url])).toEqual([
-      [
-        "POST",
-        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-brain/knowledge/search`,
-      ],
-      [
-        "GET",
-        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-brain/knowledge/record?id=document%3A00000000-0000-4000-8000-000000000010`,
-      ],
-      [
-        "POST",
-        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-brain/knowledge/browse`,
-      ],
       [
         "GET",
         `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-brain/context-receipts?attemptId=00000000-0000-4000-8000-000000000011&limit=1`,
@@ -115,7 +89,5 @@ describe("Company Brain SDK", () => {
         `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-brain/knowledge-proposals?limit=13`,
       ],
     ]);
-    expect(await requests[0]!.json()).toEqual({ query: "mission", limit: 7 });
-    expect(await requests[2]!.json()).toEqual({ limit: 9 });
   });
 });

@@ -1,3 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
+import {
+  freezeAgentLearningPolicy,
+  getScheduledTaskRunAcceptedExecution,
+  ensureKnowledgeSourceSyncState,
+  recordKnowledgeSourceSyncWake,
+} from "@opengeni/db";
 import { createHash } from "node:crypto";
 import { heartbeat } from "@temporalio/activity";
 import {
@@ -114,6 +123,16 @@ import {
   type GoogleDriveSyncBudget,
 } from "./google-drive-changes";
 
+// Carries exact-attempt liveness into every physical request, including provider retries.
+const sourceRequestAuthority = new AsyncLocalStorage<() => Promise<unknown>>();
+const sourceFetch: typeof fetch = Object.assign(
+  async (...args: Parameters<typeof fetch>) => {
+    await sourceRequestAuthority.getStore()?.();
+    return fetch(...args);
+  },
+  { preconnect: fetch.preconnect },
+);
+
 const DRIVE_API_BASE = "https://www.googleapis.com/drive/v3";
 const DRIVE_JSON_MAX_BYTES = 2 * 1024 * 1024;
 const GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -161,17 +180,83 @@ export function createKnowledgeSourceSyncActivities(
     ): Promise<RunKnowledgeSourceSyncBatchResult> => {
       const { settings, db, objectStorage, observability } = await services();
       if (!objectStorage) throw new Error("object storage is not configured");
-      const task = await getScheduledTask(db, input.workspaceId, input.taskId);
+      // A control workflow cannot fetch sources. Only the exact ordinary
+      // agent run carrying the immutable source binding can use this adapter.
+      if (!input.agent)
+        return { action: "failed", bufferedWake: false, errorCode: "accepted_agent_required" };
+      const context = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actor: input.agent,
+      };
+      let boundSource: ReturnType<typeof scheduledTaskKnowledgeSource> = null;
+      const authorize = async () => {
+        const policy = await freezeAgentLearningPolicy(db, context);
+        if (policy.scheduledTaskRunId !== input.scheduledTaskRunId)
+          throw new Error("Source fetch does not belong to this accepted agent run");
+        if (boundSource) {
+          const [currentTask, connection] = await Promise.all([
+            getScheduledTask(db, input.workspaceId, input.taskId),
+            getConnectionMetadata(
+              db,
+              input.workspaceId,
+              boundSource.connection.connectionId,
+              boundSource.initiatingSubjectId,
+            ),
+          ]);
+          const control = currentTask?.metadata.knowledgeSourceSync as
+            | Record<string, unknown>
+            | undefined;
+          if (
+            !currentTask ||
+            currentTask.status !== "active" ||
+            control?.sourceEnabled === false ||
+            control?.connectionPaused === true ||
+            !isDeepStrictEqual(scheduledTaskKnowledgeSource(currentTask), boundSource) ||
+            !connection ||
+            connection.status !== "active" ||
+            connection.version !== boundSource.connection.connectionVersion ||
+            connection.subjectId !== boundSource.connection.ownerSubjectId
+          )
+            throw new SyncFailure("authority_changed", false);
+        }
+        return policy;
+      };
+      await authorize();
+      const accepted = await getScheduledTaskRunAcceptedExecution(db, {
+        workspaceId: input.workspaceId,
+        runId: input.scheduledTaskRunId,
+      });
+      const task = accepted?.task;
+      const action = task ? scheduledTaskKnowledgeSource(task) : null;
+      const liveTask = await getScheduledTask(db, input.workspaceId, input.taskId);
       if (
         !task ||
+        !action ||
+        !liveTask ||
+        liveTask.status !== "active" ||
+        task.id !== input.taskId ||
         task.accountId !== input.accountId ||
-        task.action.kind !== "knowledge_source_sync" ||
-        task.action.sourceId !== input.sourceId ||
-        task.status !== "active"
+        task.action.kind !== "agent_turn" ||
+        action.sourceId !== input.sourceId ||
+        accepted.causalHumanSubjectId !== action.initiatingSubjectId
       ) {
-        return await failWithoutProvider("schedule_inactive_or_changed");
+        return { action: "failed", bufferedWake: false };
       }
-      const action = task.action;
+      boundSource = action;
+      await authorize();
+      await ensureKnowledgeSourceSyncState(db, task);
+      await recordKnowledgeSourceSyncWake(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceId: input.sourceId,
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: input.scheduledTaskRunId,
+        cause: "scheduled",
+        producerKey: `agent-source:${input.scheduledTaskRunId}`,
+        sourceConfigGeneration: action.sourceConfigGeneration,
+        sourceLifecycleGeneration: action.sourceLifecycleGeneration,
+      });
       const providerLabel =
         action.connection.providerDomain === ATLASSIAN_PROVIDER_DOMAIN
           ? "atlassian"
@@ -310,6 +395,8 @@ export function createKnowledgeSourceSyncActivities(
           await recordConnectorUsage("bytes", replayedSummary.bytes, "byte");
           return {
             action: replayedRun.state === "succeeded" ? "complete" : "failed",
+            summary: replayedSummary,
+            ...(replayedRun.errorCode ? { errorCode: replayedRun.errorCode } : {}),
             bufferedWake: settled.bufferedWake,
             bufferedScheduledTaskRunId: settled.bufferedScheduledTaskRunId,
           };
@@ -373,7 +460,22 @@ export function createKnowledgeSourceSyncActivities(
           }));
         knowledgeRunId = knowledgeRun.id;
 
-        const driver = provider.driver;
+        const originalDriver = provider.driver;
+        const readAcl = originalDriver.readAcl;
+        const driver = {
+          ...originalDriver,
+          inventory: (...args: Parameters<typeof originalDriver.inventory>) =>
+            sourceRequestAuthority.run(authorize, () => originalDriver.inventory(...args)),
+          fetchContent: (...args: Parameters<typeof originalDriver.fetchContent>) =>
+            sourceRequestAuthority.run(authorize, () => originalDriver.fetchContent(...args)),
+          ...(readAcl
+            ? {
+                readAcl: (...args: Parameters<typeof readAcl>) =>
+                  sourceRequestAuthority.run(authorize, () => readAcl(...args)),
+              }
+            : {}),
+        };
+        await authorize();
         const inventory = await driver.inventory(
           lease.state.executionCheckpoint,
           lease.state.providerCursor,
@@ -576,6 +678,7 @@ export function createKnowledgeSourceSyncActivities(
           if (remainingProviderRequests < 1) {
             throw new SyncFailure("resource_limit", false);
           }
+          await authorize();
           const evidence = await driver.readAcl(details.entry, remainingProviderRequests);
           summary.providerRequests += evidence.providerRequests;
           if (summary.providerRequests > action.limits.maxProviderRequests) {
@@ -619,6 +722,7 @@ export function createKnowledgeSourceSyncActivities(
 
         const outcomes = [];
         for (const entry of entriesToProcess) {
+          await authorize();
           heartbeat({ sourceId: input.sourceId, externalObjectId: entry.externalObjectId });
           const observationFloor = observationFloorsById.get(entry.externalObjectId);
           if (!observationFloor) throw new SyncFailure("provider_payload_invalid", false);
@@ -758,6 +862,7 @@ export function createKnowledgeSourceSyncActivities(
               continue;
             }
             summary.phase = "transfer";
+            await authorize();
             const bytes = await driver.fetchContent(entry, action.limits.maxFileBytes);
             const contentSha256 = createHash("sha256").update(bytes).digest("hex");
             const observationKey = createHash("sha256")
@@ -1035,7 +1140,7 @@ export function createKnowledgeSourceSyncActivities(
               observations: observationFloors,
             },
           });
-          return { action: "continue" };
+          return { action: "continue", summary };
         }
 
         const tombstonedExternalObjectIds = inventory.authoritativeFullScan
@@ -1130,6 +1235,7 @@ export function createKnowledgeSourceSyncActivities(
         recordSyncHealthTelemetry(observability, providerLabel, summary, "succeeded");
         return {
           action: "complete",
+          summary,
           bufferedWake: settled.bufferedWake,
           bufferedScheduledTaskRunId: settled.bufferedScheduledTaskRunId,
         };
@@ -1153,7 +1259,7 @@ export function createKnowledgeSourceSyncActivities(
           await completeKnowledgeSyncRun(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
-            initiatingSubjectId: task.action.initiatingSubjectId,
+            initiatingSubjectId: action.initiatingSubjectId,
             runId: knowledgeRunId,
             state: "failed",
             metadata: summary,
@@ -1218,6 +1324,8 @@ export function createKnowledgeSourceSyncActivities(
         recordSyncHealthTelemetry(observability, providerLabel, summary, "failed", failure);
         return {
           action: "failed",
+          summary,
+          errorCode: failure.code,
           bufferedWake: settled.bufferedWake,
           bufferedScheduledTaskRunId: settled.bufferedScheduledTaskRunId,
         };
@@ -1250,11 +1358,7 @@ export function createKnowledgeSourceSyncActivities(
           ],
         };
         await updateScheduledTaskRun(db, input.workspaceId, input.scheduledTaskRunId, {
-          status: "failed",
-          actionKind: "knowledge_source_sync",
           knowledgeSummary: terminalSummary,
-          completedAt: new Date(),
-          error: code,
         }).catch(() => undefined);
         await completeKnowledgeSourceSyncWakeWithoutLease(db, {
           accountId: input.accountId,
@@ -1267,7 +1371,7 @@ export function createKnowledgeSourceSyncActivities(
           name: "opengeni_knowledge_source_sync_runs_total",
           labels: { provider: "unknown", outcome: "failed_preflight" },
         });
-        return { action: "failed", bufferedWake: false };
+        return { action: "failed", bufferedWake: false, summary: terminalSummary, errorCode: code };
       }
 
       async function recordConnectorUsage(
@@ -2712,7 +2816,7 @@ async function requestGoogleDrive(
 ): Promise<Response> {
   try {
     return await fetchGoogleDriveProvider({
-      fetchImpl: fetch,
+      fetchImpl: sourceFetch,
       url,
       init,
       operation,
@@ -3128,7 +3232,7 @@ async function atlassianJsonRequest(
   authorization: string,
   label: string,
 ): Promise<unknown> {
-  const response = await fetch(url, {
+  const response = await sourceFetch(url, {
     headers: { authorization, accept: "application/json" },
     redirect: "error",
     signal: AbortSignal.timeout(20_000),

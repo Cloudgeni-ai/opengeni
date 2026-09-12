@@ -58,7 +58,7 @@ Workspaces are shared by their members, and sessions in a shared workspace are v
 
 The more restrictive side wins across trees. Children inherit the parent's scope and can only narrow it. These rules do not make product-created chats invisible to authorized human workspace members or organization API keys. The product backend must still authorize each user's requests.
 
-The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Memory](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Integrate your product](/guides/integrate-your-product#choose-agent-access-and-memory).
+The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Knowledge](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Integrate your product](/guides/integrate-your-product#choose-agent-access-and-memory).
 
 ## Browsing and archiving
 

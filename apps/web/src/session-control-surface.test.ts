@@ -9,6 +9,9 @@ describe("session control surface architecture", () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");
     expect(newSession).toContain('expandedPanelPresentation="dialog"');
+    expect(newSession).toContain("draftChatSettings={{");
+    expect(newSession.match(/<ComposerMobilePlus\b/g)).toHaveLength(1);
+    expect(newSession).toContain("agentLearning: draft.agentLearning");
     expect(existingSession).not.toContain('expandedPanelPresentation="dialog"');
   });
 

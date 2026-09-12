@@ -15,6 +15,7 @@ export type WorkspaceInstructionPolicyScope = z.infer<typeof WorkspaceInstructio
 
 export const WorkspaceInstructionPolicyProvenanceSource = z.enum([
   "human",
+  "agent_learning",
   "onboarding",
   "knowledge_proposal",
   "legacy_import",

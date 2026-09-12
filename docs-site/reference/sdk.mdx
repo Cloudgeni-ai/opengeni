@@ -43,7 +43,7 @@ const reply = await chat.send("What did we decide last time?");
 console.log(reply.text);
 ```
 
-In an authenticated product, resolve `tenant` and `user` on your server. The session is created on first send, and the same product, tenant, user, and conversation IDs reopen it. `agentAccess` defaults to `"session"`; `memory` defaults to the same scope and accepts `false` to disable Memory tools. Both settings apply at creation, not when reopening an existing session.
+In an authenticated product, resolve `tenant` and `user` on your server. The session is created on first send, and the same product, tenant, user, and conversation IDs reopen it. `agentAccess` defaults to `"session"`, with omitted `memory` defaulting to `false`. For user or workspace agent access, omitted `memory` follows that scope. This compatibility option selects personal or workspace Knowledge; `false` initializes Knowledge authoring to Off and leaves authorized retrieval available. Both settings apply at creation, not when reopening an existing session.
 
 | API                                          | Purpose                                                                    |
 | -------------------------------------------- | -------------------------------------------------------------------------- |

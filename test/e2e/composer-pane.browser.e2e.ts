@@ -93,6 +93,9 @@ describe("console composer in a split desktop pane", () => {
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Tools/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
+    expect(await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count()).toBe(
+      1,
+    );
     await page.keyboard.press("Escape");
   });
 
@@ -108,7 +111,11 @@ describe("console composer in a split desktop pane", () => {
       });
       for (const name of ["Repositories", "Tools", "Variable sets"]) {
         const plus = page.getByRole("button", { name: "More composer actions" });
+        expect(await page.getByRole("button", { name: "More composer actions" }).count()).toBe(1);
         await plus.click();
+        expect(
+          await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count(),
+        ).toBe(1);
         await page.getByRole("menuitem", { name: new RegExp(name) }).click();
         const dialog = page.getByRole("dialog", { name, exact: true });
         await dialog.waitFor({ state: "visible" });

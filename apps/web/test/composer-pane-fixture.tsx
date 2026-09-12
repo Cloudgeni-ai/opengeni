@@ -46,6 +46,12 @@ createRoot(document.getElementById("root")!).render(
           <>
             <ComposerMobilePlus
               expandedPanelPresentation={newSession ? "dialog" : "menu"}
+              draftChatSettings={{
+                workspaceId: "composer-fixture",
+                scope: "workspace",
+                value: {},
+                onChange: () => {},
+              }}
               fileUploadsEnabled
               servers={galleryToolServers}
               firstPartyTools={galleryFirstPartyTools}

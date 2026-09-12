@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { KNOWLEDGE_MIGRATION_MARKER, migrateRetainedKnowledge } from "./knowledge-migration";
 import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
 import {
@@ -189,6 +190,24 @@ export async function executeMigrationFile(
       await transaction.unsafe(parts[1]!);
       // Unlike historical one-query migrations, include this hook's ledger
       // receipt in the same transaction so retry cannot rerun committed DDL.
+      await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+    });
+    return;
+  }
+  if (sqlText.includes(KNOWLEDGE_MIGRATION_MARKER)) {
+    if (file !== "0461_unified_knowledge.sql")
+      throw new Error("Knowledge conversion is restricted to migration 0461");
+    const parts = sqlText.split(KNOWLEDGE_MIGRATION_MARKER);
+    if (parts.length !== 2) throw new Error("0461 requires exactly one Knowledge conversion stage");
+    await sql.begin(async (transaction) => {
+      await transaction`CREATE TEMP TABLE knowledge_conversion_0461(completed boolean NOT NULL) ON COMMIT DROP`;
+      await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+      await transaction.unsafe(parts[0]!);
+      await migrateRetainedKnowledge(transaction);
+      await transaction`INSERT INTO pg_temp.knowledge_conversion_0461 VALUES(true)`;
+      await transaction.unsafe(parts[1]!);
       await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
     });
     return;

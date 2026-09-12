@@ -214,3 +214,23 @@ describe("local Site Codemode handler", () => {
     expect(calls).toBe(0);
   });
 });
+
+test("optional browser client loads without credentials; tool requests still need them", async () => {
+  let acquired = 0;
+  const handler = createCodemodeSiteRequestHandler(() => {
+    acquired++;
+    throw new Error("No attempt");
+  });
+  const url = "http://localhost/__opengeni/site-tools/client.js";
+  const response = await handler(new Request(url));
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+  expect(await response.text()).toContain("createOpenGeniSiteClient");
+  expect(await (await handler(new Request(url, { method: "HEAD" }))).text()).toBe("");
+  expect((await handler(new Request(url, { method: "POST" }))).status).toBe(405);
+  expect(acquired).toBe(0);
+  expect(
+    (await handler(new Request("http://localhost/__opengeni/site-tools/catalog"))).status,
+  ).toBe(500);
+  expect(acquired).toBe(1);
+});

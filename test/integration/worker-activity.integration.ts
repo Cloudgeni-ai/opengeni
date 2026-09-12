@@ -68,12 +68,12 @@ import {
 } from "@opengeni/db";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 import {
-  FIRST_PARTY_MCP_TOOL_NAMES,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   type AccessGrant,
   type SessionStatus,
 } from "@opengeni/contracts";
+import { allowedFirstPartyMcpToolsForSession } from "@opengeni/config";
 import { updateSessionToolPolicy } from "@opengeni/core";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -2873,14 +2873,14 @@ describe("worker activities integration", () => {
     );
   });
 
-  test("blocks async document embeddings when managed credits are empty", async () => {
+  test("retains document source text without an inline embedding charge when credits are empty", async () => {
     const grant = await testGrant(dbClient.db);
     const upload = await createOwnedFileUpload(dbClient.db, grant, {
       fileId: crypto.randomUUID(),
       filename: "no-credit-doc.txt",
       safeFilename: "no-credit-doc.txt",
       contentType: "text/plain",
-      sizeBytes: 24,
+      sizeBytes: new TextEncoder().encode("OpenGeni managed document credit test.").byteLength,
       bucket: "test",
       objectKey: `workspaces/${grant.workspaceId}/files/no-credit-doc.txt`,
       expiresAt: new Date(Date.now() + 60_000),
@@ -2970,8 +2970,8 @@ describe("worker activities integration", () => {
       authoritySubjectId: document.authoritySubjectId,
     });
 
-    expect(indexed.status).toBe("failed");
-    expect(indexed.error).toContain("insufficient OpenGeni credits");
+    expect(indexed.status).toBe("ready");
+    expect(indexed.error).toBeNull();
     expect(parserCalled).toBe(true);
     expect(embedderCalled).toBe(false);
     const usage = await listUsageEvents(dbClient.db, {
@@ -2995,7 +2995,7 @@ describe("worker activities integration", () => {
         filename: `${label}.txt`,
         safeFilename: `${label}.txt`,
         contentType: "text/plain",
-        sizeBytes: 24,
+        sizeBytes: new TextEncoder().encode("Historical document replay content.").byteLength,
         bucket: "test",
         objectKey: `workspaces/${grant.workspaceId}/files/${label}.txt`,
         expiresAt: new Date(Date.now() + 60_000),
@@ -3111,10 +3111,10 @@ describe("worker activities integration", () => {
     );
     expect(untouched).toHaveLength(0);
     expect(parserCalls).toBe(2);
-    expect(embedderCalls).toBe(2);
+    expect(embedderCalls).toBe(0);
   });
 
-  test("serializes concurrent document indexing against monthly chunk caps", async () => {
+  test("queues canonical projections for concurrent source preparation without writing legacy chunks", async () => {
     const grant = await testGrant(dbClient.db);
     const uploadOne = await createOwnedFileUpload(dbClient.db, grant, {
       fileId: crypto.randomUUID(),
@@ -3220,17 +3220,22 @@ describe("worker activities integration", () => {
       }),
     ]);
 
-    expect(results.map((document) => document.status).sort()).toEqual(["failed", "ready"]);
-    expect(results.find((document) => document.status === "failed")?.error).toContain(
-      "monthly document indexing limit reached (2 chunks)",
+    expect(results.map((document) => document.status)).toEqual(["ready", "ready"]);
+    expect(embedCalls).toBe(0);
+    const queued = await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) =>
+      db.execute<{ count: number }>(dbSql`
+      SELECT count(*)::integer AS count FROM knowledge_index_jobs j
+      JOIN knowledge_entries e ON e.account_id=j.account_id AND e.id=j.entry_id
+      WHERE e.legacy_document_id IN (${documentOne.id}, ${documentTwo.id}) AND j.completed_generation IS NULL
+    `),
     );
-    expect(embedCalls).toBe(1);
+    expect(queued[0]?.count).toBe(2);
     const indexedChunks = await sumUsageQuantity(dbClient.db, {
       workspaceId: grant.workspaceId,
       eventType: "document.indexed",
       since: startOfUtcMonth(),
     });
-    expect(indexedChunks).toBe(2);
+    expect(indexedChunks).toBe(0);
   });
 
   test("allows the worker to run an already accepted turn at the exact monthly run cap", async () => {
@@ -3330,7 +3335,7 @@ describe("worker activities integration", () => {
         {
           mode: "explicit",
           tools: [{ kind: "mcp", id: "docs" }],
-          firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
+          firstPartyMcpTools: allowedFirstPartyMcpToolsForSession(settings),
           expectedVersion: session.toolPolicyVersion,
         },
       );

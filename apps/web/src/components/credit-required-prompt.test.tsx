@@ -145,6 +145,25 @@ describe("credit required prompt", () => {
     expect(container.textContent).not.toContain("This model uses OpenGeni credits");
   });
 
+  test("disabled billing never shows an empty-credits notice", async () => {
+    getBilling.mockResolvedValue({ mode: "disabled", balance: { balanceMicros: 0 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(container.textContent).toBe("");
+  });
+
   test("empty-credits notice does not probe billing without read permission", async () => {
     const container = document.createElement("div");
     document.body.append(container);

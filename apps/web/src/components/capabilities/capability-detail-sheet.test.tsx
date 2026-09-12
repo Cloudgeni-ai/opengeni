@@ -570,3 +570,96 @@ test("separate inline connection forms have independent ownership groups", async
   expect(radios[0]!.name).not.toBe(radios[2]!.name);
   await r.unmount();
 });
+
+test("compact chat ownership choices retain native radio semantics and explicit sharing copy", async () => {
+  const onChange = mock(() => {});
+  const r = await render(<OwnershipSelector compact value="workspace" onChange={onChange} />);
+  try {
+    const radios = [...r.container.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+    expect(radios).toHaveLength(2);
+    expect(radios[0]!.checked).toBe(true);
+    expect(radios[1]!.checked).toBe(false);
+    expect(radios[0]!.name).toBe(radios[1]!.name);
+    expect(r.container.textContent).toContain(
+      "Shared with agents and automations in this workspace.",
+    );
+    await act(async () => radios[1]!.click());
+    expect(onChange).toHaveBeenCalledWith("personal");
+  } finally {
+    await r.unmount();
+  }
+});
+
+test("inline Skill review keeps provenance available and offers only the real workspace install", async () => {
+  const skill = { ...installedCuratedSkill(), enabled: false };
+  const onAction = mock(() => {});
+  const onCancel = mock(() => {});
+  const r = await render(
+    <DetailBody
+      item={skill}
+      inline
+      showIdentity={false}
+      health={{ state: "none" }}
+      logoSrc={null}
+      busy={false}
+      errorMessage={null}
+      canManageSocial={false}
+      canManageSkills
+      onAction={onAction}
+      onCancel={onCancel}
+    />,
+  );
+  try {
+    expect(
+      [...r.container.querySelectorAll("h3")].some((heading) => heading.textContent === skill.name),
+    ).toBe(false);
+    expect(r.container.textContent).toContain("What this skill adds");
+    expect(r.container.textContent).toContain("Reviewed Terraform conventions.");
+    expect(r.container.textContent).toContain(
+      "Available to everyone on the team in this workspace.",
+    );
+    expect(r.container.textContent).toContain("workspace only");
+    expect(r.container.querySelector("details")?.open).toBe(false);
+    const buttons = [...r.container.querySelectorAll("button")];
+    expect(
+      buttons.some((button) => /Only me|This conversation/.test(button.textContent ?? "")),
+    ).toBe(false);
+    await act(async () => buttons.find((button) => button.textContent === "Cancel")!.click());
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onAction).not.toHaveBeenCalled();
+    await act(async () =>
+      buttons.find((button) => button.textContent === "Install & use")!.click(),
+    );
+    expect(onAction).toHaveBeenCalledWith({ type: "install_skill", item: skill });
+  } finally {
+    await r.unmount();
+  }
+});
+
+test("preview-style Skill action retains the administrator permission gate", async () => {
+  const r = await render(
+    <DetailBody
+      item={{ ...installedCuratedSkill(), enabled: false }}
+      inline
+      showIdentity={false}
+      health={{ state: "none" }}
+      logoSrc={null}
+      busy={false}
+      errorMessage={null}
+      canManageSocial={false}
+      canManageSkills={false}
+      onAction={() => {
+        throw new Error("Unauthorized install");
+      }}
+    />,
+  );
+  try {
+    const install = [...r.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Install & use",
+    );
+    expect(install?.disabled).toBe(true);
+    expect(r.container.textContent).toContain("Workspace administrator permission is required");
+  } finally {
+    await r.unmount();
+  }
+});

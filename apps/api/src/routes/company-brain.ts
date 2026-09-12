@@ -1,3 +1,4 @@
+import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { createHash } from "node:crypto";
 import {
   COMPANY_BRAIN_INSPECTOR_CURSOR_MAX_CHARS,
@@ -6,15 +7,17 @@ import {
   CompanyBrainContextReceiptPage,
   CompanyBrainKnowledgeProposalPage,
   CompanyBrainOkfPackage,
-  KnowledgeBrowseRequest,
-  KnowledgeBrowseResponse,
-  KnowledgeGetResponse,
-  KnowledgeRecordId,
-  KnowledgeSearchRequest,
-  KnowledgeSearchResponse,
+  WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT,
   type WorkspaceInstructionPolicyRevision,
 } from "@opengeni/contracts";
-import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  knowledgeContextForAccess,
+  type AccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   getCurrentPreferenceRegistryGovernanceMetadata,
   getWorkspace,
@@ -25,24 +28,14 @@ import {
   listCompanyBrainPreferenceGuidance,
   listCompanyProfile,
   listWorkspaceInstructionPolicyRevisions,
-  listWorkspaceStateMemoryRecords,
+  listKnowledgeEntries,
 } from "@opengeni/db";
-import {
-  browseEffectiveKnowledge,
-  getDocumentInventory,
-  getEffectiveKnowledgeRecord,
-  searchEffectiveKnowledge,
-} from "@opengeni/documents";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
 import { createCompanyBrainOkfPackage, serializeCompanyBrainOkf } from "../company-brain-okf";
 import { projectWorkspaceState } from "../workspace-state-projection";
-
-const BASE_LIMIT = 24;
-const TOPIC_LIMIT = 24;
-const TOPIC_MAX_CHARS = 96;
 
 const inspectorQuery = z
   .object({
@@ -105,26 +98,6 @@ function decodeReceiptCursor(value: string, workspaceId: string, subjectId: stri
   }
 }
 
-async function parsedJson<T>(
-  context: { req: { json: () => Promise<unknown> } },
-  schema: z.ZodType<T>,
-) {
-  const result = schema.safeParse(await context.req.json().catch(() => null));
-  if (!result.success) throw new HTTPException(400, { message: "invalid Company Brain request" });
-  return result.data;
-}
-
-function knowledgeHttpError(error: unknown): never {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("belongs to a different scope")) {
-    throw new HTTPException(409, { message });
-  }
-  if (message.includes("invalid knowledge") || message.includes("knowledge browse")) {
-    throw new HTTPException(400, { message });
-  }
-  throw error;
-}
-
 async function readCompanyBrainPackage(
   deps: ApiRouteDeps,
   input: {
@@ -132,6 +105,7 @@ async function readCompanyBrainPackage(
     accountId: string;
     subjectId: string;
     canInspectKnowledge: boolean;
+    access: AccessGrantAuthorization;
   },
 ) {
   const generatedAt = new Date().toISOString();
@@ -159,15 +133,13 @@ async function readCompanyBrainPackage(
       subjectId: input.subjectId,
     }),
     input.canInspectKnowledge
-      ? Promise.all([
-          getDocumentInventory(deps.db, input.workspaceId, {
-            baseLimit: BASE_LIMIT,
-            topicLimit: TOPIC_LIMIT,
-            topicMaxChars: TOPIC_MAX_CHARS,
-            access: { viewerSubjectId: input.subjectId },
-          }),
-          listWorkspaceStateMemoryRecords(deps.db, input.workspaceId),
-        ]).then(([documents, memories]) => ({ documents, memories }))
+      ? withAccessGrantSessionRlsContext(deps, input.access.grant, async () =>
+          listKnowledgeEntries(
+            deps.db,
+            await knowledgeContextForAccess(deps, input.access, "documents:search"),
+            { limit: WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT, view: "published" },
+          ),
+        )
       : Promise.resolve(null),
   ]);
   if (!workspace) throw new HTTPException(404, { message: "workspace not found" });
@@ -223,12 +195,19 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const result = await readCompanyBrainPackage(deps, {
       workspaceId,
       accountId: grant.accountId,
       subjectId: grant.subjectId,
       canInspectKnowledge: hasPermission(grant.permissions, "documents:search"),
+      access,
     });
     context.header("cache-control", "private, no-store");
     return context.json(CompanyBrainOkfPackage.parse(result));
@@ -236,12 +215,19 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
 
   app.get(`${base}/export`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const result = await readCompanyBrainPackage(deps, {
       workspaceId,
       accountId: grant.accountId,
       subjectId: grant.subjectId,
       canInspectKnowledge: hasPermission(grant.permissions, "documents:search"),
+      access,
     });
     context.header("cache-control", "private, no-store");
     context.header("content-type", "text/markdown; charset=utf-8");
@@ -252,69 +238,34 @@ export function registerCompanyBrainRoutes(app: Hono, deps: ApiRouteDeps): void 
     return context.body(serializeCompanyBrainOkf(result));
   });
 
-  app.post(`${base}/knowledge/search`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "documents:search");
-    const request = await parsedJson(context, KnowledgeSearchRequest);
-    try {
-      const response = await searchEffectiveKnowledge(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          initiatingSubjectId: grant.subjectId,
-          surface: "human",
-          ...request,
-        },
-        deps.getDocumentServices(),
+  for (const path of [
+    `${base}/knowledge/search`,
+    `${base}/knowledge/record`,
+    `${base}/knowledge/browse`,
+  ]) {
+    app.all(path, async (context) => {
+      await requireAccessGrant(
+        context,
+        deps,
+        context.req.param("workspaceId")!,
+        "documents:search",
       );
-      context.header("cache-control", "private, no-store");
-      return context.json(KnowledgeSearchResponse.parse(response));
-    } catch (error) {
-      return knowledgeHttpError(error);
-    }
-  });
-
-  app.get(`${base}/knowledge/record`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "documents:search");
-    const parsedId = KnowledgeRecordId.safeParse(context.req.query("id"));
-    if (!parsedId.success)
-      throw new HTTPException(400, { message: "knowledge record id is invalid" });
-    const record = await getEffectiveKnowledgeRecord(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      initiatingSubjectId: grant.subjectId,
-      surface: "human",
-      id: parsedId.data,
-    });
-    if (!record) throw new HTTPException(404, { message: "knowledge record not found" });
-    context.header("cache-control", "private, no-store");
-    return context.json(KnowledgeGetResponse.parse({ record }));
-  });
-
-  app.post(`${base}/knowledge/browse`, async (context) => {
-    const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "documents:search");
-    const request = await parsedJson(context, KnowledgeBrowseRequest);
-    try {
-      const response = await browseEffectiveKnowledge(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        initiatingSubjectId: grant.subjectId,
-        surface: "human",
-        ...request,
+      throw new HTTPException(410, {
+        message:
+          "Knowledge retrieval moved to /knowledge/entries. Use canonical entries, revisions and groups.",
       });
-      context.header("cache-control", "private, no-store");
-      return context.json(KnowledgeBrowseResponse.parse(response));
-    } catch (error) {
-      return knowledgeHttpError(error);
-    }
-  });
+    });
+  }
 
   app.get(`${base}/context-receipts`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const { grant } = access;
     const parsed = inspectorQuery.safeParse(context.req.query());
     if (!parsed.success) throw new HTTPException(400, { message: "invalid context receipt query" });
     const before = parsed.data.cursor

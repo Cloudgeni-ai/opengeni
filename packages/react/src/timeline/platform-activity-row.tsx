@@ -10,7 +10,6 @@ export default function PlatformActivityRow({
   t: displayName,
   b: BotIcon,
   m: Markdown,
-  r: truncate,
   j,
   s,
 }: {
@@ -20,7 +19,6 @@ export default function PlatformActivityRow({
   t: (name: string) => string;
   b: typeof import("lucide-react").BotIcon;
   m: typeof import("../components/markdown").Markdown;
-  r: typeof import("../lib/format").truncate;
   j: RowJsx;
   s: RowJsxs;
 }) {
@@ -35,7 +33,11 @@ export default function PlatformActivityRow({
             children: "Thought",
           }),
       running: item.streaming,
-      preview: truncate(item.text, 110),
+      compactPreview: item.text.replace(/\*\*|__|`/g, "").replace(/\s+/g, " "),
+      preview: j("span", {
+        className: "og-reasoning-preview",
+        children: j(Markdown, { streaming: item.streaming, children: item.text }),
+      }),
       children: j("div", {
         className: "text-og-base leading-6 text-og-fg-muted [&_strong]:text-og-fg-muted",
         children: j(Markdown, { streaming: item.streaming, children: item.text }),

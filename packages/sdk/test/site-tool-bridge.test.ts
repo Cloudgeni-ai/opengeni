@@ -31,9 +31,18 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
       ["x-opengeni-site-id", "forged-site"],
       ["x-opengeni-site-version", "forged-version"],
       ["accept", "text/event-stream"],
+      ["range", "bytes=0-1023"],
+      ["if-none-match", "image-version"],
+      ["idempotency-key", "operation-1"],
     ] as [string, string][],
   };
   await bridge.fetch!(message, new AbortController().signal);
+  for (const [name, value] of [
+    ["range", "bytes=0-1023"],
+    ["if-none-match", "image-version"],
+    ["idempotency-key", "operation-1"],
+  ])
+    expect(new Headers(requests[0]!.init.headers).get(name!)).toBe(value!);
   expect(requests[0]!.path).toBe("/v1/workspaces/workspace/sessions");
   expect(new Headers(requests[0]!.init.headers).get("authorization")).toBeNull();
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-external-actor")).toBeNull();
@@ -155,4 +164,31 @@ test("base SDK sends pinned Site calls through the actor-scoped gateway", async 
   expect(observed?.path).toBe("/v1/workspaces/space%2Fone/tools/calls");
   expect(observed?.actor).not.toBeNull();
   expect(observed?.body).toEqual(request);
+});
+
+test("inline HTML reuses the bridge without inventing a saved Site identity", async () => {
+  const calls: unknown[] = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async ({ request }) => {
+      calls.push(request);
+      return {} as ToolGatewayCallResponse;
+    },
+  });
+  const signal = new AbortController().signal;
+  expect((await bridge.catalog({ signal })).entries).toHaveLength(1);
+  await bridge.call({ catalogDigest: catalog.digest, identity, arguments: {} }, { signal });
+  expect(calls).toEqual([{ catalogDigest: catalog.digest, identity, arguments: {} }]);
+  await expect(
+    bridge.call(
+      {
+        catalogDigest: catalog.digest,
+        identity: { serverId: "other", toolName: "bad" },
+        arguments: {},
+      },
+      { signal },
+    ),
+  ).rejects.toThrow("not enabled");
+  expect(calls).toHaveLength(1);
 });

@@ -662,9 +662,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     }
     expect(posture.tables.find((table) => table.name === "knowledge_memories")).toMatchObject({
       select: true,
-      insert: true,
-      update: true,
-      delete: true,
+      insert: false,
+      update: false,
+      delete: false,
     });
     for (const tableName of [
       "knowledge_lifecycle_events",

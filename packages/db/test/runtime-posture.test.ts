@@ -32,7 +32,26 @@ const options: RuntimeDatabasePostureOptions = {
 };
 
 function knowledgeAuthorityTables(): RuntimeTablePosture[] {
-  return ["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+  return [
+    "knowledge_sources",
+    "knowledge_source_objects",
+    "knowledge_entries",
+    "knowledge_entry_revisions",
+    "knowledge_entry_decisions",
+    "knowledge_entry_links",
+    "knowledge_entry_operations",
+    "knowledge_entry_search",
+    "knowledge_index_jobs",
+    "knowledge_entry_vectors",
+    "knowledge_review_batches",
+    "agent_learning_revisions",
+    "agent_learning_snapshots",
+    "agent_instruction_operations",
+    "workspace_instruction_policy_revisions",
+    "workspace_instruction_policy_heads",
+    "workspace_instruction_policy_activation_events",
+    "documents",
+  ].map((name) => ({
     name,
     owner: "opengeni_migrator",
     rlsEnabled: false,
@@ -576,10 +595,10 @@ describe("runtime database posture evaluator", () => {
         ? ([
             [FORCE_RLS_TABLES, 322],
             [NON_RLS_RUNTIME_TABLES, 19],
-            [RUNTIME_FULL_DML_TABLES, 164],
-            [RUNTIME_READ_ONLY_TABLES, 24],
+            [RUNTIME_FULL_DML_TABLES, 163],
+            [RUNTIME_READ_ONLY_TABLES, 26],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 47],
+            [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
             [PROTECTED_NO_DIRECT_DML_TABLES, 72],
             [RUNTIME_DML_TABLES, 269],
@@ -613,6 +632,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 12 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -627,7 +647,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 1;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1;
       expect(FORCE_RLS_TABLES).toContain("mcp_operations");
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("mcp_operations");
       expect(RUNTIME_TABLE_PRIVILEGES.mcp_operations).toBeUndefined();
@@ -1028,12 +1048,7 @@ describe("runtime database posture evaluator", () => {
     posture.schemas[0]!.owner = "pg_database_owner";
     for (const routine of posture.targetRoutines) {
       if (
-        routine.name.includes("personal_document") ||
-        routine.name.includes("document_authority_reclassification") ||
-        routine.name.includes("document_default_collection") ||
-        routine.name === "reclassify_document_authority(jsonb)" ||
         routine.name.includes("personal_github_repository") ||
-        routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set") ||
         (routine.name.includes("scoped_rig") && !routine.name.startsWith("scheduled_")) ||
         routine.name.includes("scoped_enrollment") ||
@@ -1046,6 +1061,18 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  test("Knowledge capabilities must share their authority-table owner even in public", () => {
+    const posture = safePosture();
+    const routine = posture.targetRoutines.find(
+      (item) => item.name === "knowledge_entry_apply(uuid, uuid, jsonb, jsonb)",
+    )!;
+    routine.owner = "pg_database_owner";
+    posture.schemas[0]!.owner = "pg_database_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Knowledge capability knowledge_entry_apply(uuid, uuid, jsonb, jsonb) owner pg_database_owner does not match knowledge_entries owner opengeni_migrator",
+    );
   });
 
   test("keeps dedicated-schema same-owner authority accepted", () => {
@@ -1392,16 +1419,16 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
-    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).not.toContain(
       "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)",
     );
-    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).not.toContain(
       "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
     );
-    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).not.toContain(
       "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
     );
-    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).not.toContain(
       "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
     );
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(

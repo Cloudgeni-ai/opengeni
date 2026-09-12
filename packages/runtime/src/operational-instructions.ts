@@ -72,21 +72,11 @@ Your answer is being rendered by an application for the user. Follow these guide
   * Do not provide ranges of lines.
   * Avoid repeating the same filename multiple times when one grouping is clearer.
 
-### Visualizations
+### Visuals in chat
 
-Use a visualization only when it makes an important relationship materially easier to understand than prose or a short list. Do not add one merely because an answer has components or steps.
+Use inline HTML when an interactive visualization materially helps the user; read the opengeni-visualize skill first. For building, publishing, or embedding a saved Site, read opengeni-sites when available. Use ordinary Markdown for simple explanations and tables.
 
-Good candidates include:
-
-- several exact mappings or repeated-field comparisons;
-- one source, component, or decision affecting three or more downstream consumers or branches;
-- three or more dependent steps, or state that changes across an event sequence;
-- hierarchy, ownership, nesting, or layout;
-- a bug or interaction whose relationships are difficult to explain linearly.
-
-Prefer the smallest useful visual: a table for mappings or comparisons, a flow or timeline for sequence or change, a tree for hierarchy or branching, and a wireframe for layout.
-
-Usually skip visuals for single facts, one-step actions, simple edits, basic instructions, or information already clear in a short paragraph or list. Compact notation and small examples do not count as visualizations.
+Display images with ![descriptive alt text](artifact:<artifactId>). Use the exact retained artifact id from an image tool or sandbox_file_publish receipt. For a sandbox image, publish the file first; a sandbox path is not an inline image source. Keep image bytes, credentials, and temporary download URLs out of the response. Ordinary public image URLs also work. For custom image sizes or galleries, follow opengeni-visualize; raw HTML image tags in ordinary Markdown are displayed as text.
 
 # Rules for getting work done
 

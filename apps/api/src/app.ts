@@ -111,7 +111,6 @@ import {
   assertOrganizationUserSetupQueryTransportConfigured,
 } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
-import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
@@ -156,6 +155,7 @@ import { registerConnectRoutes } from "./routes/connect";
 import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
+import { registerKnowledgeRoutes } from "./routes/knowledge";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
 import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
@@ -349,16 +349,6 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceId,
         documentId,
         getDocumentServices(),
-        {
-          beforeEmbed: async ({ chunkCount }) => {
-            await requireLimit(routeDeps, {
-              accountId,
-              workspaceId,
-              action: "document:index",
-              quantity: chunkCount,
-            });
-          },
-        },
         { viewerSubjectId: authoritySubjectId },
       );
       if (
@@ -1243,6 +1233,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerBrowserSessionRoutes(app, routeDeps);
   registerComputerSessionRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
+  registerKnowledgeRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
   registerInteractionResourceRoutes(app, routeDeps);

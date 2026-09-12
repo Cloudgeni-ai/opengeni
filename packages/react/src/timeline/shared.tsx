@@ -55,6 +55,8 @@ export function ToolCallTruncationProvider({
 }
 
 export type ActivityDisclosureProps = {
+  /** Override the rolling preview; null keeps rapidly streaming details out of the header. */
+  compactPreview?: ReactNode;
   icon: ReactNode;
   /** Icon tint. Defaults to the muted foreground; renderers pass accent/failed. */
   iconTone?: "accent" | "failed" | "running" | "muted" | undefined;
@@ -116,6 +118,8 @@ const ICON_TONE: Record<NonNullable<ActivityDisclosureProps["iconTone"]>, string
  * inline media, and at most one right-gutter settle chip. Compact by default;
  * the body mounts only when expanded.
  */
+export const CompactActivityContext = createContext(false);
+
 export function ActivityDisclosure({
   icon,
   iconTone: iconToneProp = "muted",
@@ -123,6 +127,7 @@ export function ActivityDisclosure({
   titleMono,
   running,
   preview,
+  compactPreview,
   media,
   chip: chipProp,
   failed,
@@ -150,6 +155,21 @@ export function ActivityDisclosure({
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
   const truncation = useContext(ToolCallTruncationContext);
+  const compact = useContext(CompactActivityContext);
+  if (compact)
+    return (
+      <span className="og-rolling-label">
+        <span className={cn("shrink-0", ICON_TONE[iconTone])}>{icon}</span>
+        <span className="og-command-reel">
+          <span className="og-reel-title">{title}</span>
+          {(compactPreview === undefined ? preview : compactPreview) ? (
+            <span className="og-reel-preview text-og-fg-subtle">
+              {compactPreview === undefined ? preview : compactPreview}
+            </span>
+          ) : null}
+        </span>
+      </span>
+    );
   const hasBody = expandable && (children != null || truncation != null);
 
   // The preview is detail-on-demand: it is suppressed once the row is open so a
@@ -189,20 +209,21 @@ export function ActivityDisclosure({
         <span className="size-3.5 shrink-0" />
       )}
       <span className={cn("shrink-0", ICON_TONE[iconTone])}>{icon}</span>
-      <span
-        className={cn(
-          "min-w-0 shrink truncate text-og-base font-medium",
-          titleMono && "font-og-mono text-og-sm font-normal",
-          running && "og-shimmer-text",
+      <span className={cn("og-command-reel", running && "og-command-reel-running")}>
+        <span
+          className={cn(
+            "min-w-0 shrink truncate text-og-base font-medium",
+            titleMono && "font-og-mono text-og-sm font-normal",
+          )}
+        >
+          {title}
+        </span>
+        {previewVisible && !media ? (
+          <span className="min-w-0 flex-1 truncate text-og-sm text-og-fg-subtle">{preview}</span>
+        ) : (
+          <span className="flex-1" />
         )}
-      >
-        {title}
       </span>
-      {previewVisible && !media ? (
-        <span className="min-w-0 flex-1 truncate text-og-sm text-og-fg-subtle">{preview}</span>
-      ) : (
-        <span className="flex-1" />
-      )}
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
           terse settle chip (hidden once expanded — the body owns the detail). */}
       {media && !open ? (

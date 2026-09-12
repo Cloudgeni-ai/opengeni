@@ -18,7 +18,8 @@ import type {
   ToolGatewayCallResponse,
   ToolGatewayDeclarationsResponse,
 } from "@opengeni/sdk";
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
 
 export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = [
   "allow-downloads",
@@ -34,6 +35,8 @@ export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = [
 
 export type PublishedHtmlArtifactFrameProps = {
   html: string;
+  autoHeight?: boolean;
+  theme?: "light" | "dark";
   title: string;
   className?: string;
   style?: CSSProperties;
@@ -58,6 +61,7 @@ const SITE_BRIDGE_BOOTSTRAP_SCRIPT = `<script>(()=>{const key=${JSON.stringify(
 
 export function publishedHtmlArtifactDocument(html: string, toolBridgeEnabled: boolean): string {
   if (!toolBridgeEnabled) return html;
+  html = resolveSiteClientScript(html);
   const doctypeEnd = leadingDoctypeEnd(html);
   if (doctypeEnd >= 0) {
     return `${html.slice(0, doctypeEnd + 1)}${SITE_BRIDGE_BOOTSTRAP_SCRIPT}${html.slice(doctypeEnd + 1)}`;
@@ -87,6 +91,28 @@ function leadingDoctypeEnd(html: string): number {
  */
 export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const [height, setHeight] = useState<number>();
+  useEffect(() => {
+    if (!props.autoHeight) return;
+    const receive = (event: MessageEvent) => {
+      if (
+        event.source !== frameRef.current?.contentWindow ||
+        event.data?.type !== "opengeni.preview.height"
+      )
+        return;
+      const value = event.data.height;
+      if (typeof value === "number" && Number.isFinite(value))
+        setHeight(Math.min(1200, Math.max(80, value)));
+    };
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, [props.autoHeight]);
+  useEffect(() => {
+    frameRef.current?.contentWindow?.postMessage(
+      { type: "opengeni.preview.theme", theme: props.theme },
+      "*",
+    );
+  }, [props.theme]);
   const bridgeRef = useRef(props.toolBridge);
   const onFrameLoadRef = useRef<() => void>(() => undefined);
   const frameLoadPendingRef = useRef(false);
@@ -198,11 +224,15 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       referrerPolicy="no-referrer"
       srcDoc={publishedHtmlArtifactDocument(props.html, toolBridgeEnabled)}
       onLoad={() => {
+        frameRef.current?.contentWindow?.postMessage(
+          { type: "opengeni.preview.theme", theme: props.theme },
+          "*",
+        );
         frameLoadPendingRef.current = true;
         onFrameLoadRef.current();
       }}
       className={props.className}
-      style={props.style}
+      style={{ ...props.style, ...(props.autoHeight && height ? { height } : {}) }}
     />
   );
 }

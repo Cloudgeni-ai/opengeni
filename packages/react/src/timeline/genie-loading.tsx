@@ -12,7 +12,7 @@ export type GenieLoadingOptions = {
   /** Replace the visual while preserving SDK loading visibility and transitions. */
   render?: (props: GenieLoadingRenderProps) => ReactNode;
   phrases?: readonly string[];
-  /** Public options stay independent of the renderer's declaration layout. */
+  /** Public adapter options; the renderer dependency's declarations stay private. */
   orb?: {
     state?:
       | "working"

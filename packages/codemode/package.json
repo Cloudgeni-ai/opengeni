@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*"
   },
   "devDependencies": {

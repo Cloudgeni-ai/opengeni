@@ -1,5 +1,40 @@
 # Deployment
 
+## Unified Knowledge cutover (0461)
+
+`0461_unified_knowledge.sql` is a maintenance migration. Stop every API,
+control worker and turn worker that uses the target database, then supply every
+runtime login through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. A live
+listed login aborts activation. Back up the database and its retained object
+storage before the cutover.
+
+Run `bun run db:migrate` with the new binary's TypeScript migration runner;
+running the SQL file directly is unsupported and fails. Its conversion callback
+preserves legacy content and references, creates canonical Knowledge revisions,
+imports pending review work and converts pending text-only Skill proposals into
+valid folders. It freezes the retired Memory/learning writers and changes the
+runtime role/posture contract. Run `bun run db:provision-roles`, then
+`bun run db:assert-runtime-posture` before starting only the new API and workers.
+Never restart a pre-0461 runtime after commit. Rollback requires restoring the
+consistent pre-cutover backup with the matching old binary.
+
+Source schedules keep their ids, cadence, selected source and connector version,
+but receive an ordinary `agent_turn` revision. Unfinished native source occurrences
+are closed with `knowledge_source_agent_cutover`; checkpoints and provider cursors
+are retained for the next agent run. Historical native workflow inputs cannot
+fetch provider content after activation. An owning human with current source and
+connection authority is required. Legacy schedules without an active organization
+member who can access the control workspace are preserved paused; that owner
+must update and re-enable the source before it can run. Personal sources
+additionally require private session availability. Source fetching now includes ordinary agent/model usage.
+
+The new control worker registers the Knowledge indexing schedule. Search caches
+are rebuildable; original files, canonical revisions, evidence and review
+receipts are retained authorities. Old learning source exceptions remain
+historical evidence: set future exceptions on the relevant chat or scheduled
+task in Settings → Agent learning. Existing category opt-outs are preserved.
+See [Knowledge](knowledge.md) for scope, review and compatibility behavior.
+
 ### Host MCP, native-link and Connect authority migrations (0443–0456)
 
 `0443_host_mcp_binding_registry.sql`, `0444_host_mcp_delegations.sql`, and

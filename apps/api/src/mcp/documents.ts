@@ -1,485 +1,114 @@
+import { searchKnowledgeEntries } from "@opengeni/core";
+import { KnowledgeEntryListRequest } from "@opengeni/contracts";
+import type { DocumentServices } from "@opengeni/documents";
 import {
-  KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS,
-  KnowledgeBrowseResponse,
-  KnowledgeGetResponse,
-  KnowledgeRecordId,
-  KnowledgeSearchResponse,
-  ListIndexedDocumentsResponse,
-} from "@opengeni/contracts";
-import {
-  browseEffectiveKnowledge,
-  getEffectiveKnowledgeRecord,
-  getDocumentChunk,
-  listDocumentBases,
-  listEffectiveIndexedDocuments,
-  resolveEffectiveDocumentAccess,
-  searchEffectiveKnowledge,
-  searchEffectiveDocuments,
-  type DocumentAccessFilter,
-  type DocumentServices,
-} from "@opengeni/documents";
-import {
-  createKnowledgeMemory,
-  listKnowledgeMemories,
+  getKnowledgeEntry,
+  listKnowledgeEntries,
+  type KnowledgeContext,
   type Database,
-  type MemoryAgentScope,
 } from "@opengeni/db";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
-import { mcpMutationReceipt } from "./receipts";
 
-const SearchInputSchema = {
-  query: z.string().min(1),
-  baseIds: z.array(z.string().uuid()).optional(),
-  limit: z.number().int().positive().max(50).optional(),
-  mode: z.enum(["hybrid", "vector", "keyword"]).optional(),
-  sourceKinds: z
-    .array(
-      z.enum([
-        "manual_upload",
-        "meeting_transcript",
-        "repository",
-        "email",
-        "chat",
-        "document",
-        "web",
-        "other",
-      ]),
-    )
-    .optional(),
-  aclTags: z.array(z.string().min(1)).optional(),
-};
-
-const MemoryKindSchema = z.enum(["semantic", "episodic", "procedural", "decision", "preference"]);
-const SourceRefSchema = z.object({
-  kind: z.enum(["document_chunk", "document", "session_event", "memory", "external"]),
-  id: z.string().min(1),
-  uri: z.string().min(1).optional(),
-  title: z.string().min(1).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
-
+/** The docs endpoint is a transport for canonical Knowledge retrieval. Legacy
+ * chunk/base retrieval is retired: it cannot bypass pending Knowledge review. */
 export function buildDocumentsMcpServer(
   db: Database,
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: {
-    createdBySessionId?: string | undefined;
-    attemptId?: string | undefined;
-    /** Immutable human subject whose agent is making this retrieval request. */
-    initiatingSubjectId: string;
-    /**
-     * The bound session's typed Memory selector (migration 0427), resolved by
-     * the caller from the session row. `off` registers neither memory tool;
-     * `user`/`session` search the workspace layer plus the own private layer.
-     * Omitted keeps the workspace layer.
-     */
-    memory?: MemoryAgentScope | null | undefined;
-  },
+  options: { knowledge: KnowledgeContext },
 ): McpServer {
-  const server = new McpServer({
-    name: "opengeni-documents",
-    version: "1.0.0",
-  });
-  // This server is the agent retrieval surface. Agent-disabled documents are
-  // never reachable. Workspace-visible documents are shared; private
-  // documents are available only to the creating subject's agent.
-  const agentAuthority =
-    options.createdBySessionId && options.attemptId
-      ? { sessionId: options.createdBySessionId, attemptId: options.attemptId }
-      : undefined;
-  const resolveAgentAccess = async (): Promise<DocumentAccessFilter> =>
-    await resolveEffectiveDocumentAccess(db, {
-      accountId,
-      workspaceId,
-      initiatingSubjectId: options.initiatingSubjectId,
-      surface: "agent",
-      agentAuthority,
-    });
-
-  server.registerTool(
-    "list_document_bases",
-    {
-      description: "List document bases available for retrieval.",
-      inputSchema: {},
-    },
-    async () => ({
-      content: [{ type: "text", text: JSON.stringify(await listDocumentBases(db, workspaceId)) }],
-    }),
-  );
-
-  server.registerTool(
-    "search_documents",
-    {
-      description: "Search indexed documents with hybrid, vector, or keyword retrieval.",
-      inputSchema: SearchInputSchema,
-    },
-    async (input) =>
-      searchContent(
-        db,
-        accountId,
-        workspaceId,
-        documentServices,
-        input,
-        options.initiatingSubjectId,
-        agentAuthority,
-      ),
-  );
-
+  const context = options.knowledge;
+  if (context.accountId !== accountId || context.workspaceId !== workspaceId)
+    throw new Error("Knowledge gateway authority mismatch");
+  const server = new McpServer({ name: "opengeni-knowledge", version: "2.0.0" });
   server.registerTool(
     "knowledge_search",
     {
       description:
-        "Search the effective authorized organization, current-workspace, and immutable initiating-user personal document scope. Authorization is applied before ranking and every result retains source and authority provenance.",
-      inputSchema: SearchInputSchema,
+        "Search published structured Knowledge and retained source text in the current authorized scope. Use a concise subject or entity name first (for example Acme); omit scope to search all authorized scopes. If a query returns no entries, retry the key name alone in the same scope or browse groups before concluding the information is absent.",
+      inputSchema: KnowledgeEntryListRequest.omit({
+        view: true,
+        sessionId: true,
+        reviewBatchId: true,
+      }).shape,
     },
-    async (input) =>
-      searchKnowledge(
-        db,
-        accountId,
-        workspaceId,
-        documentServices,
-        input,
-        options.initiatingSubjectId,
-        agentAuthority,
-      ),
+    async (input) => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            await searchKnowledgeEntries(db, context, input, () => documentServices.embedder),
+          ),
+        },
+      ],
+    }),
   );
-
-  server.registerTool(
-    "knowledge_get",
-    {
-      description:
-        "Fetch one stable Knowledge record by the id returned from knowledge_search or knowledge_browse. Authorization and agent access are rechecked before content or links are returned.",
-      inputSchema: { id: KnowledgeRecordId },
-    },
-    async ({ id }) => {
-      const record = await getEffectiveKnowledgeRecord(db, {
-        accountId,
-        workspaceId,
-        initiatingSubjectId: options.initiatingSubjectId,
-        agentAuthority,
-        id,
-      });
-      return {
-        content: [
-          {
-            type: "text",
-            text: record
-              ? JSON.stringify(KnowledgeGetResponse.parse({ record }))
-              : `knowledge record not found: ${id}`,
-          },
-        ],
-        isError: !record,
-      };
-    },
-  );
-
   server.registerTool(
     "knowledge_browse",
     {
-      description:
-        "Browse authorized Knowledge without crawling folders. Omit parentId to list source documents; pass a document record id to inspect its chunks. Opaque cursors are bound to this user, workspace, parent, and filters.",
+      description: "Browse Knowledge groups or entries in one group, across sources.",
       inputSchema: {
-        parentId: KnowledgeRecordId.optional(),
-        topic: z.string().min(1).max(256).optional(),
-        sourceKinds: SearchInputSchema.sourceKinds,
-        cursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
+        groupId: z.uuid().optional(),
+        cursor: z.string().optional(),
         limit: z.number().int().positive().max(50).optional(),
       },
     },
-    async ({ parentId, topic, sourceKinds, cursor, limit }) => ({
+    async (input) => ({
       content: [
         {
           type: "text",
           text: JSON.stringify(
-            KnowledgeBrowseResponse.parse(
-              await browseEffectiveKnowledge(db, {
-                accountId,
-                workspaceId,
-                initiatingSubjectId: options.initiatingSubjectId,
-                agentAuthority,
-                ...(parentId ? { parentId } : {}),
-                ...(topic ? { topic } : {}),
-                ...(sourceKinds ? { sourceKinds } : {}),
-                ...(cursor ? { cursor } : {}),
-                ...(limit ? { limit } : {}),
-              }),
-            ),
-          ),
-        },
-      ],
-    }),
-  );
-
-  server.registerTool(
-    "list_indexed_documents",
-    {
-      description:
-        "List agent-authorized documents that became ready after an opaque checkpoint, ordered by durable indexing completion. Results include source and authority/ingestion provenance. Persist nextCheckpoint only after successfully processing the returned page, then pass it on the next scheduled run to avoid repeats.",
-      inputSchema: {
-        checkpoint: z.string().min(1).max(1_024).optional(),
-        limit: z.number().int().positive().max(100).optional(),
-      },
-    },
-    async ({ checkpoint, limit }) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            ListIndexedDocumentsResponse.parse(
-              await listEffectiveIndexedDocuments(db, {
-                accountId,
-                workspaceId,
-                initiatingSubjectId: options.initiatingSubjectId,
-                agentAuthority,
-                ...(checkpoint ? { checkpoint } : {}),
-                ...(limit ? { limit } : {}),
-              }),
-            ),
-          ),
-        },
-      ],
-    }),
-  );
-
-  server.registerTool(
-    "fetch_document_chunk",
-    {
-      description: "Fetch one indexed document chunk by id.",
-      inputSchema: {
-        chunkId: z.string().uuid(),
-      },
-    },
-    async ({ chunkId }) => {
-      const found = await getDocumentChunk(
-        db,
-        accountId,
-        workspaceId,
-        chunkId,
-        await resolveAgentAccess(),
-      );
-      return {
-        content: [
-          { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
-        ],
-        isError: !found,
-      };
-    },
-  );
-
-  server.registerTool(
-    "knowledge_fetch",
-    {
-      description: "Fetch one knowledge source chunk by id.",
-      inputSchema: {
-        chunkId: z.string().uuid(),
-      },
-    },
-    async ({ chunkId }) => {
-      const found = await getDocumentChunk(
-        db,
-        accountId,
-        workspaceId,
-        chunkId,
-        await resolveAgentAccess(),
-      );
-      return {
-        content: [
-          { type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` },
-        ],
-        isError: !found,
-      };
-    },
-  );
-
-  const memoryScope = options.memory ?? null;
-  if (memoryScope?.mode === "off") return server;
-  const memoryReadScope: MemoryAgentScope = memoryScope ?? {
-    mode: "workspace",
-    userSubjectId: null,
-    rootSessionId: null,
-  };
-
-  server.registerTool(
-    "memory_search",
-    {
-      description: "Search approved company memory records.",
-      inputSchema: {
-        query: z.string().min(1).optional(),
-        kind: MemoryKindSchema.optional(),
-        scope: z.string().min(1).optional(),
-        limit: z.number().int().positive().max(100).optional(),
-      },
-    },
-    async ({ query, kind, scope, limit }) => ({
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            await listKnowledgeMemories(db, workspaceId, {
-              ...(query ? { query } : {}),
-              status: ["active", "approved"],
-              ...(kind ? { kind } : {}),
-              ...(scope ? { scope } : {}),
-              ...(limit ? { limit } : {}),
-              agentScope: memoryReadScope,
+            await listKnowledgeEntries(db, context, {
+              ...input,
+              ...(input.groupId ? {} : { kind: "group" }),
             }),
           ),
         },
       ],
     }),
   );
-
   server.registerTool(
-    "memory_propose",
+    "knowledge_get",
     {
-      description: "Propose a company memory record for human review.",
+      description:
+        "Read an exact published Knowledge revision and its evidence. Long source text is paginated.",
       inputSchema: {
-        text: z.string().min(1),
-        kind: MemoryKindSchema.optional(),
-        scope: z.string().min(1).optional(),
-        sourceRefs: z.array(SourceRefSchema).optional(),
-        confidence: z.number().min(0).max(1).optional(),
-        metadata: z.record(z.string(), z.unknown()).optional(),
+        entryId: z.uuid(),
+        revisionId: z.uuid().optional(),
+        offset: z.number().int().nonnegative().default(0),
+        maxChars: z.number().int().positive().max(16000).default(8000),
       },
     },
-    async ({ text, kind, scope, sourceRefs, confidence, metadata }) => {
-      const memory = await createKnowledgeMemory(db, {
-        accountId,
-        workspaceId,
-        status: "proposed",
-        kind: kind ?? "semantic",
-        scope: scope ?? "workspace",
-        text,
-        sourceRefs:
-          sourceRefs?.map((sourceRef) => ({
-            ...sourceRef,
-            metadata: sourceRef.metadata ?? {},
-          })) ?? [],
-        confidence: confidence ?? 0.5,
-        metadata: metadata ?? {},
-        createdBySessionId: options.createdBySessionId,
+    async (input) => {
+      const record = await getKnowledgeEntry(db, context, input.entryId, {
+        revisionId: input.revisionId,
       });
+      if (!record) return { content: [{ type: "text", text: JSON.stringify({ found: false }) }] };
+      const text = record.revision.entry.content;
+      const end = Math.min(text.length, input.offset + input.maxChars);
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              mcpMutationReceipt({
-                operation: "memory_propose",
-                committed: true,
-                outcome: "created",
-                changed: true,
-                resource: {
-                  type: "knowledge_memory",
-                  id: memory.id,
-                  state: memory.status,
-                },
-                timestamp: memory.updatedAt,
-                idempotency: { status: "not_supported" },
-                nextAction: { tool: "memory_search", arguments: {} },
-              }),
-            ),
+            text: JSON.stringify({
+              ...record,
+              revision: {
+                ...record.revision,
+                entry: { ...record.revision.entry, content: text.slice(input.offset, end) },
+              },
+              contentRange: {
+                start: input.offset,
+                end,
+                total: text.length,
+                nextOffset: end < text.length ? end : null,
+              },
+            }),
           },
         ],
       };
     },
   );
-
   return server;
-}
-
-async function searchContent(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  documentServices: DocumentServices,
-  input: {
-    query: string;
-    baseIds?: string[] | undefined;
-    limit?: number | undefined;
-    mode?: "hybrid" | "vector" | "keyword" | undefined;
-    sourceKinds?:
-      | Array<
-          | "manual_upload"
-          | "meeting_transcript"
-          | "repository"
-          | "email"
-          | "chat"
-          | "document"
-          | "web"
-          | "other"
-        >
-      | undefined;
-    aclTags?: string[] | undefined;
-  },
-  initiatingSubjectId: string,
-  agentAuthority: { sessionId: string; attemptId: string } | undefined,
-) {
-  const results = await searchEffectiveDocuments(
-    db,
-    {
-      accountId,
-      workspaceId,
-      query: input.query,
-      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
-      ...(input.limit ? { limit: input.limit } : {}),
-      ...(input.mode ? { mode: input.mode } : {}),
-      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
-      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
-      initiatingSubjectId,
-      agentAuthority,
-      surface: "agent",
-    },
-    documentServices,
-  );
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(results),
-      },
-    ],
-  };
-}
-
-async function searchKnowledge(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  documentServices: DocumentServices,
-  input: {
-    query: string;
-    baseIds?: string[] | undefined;
-    limit?: number | undefined;
-    mode?: "hybrid" | "vector" | "keyword" | undefined;
-    sourceKinds?: Parameters<typeof searchContent>[4]["sourceKinds"];
-    aclTags?: string[] | undefined;
-  },
-  initiatingSubjectId: string,
-  agentAuthority: { sessionId: string; attemptId: string } | undefined,
-) {
-  const response = await searchEffectiveKnowledge(
-    db,
-    {
-      accountId,
-      workspaceId,
-      query: input.query,
-      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
-      ...(input.limit ? { limit: input.limit } : {}),
-      ...(input.mode ? { mode: input.mode } : {}),
-      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
-      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
-      initiatingSubjectId,
-      agentAuthority,
-      surface: "agent",
-    },
-    documentServices,
-  );
-  return {
-    content: [
-      { type: "text" as const, text: JSON.stringify(KnowledgeSearchResponse.parse(response)) },
-    ],
-  };
 }

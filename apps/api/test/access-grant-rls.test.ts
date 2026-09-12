@@ -56,6 +56,10 @@ describe("access-grant session RLS context", () => {
       actors.push(actor);
       return await fn();
     });
+    spyOn(db, "freezeAgentLearningPolicy").mockResolvedValue({
+      defaultScope: "personal",
+      subjectId: "user:owner",
+    } as never);
     const liveAttempt = spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
       subjectId: "worker:first-party-mcp",
       initiatingHumanSubjectId: "user:owner",
@@ -74,6 +78,7 @@ describe("access-grant session RLS context", () => {
       {
         subjectId: "worker:first-party-mcp",
         initiatingHumanSubjectId: "user:owner",
+        privateFileOwnerSubjectId: "user:owner",
       },
     ]);
   });

@@ -22,6 +22,13 @@ describe("workspace provider import guard", () => {
     );
     expect(allowed).toEqual([]);
 
+    checkBillingPortalSurface(
+      "packages/sdk/src/site-browser-runtime.gen.ts",
+      `const bundledClient = "${portalPath}";`,
+      allowed,
+    );
+    expect(allowed).toEqual([]);
+
     const denied: Finding[] = [];
     checkBillingPortalSurface(
       "apps/api/src/routes/example.ts",

@@ -38,6 +38,16 @@
 #[allow(unsafe_code)]
 mod ffi;
 
+/// Runs one synchronous native operation with a thread-local Cocoa pool.
+///
+/// Rust worker threads do not have AppKit's event-loop pools. Drain temporary
+/// Objective-C objects before returning; retained handles may outlive the pool.
+/// Call this inside each worker operation, never around an async future.
+#[cfg(target_os = "macos")]
+pub fn with_autorelease_pool<T>(operation: impl FnOnce() -> T) -> T {
+    objc2::rc::autoreleasepool(|_| operation())
+}
+
 /// A probed display: an opaque id plus its **pixel** dimensions (the size a
 /// captured frame will be, so a viewer canvas matches 1:1).
 #[derive(Debug, Clone, PartialEq)]
@@ -352,7 +362,7 @@ impl MacAxController {
     pub fn snapshot(&self, target: &MacTargetInfo) -> Result<MacAxSnapshot, MacFfiError> {
         #[cfg(target_os = "macos")]
         {
-            self.inner.snapshot(target)
+            with_autorelease_pool(|| self.inner.snapshot(target))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -378,7 +388,7 @@ impl MacAxController {
     ) -> Result<(), MacFfiError> {
         #[cfg(target_os = "macos")]
         {
-            self.inner.perform_action(target, selector, action)
+            with_autorelease_pool(|| self.inner.perform_action(target, selector, action))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -544,7 +554,7 @@ pub enum MacFfiError {
 pub fn probe_display() -> Option<DisplayInfo> {
     #[cfg(target_os = "macos")]
     {
-        ffi::probe_display()
+        with_autorelease_pool(ffi::probe_display)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -561,7 +571,7 @@ pub fn probe_display() -> Option<DisplayInfo> {
 pub fn list_displays() -> Result<Vec<DisplayInfo>, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::list_displays()
+        with_autorelease_pool(ffi::list_displays)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -580,7 +590,7 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, MacFfiError> {
 pub fn capture_rgba() -> Result<RgbaFrame, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::capture_rgba()
+        with_autorelease_pool(ffi::capture_rgba)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -602,7 +612,7 @@ pub fn capture_display_rgba(display_id: &str) -> Result<RgbaFrame, MacFfiError> 
         let display_id = display_id.parse::<u32>().map_err(|_| {
             MacFfiError::Invalid("macOS display id is not a CGDirectDisplayID".to_string())
         })?;
-        ffi::capture_display_rgba(display_id)
+        with_autorelease_pool(|| ffi::capture_display_rgba(display_id))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -629,7 +639,9 @@ pub fn capture_display_rgba_sized(
         let display_id = display_id.parse::<u32>().map_err(|_| {
             MacFfiError::Invalid("macOS display id is not a CGDirectDisplayID".to_string())
         })?;
-        ffi::capture_display_rgba_sized(display_id, Some((max_width, max_height)))
+        with_autorelease_pool(|| {
+            ffi::capture_display_rgba_sized(display_id, Some((max_width, max_height)))
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -655,7 +667,7 @@ pub fn start_display_frame_stream(
         let display_id = display_id.parse::<u32>().map_err(|_| {
             MacFfiError::Invalid("macOS display id is not a CGDirectDisplayID".to_string())
         })?;
-        if !ffi::screen_capture_granted() {
+        if !with_autorelease_pool(ffi::screen_capture_granted) {
             return Err(MacFfiError::PermissionDenied(
                 "Screen Recording permission is required for live display capture".to_string(),
             ));
@@ -682,7 +694,7 @@ pub fn start_display_frame_stream(
 pub fn list_targets() -> Result<Vec<MacTargetInfo>, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::list_targets()
+        with_autorelease_pool(ffi::list_targets)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -704,7 +716,7 @@ pub fn capture_window_rgba(
 ) -> Result<MacWindowFrame, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::capture_window_rgba(window_id, expected_process_id)
+        with_autorelease_pool(|| ffi::capture_window_rgba(window_id, expected_process_id))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -728,11 +740,13 @@ pub fn capture_window_rgba_sized(
 ) -> Result<MacWindowFrame, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::capture_window_rgba_sized(
-            window_id,
-            expected_process_id,
-            Some((max_width, max_height)),
-        )
+        with_autorelease_pool(|| {
+            ffi::capture_window_rgba_sized(
+                window_id,
+                expected_process_id,
+                Some((max_width, max_height)),
+            )
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -756,7 +770,7 @@ pub fn start_window_frame_stream(
 ) -> Result<MacFrameStream, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        if !ffi::screen_capture_granted() {
+        if !with_autorelease_pool(ffi::screen_capture_granted) {
             return Err(MacFfiError::PermissionDenied(
                 "Screen Recording permission is required for live window capture".to_string(),
             ));
@@ -786,7 +800,7 @@ pub fn start_window_frame_stream(
 pub fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::focus_target(target)
+        with_autorelease_pool(|| ffi::focus_target(target))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -806,7 +820,7 @@ pub fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
 pub fn launch_application(application_id: &str) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::launch_application(application_id)
+        with_autorelease_pool(|| ffi::launch_application(application_id))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -840,7 +854,7 @@ pub fn run_background_application(
         let bundle = application_bundle.to_str().ok_or_else(|| {
             MacFfiError::Invalid("application bundle path is not valid UTF-8".to_string())
         })?;
-        ffi::run_background_application(bundle, arguments, pid_file)
+        with_autorelease_pool(|| ffi::run_background_application(bundle, arguments, pid_file))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -862,7 +876,7 @@ pub fn run_background_application(
 pub fn inject(input: &InputEvent) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::inject(input)
+        with_autorelease_pool(|| ffi::inject(input))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -883,7 +897,7 @@ pub fn inject(input: &InputEvent) -> Result<(), MacFfiError> {
 pub fn inject_batch(inputs: &[InputEvent]) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::inject_batch(inputs)
+        with_autorelease_pool(|| ffi::inject_batch(inputs))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -909,7 +923,9 @@ pub fn inject_display_batch(
 ) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::inject_display_batch(display, frame_width, frame_height, inputs)
+        with_autorelease_pool(|| {
+            ffi::inject_display_batch(display, frame_width, frame_height, inputs)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -935,7 +951,9 @@ pub fn inject_window(
 ) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::inject_window(input, logical_bounds, frame_width, frame_height)
+        with_autorelease_pool(|| {
+            ffi::inject_window(input, logical_bounds, frame_width, frame_height)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -960,7 +978,9 @@ pub fn inject_window_batch(
 ) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::inject_window_batch(inputs, logical_bounds, frame_width, frame_height)
+        with_autorelease_pool(|| {
+            ffi::inject_window_batch(inputs, logical_bounds, frame_width, frame_height)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -987,7 +1007,9 @@ pub fn focus_and_inject_window(
 ) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::focus_and_inject_window(target, expected_bounds, frame_width, frame_height, inputs)
+        with_autorelease_pool(|| {
+            ffi::focus_and_inject_window(target, expected_bounds, frame_width, frame_height, inputs)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1011,7 +1033,7 @@ pub fn focus_and_inject_target(
 ) -> Result<(), MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::focus_and_inject_target(target, inputs)
+        with_autorelease_pool(|| ffi::focus_and_inject_target(target, inputs))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1028,7 +1050,7 @@ pub fn focus_and_inject_target(
 pub fn screen_capture_granted() -> bool {
     #[cfg(target_os = "macos")]
     {
-        ffi::screen_capture_granted()
+        with_autorelease_pool(ffi::screen_capture_granted)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1042,7 +1064,7 @@ pub fn screen_capture_granted() -> bool {
 pub fn accessibility_trusted() -> bool {
     #[cfg(target_os = "macos")]
     {
-        ffi::accessibility_trusted()
+        with_autorelease_pool(ffi::accessibility_trusted)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1056,7 +1078,7 @@ pub fn accessibility_trusted() -> bool {
 pub fn input_monitoring_granted() -> bool {
     #[cfg(target_os = "macos")]
     {
-        ffi::input_monitoring_granted()
+        with_autorelease_pool(ffi::input_monitoring_granted)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1076,7 +1098,7 @@ pub fn input_monitoring_granted() -> bool {
 pub fn machine_locked() -> Result<bool, MacFfiError> {
     #[cfg(target_os = "macos")]
     {
-        ffi::machine_locked()
+        with_autorelease_pool(ffi::machine_locked)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1092,6 +1114,6 @@ pub fn machine_locked() -> Result<bool, MacFfiError> {
 pub fn request_grants() {
     #[cfg(target_os = "macos")]
     {
-        ffi::request_grants();
+        with_autorelease_pool(ffi::request_grants);
     }
 }

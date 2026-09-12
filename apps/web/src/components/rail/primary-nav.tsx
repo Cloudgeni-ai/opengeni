@@ -2,6 +2,7 @@ import { useRouterState } from "@tanstack/react-router";
 import { ChevronDownIcon, SquarePenIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { ForYouLink } from "@/components/rail/for-you-link";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
@@ -24,8 +25,16 @@ function initialWorkspaceShortcutsExpanded(): boolean {
   }
 }
 
-export function WorkspaceShortcutLinks({ className }: { className?: string }) {
+export function WorkspaceShortcutLinks({
+  className,
+  pending,
+}: {
+  className?: string;
+  pending?: boolean;
+}) {
   const rail = useRail();
+  const fetchedPending = useKnowledgeReviewIndicator(rail.workspaceId, pending === undefined);
+  const pendingKnowledge = pending ?? fetchedPending;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
@@ -35,6 +44,7 @@ export function WorkspaceShortcutLinks({ className }: { className?: string }) {
         <WorkspaceConfigLink
           key={item.to}
           item={item}
+          needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
           workspaceId={rail.workspaceId}
           variant="rail"
           collapsed={rail.collapsed}
@@ -49,6 +59,7 @@ export function WorkspaceShortcutLinks({ className }: { className?: string }) {
 /** Primary product navigation, kept separate from workspace administration. */
 export function PrimaryNav() {
   const rail = useRail();
+  const pendingKnowledge = useKnowledgeReviewIndicator(rail.workspaceId);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
   const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
@@ -103,12 +114,12 @@ export function PrimaryNav() {
       </NewSessionLink>
 
       {rail.isMobile ? null : rail.collapsed ? (
-        <WorkspaceShortcutLinks />
+        <WorkspaceShortcutLinks pending={pendingKnowledge} />
       ) : (
         <div className="grid gap-0.5">
           {showShortcuts ? (
             <>
-              <WorkspaceShortcutLinks />
+              <WorkspaceShortcutLinks pending={pendingKnowledge} />
               {shortViewport ? (
                 <Button
                   type="button"
@@ -124,33 +135,53 @@ export function PrimaryNav() {
               ) : null}
             </>
           ) : (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-expanded="false"
-              aria-label={
-                activeWorkspaceSection
-                  ? `More, current section ${activeWorkspaceSection}`
-                  : undefined
-              }
-              data-active={activeWorkspaceSection ? "true" : undefined}
-              onClick={() => setShortcutsExpanded(true)}
-              className={cn(
-                "group relative w-full justify-start gap-2.5 px-2.5 text-fg-muted pointer-coarse:h-10",
-                activeWorkspaceSection && "bg-surface-2 text-fg",
-              )}
-            >
-              <span
-                aria-hidden="true"
+            <>
+              {pendingKnowledge ? (
+                <WorkspaceConfigLink
+                  item={
+                    PRIMARY_WORKSPACE_ITEMS.find(
+                      (item) => item.to === "/workspaces/$workspaceId/state",
+                    )!
+                  }
+                  workspaceId={rail.workspaceId}
+                  variant="rail"
+                  needsReview
+                  active={isConfigItemActive(
+                    pathname,
+                    rail.workspaceId,
+                    "/workspaces/$workspaceId/state",
+                  )}
+                  onNavigate={() => rail.setDrawerOpen(false)}
+                />
+              ) : null}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-expanded="false"
+                aria-label={
+                  activeWorkspaceSection
+                    ? `More, current section ${activeWorkspaceSection}`
+                    : undefined
+                }
+                data-active={activeWorkspaceSection ? "true" : undefined}
+                onClick={() => setShortcutsExpanded(true)}
                 className={cn(
-                  "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity",
-                  activeWorkspaceSection ? "opacity-100" : "opacity-0",
+                  "group relative w-full justify-start gap-2.5 px-2.5 text-fg-muted pointer-coarse:h-10",
+                  activeWorkspaceSection && "bg-surface-2 text-fg",
                 )}
-              />
-              <span className="min-w-0 flex-1 truncate text-left">More</span>
-              <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0" />
-            </Button>
+              >
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity",
+                    activeWorkspaceSection ? "opacity-100" : "opacity-0",
+                  )}
+                />
+                <span className="min-w-0 flex-1 truncate text-left">More</span>
+                <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              </Button>
+            </>
           )}
         </div>
       )}

@@ -115,6 +115,8 @@ type ReplaceTurnSummaryFacets = Readonly<{
 export type TurnSummaryFacetConfiguration = ModifyTurnSummaryFacets | ReplaceTurnSummaryFacets;
 
 export type TurnSummaryOptions = Readonly<{
+  /** Experimental compact live activity reel. */
+  rolling?: boolean;
   facets?: TurnSummaryFacetConfiguration;
 }>;
 
@@ -133,6 +135,7 @@ export type TurnSummaryProps = {
   durationMs?: number | undefined;
   /** Start expanded. */
   defaultOpen?: boolean | undefined;
+  liveHeader?: ReactNode;
   /**
    * A nested fold — a cluster or sub-turn INSIDE an already-expanded turn. It
    * drops the bordered/filled chip and renders as a plain disclosure node on the
@@ -187,6 +190,7 @@ export function TurnSummary({
   failureText,
   durationMs,
   defaultOpen,
+  liveHeader,
   bare,
   facets: facetConfiguration,
   settleFold,
@@ -443,7 +447,7 @@ export function TurnSummary({
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,
             cancelled, and still-running folds retain a visible state marker. */}
-            {outcome === "complete" ? null : (
+            {outcome === "complete" || (liveHeader && !outcome) ? null : (
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center justify-center",
@@ -463,21 +467,23 @@ export function TurnSummary({
             <span
               className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}
             >
-              {facets.map(({ facet, result }, index) => (
-                <FacetRenderBoundary key={facet.id}>
-                  <>
-                    {index > 0 ? " · " : null}
-                    <span aria-label={result.ariaLabel} title={result.title}>
-                      {result.icon ? (
-                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                          {result.icon}
+              {liveHeader && !open
+                ? liveHeader
+                : facets.map(({ facet, result }, index) => (
+                    <FacetRenderBoundary key={facet.id}>
+                      <>
+                        {index > 0 ? " · " : null}
+                        <span aria-label={result.ariaLabel} title={result.title}>
+                          {result.icon ? (
+                            <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                              {result.icon}
+                            </span>
+                          ) : null}
+                          {result.content}
                         </span>
-                      ) : null}
-                      {result.content}
-                    </span>
-                  </>
-                </FacetRenderBoundary>
-              ))}
+                      </>
+                    </FacetRenderBoundary>
+                  ))}
               {outcome === "failed" && failureText ? (
                 <span className="text-og-status-failed"> · {failureText}</span>
               ) : null}

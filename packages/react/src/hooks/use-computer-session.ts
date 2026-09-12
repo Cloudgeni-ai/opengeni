@@ -117,6 +117,33 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
       const selected = chooseTarget(targets, selectedTargetIdRef.current, session.platform);
+      // Discovery is useful independently of semantic observation. Publish it
+      // now so a slow/unresponsive application cannot block the frame stream
+      // or prevent the person from choosing a different window or screen.
+      const previous = observationRef.current.observation;
+      const retainedObservation =
+        selected &&
+        previous?.target.id === selected.id &&
+        previous.target.controllerGeneration === selected.controllerGeneration &&
+        previous.target.targetGeneration === selected.targetGeneration
+          ? previous
+          : null;
+      selectedTargetIdRef.current = selected?.id ?? null;
+      targetsRef.current = { computerSessionId, targets };
+      observationRef.current = { computerSessionId, observation: retainedObservation };
+      setState((current) =>
+        current.computerSessionId === computerSessionId
+          ? {
+              ...current,
+              session,
+              targets,
+              selectedTargetId: selected?.id ?? null,
+              observation: retainedObservation,
+              loading: false,
+              error: null,
+            }
+          : current,
+      );
       const observation = selected
         ? await client.observeComputerTarget(workspaceId, computerSessionId, selected.id, {
             signal: controller.signal,
@@ -303,7 +330,15 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         ? (targetsRef.current.targets.find((candidate) => candidate.id === frame.targetId) ??
           (currentObservation?.target.id === frame.targetId ? currentObservation.target : null))
         : null;
-      const target = frameTarget ?? focusTarget ?? currentObservation?.target ?? null;
+      const inputTarget =
+        (action.type === "keyboard" || action.type === "clipboard") &&
+        targetsRef.current.computerSessionId === computerSessionId
+          ? targetsRef.current.targets.find(
+              (candidate) => candidate.id === selectedTargetIdRef.current,
+            )
+          : null;
+      const target =
+        frameTarget ?? focusTarget ?? currentObservation?.target ?? inputTarget ?? null;
       if (!target) throw new Error("The desktop target is not ready for input.");
       if (frame && frame.targetId !== selectedTargetIdRef.current) {
         throw new Error("The displayed desktop frame is no longer selected.");

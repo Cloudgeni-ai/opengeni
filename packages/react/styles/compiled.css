@@ -443,6 +443,8 @@
 }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
 :where(.og-root) {
+    --font-sans: var(--og-font-sans);
+    --font-mono: var(--og-font-mono);
     --color-black: #000;
     --color-white: #fff;
     --spacing: 0.25rem;
@@ -469,7 +471,11 @@
     --leading-tight: 1.25;
     --leading-snug: 1.375;
     --leading-relaxed: 1.625;
+    --radius-sm: var(--og-radius-sm);
+    --radius-md: var(--og-radius-md);
+    --radius-lg: var(--og-radius-lg);
     --radius-2xl: 1rem;
+    --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
     --ease-out: cubic-bezier(0, 0, 0.2, 1);
     --blur-sm: 8px;
     --blur-md: 12px;
@@ -909,6 +915,110 @@
 @media (prefers-reduced-motion: reduce) {
   :where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
     animation: none;
+  }
+}
+:where(.og-root).og-rolling-status,:where(.og-root) .og-rolling-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+:where(.og-root).og-rolling-window,:where(.og-root) .og-rolling-window {
+  position: relative;
+  display: block;
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  overflow: hidden;
+}
+:where(.og-root).og-rolling-face,:where(.og-root) .og-rolling-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+}
+:where(.og-root).og-rolling-label,:where(.og-root) .og-rolling-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 20px;
+  color: var(--og-color-fg-muted);
+}
+:where(.og-root).og-rolling-label > svg,:where(.og-root) .og-rolling-label > svg {
+  flex-shrink: 0;
+}
+:where(.og-root).og-rolling-count,:where(.og-root) .og-rolling-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--og-color-fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+:where(.og-root).og-command-reel,:where(.og-root) .og-command-reel {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  transform-origin: 50% 50%;
+}
+:where(.og-root).og-reasoning-preview,:where(.og-root) .og-reasoning-preview,:where(.og-root) .og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre),:where(.og-root)  .og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+:where(.og-root).og-reasoning-preview br,:where(.og-root) .og-reasoning-preview br {
+  display: none;
+}
+:where(.og-root).og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after,:where(.og-root) .og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after {
+  content: " ";
+}
+:where(.og-root).og-reel-title,:where(.og-root) .og-reel-title {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 75%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.og-root).og-reel-title:only-child,:where(.og-root) .og-reel-title:only-child {
+  max-width: 100%;
+}
+:where(.og-root).og-reel-preview,:where(.og-root) .og-reel-preview {
+  flex: 1 1 0%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
+  background-image: linear-gradient(90deg, light-dark(#898c94,#686b76) 42%, light-dark(#f0f1f4,#fff) 50%, light-dark(#898c94,#686b76) 58%);
+  background-size: 300% 100%;
+  background-position: 100% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: og-activity-sweep 3.6s linear infinite;
+}
+@keyframes og-activity-sweep {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+@media (prefers-reduced-motion:reduce), (forced-colors:active) {
+  :where(.og-root).og-command-reel-running,:where(.og-root) .og-command-reel-running,:where(.og-root) .og-rolling-status[data-running="true"] .og-command-reel,:where(.og-root)  .og-rolling-status[data-running="true"] .og-command-reel {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
   }
 }
 :where(.og-root).pointer-events-auto,:where(.og-root) .pointer-events-auto {
@@ -1716,6 +1826,9 @@
   }
 :where(.og-root).flex-\[1_1_5rem\],:where(.og-root) .flex-\[1_1_5rem\] {
     flex: 1 1 5rem;
+  }
+:where(.og-root).flex-shrink,:where(.og-root) .flex-shrink {
+    flex-shrink: 1;
   }
 :where(.og-root).shrink,:where(.og-root) .shrink {
     flex-shrink: 1;
@@ -3207,6 +3320,9 @@
 :where(.og-root).text-balance,:where(.og-root) .text-balance {
     text-wrap: balance;
   }
+:where(.og-root).text-nowrap,:where(.og-root) .text-nowrap {
+    text-wrap: nowrap;
+  }
 :where(.og-root).\[overflow-wrap\:anywhere\],:where(.og-root) .\[overflow-wrap\:anywhere\] {
     overflow-wrap: anywhere;
   }
@@ -3231,6 +3347,9 @@
 :where(.og-root).whitespace-pre-wrap,:where(.og-root) .whitespace-pre-wrap {
     white-space: pre-wrap;
   }
+:where(.og-root).text-destructive,:where(.og-root) .text-destructive {
+    color: var(--og-color-danger);
+  }
 :where(.og-root).text-fg,:where(.og-root) .text-fg {
     color: var(--og-color-fg);
   }
@@ -3239,6 +3358,9 @@
   }
 :where(.og-root).text-fg-subtle,:where(.og-root) .text-fg-subtle {
     color: var(--og-color-fg-subtle);
+  }
+:where(.og-root).text-muted,:where(.og-root) .text-muted {
+    color: var(--color-surface-2);
   }
 :where(.og-root).text-og-accent,:where(.og-root) .text-og-accent {
     color: var(--og-color-accent);

@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   DocumentAuthorityKind,
   EntitlementsPort,
+  KnowledgeSourceSyncRunSummary,
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
@@ -434,6 +435,7 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_run_terminal"
         | "scheduled_execution_unrepresentable"
         | "knowledge_source_paused"
+        | "legacy_source_schedule_requires_migration"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";
@@ -458,6 +460,9 @@ export type DispatchScheduledTaskRunResult =
     };
 
 export type RunKnowledgeSourceSyncBatchInput = {
+  /** Host-bound attempt only. Legacy control workflow inputs have none and cannot fetch. */
+  agent?: Extract<import("@opengeni/db").KnowledgeActor, { kind: "agent" }>;
+
   accountId: string;
   workspaceId: string;
   taskId: string;
@@ -479,7 +484,7 @@ export type DispatchAutomationRunResult =
   | { action: "failed"; reason: string }
   | { action: "not_found" };
 
-export type RunKnowledgeSourceSyncBatchResult =
+export type RunKnowledgeSourceSyncBatchResult = (
   | { action: "continue" }
   | {
       action: "complete";
@@ -491,7 +496,8 @@ export type RunKnowledgeSourceSyncBatchResult =
       action: "failed";
       bufferedWake: boolean;
       bufferedScheduledTaskRunId?: string | null;
-    };
+    }
+) & { summary?: KnowledgeSourceSyncRunSummary; errorCode?: string };
 
 type DocumentIndexIdentity = {
   accountId: string;

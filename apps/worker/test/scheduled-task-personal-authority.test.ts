@@ -1,3 +1,4 @@
+import { migrate } from "@opengeni/db/migrate";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
@@ -49,6 +50,7 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  acquireBlankTestDatabase,
   MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
@@ -1219,36 +1221,49 @@ describe("scheduled task personal MCP authority", () => {
 
   test("0414 rolling producer fence replay preserves identity and refuses definition drift", async () => {
     if (!available) return;
-    const migration = await readFile(
-      new URL(
-        "../../../packages/db/drizzle/0414_scheduled_generated_producer_materialization.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    );
-    const [before] =
-      await admin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-    await admin.begin(async (tx) => {
-      await tx.unsafe(migration);
-    });
-    const [after] =
-      await admin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-    expect(after).toEqual(before);
-    await expect(
-      admin.begin(async (tx) => {
-        const drifted = String(before!.definition).replace(
-          "receipt.source_execution_digest = OLD.task_execution_digest",
-          "receipt.source_execution_digest <> OLD.task_execution_digest",
-        );
-        expect(drifted).not.toBe(before!.definition);
-        await tx.unsafe(drifted);
+    const historical = await acquireBlankTestDatabase("scheduled-0414-replay");
+    if (!historical) throw new Error("Historical migration test requires PostgreSQL");
+    const historicalAdmin = postgres(historical.databaseUrl, { max: 1, onnotice: () => undefined });
+    try {
+      // 0461 deliberately extends this function for ordinary private source
+      // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
+      await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0461_unified_knowledge.sql')`;
+      await migrate(historical.databaseUrl);
+      const migration = await readFile(
+        new URL(
+          "../../../packages/db/drizzle/0414_scheduled_generated_producer_materialization.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const [before] =
+        await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
+      await historicalAdmin.begin(async (tx) => {
         await tx.unsafe(migration);
-      }),
-    ).rejects.toMatchObject({ code: "55000" });
-    const [restored] =
-      await admin`select pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
-    expect(restored!.definition).toBe(before!.definition);
-  });
+      });
+      const [after] =
+        await historicalAdmin`select oid, prosecdef, proconfig, proacl, pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
+      expect(after).toEqual(before);
+      await expect(
+        historicalAdmin.begin(async (tx) => {
+          const drifted = String(before!.definition).replace(
+            "receipt.source_execution_digest = OLD.task_execution_digest",
+            "receipt.source_execution_digest <> OLD.task_execution_digest",
+          );
+          expect(drifted).not.toBe(before!.definition);
+          await tx.unsafe(drifted);
+          await tx.unsafe(migration);
+        }),
+      ).rejects.toMatchObject({ code: "55000" });
+      const [restored] =
+        await historicalAdmin`select pg_get_functiondef(oid) as definition from pg_proc where proname = 'fence_scheduled_task_run_connection_session_identity'`;
+      expect(restored!.definition).toBe(before!.definition);
+    } finally {
+      await historicalAdmin.end();
+      await historical.release();
+    }
+  }, 180_000);
 
   for (const authorityCase of [
     "valid",

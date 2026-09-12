@@ -1,119 +1,46 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { WorkspaceLearningHistoryResponse } from "@opengeni/sdk";
-import type { ManagedSelfContext } from "@/lib/managed-self-context";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import type { AgentLearningContext, SaveAgentLearningSettingsRequest } from "@opengeni/sdk";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
-const accountId = "00000000-0000-4000-8000-000000000002";
-const firstRevisionId = "00000000-0000-4000-8000-000000000003";
-const secondRevisionId = "00000000-0000-4000-8000-000000000004";
-const activationId = "00000000-0000-4000-8000-000000000005";
-
-const history: WorkspaceLearningHistoryResponse = {
-  head: {
-    accountId,
-    workspaceId,
-    revisionId: secondRevisionId,
-    revision: 2,
-    policyHash: "b".repeat(64),
-    activationVersion: 2,
-    activatedAt: "2026-08-16T10:00:00.000Z",
-  },
-  revisions: [
-    {
-      id: secondRevisionId,
-      operationId: crypto.randomUUID(),
-      accountId,
-      workspaceId,
-      revision: 2,
-      policyHash: "b".repeat(64),
-      workspaceMode: "suggest",
-      sourceOverrides: [
-        { kind: "task-note", id: "00000000-0000-4000-8000-000000000007", mode: "off" },
-      ],
-      supersedesRevisionId: firstRevisionId,
-      createdBySubjectId: "user:admin",
-      createdAt: "2026-08-16T09:59:00.000Z",
-    },
-    {
-      id: firstRevisionId,
-      operationId: crypto.randomUUID(),
-      accountId,
-      workspaceId,
-      revision: 1,
-      policyHash: "a".repeat(64),
-      workspaceMode: "off",
-      sourceOverrides: [],
-      supersedesRevisionId: null,
-      createdBySubjectId: "user:admin",
-      createdAt: "2026-08-15T09:59:00.000Z",
-    },
-  ],
-  policyEvents: [],
-  decisions: [
-    {
-      id: crypto.randomUUID(),
-      sourceKind: "task-note",
-      sourceId: "00000000-0000-4000-8000-000000000006",
-      proposalId: crypto.randomUUID(),
-      policySnapshotId: crypto.randomUUID(),
-      policyRevisionId: secondRevisionId,
-      policyActivationVersion: 2,
-      effectiveMode: "suggest",
-      confidenceBps: 9_200,
-      conflictCount: 0,
-      outcome: "suggest",
-      reasons: ["policy_suggest"],
-      automaticEligible: false,
-      createdAt: "2026-08-16T10:01:00.000Z",
-    },
-  ],
-  activations: [
-    {
-      id: activationId,
-      decisionReceiptId: crypto.randomUUID(),
-      initiatingHumanSubjectId: "user:admin",
-      serviceActorSubjectId: "service:governed-learning-activation:test",
-      sourceKind: "task-note",
-      sourceId: "00000000-0000-4000-8000-000000000006",
-      destination: "preference",
-      destinationRevisionId: crypto.randomUUID(),
-      destinationOldRevisionId: crypto.randomUUID(),
-      destinationOldContentHash: "c".repeat(64),
-      destinationOldVersion: 3,
-      destinationNewContentHash: "d".repeat(64),
-      destinationNewVersion: 4,
-      effectiveAt: "2026-08-16T10:02:00.000Z",
-      createdAt: "2026-08-16T10:02:00.000Z",
-    },
-  ],
-  undos: [],
-  truncated: false,
-  effectiveBoundary: "next_accepted_attempt",
-};
-
-const getHistory = mock(async () => history);
-const createRevision = mock(async (_workspaceId: string, request: Record<string, any>) => ({
-  ...history.revisions[0]!,
-  id: crypto.randomUUID(),
-  workspaceMode: request.workspaceMode,
+const defaults = {
+  knowledge: "automatic",
+  instructions: "review_first",
+  skills: "review_first",
+} as const;
+const getSettings = mock(async (_id: string, scope: string, source?: AgentLearningContext) => ({
+  ownerKey: scope,
+  contextKey: source ? `${source.kind}:${source.id}` : "default",
+  version: 2,
+  settings: source ? { knowledge: "review_first" as const } : defaults,
 }));
-const activateRevision = mock(async () => ({ head: history.head!, event: {} }));
-const rollbackRevision = mock(async () => ({ head: history.head!, event: {} }));
-const undoActivation = mock(async () => ({}));
-
-const context = {
-  workspaces: [{ id: workspaceId, accountId, kind: "shared" as "shared" | "personal" }],
-  managedSelfContext: null as ManagedSelfContext | null,
-  client: {
-    getWorkspaceLearningHistory: getHistory,
-    createWorkspaceLearningPolicyRevision: createRevision,
-    activateWorkspaceLearningPolicyRevision: activateRevision,
-    rollbackWorkspaceLearningPolicyRevision: rollbackRevision,
-    undoGovernedLearningActivation: undoActivation,
+const saveSettings = mock(async (_id: string, input: SaveAgentLearningSettingsRequest) => ({
+  ownerKey: input.scope,
+  contextKey: "default",
+  version: 3,
+  settings: { ...defaults, ...input.settings },
+}));
+const listOverrides = mock(async (_workspaceId: string, _scope: string) => [
+  {
+    contextKey: "scheduled_task:00000000-0000-4000-8000-000000000002",
+    version: 1,
+    settings: { knowledge: "review_first" },
+    label: "Read support feedback",
+    updatedAt: "2026-09-10T00:00:00Z",
   },
+]);
+const context = {
+  workspaces: [{ id: workspaceId, kind: "shared" }],
+  managedSelfContext: null,
+  client: {
+    getAgentLearningSettings: getSettings,
+    saveAgentLearningSettings: saveSettings,
+    listAgentLearningOverrides: listOverrides,
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
   accessContext: {
     mode: "managed",
     subjectId: "user:admin",
@@ -121,196 +48,85 @@ const context = {
     workspaceGrants: [{ workspaceId, permissions: ["workspace:read", "workspace:admin"] }],
   },
 };
-
 mock.module("@/context", () => ({ useAppContext: () => context }));
 const { WorkspaceLearningAdministration } = await import("./workspace-learning-admin");
-
 beforeAll(() => {
   GlobalRegistrator.register();
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
 });
-
+beforeEach(() => {
+  getSettings.mockClear();
+  saveSettings.mockClear();
+  listOverrides.mockClear();
+});
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
 
-describe("Workspace instruction and Skill autonomy", () => {
-  test("renders only the learning-mode selector and saves with preserved overrides", async () => {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
-      );
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-
-      expect(container.textContent).toContain("Off");
-      expect(container.textContent).toContain("Require approval");
-      expect(container.textContent).toContain("Autonomous");
-      expect(container.textContent).toContain("Workspace instruction & Skill autonomy");
-      expect(container.textContent).toContain("Workspace instructions and Skills automatically");
-      expect(container.querySelectorAll('input[name="learning-mode"]')).toHaveLength(3);
-      expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
-        true,
-      );
-
-      expect(container.textContent).not.toContain("Advanced source overrides");
-      expect(container.textContent).not.toContain("Policy versions");
-      expect(container.textContent).not.toContain("Learning history");
-      expect(container.textContent).not.toContain("Rollback");
-      expect(container.textContent).not.toContain("Undo");
-      expect(container.textContent).not.toContain("92.00% confidence");
-      expect(container.textContent).not.toContain("Workspace admin access is required");
-
-      const autonomous = container.querySelector<HTMLInputElement>('input[value="automatic"]');
-      expect(autonomous).not.toBeNull();
-      await act(async () => {
-        autonomous!.click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(container.textContent).not.toContain("Save learning mode");
-      expect(createRevision).toHaveBeenCalledTimes(1);
-      expect(createRevision).toHaveBeenCalledWith(
-        workspaceId,
-        expect.objectContaining({
-          workspaceMode: "automatic",
-          sourceOverrides: [
-            { kind: "task-note", id: "00000000-0000-4000-8000-000000000007", mode: "off" },
-          ],
-          supersedesRevisionId: secondRevisionId,
-        }),
-      );
-      expect(activateRevision).toHaveBeenCalledTimes(1);
-      expect(activateRevision).toHaveBeenCalledWith(
-        workspaceId,
-        expect.any(String),
-        expect.objectContaining({
-          expectedCurrentRevisionId: secondRevisionId,
-          expectedActivationVersion: 2,
-        }),
-      );
-      expect(rollbackRevision).not.toHaveBeenCalled();
-      expect(undoActivation).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("Instruction and Skill mode saved.");
-    } finally {
-      await act(async () => root.unmount());
-    }
+async function render() {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />);
   });
-
-  test("saves a fresh workspace with no head, no overrides, and version 0", async () => {
-    getHistory.mockResolvedValueOnce({
-      ...history,
-      head: null,
-      revisions: [],
-      policyEvents: [],
-      decisions: [],
-      activations: [],
-      undos: [],
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return {
+    container,
+    dispose: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+function field(container: HTMLElement, label: string) {
+  const element = [...container.querySelectorAll("label")].find(
+    (item) => item.textContent === label,
+  );
+  if (!element) throw new Error(`Missing field ${label}`);
+  return document.getElementById(element.htmlFor) as HTMLSelectElement;
+}
+test("shows all three defaults together and saves one change without resetting the others", async () => {
+  const view = await render();
+  try {
+    expect(field(view.container, "Knowledge").value).toBe("automatic");
+    expect(field(view.container, "Workspace instructions").value).toBe("review_first");
+    expect(field(view.container, "Skills").value).toBe("review_first");
+    const select = field(view.container, "Knowledge");
+    await act(async () => {
+      select.value = "off";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    createRevision.mockClear();
-    activateRevision.mockClear();
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
-      );
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-
-      expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
-        true,
-      );
-
-      const off = container.querySelector<HTMLInputElement>('input[value="off"]');
-      await act(async () => {
-        off!.click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(createRevision).toHaveBeenCalledTimes(1);
-      expect(createRevision).toHaveBeenCalledWith(
-        workspaceId,
-        expect.objectContaining({
-          workspaceMode: "off",
-          sourceOverrides: [],
-          supersedesRevisionId: null,
-        }),
-      );
-      expect(activateRevision).toHaveBeenCalledTimes(1);
-      expect(activateRevision).toHaveBeenCalledWith(
-        workspaceId,
-        expect.any(String),
-        expect.objectContaining({
-          expectedCurrentRevisionId: null,
-          expectedActivationVersion: 0,
-        }),
-      );
-      expect(container.textContent).toContain("Instruction and Skill mode saved.");
-    } finally {
-      await act(async () => root.unmount());
-    }
-  });
-
-  test("lets the Personal owner save without a workspace admin grant", async () => {
-    const previousGrants = context.accessContext.workspaceGrants;
-    context.accessContext.workspaceGrants = [{ workspaceId, permissions: ["workspace:read"] }];
-    context.workspaces[0]!.kind = "personal";
-    context.managedSelfContext = {
-      identity: { credentialGeneration: 1, managedUserId: "admin", subjectId: "user:admin" },
-      memberships: [
-        {
-          id: crypto.randomUUID(),
-          organizationId: accountId,
-          status: "active",
-          personalWorkspaceId: workspaceId,
-        },
-      ],
-    };
-    createRevision.mockClear();
-    activateRevision.mockClear();
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
-      );
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-      expect(container.querySelector<HTMLFieldSetElement>("fieldset")?.disabled).toBe(false);
-      await act(async () => {
-        container.querySelector<HTMLInputElement>('input[value="off"]')!.click();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(createRevision).toHaveBeenCalledTimes(1);
-      expect(activateRevision).toHaveBeenCalledTimes(1);
-      expect(container.textContent).toContain("Instruction and Skill mode saved.");
-    } finally {
-      await act(async () => root.unmount());
-      context.accessContext.workspaceGrants = previousGrants;
-      context.workspaces[0]!.kind = "shared";
-      context.managedSelfContext = null;
-    }
-  });
-
-  test("shows the admin-access note and disables saving without workspace:admin", async () => {
-    const previousGrants = context.accessContext.workspaceGrants;
-    context.accessContext.workspaceGrants = [{ workspaceId, permissions: ["workspace:read"] }];
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(<WorkspaceLearningAdministration workspaceId={workspaceId} />),
-      );
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-
-      expect(container.textContent).toContain(
-        "A workspace administrator or Personal workspace owner can change instruction and Skill autonomy.",
-      );
-      expect(container.querySelector<HTMLFieldSetElement>("fieldset")?.disabled).toBe(true);
-    } finally {
-      await act(async () => root.unmount());
-      context.accessContext.workspaceGrants = previousGrants;
-    }
-  });
+    expect(saveSettings.mock.calls[0]?.[1]).toMatchObject({
+      scope: "workspace",
+      expectedVersion: 2,
+      settings: { knowledge: "off", instructions: "review_first", skills: "review_first" },
+    });
+    expect(view.container.textContent).toContain("Saved. Applies from the next agent run.");
+    expect(view.container.textContent).toContain("Read support feedback");
+  } finally {
+    await view.dispose();
+  }
+});
+test("personal defaults use their own settings and override inventory", async () => {
+  const view = await render();
+  try {
+    const select = view.container.querySelector(
+      '[aria-label="Agent learning defaults for"]',
+    ) as HTMLSelectElement;
+    await act(async () => {
+      select.value = "personal";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(getSettings.mock.calls.some((call) => call[1] === "personal")).toBe(true);
+    expect(listOverrides.mock.calls.at(-1)).toEqual([workspaceId, "personal"]);
+    expect(saveSettings).not.toHaveBeenCalled();
+  } finally {
+    await view.dispose();
+  }
 });
