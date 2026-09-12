@@ -646,6 +646,23 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type RotateSessionMcpCredentialsRequest = {
+  operationKey: string;
+  updates: Array<{
+    id: string;
+    expectedCredentialVersion: number;
+    expectedServerUrl: string;
+    headers: Record<string, string>;
+  }>;
+};
+
+export type RotateSessionMcpCredentialsReceipt = {
+  operationKey: string;
+  sessionId: string;
+  servers: Array<{ id: string; credentialVersion: number }>;
+  appliedAt: string;
+};
+
 export type SessionMcpApprovalPolicy = boolean | string[];
 
 export type SessionMcpServerMetadata = {
@@ -1348,6 +1365,17 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
+  failureDiagnostics?:
+    | {
+        eventId: string;
+        sequence: number;
+        turnId: string | null;
+        occurredAt: string;
+        payload: unknown;
+      }
+    | null
+    | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   id: string;
   workspaceId: string;
@@ -7432,7 +7460,7 @@ export type PluginInstallationSummary = {
   description: string;
   category: string;
   tags: string[];
-  logoUrl?: string | null;
+  logoUrl?: string | null | undefined;
   sourceUrl: string | null;
   manifestDigest: string;
   installationVersion: number;
@@ -8022,6 +8050,7 @@ export type MachineRuntimeCapabilities = {
   browserBridge: boolean;
   operationResourcePolicy: boolean;
   operationCpuQuota: boolean;
+  transactionalFsWrite: boolean;
 };
 
 export type MachineUpdateStatus =

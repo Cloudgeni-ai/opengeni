@@ -1,3 +1,4 @@
+import { codexSelectionDiagnostics } from "../src/activities/agent-turn/codex-selection-diagnostics";
 import { describe, expect, test } from "bun:test";
 import type { CodexAccountStatus, CodexLeaseAccountStatus } from "@opengeni/db";
 import {
@@ -910,6 +911,28 @@ describe("credential allocator pin and rotation policy", () => {
     existingCredentialId,
     policyScope: null,
     unavailableDiagnostics: [],
+  });
+
+  test("sticky session selection differs from workspace pointer without rotating the session", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: context([leasedAcct("a"), leasedAcct("b")]),
+      sessionId: "sticky-diagnostic",
+      sessionPinSource: "policy",
+      sessionPinnedCredentialId: "b",
+      sessionLastCredentialId: "b",
+      now: NOW,
+    });
+    expect(selected.credentialId).toBe("b");
+    // moved compares the workspace pointer, not this session's previous account.
+    expect(selected.decision).toMatchObject({ kind: "active", moved: true });
+    expect(
+      codexSelectionDiagnostics({
+        previousCredentialId: "b",
+        credentialId: selected.credentialId!,
+        reusedLease: false,
+        pinnedCredentialId: null,
+      }),
+    ).toEqual({ transition: "unchanged", source: "allocator", reason: "affinity_reused" });
   });
 
   test("a healthy explicit pin wins", () => {

@@ -819,6 +819,32 @@ await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision
 
 ## Session tool policy and native web search
 
+For standalone credential maintenance, use the dedicated operation rather than
+sending a message:
+
+```ts
+const request = {
+  operationKey: crypto.randomUUID(),
+  updates: [{
+    id: "crm",
+    expectedCredentialVersion: 1,
+    expectedServerUrl: "https://tools.example.test/mcp",
+    headers: { Authorization: `Bearer ${replacementToken}` },
+  }],
+};
+const receipt = await client.rotateSessionMcpCredentials(workspaceId, sessionId, request);
+```
+
+Only exact existing inline servers without `connectionRef` are eligible. Both
+session control and MCP attach permissions, live session authorization, expected
+versions, and a quiescent credential-consumer boundary are required. This never
+sends a message, starts work, retries a failed turn, or refreshes an active
+client. Reconcile an ambiguous response with the same request/key; the SDK does
+not retry mutations automatically. Exact authorized replay returns the original
+receipt without a second write. Old receipt verification fails explicitly with
+503 if the deployment encryption key has been replaced. See the full
+[rotation contract](../../docs/session-mcp-servers.md#standalone-inline-credential-rotation).
+
 Omitting `tools` when creating a top-level session selects the current
 workspace-default capability policy, including the built-in `files` server.
 Passing `tools`, including `[]`, is an intentional fixed narrowing and can

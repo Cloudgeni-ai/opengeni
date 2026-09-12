@@ -11,7 +11,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { useAppContext, type AppContextValue } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
@@ -319,7 +324,10 @@ export function SkillsPanelContent({
 
   return (
     <section aria-label="Skills" className="skills-panel space-y-4">
-      <div hidden={Boolean(query.trim()) && !matchingSkills.length && !record} className="flex flex-wrap items-center justify-between gap-3">
+      <div
+        hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
+        className="flex flex-wrap items-center justify-between gap-3"
+      >
         <div>
           <h2 className="text-lg font-semibold">Your skills</h2>
           <p hidden={Boolean(query.trim())} className="text-sm text-fg-subtle">
@@ -332,23 +340,26 @@ export function SkillsPanelContent({
             .slice(0, 1)
             .map((scope) => (
               <DropdownMenu key={scope}>
-              <DropdownMenuTrigger asChild>
-              <Button
-                variant="default"
-                disabled={busy}
-              >
-                <PlusIcon aria-hidden="true" />
-                New skill
-                <ChevronDownIcon aria-hidden="true" />
-              </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
-                  Create manually
-                </DropdownMenuItem>
-                {onFindSkill ? <DropdownMenuItem onSelect={onFindSkill}>Find a skill in the catalogue</DropdownMenuItem> : null}
-                {onImportSkill ? <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem> : null}
-              </DropdownMenuContent>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="default" disabled={busy}>
+                    <PlusIcon aria-hidden="true" />
+                    New skill
+                    <ChevronDownIcon aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
+                    Create manually
+                  </DropdownMenuItem>
+                  {onFindSkill ? (
+                    <DropdownMenuItem onSelect={onFindSkill}>
+                      Find a skill in the catalogue
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onImportSkill ? (
+                    <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
               </DropdownMenu>
             ))}
         </div>
@@ -377,27 +388,35 @@ export function SkillsPanelContent({
         </p>
       ) : null}
       <div className="skill-list">
-        {matchingSkills
-          .map((skill) => (
-            <button
-              type="button"
-              className="skill-list-row"
-              key={skill.id}
-              aria-expanded={record?.id === skill.id}
-              aria-controls={record?.id === skill.id ? editorId : undefined}
-              disabled={busy}
-              onClick={() => navigate(() => {
+        {matchingSkills.map((skill) => (
+          <button
+            type="button"
+            className="skill-list-row"
+            key={skill.id}
+            aria-expanded={record?.id === skill.id}
+            aria-controls={record?.id === skill.id ? editorId : undefined}
+            disabled={busy}
+            onClick={() =>
+              navigate(() => {
                 if (record?.id === skill.id) setRecord(null);
                 else void open(skill.id);
-              })}
-            >
-              <span className="min-w-0">
-                <span className="block truncate font-medium">{skill.title || skill.stableKey}</span>
-                {skill.status !== "active" || skill.pendingRevisionIds.length ? <span className="mt-1 block text-xs text-fg-subtle">{skill.pendingRevisionIds.length ? "Pending changes" : skill.status}</span> : null}
-              </span>
-              <ChevronDownIcon aria-hidden="true" className={`size-4 shrink-0 text-fg-subtle transition-transform ${record?.id === skill.id ? "rotate-180" : ""}`} />
-            </button>
-          ))}
+              })
+            }
+          >
+            <span className="min-w-0">
+              <span className="block truncate font-medium">{skill.title || skill.stableKey}</span>
+              {skill.status !== "active" || skill.pendingRevisionIds.length ? (
+                <span className="mt-1 block text-xs text-fg-subtle">
+                  {skill.pendingRevisionIds.length ? "Pending changes" : skill.status}
+                </span>
+              ) : null}
+            </span>
+            <ChevronDownIcon
+              aria-hidden="true"
+              className={`size-4 shrink-0 text-fg-subtle transition-transform ${record?.id === skill.id ? "rotate-180" : ""}`}
+            />
+          </button>
+        ))}
         {nextCursor ? (
           <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
             Load more Skills
@@ -405,10 +424,18 @@ export function SkillsPanelContent({
         ) : null}
       </div>
       {record ? (
-        <div id={editorId} className="skill-editor space-y-4 rounded-xl border border-border p-4 sm:p-5">
+        <div
+          id={editorId}
+          className="skill-editor space-y-4 rounded-xl border border-border p-4 sm:p-5"
+        >
           <div className="flex items-center justify-between gap-3">
             <h3 className="font-medium">{record.title || record.stableKey || "New skill"}</h3>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => navigate(() => setRecord(null))}>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => navigate(() => setRecord(null))}
+            >
               Collapse <ChevronDownIcon aria-hidden="true" className="rotate-180" />
             </Button>
           </div>
@@ -424,7 +451,15 @@ export function SkillsPanelContent({
             >
               {(["user", "workspace", "organization"] as const)
                 .filter((scope) => scope === record.scope || canManage(scope))
-                .map((scope) => <option key={scope} value={scope}>{scope === "user" ? "Personal" : scope === "workspace" ? "Workspace" : "Organization"}</option>)}
+                .map((scope) => (
+                  <option key={scope} value={scope}>
+                    {scope === "user"
+                      ? "Personal"
+                      : scope === "workspace"
+                        ? "Workspace"
+                        : "Organization"}
+                  </option>
+                ))}
             </Select>
           </div>
           <p className="text-sm text-muted-foreground">

@@ -8,6 +8,7 @@ import {
   UserMessageBody,
   type TimelineItem,
   type UserMessageItem,
+  type UserMessageDisclosureLabels,
 } from "@opengeni/react";
 import "./styles.css";
 
@@ -15,6 +16,7 @@ type UserMessageHarness = {
   prepend: () => void;
   stream: () => void;
   scroller: () => HTMLElement;
+  setDisclosureLabels: (labels: UserMessageDisclosureLabels) => void;
 };
 
 declare global {
@@ -118,6 +120,8 @@ function HiddenShadowActionFixture() {
 }
 
 function Harness() {
+  const [disclosureLabels, setDisclosureLabels] = useState<UserMessageDisclosureLabels>();
+  const defaultRenderer = new URLSearchParams(window.location.search).has("defaultRenderer");
   const [streamed, setStreamed] = useState(false);
   const [prepended, setPrepended] = useState(false);
   const items = useMemo(
@@ -147,6 +151,7 @@ function Harness() {
       prepend: () => flushSync(() => setPrepended(true)),
       stream: () => flushSync(() => setStreamed(true)),
       scroller,
+      setDisclosureLabels: (labels) => flushSync(() => setDisclosureLabels(labels)),
     };
     return () => {
       delete window.userMessageHarness;
@@ -229,7 +234,8 @@ function Harness() {
           className="min-h-0 flex-1 overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1"
           items={items}
           hasOlder
-          renderMessageText={renderMessageText}
+          renderMessageText={defaultRenderer ? undefined : renderMessageText}
+          userMessageDisclosureLabels={disclosureLabels}
         />
       </section>
     </main>

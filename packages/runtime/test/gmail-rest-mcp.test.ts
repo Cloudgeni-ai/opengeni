@@ -133,6 +133,44 @@ describe("Gmail REST MCP adapter", () => {
     expect(requests).toBe(0);
   });
 
+  test.each(["personal_authority_unavailable", "expired", "refresh_failed"] as const)(
+    "connect publishes %s before failing without a Gmail request",
+    async (reason) => {
+      const events: unknown[] = [];
+      let requests = 0;
+      const gmail = server({
+        resolveCredential: async () => ({
+          status: "auth_needed",
+          reason,
+          providerDomain: "gmailmcp.googleapis.com",
+          connectionId: "conn_1",
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+          resource: OFFICIAL_GMAIL_MCP_URL,
+        }),
+        onAuthNeeded: (payload) => {
+          events.push(payload);
+        },
+        fetchImpl: async () => {
+          requests++;
+          return Response.json({});
+        },
+      });
+      await expect(gmail.connect()).rejects.toThrow("Authentication required for Gmail");
+      expect(requests).toBe(0);
+      expect(events).toEqual([
+        {
+          serverId: "gmail",
+          providerDomain: "gmailmcp.googleapis.com",
+          connectionId: "conn_1",
+          reason,
+          scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+          resource: OFFICIAL_GMAIL_MCP_URL,
+          subjectId: "subject-a",
+        },
+      ]);
+    },
+  );
+
   test("preserves host provenance from a legacy credential result", async () => {
     const authNeeded: unknown[] = [];
     let requests = 0;

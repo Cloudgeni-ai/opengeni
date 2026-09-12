@@ -9,7 +9,6 @@ import {
   currentViteBuildId,
   installVitePreloadRecovery,
 } from "./lib/vite-preload-recovery";
-import "streamdown/styles.css";
 import "./styles.css";
 
 retainIdentityLinkContinuation(window);

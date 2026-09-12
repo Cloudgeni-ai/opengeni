@@ -1,5 +1,40 @@
 # @opengeni/react
 
+## 5.2.0
+
+### Minor Changes
+
+- c1ad490: Allow hosts to localize user-message disclosure actions through direct component props and the default timeline composition. Each label falls back independently to English, while message expansion, accessible controls, and scroll anchoring retain their existing behavior.
+
+## 5.1.1
+
+### Patch Changes
+
+- 0507f91: Retry timed-out composer draft reads with backoff and clear their warning after a successful refresh, including when the draft revision is unchanged. Keep draft-read failures separate from Send, Steer, and control failures, and identify draft sync timeouts in the composer message.
+
+## 5.1.0
+
+### Minor Changes
+
+- d40bd9b: Replace startup timing rows with a quiet animated genie and rotating loading copy. Retain timing evidence in diagnostics, support a browser-local detail preference, and keep failures visible. Add a replayable loading studio.
+
+### Patch Changes
+
+- 4e2b59d: Keep loading animation options self-contained in public declarations so NodeNext consumers do not need to resolve the renderer's internal type imports. Supported animation options and runtime behavior are unchanged.
+- 4e2b59d: Route plugin discovery types and endpoint compatibility through the public SDK boundary, using a narrow contracts entry without schema-runtime imports.
+- 9968ae5: Allow host rendering of DeviceAuthorization while retaining shared clipboard state and URL validation. Restore the native Codex and SuperGrok subscription sign-in panels without changing embedded defaults or integration setup.
+- 488a69b: Expose bounded current-failure evidence on session detail reads so recovery diagnostics do not depend on timeline pagination. Show recorded consecutive retry streaks without inventing lifetime totals, and distinguish Codex account assignment, affinity/lease reuse, and actual switches without changing allocation policy.
+
+  Read session status and its replay cursor coherently, decode bounded diagnostics through the lossless storage codec, and record account transitions atomically against the current assignment with attempt-keyed replay and compatible switch reasons.
+
+- 5ef34cf: Allow hosts to open a workbench tab with `openTabRequest`. The stock console routes Site links into the session artifact panel and retains a session return link when expanding Sites or editors full-page.
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [d08dbb6]
+  - @opengeni/sdk@5.1.0
+
 ## 5.0.5
 
 ### Patch Changes

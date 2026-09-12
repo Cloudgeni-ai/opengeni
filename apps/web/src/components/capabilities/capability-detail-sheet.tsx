@@ -564,7 +564,9 @@ export function DetailBody({
             </div>
           ) : plan.mode === "setup_required" ? (
             <p role="status" className="text-sm text-fg-muted">
-              {item.metadata.authDiscovery === "checking" ? "Checking sign-in requirements…" : "Setup required. Check the provider’s instructions, or reopen to retry."}
+              {item.metadata.authDiscovery === "checking"
+                ? "Checking sign-in requirements…"
+                : "Setup required. Check the provider’s instructions, or reopen to retry."}
             </p>
           ) : item.kind === "mcp" ? (
             <ConnectionActions onCancel={onCancel} busy={busy}>

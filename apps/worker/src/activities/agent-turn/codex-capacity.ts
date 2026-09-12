@@ -5,7 +5,7 @@ import {
   CodexCredentialLeaseAttemptFencedError,
   CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
-  recordSessionActiveCodexCredential,
+  recordSessionCodexSelectionForTurnAttempt,
   setSessionCodexPinInTransaction,
   settleCodexCredentialFailover,
   withSessionCodexCapacityMutation,
@@ -288,19 +288,40 @@ export async function selectCodexTurnCapacity(
         leases.codex.confirmedUntilMs !== null;
       if (leases.codex.held) leases.codex.startHeartbeat();
 
+      const eligibleCount = leased.accounts.filter((account) =>
+        isCodexCredentialEligible(account, new Date()),
+      ).length;
+      const selectionReceipt = providerTurn.effectiveCodexCredentialId
+        ? await recordSessionCodexSelectionForTurnAttempt(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            credentialId: providerTurn.effectiveCodexCredentialId,
+            strategy: leased.rotationStrategy,
+            reusedLease: leased.reused,
+            pinnedCredentialId: sessionPin,
+            pinSource: sessionPinSource,
+            eligibleCount,
+            connectedCount: leased.accounts.length,
+          })
+        : null;
+      if (selectionReceipt)
+        await publishDurableSessionEvents(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          selectionReceipt.events,
+        );
+      const selectionDiagnostics = selectionReceipt?.diagnostics ?? null;
       const actualOutcome = providerTurn.effectiveCodexCredentialId
         ? "selected"
         : rotationDecision.kind === "allCapped" || rotationDecision.kind === "allocatorDisabled"
           ? "waiting"
           : "none";
-      const actualReason = providerTurn.effectiveCodexCredentialId
-        ? leased.reused
-          ? "lease_reused"
-          : sessionPin === providerTurn.effectiveCodexCredentialId
-            ? "pin"
-            : rotationDecision.kind === "active" && rotationDecision.moved
-              ? "rotation"
-              : "active"
+      const actualReason = selectionDiagnostics
+        ? selectionDiagnostics.reason
         : rotationDecision.kind === "allCapped"
           ? "all_capped"
           : rotationDecision.kind === "allocatorDisabled"
@@ -362,9 +383,6 @@ export async function selectCodexTurnCapacity(
         });
       }
 
-      const eligibleCount = leased.accounts.filter((account) =>
-        isCodexCredentialEligible(account, new Date()),
-      ).length;
       const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
       observability.incrementCounter({
         name: "opengeni_codex_pool_observations_total",
@@ -690,34 +708,7 @@ export async function selectCodexTurnCapacity(
         return { exit: claimedResult({ status: "cancelled" }) };
       }
       if (providerTurn.effectiveCodexCredentialId) {
-        const priorAccountId = lockedSessionCodexState.lastCredentialId;
-        if (priorAccountId !== providerTurn.effectiveCodexCredentialId) {
-          await recordSessionActiveCodexCredential(
-            db,
-            input.workspaceId,
-            input.sessionId,
-            providerTurn.effectiveCodexCredentialId,
-          );
-          const rotated = rotationDecision.kind === "active" && rotationDecision.moved;
-          await eventing.publish([
-            {
-              type: "codex.account.switched",
-              payload: {
-                fromAccountId: priorAccountId,
-                toAccountId: providerTurn.effectiveCodexCredentialId,
-                reason: rotated ? "rotation" : "manual",
-              },
-            },
-          ]);
-        }
-
-        const selectionReason = leased.reused
-          ? "lease_reused"
-          : sessionPin === providerTurn.effectiveCodexCredentialId
-            ? "pin"
-            : rotationDecision.kind === "active" && rotationDecision.moved
-              ? "rotation"
-              : "active";
+        const selectionReason = selectionDiagnostics!.reason;
         observability.incrementCounter({
           name: "opengeni_codex_credential_selections_total",
           help: "Codex credential selections by strategy and reason.",
@@ -727,19 +718,6 @@ export async function selectCodexTurnCapacity(
             reason: selectionReason,
           },
         });
-        await eventing.publish([
-          {
-            type: "codex.credential.selected",
-            payload: {
-              credentialId: providerTurn.effectiveCodexCredentialId,
-              strategy: leased.rotationStrategy,
-              reason: selectionReason,
-              eligibleCount,
-              connectedCount: leased.accounts.length,
-              reused: leased.reused,
-            },
-          },
-        ]);
       }
     } catch (error) {
       credentialSelectionOutcome = "failed";

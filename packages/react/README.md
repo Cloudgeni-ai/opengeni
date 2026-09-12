@@ -592,7 +592,10 @@ state remains application-owned; durable draft and session state remain in
   directly in chat and supersedes the current direction. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
-  `clientEventId` across retries so the server dedupes. `composer.policy` and
+  `clientEventId` across retries so the server dedupes. Draft reads retry transient
+  failures, including request timeouts, with backoff. Successful refreshes clear
+  draft-read errors without dismissing Send, Steer, or control errors; a draft
+  sync timeout does not mean the agent turn has stopped. `composer.policy` and
   `setModel` / `setReasoningEffort` / `setLatencyMode` expose the exact policy
   owned by that actor/session draft; policy is `null` until hydration completes.
   `sendExtras` (object or function evaluated at send time) is only for
@@ -688,6 +691,15 @@ intentional changes should regenerate those snapshots and review the diff.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
+  Pass `disclosureLabels={{ showMore: "Afficher davantage", showLess: "Réduire" }}`
+  to localize a direct instance. For the default timeline, pass the same object
+  as `MessageTimeline.userMessageDisclosureLabels` or
+  `SessionConversation.userMessageDisclosureLabels`; custom `UserMessageBody`
+  renderers inside that timeline inherit these labels too. Each direct label
+  overrides its timeline label independently, then falls back to `Show more`
+  or `Show less`. Changing labels does not reset a message's expanded state.
+  `UserMessageDisclosureLabels` is exported from both `@opengeni/react` and
+  `@opengeni/react/session-ui`.
 - `SessionStatus` / `StatusDot` — status badges; live states breathe.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
 - `ModelPicker` — a compact model dropdown for a composer slot, grouping the

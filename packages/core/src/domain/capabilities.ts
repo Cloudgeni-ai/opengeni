@@ -1995,22 +1995,6 @@ function validUrl(value: string | undefined): string | null {
   }
 }
 
-function catalogSearchText(item: CapabilityCatalogItem): string {
-  return [
-    item.name,
-    item.description,
-    item.category,
-    ...item.tags,
-    item.endpointUrl,
-    item.homepageUrl,
-    item.installUrl,
-    JSON.stringify(item.metadata),
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
-
 function capabilityInstallationRuntimeReady(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,

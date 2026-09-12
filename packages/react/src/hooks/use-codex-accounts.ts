@@ -16,6 +16,7 @@ import {
 /** Events that change which Codex account a session runs on (or just ran). */
 export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean {
   return [
+    "codex.credential.selected",
     "codex.account.switched",
     "codex.account.selection.changed",
     "codex.capacity.waiting",

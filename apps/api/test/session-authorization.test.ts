@@ -23,6 +23,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["POST", "/forks", "session.fork.create"],
   ["PUT", "/channel", "session.channel.write"],
   ["PUT", "/tool-policy", "session.tool_policy.write"],
+  ["POST", "/mcp-credentials/rotate", "session.mcp.credentials.rotate"],
   ["GET", "/lineage", "session.lineage.read"],
   ["GET", "/background-commands", "session.read"],
   ["GET", "/model-context", "session.read"],

@@ -475,6 +475,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationResourcePolicy === true,
             operationCpuQuotaSupported:
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
+            transactionalFsWriteSupported:
+              liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
             ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
               ? {
                   personalMachineAttempt: {

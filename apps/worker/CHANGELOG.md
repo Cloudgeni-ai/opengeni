@@ -1,5 +1,51 @@
 # @opengeni/worker-bundle
 
+## 0.29.0
+
+### Minor Changes
+
+- e41027c: Add opt-in MCP operation outcome recovery through a configured read-only provider receipt tool. Persist exact operation identity before dispatch, retain original invocation outcomes separately from late receipts, and revalidate current authority across accepted attempts without replaying mutations. Preserve arbitrary SDK call IDs as correlation rather than replacing UUID operation identity.
+
+  Apply the additive operation-ledger migration and runtime-role provisioning, and upgrade all claim-capable workers to the membership-first lock order before enabling provider mappings. Providers must implement the documented observation contract; unsupported providers and historical operations without captured authority are not automatically recoverable.
+
+### Patch Changes
+
+- 22a9e4d: Bound sandbox acquisition and workspace mutation waits across repeated archive capture attempts. Honor the first observed capture's persisted timeout once, without letting expired or renewed claims replenish the caller's deadline; retain all capture and writer fences.
+
+  Release an exact unpublished drain capture after its provider promise rejects, including after a local timeout, so waiting turns can resume the intact live sandbox. Unresolved captures, published archives, successors, and provider teardown remain fenced.
+
+  Fresh claims allocate a new provider request identity; uninterrupted replacements retain it, preventing stale snapshot replay after an intervening writer re-arms the lease.
+
+- d08dbb6: Support capability-gated transactional large-file edits on Connected Machines,
+  with bounded transfers, verified outcomes, and live authorization checks. Keep
+  legacy agent writes compatible and report oversized outbound requests accurately
+  instead of marking a healthy agent offline. Native agent support is required;
+  unsupported filesystem semantics fail closed.
+- Updated dependencies [4e2b59d]
+- Updated dependencies [4661bbd]
+- Updated dependencies [8a60104]
+- Updated dependencies [a1bb8db]
+- Updated dependencies [4e2b59d]
+- Updated dependencies [e41027c]
+- Updated dependencies [1598498]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [22a9e4d]
+- Updated dependencies [d08dbb6]
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@2.6.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/config@1.2.0
+  - @opengeni/tool-gateway@0.1.8
+  - @opengeni/codemode@0.5.7
+  - @opengeni/core@2.10.0
+  - @opengeni/agent-proto@0.6.0
+  - @opengeni/documents@0.8.28
+  - @opengeni/events@0.4.26
+  - @opengeni/github@0.7.11
+  - @opengeni/observability@0.8.27
+  - @opengeni/storage@0.2.128
+
 ## 0.28.4
 
 ### Patch Changes

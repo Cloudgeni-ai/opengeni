@@ -63,6 +63,7 @@ import {
   UserMessageBody,
   UserMessageDisclosureProvider,
   type UserMessageDisclosureContextValue,
+  type UserMessageDisclosureLabels,
 } from "./user-message-body";
 import {
   createTipFollowState,
@@ -129,6 +130,8 @@ const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-sel
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
 
 export type MessageTimelineProps = {
+  /** Localized user-message disclosure actions, including custom UserMessageBody renderers. */
+  userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   /** Raw session events (projected internally) … */
   events?: SessionEvent[] | undefined;
   /** … or pre-projected items (e.g. from `useSessionEvents().timeline`). */
@@ -405,6 +408,7 @@ function cssEscapeAttribute(value: string): string {
  * with a "jump to latest" affordance when the reader scrolls back.
  */
 export function MessageTimeline({
+  userMessageDisclosureLabels,
   events,
   items,
   status: _status,
@@ -920,8 +924,16 @@ export function MessageTimeline({
     () => ({
       expandedByMessageId: userMessageDisclosureMemoryRef.current,
       beginChange: beginUserMessageDisclosureChange,
+      labels: {
+        showMore: userMessageDisclosureLabels?.showMore,
+        showLess: userMessageDisclosureLabels?.showLess,
+      },
     }),
-    [beginUserMessageDisclosureChange],
+    [
+      beginUserMessageDisclosureChange,
+      userMessageDisclosureLabels?.showMore,
+      userMessageDisclosureLabels?.showLess,
+    ],
   );
   const timelineGroupEntryContext = useMemo<TimelineGroupEntryContext>(
     () => ({
@@ -2394,41 +2406,49 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
           nextGroup.item.phase === "compacted"
         ? 1
         : 0;
+  const content = (
+    <TimelineGroupView
+      {...behavior}
+      group={group}
+      foldLiveCluster={isAgentProgress(nextGroup)}
+      startupDismissed={startupDismissed}
+      trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+      contextCompactionCount={contextCompactionCount > 0 ? contextCompactionCount : undefined}
+    />
+  );
   return (
     <GenieLoadingOptionsContext.Provider value={behavior.genieLoading}>
       <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
         <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
           <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
             <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
-              <AnimatePresence initial={false}>
-                <motion.div
-                  key={
-                    !startupDismissed &&
-                    group.kind === "activity" &&
-                    group.items.every(
-                      (item) =>
-                        item.kind === "startup-phase" ||
-                        (item.kind === "reasoning" && !item.text.trim()),
-                    )
-                      ? "preparation"
-                      : "content"
-                  }
-                  initial={false}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: reducedMotion ? 0 : 0.2 }}
-                >
-                  <TimelineGroupView
-                    {...behavior}
-                    group={group}
-                    foldLiveCluster={isAgentProgress(nextGroup)}
-                    startupDismissed={startupDismissed}
-                    trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
-                    contextCompactionCount={
-                      contextCompactionCount > 0 ? contextCompactionCount : undefined
+              {/* Item groups never switch the preparation/content key. Keep their
+                  DOM shell without mounting inert presence and motion lifecycles
+                  for every historical message in a prepend. */}
+              {group.kind === "item" ? (
+                <div>{content}</div>
+              ) : (
+                <AnimatePresence initial={false}>
+                  <motion.div
+                    key={
+                      !startupDismissed &&
+                      group.kind === "activity" &&
+                      group.items.every(
+                        (item) =>
+                          item.kind === "startup-phase" ||
+                          (item.kind === "reasoning" && !item.text.trim()),
+                      )
+                        ? "preparation"
+                        : "content"
                     }
-                  />
-                </motion.div>
-              </AnimatePresence>
+                    initial={false}
+                    exit={{ opacity: 0, height: 0 }}
+                    transition={{ duration: reducedMotion ? 0 : 0.2 }}
+                  >
+                    {content}
+                  </motion.div>
+                </AnimatePresence>
+              )}
             </UserMessageDisclosureProvider>
           </TimelineGroupRenderBoundary>
         </EntranceAnimationProvider>

@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
+import { migrate } from "../src/migrate";
 import {
   acquireLease,
   activateBrowserSession,
@@ -39,9 +41,30 @@ let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("computer-sessions");
+  const adminUrl = process.env.OPENGENI_COMPUTER_SESSIONS_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_COMPUTER_SESSIONS_TEST_POSTGRES_APP_URL;
+  if (Boolean(adminUrl) !== Boolean(appUrl)) {
+    throw new Error("ComputerSession test PostgreSQL admin/app URLs must be supplied together");
+  }
+  if (adminUrl && appUrl) {
+    await migrate(adminUrl);
+    const admin = postgres(adminUrl, { max: 4 });
+    shared = {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => {
+        await admin.end();
+      },
+    };
+  } else {
+    shared = await acquireSharedTestDatabase("computer-sessions");
+  }
   if (!shared) {
     available = false;
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("[computer-sessions] PostgreSQL is required but unavailable");
+    }
     console.warn("[computer-sessions] postgres unavailable, skipping");
     return;
   }
@@ -144,6 +167,41 @@ async function activeComputer(scope: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("durable ComputerSession lifecycle", () => {
+  test("concurrent operation inserts arbitrate every unique index before replay", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    for (let round = 0; round < 12; round++) {
+      const input = createInput(scope);
+      const attempts = await Promise.allSettled(
+        Array.from({ length: 8 }, () => prepareComputerSessionCreate(client.db, input)),
+      );
+      const failures = attempts.filter((attempt) => attempt.status === "rejected");
+      expect(failures).toEqual([]);
+      const results = attempts.map((attempt) => {
+        if (attempt.status !== "fulfilled") throw attempt.reason;
+        return attempt.value;
+      });
+      expect(new Set(results.map((result) => result.session.id)).size).toBe(1);
+      expect(results.filter((result) => !result.operation.replayed)).toHaveLength(1);
+    }
+    expect((await listComputerSessions(client.db, scope)).sessions).toHaveLength(12);
+  }, 180_000);
+
+  test("operation deduplication never adopts another workspace's resource", async () => {
+    if (!available) return;
+    const owner = await fixture();
+    const other = await fixture();
+    const operationId = crypto.randomUUID();
+    const created = await prepareComputerSessionCreate(client.db, createInput(owner, operationId));
+    await expect(
+      prepareComputerSessionCreate(client.db, createInput(other, operationId)),
+    ).rejects.toBeInstanceOf(ComputerSessionOperationConflictError);
+    expect((await listComputerSessions(client.db, other)).sessions).toEqual([]);
+    expect(
+      (await prepareComputerSessionCreate(client.db, createInput(owner, operationId))).session.id,
+    ).toBe(created.session.id);
+  });
+
   test("collapses concurrent create retries without inventing native placement facts", async () => {
     if (!available) return;
     const scope = await fixture();

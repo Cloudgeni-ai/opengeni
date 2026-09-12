@@ -36,6 +36,7 @@ mod error;
 mod native;
 mod pty;
 pub mod service;
+pub mod transactional_write;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -258,6 +259,25 @@ pub trait Platform: Send + Sync {
     /// Writes (or appends to) a file, optionally creating parent directories and
     /// applying a POSIX mode.
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse>;
+
+    /// Whether this platform implements the transactional upload contract.
+    fn transactional_fs_write_supported(&self) -> bool {
+        false
+    }
+
+    /// Begin private staging; called on a blocking worker, never the liveness loop.
+    ///
+    /// # Errors
+    /// Returns unsupported unless the platform opts in; implementations also
+    /// reject unsupported metadata, base conflicts, and filesystem I/O errors.
+    fn fs_write_begin(
+        &self,
+        _req: &v1::FsWriteBegin,
+    ) -> PlatformResult<Box<dyn transactional_write::TransactionalWrite>> {
+        Err(PlatformError::Unsupported(
+            "transactional filesystem write".into(),
+        ))
+    }
 
     /// Lists a directory, optionally recursively.
     async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse>;
