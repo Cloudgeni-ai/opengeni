@@ -15,7 +15,7 @@ import {
   setSubjectRlsContext,
   type Database,
 } from "./database";
-import { grantWorkspaceAccess, listWorkspaceMembers } from "./index";
+import { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { removeWorkspaceMember } from "./organization-membership-lifecycle";
 
 type ServiceScope = { organizationId: string; actorSubjectId: string };

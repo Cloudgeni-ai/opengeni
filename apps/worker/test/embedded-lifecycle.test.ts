@@ -431,6 +431,7 @@ describe("embedded worker lifecycle contract", () => {
       [],
       [
         ...[
+          "api_keys",
           "company_profile_activation_events",
           "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
