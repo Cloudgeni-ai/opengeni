@@ -162,7 +162,7 @@ describe("Company Brain first-party MCP policy", () => {
     expect(registeredToolNames(buildOpenGeniMcpServer(deps(), humanGrant))).toEqual([]);
   });
 
-  test("legacy instruction selection uses the native adapter and task-note promotion stays permission filtered", () => {
+  test("legacy instruction selection uses the safe native edit contract and stays permission filtered", async () => {
     const selected: FirstPartyMcpToolName[] = [
       "knowledge_propose",
       "knowledge_correct",
@@ -180,6 +180,23 @@ describe("Company Brain first-party MCP policy", () => {
       "instruction_policy_get",
       "instruction_policy_save",
     ]);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "instruction-policy-tools-test", version: "1" });
+    await readOnly.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "instruction_policy_save",
+      );
+      expect(tool?.description).toContain("Use editMode=append by default");
+      expect(tool?.description).toContain("Use replace only when the user explicitly asks");
+      expect(tool?.inputSchema.required).toContain("editMode");
+      expect(tool?.inputSchema.properties?.editMode).toMatchObject({
+        enum: ["append", "edit", "replace"],
+      });
+    } finally {
+      await Promise.all([client.close(), readOnly.close()]);
+    }
 
     const admitted = buildOpenGeniMcpServer(
       deps(),

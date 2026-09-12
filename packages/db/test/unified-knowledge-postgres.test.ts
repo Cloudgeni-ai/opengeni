@@ -1517,6 +1517,7 @@ describe("unified Knowledge storage", () => {
     const published = await saveAgentInstruction(client.db, first.agent, {
       operationId: crypto.randomUUID(),
       target: { kind: "policy", scope: "global", roleKey: null },
+      editMode: "append",
       content: "Include the contract currency when reporting a renewal amount.",
       expectedCurrentRevisionId: null,
       expectedActivationVersion: 0,
@@ -1544,7 +1545,9 @@ describe("unified Knowledge storage", () => {
     const pending = await saveAgentInstruction(client.db, second.agent, {
       operationId: crypto.randomUUID(),
       target: { kind: "policy", scope: "global", roleKey: null },
-      content: "Include currency and applicable tax when reporting renewal amounts.",
+      editMode: "edit",
+      oldText: "the contract currency",
+      newText: "the contract currency and applicable tax",
       expectedCurrentRevisionId: published.revisionId,
       expectedActivationVersion: 1,
       reason: "Clarify tax treatment",
@@ -1587,6 +1590,132 @@ describe("unified Knowledge storage", () => {
       )[0]?.revision_id,
     ).toBe(pending.revisionId);
     expect((await listAgentInstructionReviews(client.db, f.human)).entries).toEqual([]);
+    expect(
+      await getAgentInstruction(client.db, second.agent, {
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+      }),
+    ).toMatchObject({
+      content: "Include the contract currency and applicable tax when reporting a renewal amount.",
+    });
+  });
+
+  test("agent instruction edits preserve unrelated rules and reject unsafe anchors", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const { agent } = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const first = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Keep customer-facing updates concise.",
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "Set the first rule",
+    });
+    const appended = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Surface blockers early.",
+      expectedCurrentRevisionId: first.revisionId,
+      expectedActivationVersion: 1,
+      reason: "Add a separate rule",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: appended.revisionId,
+      expectedActivationVersion: 2,
+      content: "Keep customer-facing updates concise.\n\nSurface blockers early.",
+    });
+
+    const edited = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "edit",
+      oldText: "customer-facing updates",
+      newText: "external updates",
+      expectedCurrentRevisionId: appended.revisionId,
+      expectedActivationVersion: 2,
+      reason: "Narrow one existing phrase",
+    });
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: edited.revisionId,
+      expectedActivationVersion: 3,
+      content: "Keep external updates concise.\n\nSurface blockers early.",
+    });
+
+    const [beforeRefusals] = await shared!
+      .admin`SELECT count(*)::integer AS count FROM workspace_instruction_policy_revisions WHERE workspace_id=${f.workspaceId}`;
+    for (const oldText of ["missing anchor", "."]) {
+      await fails(
+        saveAgentInstruction(client.db, agent, {
+          operationId: crypto.randomUUID(),
+          target,
+          editMode: "edit",
+          oldText,
+          newText: "",
+          expectedCurrentRevisionId: edited.revisionId,
+          expectedActivationVersion: 3,
+          reason: "Unsafe exact edit must fail",
+        }),
+        "22023",
+      );
+    }
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "append",
+        content: "A stale append must not land.",
+        expectedCurrentRevisionId: appended.revisionId,
+        expectedActivationVersion: 2,
+        reason: "Stale baseline",
+      }),
+      "40001",
+    );
+    const [afterRefusals] = await shared!
+      .admin`SELECT count(*)::integer AS count FROM workspace_instruction_policy_revisions WHERE workspace_id=${f.workspaceId}`;
+    expect(afterRefusals?.count).toBe(beforeRefusals?.count);
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: edited.revisionId,
+      expectedActivationVersion: 3,
+      content: "Keep external updates concise.\n\nSurface blockers early.",
+    });
+
+    const replacementText = "R".repeat(590);
+    const replaced = await saveAgentInstruction(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "replace",
+      content: replacementText,
+      expectedCurrentRevisionId: edited.revisionId,
+      expectedActivationVersion: 3,
+      reason: "Explicitly replace the complete policy",
+    });
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "append",
+        content: "This would exceed the standing instruction budget.",
+        expectedCurrentRevisionId: replaced.revisionId,
+        expectedActivationVersion: 4,
+        reason: "Do not truncate",
+      }),
+      "22023",
+    );
+    expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
+      expectedCurrentRevisionId: replaced.revisionId,
+      expectedActivationVersion: 4,
+      content: replacementText,
+    });
   });
 
   test("an ordinary PDF attachment is parsed into one searchable source under its task policy", async () => {

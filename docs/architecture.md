@@ -189,7 +189,10 @@ accepted-turn policy snapshots. Review first queues inactive changes without
 pausing the agent. Explicit pending-proposal retrieval lets agents reuse and
 correct unapproved entries; default retrieval stays published-only. Pending
 content grants no publication or instruction authority. Instructions and Skills
-retain their native authorities.
+retain their native authorities. Agent instruction changes are non-destructive
+by default: new rules append to the exact active baseline, updates/removals use a
+unique exact-text anchor, and complete replacement must be explicit. Every path
+retains active-head compare-and-set and the standing instruction budget.
 The old Memory and reviewed-Knowledge authoring lanes are retired; historical
 records remain audit/compatibility evidence. See [`knowledge.md`](knowledge.md).
 

@@ -58,6 +58,9 @@ const withheldMigrationNames = [
   // those actual prerequisites exist; do not weaken its production checks.
   "0459_mcp_operations.sql",
   "0461_unified_knowledge.sql",
+  // Patches the instruction writer introduced by 0461 and therefore belongs
+  // behind the same historical replay boundary.
+  "0462_agent_instruction_non_destructive_edits.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

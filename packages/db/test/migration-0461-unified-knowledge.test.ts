@@ -50,6 +50,7 @@ import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 
 const migration = "0461_unified_knowledge.sql";
+const forwardMigrations = ["0462_agent_instruction_non_destructive_edits.sql"];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
 let app: ReturnType<typeof createDb>;
@@ -377,7 +378,7 @@ beforeAll(async () => {
   const owner = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
     await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-    await owner`INSERT INTO schema_migrations(name) VALUES(${migration})`;
+    await owner`INSERT INTO schema_migrations(name) SELECT unnest(${[migration, ...forwardMigrations]}::text[])`;
     await migrate(owned.ownerUrl);
     await owned.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Acme migration')`;
     await owned.admin`INSERT INTO workspaces(id,account_id,name,settings)
@@ -592,7 +593,7 @@ beforeAll(async () => {
     } finally {
       await legacy.close();
     }
-    await owner`DELETE FROM schema_migrations WHERE name=${migration}`;
+    await owner`DELETE FROM schema_migrations WHERE name=ANY(${[migration, ...forwardMigrations]}::text[])`;
   } finally {
     await owner.end({ timeout: 5 });
   }

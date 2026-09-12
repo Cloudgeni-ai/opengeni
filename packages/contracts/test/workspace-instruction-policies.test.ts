@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AgentInstructionSaveRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
   CreateWorkspaceInstructionPolicyOnboardingProposalRequest,
   WorkspaceInstructionPolicyActivationEvent,
@@ -11,6 +12,57 @@ import {
 } from "../src";
 
 describe("workspace instruction-policy contracts", () => {
+  test("requires agent changes to choose append, exact edit, or explicit replacement", () => {
+    const base = {
+      operationId: "00000000-0000-4000-8000-000000000020",
+      target: { kind: "policy" as const, scope: "global" as const, roleKey: null },
+      expectedCurrentRevisionId: "00000000-0000-4000-8000-000000000021",
+      expectedActivationVersion: 4,
+      reason: "Keep existing rules",
+    };
+    expect(
+      AgentInstructionSaveRequest.parse({
+        ...base,
+        editMode: "append",
+        content: "Surface blockers early.",
+      }),
+    ).toMatchObject({ editMode: "append", content: "Surface blockers early." });
+    expect(
+      AgentInstructionSaveRequest.parse({
+        ...base,
+        editMode: "edit",
+        oldText: "Surface blockers late.",
+        newText: "Surface blockers early.",
+      }),
+    ).toMatchObject({ editMode: "edit", newText: "Surface blockers early." });
+    expect(
+      AgentInstructionSaveRequest.parse({
+        ...base,
+        editMode: "replace",
+        content: "Use only this complete instruction set.",
+      }).editMode,
+    ).toBe("replace");
+    expect(
+      AgentInstructionSaveRequest.safeParse({ ...base, content: "Unsafe implicit replacement." })
+        .success,
+    ).toBe(false);
+    expect(
+      AgentInstructionSaveRequest.safeParse({
+        ...base,
+        editMode: "edit",
+        oldText: "Surface blockers late.",
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentInstructionSaveRequest.safeParse({
+        ...base,
+        editMode: "append",
+        content: "Surface blockers early.",
+        oldText: "Surface blockers late.",
+      }).success,
+    ).toBe(false);
+  });
+
   test("normalizes role keys and rejects invalid kind/scope combinations", () => {
     expect(normalizeWorkspaceInstructionPolicyRoleKey("  Incident   RESPONDER  ")).toBe(
       "incident-responder",
