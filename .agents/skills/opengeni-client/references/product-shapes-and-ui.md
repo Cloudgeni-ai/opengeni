@@ -36,6 +36,26 @@ Choose based on UX requirements and dependency compatibility, then record why. S
 
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
 
+## Optional artifact library
+
+Use `client.listArtifactCatalog(workspaceId, options)` for a workspace output
+library; supply `sourceSessionId` for a session panel. It returns bounded native
+artifact summaries and `nextCursor`, with `q`, `kind`, `status`, and `sort` filters.
+Use `kind:id` as a UI key, preserve existing type-specific open/edit APIs, and
+never reconstruct a library by scanning chat history or a sandbox filesystem.
+The catalog is discovery, not new content access authority: preserve the current
+viewer's file/artifact permissions and authorize the host's workspace mapping.
+
+Render retained images with the existing artifact loader and lightbox rather
+than compute file links. `@opengeni/react/artifacts` exports
+`isRetainedImageContentType` and `useRetainedImageObjectUrl`; the host supplies
+authenticated loading and presentation. Keep image bytes and signed download
+URLs out of durable Markdown. Standard image references use `artifact:<id>`.
+Use static tiles with a useful fallback for types without a preview; do not
+execute every Site or invoke tools just to display a library grid. Inline HTML
+and saved Sites keep the existing explicit Markdown host callbacks and isolated
+frame; ordinary HTML file downloads do not become executable previews.
+
 ## Browser/backend split
 
 The product browser normally sends product-shaped requests to its own same-origin backend. The backend authenticates, resolves the allowed mapping, and calls OpenGeni. Never bundle an organization key into frontend code.

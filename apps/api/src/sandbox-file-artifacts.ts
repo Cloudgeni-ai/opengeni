@@ -22,6 +22,7 @@ import {
   prepareGeneratedWorkspaceFile,
   getSessionAuthorityProjection,
   requireWorkspace,
+  recordSandboxFilePublication,
   withSessionRlsActorContext,
 } from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
@@ -225,6 +226,12 @@ async function publishSandboxFileArtifactInScope(
   if (!artifact) {
     throw new HTTPException(502, { message: "published sandbox artifact is not ready" });
   }
+  await recordSandboxFilePublication(deps.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    fileId: file.id,
+    sourceSessionId: input.session.id,
+  });
   return SandboxFileArtifactReceipt.parse({
     type: "sandbox_file",
     sandboxPath: `/workspace/${path}`,
@@ -300,7 +307,7 @@ export function sandboxFileContentType(filename: string): string {
   );
 }
 
-function sandboxArtifactIdentity(input: {
+export function sandboxArtifactIdentity(input: {
   workspaceId: string;
   sessionId: string;
   path: string;
@@ -330,7 +337,7 @@ function uuidFromDigest(digest: string, startByte: number): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function assertSandboxArtifactFile(
+export function assertSandboxArtifactFile(
   file: NonNullable<Awaited<ReturnType<typeof getFile>>>,
   expected: {
     filename: string;

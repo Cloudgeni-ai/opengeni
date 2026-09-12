@@ -2089,6 +2089,12 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    IF to_regclass('opengeni_private.sandbox_file_publications') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
+    END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'guard_mcp_operation_immutable()',
       'mcp_operation_command_scoped(jsonb,text,jsonb)',

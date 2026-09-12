@@ -12,6 +12,7 @@ function handler(name: string) {
     "navigate",
     "workspaceId",
     "detail",
+    "filters = { kind: 'all' }",
     `${source.slice(start, end + 5)}; return ${name}();`,
   );
 }
@@ -30,7 +31,7 @@ describe("Site session shortcuts", () => {
           {
             text:
               name === "startSession"
-                ? "Help me build a workspace Site."
+                ? "Help me create a workspace artifact. Ask what I want to make before creating it."
                 : "Help me edit the Site “Status board”: /workspaces/workspace-1/artifacts/artifact-1",
           },
         ],
@@ -58,6 +59,18 @@ describe("Site session shortcuts", () => {
     const startSession = mock(async () => null);
     await handler("startEditSession")({ startSession }, mock(), "workspace-1", null);
     expect(startSession).not.toHaveBeenCalled();
+  });
+  test("creation follows the selected artifact type without inventing its contents", async () => {
+    const startSession = mock(async (..._args: unknown[]) => null);
+    await handler("startSession")({ startSession }, mock(), "workspace-1", null, { kind: "image" });
+    expect(startSession.mock.calls).toEqual([
+      [
+        "workspace-1",
+        {
+          text: "Help me create a workspace image. Ask what it should contain before creating it.",
+        },
+      ],
+    ]);
   });
 
   test("archived Sites cannot start edit sessions", async () => {

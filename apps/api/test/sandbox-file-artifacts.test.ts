@@ -41,5 +41,9 @@ describe("sandbox file artifact paths", () => {
     expect(sandboxFileContentType("report.PDF")).toBe("application/pdf");
     expect(sandboxFileContentType("archive.zip")).toBe("application/zip");
     expect(sandboxFileContentType("unknown.custom")).toBe("application/octet-stream");
+    // Writer MIME must remain replay-compatible with the rolling base binary.
+    expect(sandboxFileContentType("diagram.SVG")).toBe("application/octet-stream");
+    expect(sandboxFileContentType("animation.gif")).toBe("application/octet-stream");
+    expect(sandboxFileContentType("screenshot.avif")).toBe("application/octet-stream");
   });
 });

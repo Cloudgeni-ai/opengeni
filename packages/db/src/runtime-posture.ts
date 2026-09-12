@@ -48,6 +48,11 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
 const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
   "enforce_automatic_session_title_policy_v1()";
 const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fanout_outbox_v1";
+export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
+  "record_sandbox_file_publication(uuid, uuid, uuid, uuid)",
+  "list_sandbox_file_publications(uuid, uuid, jsonb)",
+] as const;
+const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
@@ -1630,6 +1635,7 @@ export type RuntimeRoutinePosture = {
   execute: boolean;
   publicExecute?: boolean;
   securityDefiner: boolean;
+  configuration?: string[] | null;
 };
 
 export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
@@ -1952,6 +1958,7 @@ export async function inspectRuntimeDatabasePosture(
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
+              ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
@@ -2018,6 +2025,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        configuration: string[] | null;
       }>(
         await tx.execute(sql`
           select
@@ -2029,7 +2037,8 @@ export async function inspectRuntimeDatabasePosture(
               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
-            p.prosecdef as security_definer
+            p.prosecdef as security_definer,
+            p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = 'opengeni_private'
@@ -2042,6 +2051,7 @@ export async function inspectRuntimeDatabasePosture(
         execute: row.can_execute,
         publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
+        configuration: row.configuration,
       }));
 
       return {
@@ -3506,6 +3516,49 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(
         `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
       );
+    }
+  }
+
+  const publicationTables = posture.privateTables.filter(
+    (table) => table.name === SANDBOX_FILE_PUBLICATIONS_TABLE,
+  );
+  if (publicationTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("sandbox file publication private relation is missing or ambiguous");
+  } else {
+    const table = publicationTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 2) {
+      violations.push("sandbox file publication relation lacks active FORCE-RLS file isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct sandbox file publication authority");
+    }
+    const filesOwner = tableByName.get("files")?.owner;
+    if (filesOwner && table.owner !== filesOwner)
+      violations.push("sandbox file publication owner does not match file authority");
+    for (const name of SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+      ]);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
+      }
     }
   }
 

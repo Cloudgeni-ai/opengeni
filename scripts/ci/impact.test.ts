@@ -43,6 +43,7 @@ const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
+const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -98,6 +99,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.e2eTests).toEqual([
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/appearance.browser.e2e.ts",
+      ARTIFACT_LIBRARY_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
@@ -270,6 +272,30 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("artifact library sources and harness select the ordinary browser E2E lane", () => {
+    for (const path of [
+      "apps/web/src/components/artifacts/artifact-library.tsx",
+      "apps/web/test/artifact-library-browser.ts",
+      "apps/web/test/artifact-library.vite.config.ts",
+      "packages/contracts/src/artifact-catalog.ts",
+      "packages/sdk/src/artifact-catalog.ts",
+      "packages/react/src/artifacts.ts",
+      "packages/react/src/timeline/retained-image.ts",
+      ARTIFACT_LIBRARY_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.e2eTests).toContain(ARTIFACT_LIBRARY_E2E);
+      expect(plan.unitTests).not.toContain(ARTIFACT_LIBRARY_E2E);
+      expect(plan.integrationTests).not.toContain(ARTIFACT_LIBRARY_E2E);
+    }
+    expect(usesBrowserRunner(ARTIFACT_LIBRARY_E2E)).toBe(true);
+    expect(OPT_IN_TESTS[ARTIFACT_LIBRARY_E2E]).toBeUndefined();
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      expect(createImpactPlan([path]).e2eTests).not.toContain(ARTIFACT_LIBRARY_E2E);
+    }
+  });
+
   test("timeline pagination changes select protected interaction browser coverage", () => {
     for (const path of [
       "packages/react/src/components/message-timeline.tsx",
@@ -372,6 +398,7 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).toEqual([
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/appearance.browser.e2e.ts",
+      ARTIFACT_LIBRARY_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
