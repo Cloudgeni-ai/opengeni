@@ -95,4 +95,51 @@ describe("console composer in a split desktop pane", () => {
     expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
     await page.keyboard.press("Escape");
   });
+
+  test("new-session panels use the viewport and preserve navigation and focus", async () => {
+    await page.goto(`${page.url().split("?")[0]}?new-session`, { waitUntil: "networkidle" });
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 390, height: 700 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.locator("main").evaluate((node) => {
+        node.style.width = "min(448px, calc(100vw - 32px))";
+      });
+      for (const name of ["Repositories", "Tools", "Variable sets"]) {
+        const plus = page.getByRole("button", { name: "More composer actions" });
+        await plus.click();
+        await page.getByRole("menuitem", { name: new RegExp(name) }).click();
+        const dialog = page.getByRole("dialog", { name, exact: true });
+        await dialog.waitFor({ state: "visible" });
+        const box = (await dialog.boundingBox())!;
+        expect(box.height).toBeGreaterThan(300);
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+        expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+        if (name !== "Tools") {
+          const scroll = dialog.getByTestId("picker-scroll");
+          expect(await scroll.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+          await dialog.getByRole("button", { name: /option 30/ }).scrollIntoViewIfNeeded();
+        }
+        await dialog.getByRole("button", { name: "Back", exact: true }).click();
+        await page.getByRole("menuitem", { name: new RegExp(name) }).click();
+        await dialog.waitFor({ state: "visible" });
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        await page.waitForFunction(
+          () => document.activeElement?.getAttribute("aria-label") === "More composer actions",
+          undefined,
+          { timeout: 2_000 },
+        );
+        expect(await plus.evaluate((node) => document.activeElement === node)).toBe(true);
+      }
+      await page.getByRole("button", { name: "More composer actions" }).click();
+      await page.getByRole("menuitem", { name: /Repositories/ }).click();
+      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.screenshot({ path: `${root}/new-session-picker-${viewport.width}.png` });
+      await page.keyboard.press("Escape");
+    }
+  }, 60_000);
 });

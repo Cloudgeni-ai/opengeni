@@ -5,6 +5,13 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
+  test("only the centered new-session composer uses viewport-sized picker dialogs", async () => {
+    const newSession = await source("routes/sessions-index.tsx");
+    const existingSession = await source("routes/session.tsx");
+    expect(newSession).toContain('expandedPanelPresentation="dialog"');
+    expect(existingSession).not.toContain('expandedPanelPresentation="dialog"');
+  });
+
   test("renders SessionChrome above the composer", async () => {
     const route = await source("routes/session.tsx");
     expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);

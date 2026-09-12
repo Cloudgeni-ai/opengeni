@@ -10,10 +10,12 @@ import {
   ModelPicker,
   ModelPickerMenu,
   SessionToolPicker,
+  SessionToolsMenuBody,
   visibleSessionToolSelection,
   type PickerModelRow,
   type SessionToolSelection,
 } from "@/components/pickers";
+import { DropdownMenu } from "@/components/ui/dropdown-menu";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -46,6 +48,51 @@ const FIRST_PARTY = [
 ];
 
 describe("unified session tool picker", () => {
+  test("dialog tools toggle without a dropdown content or roving-focus context", async () => {
+    let latest: SessionToolSelection = {
+      mcpServerIds: new Set<string>(),
+      firstPartyToolIds: new Set<FirstPartyMcpToolName>(),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      const [selection, setSelection] = useState(latest);
+      return (
+        <DropdownMenu>
+          <SessionToolsMenuBody
+            presentation="dialog"
+            servers={[{ id: "linear", name: "Linear" }]}
+            firstPartyTools={FIRST_PARTY}
+            selection={selection}
+            onChange={(next) => {
+              latest = next;
+              setSelection(next);
+            }}
+          />
+        </DropdownMenu>
+      );
+    }
+    try {
+      await act(async () => root.render(<Harness />));
+      const linear = container.querySelector<HTMLButtonElement>('button[title="linear"]')!;
+      expect(linear.getAttribute("aria-pressed")).toBe("false");
+      await act(async () => linear.click());
+      expect(latest.mcpServerIds.has("linear")).toBe(true);
+      expect(linear.getAttribute("aria-pressed")).toBe("true");
+      await act(async () => linear.click());
+      expect(latest.mcpServerIds.has("linear")).toBe(false);
+      const capability = container.querySelector<HTMLButtonElement>(
+        "button[aria-pressed]:not([title])",
+      )!;
+      await act(async () => capability.click());
+      expect(latest.firstPartyToolIds.size).toBeGreaterThan(0);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("shows one durable selection for connected and OpenGeni tools", async () => {
     let latest: SessionToolSelection = {
       mcpServerIds: new Set(["linear"]),

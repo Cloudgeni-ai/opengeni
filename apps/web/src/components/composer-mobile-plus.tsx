@@ -16,6 +16,7 @@ import {
   useRef,
   type ReactElement,
   type ReactNode,
+  type CSSProperties,
 } from "react";
 
 import {
@@ -25,6 +26,7 @@ import {
   type SessionToolSelection,
 } from "@/components/pickers";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,6 +42,8 @@ type Panel = "root" | "tools" | "repos" | "voice" | "variables";
  * Shared composer actions at every width; model and voice stay in the bar.
  */
 export function ComposerMobilePlus(props: {
+  /** Centered composers need viewport-sized panels rather than trigger-side space. */
+  expandedPanelPresentation?: "menu" | "dialog";
   disabled?: boolean;
   fileUploadsEnabled: boolean;
   servers: McpServerOption[];
@@ -74,6 +78,7 @@ export function ComposerMobilePlus(props: {
   const toolsAvailable = toolSummary.total > 0;
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
+  const dialogOpen = open && panel !== "root" && props.expandedPanelPresentation === "dialog";
 
   const backButton = (
     <button
@@ -90,152 +95,221 @@ export function ComposerMobilePlus(props: {
   );
 
   return (
-    <DropdownMenu
-      open={open}
+    <Dialog
+      open={dialogOpen}
       onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) setPanel("root");
+        if (!next) {
+          setOpen(false);
+          setPanel("root");
+        }
       }}
     >
-      <DropdownMenuTrigger asChild>
-        <Button
-          ref={triggerRef}
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          disabled={props.disabled}
-          aria-label="More composer actions"
-          className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
-        >
-          <PlusIcon className="size-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        side="top"
-        sideOffset={8}
-        collisionPadding={12}
-        className={
-          panel === "tools"
-            ? SESSION_TOOLS_PANEL_CLASS
-            : panel === "variables"
-              ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
-              : panel === "voice"
-                ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
-                : panel === "repos"
-                  ? REPOSITORY_PANEL_CLASS
-                  : "min-w-52 rounded-xl"
-        }
+      <DropdownMenu
+        open={open && !dialogOpen}
+        onOpenChange={(next) => {
+          if (dialogOpen) return;
+          setOpen(next);
+          if (!next) setPanel("root");
+        }}
       >
-        {panel === "root" ? (
-          <>
-            {props.fileUploadsEnabled ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setOpen(false);
-                  const root = triggerRef.current?.closest<HTMLElement>("[data-og-composer-id]");
-                  root?.querySelector<HTMLInputElement>("[data-og-composer-attach]")?.click();
-                }}
-              >
-                <PaperclipIcon className="size-4" />
-                Add photos & files
-              </DropdownMenuItem>
-            ) : null}
-            {toolsAvailable ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled || props.toolsDisabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("tools");
-                }}
-              >
-                <PlugIcon className="size-4" />
-                Tools
-                <span className="ml-auto text-2xs text-fg-subtle">
-                  {props.toolsSaving ? "Saving…" : toolSummary.label}
-                </span>
-              </DropdownMenuItem>
-            ) : null}
-            {repositories ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled || repositories.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("repos");
-                }}
-              >
-                <GitBranchIcon className="size-4" />
-                Repositories
-                <span className="ml-auto text-2xs text-fg-subtle">
-                  {repositories.selectedCount > 0
-                    ? repoCountLabel(repositories.selectedCount)
-                    : "Optional"}
-                </span>
-              </DropdownMenuItem>
-            ) : null}
-            {props.variableSets ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("variables");
-                }}
-              >
-                <BoxIcon className="size-4" />
-                Variable sets
-                {props.variableSets.selectedCount > 0 ? (
+        <DropdownMenuTrigger asChild>
+          <Button
+            ref={triggerRef}
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            disabled={props.disabled}
+            aria-label="More composer actions"
+            className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
+          >
+            <PlusIcon className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <ComposerPanelContent
+          dialog={dialogOpen}
+          panel={panel}
+          triggerRef={triggerRef}
+          className={
+            panel === "tools"
+              ? SESSION_TOOLS_PANEL_CLASS
+              : panel === "variables"
+                ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
+                : panel === "voice"
+                  ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
+                  : panel === "repos"
+                    ? REPOSITORY_PANEL_CLASS
+                    : "min-w-52 rounded-xl"
+          }
+        >
+          {panel === "root" ? (
+            <>
+              {props.fileUploadsEnabled ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setOpen(false);
+                    const root = triggerRef.current?.closest<HTMLElement>("[data-og-composer-id]");
+                    root?.querySelector<HTMLInputElement>("[data-og-composer-attach]")?.click();
+                  }}
+                >
+                  <PaperclipIcon className="size-4" />
+                  Add photos & files
+                </DropdownMenuItem>
+              ) : null}
+              {toolsAvailable ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled || props.toolsDisabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("tools");
+                  }}
+                >
+                  <PlugIcon className="size-4" />
+                  Tools
                   <span className="ml-auto text-2xs text-fg-subtle">
-                    {props.variableSets.selectedCount}
+                    {props.toolsSaving ? "Saving…" : toolSummary.label}
                   </span>
-                ) : null}
-              </DropdownMenuItem>
-            ) : null}
-            {voiceModel ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled || voiceModel.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("voice");
-                }}
-              >
-                <AudioLinesIcon className="size-4" />
-                Voice model
-                <span className="ml-auto max-w-[7rem] truncate text-2xs text-fg-subtle">
-                  {voiceModel.selectedLabel}
-                </span>
-              </DropdownMenuItem>
-            ) : null}
-          </>
-        ) : panel === "tools" ? (
-          <SessionToolsMenuBody
-            servers={props.servers}
-            firstPartyTools={props.firstPartyTools}
-            selection={props.selection}
-            onChange={props.onToolSelectionChange}
-            leading={backButton}
-          />
-        ) : panel === "repos" && repositories ? (
-          withLeading(repositories.panel, backButton)
-        ) : panel === "variables" && props.variableSets ? (
-          cloneElement(props.variableSets.panel, {
-            leading: backButton,
-            onClose: () => {
-              setOpen(false);
-              setPanel("root");
-            },
-          })
-        ) : panel === "voice" && voiceModel ? (
-          withLeading(voiceModel.panel, backButton)
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+                </DropdownMenuItem>
+              ) : null}
+              {repositories ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled || repositories.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("repos");
+                  }}
+                >
+                  <GitBranchIcon className="size-4" />
+                  Repositories
+                  <span className="ml-auto text-2xs text-fg-subtle">
+                    {repositories.selectedCount > 0
+                      ? repoCountLabel(repositories.selectedCount)
+                      : "Optional"}
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
+              {props.variableSets ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("variables");
+                  }}
+                >
+                  <BoxIcon className="size-4" />
+                  Variable sets
+                  {props.variableSets.selectedCount > 0 ? (
+                    <span className="ml-auto text-2xs text-fg-subtle">
+                      {props.variableSets.selectedCount}
+                    </span>
+                  ) : null}
+                </DropdownMenuItem>
+              ) : null}
+              {voiceModel ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled || voiceModel.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("voice");
+                  }}
+                >
+                  <AudioLinesIcon className="size-4" />
+                  Voice model
+                  <span className="ml-auto max-w-[7rem] truncate text-2xs text-fg-subtle">
+                    {voiceModel.selectedLabel}
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
+            </>
+          ) : panel === "tools" ? (
+            <SessionToolsMenuBody
+              presentation={dialogOpen ? "dialog" : "menu"}
+              servers={props.servers}
+              firstPartyTools={props.firstPartyTools}
+              selection={props.selection}
+              onChange={props.onToolSelectionChange}
+              leading={backButton}
+            />
+          ) : panel === "repos" && repositories ? (
+            withLeading(repositories.panel, backButton)
+          ) : panel === "variables" && props.variableSets ? (
+            cloneElement(props.variableSets.panel, {
+              leading: backButton,
+              onClose: () => {
+                setOpen(false);
+                setPanel("root");
+              },
+            })
+          ) : panel === "voice" && voiceModel ? (
+            withLeading(voiceModel.panel, backButton)
+          ) : null}
+        </ComposerPanelContent>
+      </DropdownMenu>
+    </Dialog>
+  );
+}
+
+function ComposerPanelContent(props: {
+  dialog: boolean;
+  panel: Panel;
+  triggerRef: { current: HTMLButtonElement | null };
+  className: string;
+  children: ReactNode;
+}) {
+  if (props.dialog) {
+    return (
+      <DialogContent
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className={`${props.className} gap-0 max-sm:mx-auto max-sm:bottom-3 sm:max-w-none ${
+          props.panel === "repos"
+            ? "sm:w-[min(560px,calc(100vw-2rem))] sm:p-0 sm:pb-0"
+            : props.panel === "variables"
+              ? "sm:w-[min(24rem,calc(100vw-1.5rem))] sm:p-2 sm:pb-2"
+              : "sm:w-[min(20rem,calc(100vw-1.5rem))] sm:p-2 sm:pb-2"
+        }`}
+        style={
+          {
+            // Reuse the picker bodies' scroll limits without an anchor-side constraint.
+            "--radix-dropdown-menu-content-available-height": "calc(85dvh - 24px)",
+            maxHeight: "min(70dvh, calc(100dvh - 24px))",
+          } as CSSProperties
+        }
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          props.triggerRef.current?.focus();
+        }}
+      >
+        <DialogTitle className="sr-only">
+          {props.panel === "repos"
+            ? "Repositories"
+            : props.panel === "tools"
+              ? "Tools"
+              : props.panel === "variables"
+                ? "Variable sets"
+                : "Voice model"}
+        </DialogTitle>
+        {props.children}
+      </DialogContent>
+    );
+  }
+
+  return (
+    <DropdownMenuContent
+      align="start"
+      side="top"
+      sideOffset={8}
+      collisionPadding={12}
+      className={props.className}
+    >
+      {props.children}
+    </DropdownMenuContent>
   );
 }
 

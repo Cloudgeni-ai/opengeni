@@ -1301,6 +1301,7 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
+                expandedPanelPresentation="dialog"
                 disabled={busy || newSessionDraft.loading}
                 fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                 servers={context.toolMcpServers}
