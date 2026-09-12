@@ -32,6 +32,32 @@ Hosts can customize the SDK without editing its source:
 Orb states use the `thinking-orbs` component's typed options. Omitted settings
 keep the defaults; an empty phrase list also falls back to the defaults.
 
+To brand or localize the native visual, supply `genieLoading.phrases` and
+`genieLoading.messages`. Every message is optional and defaults to the existing
+English copy:
+
+```tsx
+<MessageTimeline
+  events={events}
+  genieLoading={{
+    phrases: ["Preparing…"],
+    messages: {
+      status: "Preparing your task.",
+      slowStatus: "Preparing your task. Taking longer than usual.",
+      slowText: "A little longer than usual…",
+      showDetails: "Show details",
+      hideDetails: "Hide details",
+    },
+  }}
+/>
+```
+
+`status` and `slowStatus` are the stable screen-reader announcements; phrase
+rotation stays decorative. The slow text appears after 30 seconds, while the
+details button appears after 15 seconds (or whenever details are open). Message
+overrides preserve native timing, accessibility, and details behavior. Empty
+phrase arrays retain the default phrase list.
+
 For an entirely different visual, supply `genieLoading.render`:
 
 ```tsx
@@ -44,3 +70,17 @@ For an entirely different visual, supply `genieLoading.render`:
 The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optionally
 keep the diagnostics affordance. The SDK still owns loading visibility and exit
 transitions. Returning `null` hides the visual.
+
+## Rolling live Steps experiment
+
+`turnSummary={{ rolling: true }}` starts live activity groups collapsed and shows
+the newest activity in a fixed-height rolling header. Opening it restores
+the existing Steps view and preserves the reader's expansion choice. Completed
+turns keep the normal summary. Tool labels reuse `ActivityDisclosure` through its
+compact presentation context; reasoning keeps a stable Thinking label with a live text preview. A single activity
+stays ungrouped until a second arrives. The header shows earlier-step and running
+counts. Step changes roll together over 400ms; a focused light beam sweeps across
+running text every 3.6 seconds. Reduced motion disables both animations.
+
+The web app enables the experiment. `/rolling-steps.html` in the React demo loops
+through sample commands and supports light/dark comparison without model calls.

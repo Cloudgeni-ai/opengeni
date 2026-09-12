@@ -106,6 +106,9 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_external_identity_link_reference(uuid, uuid, text)",
   "get_external_identity_link_inventory_references(uuid, uuid[])",
   "ensure_external_identity(uuid, text, text)",
+  "lookup_external_identity(uuid, text, text, text)",
+  "prepare_external_workspace_membership_operation(jsonb)",
+  "record_external_workspace_membership_operation(jsonb, jsonb)",
   "list_self_organization_memberships(text)",
   "list_self_organization_invitations(text)",
   "list_self_organization_invitations(text, uuid, integer)",
@@ -424,10 +427,6 @@ const COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE =
 const GOVERNED_LEARNING_EVALUATION_ROUTINE =
   "evaluate_governed_learning_proposal(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, uuid)";
 const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
-  "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
-  "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
-  "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
-  "materialize_remember_knowledge_memory(uuid, uuid, uuid)",
   "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
 ] as const;
 const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
@@ -573,13 +572,48 @@ const XAI_AUTHORITY_TABLES = [
   "xai_subscription_credentials",
 ] as const;
 
+const UNIFIED_KNOWLEDGE_ROUTINES = [
+  "knowledge_index_claim(text, integer, integer)",
+  "knowledge_index_work(uuid, uuid, uuid, jsonb)",
+  "knowledge_entry_apply(uuid, uuid, jsonb, jsonb)",
+  "knowledge_entry_confirm_legacy(uuid, uuid, jsonb, jsonb)",
+  "agent_instruction_apply(uuid, uuid, jsonb, jsonb)",
+  "knowledge_entry_read(uuid, uuid, jsonb, jsonb)",
+  "knowledge_entry_prepare_file(uuid, uuid, jsonb, jsonb)",
+  "knowledge_document_prepare(uuid, uuid, uuid, jsonb)",
+  "agent_learning_manage(uuid, uuid, jsonb, jsonb)",
+] as const;
+const UNIFIED_KNOWLEDGE_ROUTINE_SET = new Set<string>(UNIFIED_KNOWLEDGE_ROUTINES);
+const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
+  "knowledge_entries",
+  "knowledge_entry_revisions",
+  "knowledge_entry_decisions",
+  "knowledge_entry_links",
+  "knowledge_entry_operations",
+  "knowledge_entry_search",
+  "knowledge_index_jobs",
+  "knowledge_entry_vectors",
+  "knowledge_review_batches",
+  "agent_learning_revisions",
+  "agent_learning_snapshots",
+  "agent_instruction_operations",
+  "workspace_instruction_policy_revisions",
+  "workspace_instruction_policy_heads",
+  "workspace_instruction_policy_activation_events",
+  "workspaces",
+  "sessions",
+  "session_turns",
+  "session_turn_attempts",
+  "files",
+  "documents",
+] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...UNIFIED_KNOWLEDGE_ROUTINES,
   MCP_OPERATION_CAPABILITY_ROUTINE,
   "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   ...COMPANY_PROFILE_AGENT_ADMIN_ROUTINES,
-  GOVERNED_LEARNING_EVALUATION_ROUTINE,
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
@@ -663,6 +697,9 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_instruction_operations",
+  "agent_learning_revisions",
+  "agent_learning_snapshots",
   "agent_run_states",
   "api_keys",
   "attached_browser_devices",
@@ -777,6 +814,8 @@ export const FORCE_RLS_TABLES = [
   "host_export_outbox",
   "host_mcp_bindings",
   "host_mcp_delegations",
+  "host_mcp_resolver_operations",
+  "host_mcp_resolvers",
   "host_mcp_task_authorities",
   "host_mcp_turn_authorities",
   "image_generation_operations",
@@ -798,13 +837,22 @@ export const FORCE_RLS_TABLES = [
   "knowledge_document_versions",
   "knowledge_entities",
   "knowledge_entity_aliases",
+  "knowledge_entries",
+  "knowledge_entry_decisions",
+  "knowledge_entry_links",
+  "knowledge_entry_operations",
+  "knowledge_entry_revisions",
+  "knowledge_entry_search",
+  "knowledge_entry_vectors",
   "knowledge_facts",
+  "knowledge_index_jobs",
   "knowledge_lifecycle_events",
   "knowledge_memories",
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "knowledge_operation_receipts",
   "knowledge_providers",
+  "knowledge_review_batches",
   "knowledge_source_acl_versions",
   "knowledge_source_objects",
   "knowledge_source_sync_index_obligations",
@@ -1125,7 +1173,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "integration_facet_bindings",
   "integration_oauth_clients",
   "integration_oauth_state_nonces",
-  "knowledge_memories",
   "knowledge_source_sync_index_obligations",
   "knowledge_source_sync_item_outcomes",
   "knowledge_source_sync_object_observations",
@@ -1244,6 +1291,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "deployment_model_catalog",
   "document_authority_reclassifications",
   "knowledge_lifecycle_events",
+  "knowledge_memories",
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
@@ -1261,6 +1309,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "workspace_instruction_policy_snapshots",
   "workspace_learning_policy_activation_events",
   "workspace_learning_policy_heads",
+  "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
 ] as const;
 
@@ -1288,6 +1337,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "feedback_submissions",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
+  "host_mcp_resolver_operations",
   "host_mcp_task_authorities",
   "host_mcp_turn_authorities",
   "knowledge_change_proposals",
@@ -1319,7 +1369,6 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
-  "workspace_learning_policy_revisions",
 ] as const;
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
@@ -1343,6 +1392,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "editable_artifact_session_links",
   "editable_artifacts",
   "external_identity_links",
+  "host_mcp_resolvers",
   "integration_facet_definitions",
   "integration_spec_revisions",
   "integration_tools",
@@ -1366,6 +1416,9 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_instruction_operations",
+  "agent_learning_revisions",
+  "agent_learning_snapshots",
   "canonical_human_identities",
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
@@ -1392,6 +1445,15 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "knowledge_entries",
+  "knowledge_entry_decisions",
+  "knowledge_entry_links",
+  "knowledge_entry_operations",
+  "knowledge_entry_revisions",
+  "knowledge_entry_search",
+  "knowledge_entry_vectors",
+  "knowledge_index_jobs",
+  "knowledge_review_batches",
   "managed_auth_actor_mutation_leases",
   "managed_auth_browser_installations",
   "managed_auth_login_return_intents",
@@ -2289,6 +2351,28 @@ export function evaluateRuntimeDatabasePosture(
       }
     } else if (
       [
+        "lookup_external_identity(uuid, text, text, text)",
+        "prepare_external_workspace_membership_operation(jsonb)",
+        "record_external_workspace_membership_operation(jsonb, jsonb)",
+      ].includes(routine.name)
+    ) {
+      const names = [
+        "external_identities",
+        "organization_memberships",
+        "organization_workspace_operation_receipts",
+        "api_keys",
+      ];
+      if (
+        names.some(
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match`,
+        );
+      }
+    } else if (
+      [
         "ensure_external_identity(uuid, text, text)",
         "get_external_identity_link_reference(uuid, uuid, text)",
         "get_external_identity_link_inventory_references(uuid, uuid[])",
@@ -2511,6 +2595,18 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (UNIFIED_KNOWLEDGE_ROUTINE_SET.has(routine.name)) {
+      // PostgreSQL 15+ public is owned by pg_database_owner while migrated
+      // tables/functions share the concrete migrator. Check the authority graph,
+      // as for the native Skill lifecycle, rather than the schema label.
+      for (const name of UNIFIED_KNOWLEDGE_AUTHORITY_TABLES) {
+        const table = tableByName.get(name);
+        if (!table) violations.push(`Knowledge authority table ${name} is missing`);
+        else if (routine.owner !== table.owner)
+          violations.push(
+            `Knowledge capability ${routine.name} owner ${routine.owner} does not match ${name} owner ${table.owner}`,
+          );
       }
     } else if (routine.name === "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)") {
       const authorityTables = [

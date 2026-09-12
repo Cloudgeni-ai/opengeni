@@ -292,7 +292,9 @@ impl MacAxControllerImpl {
         let worker_target = target.clone();
         let join = thread::Builder::new()
             .name(format!("opengeni-ax-{process_id}"))
-            .spawn(move || ax_worker_main(&worker_target, &receiver, &ready))
+            .spawn(move || {
+                crate::with_autorelease_pool(|| ax_worker_main(&worker_target, &receiver, &ready));
+            })
             .map_err(|error| MacFfiError::Ffi(format!("spawn AX worker: {error}")))?;
         match ready_receiver.recv_timeout(Duration::from_secs(3)) {
             Ok(Ok(())) => {
@@ -379,29 +381,37 @@ fn ax_worker_main(
     let mut last_liveness_poll = Instant::now();
 
     loop {
-        state.pump_notifications();
-        match commands.recv_timeout(AX_WORKER_POLL) {
-            Ok(AxWorkerCommand::Snapshot { target, response }) => {
-                state.pump_notifications();
-                let _ = response.send(state.snapshot(target));
+        let keep_running = crate::with_autorelease_pool(|| {
+            state.pump_notifications();
+            match commands.recv_timeout(AX_WORKER_POLL) {
+                Ok(AxWorkerCommand::Snapshot { target, response }) => {
+                    state.pump_notifications();
+                    let _ = response.send(state.snapshot(target));
+                }
+                Ok(AxWorkerCommand::Perform {
+                    target,
+                    selector,
+                    action,
+                    response,
+                }) => {
+                    state.pump_notifications();
+                    let _ = response.send(state.perform(&target, &selector, &action));
+                }
+                Ok(AxWorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return false
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            Ok(AxWorkerCommand::Perform {
-                target,
-                selector,
-                action,
-                response,
-            }) => {
-                state.pump_notifications();
-                let _ = response.send(state.perform(&target, &selector, &action));
+            if last_liveness_poll.elapsed() >= AX_WORKER_LIVENESS_POLL {
+                if validate_running_application(worker_target).is_err() {
+                    return false;
+                }
+                last_liveness_poll = Instant::now();
             }
-            Ok(AxWorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        if last_liveness_poll.elapsed() >= AX_WORKER_LIVENESS_POLL {
-            if validate_running_application(worker_target).is_err() {
-                break;
-            }
-            last_liveness_poll = Instant::now();
+            true
+        });
+        if !keep_running {
+            break;
         }
     }
     state.invalidate_all();

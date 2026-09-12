@@ -12,7 +12,15 @@ export type GenieLoadingOptions = {
   /** Replace the visual while preserving SDK loading visibility and transitions. */
   render?: (props: GenieLoadingRenderProps) => ReactNode;
   phrases?: readonly string[];
-  /** Public options stay independent of the renderer's declaration layout. */
+  /** Native copy overrides. Omitted messages retain the default English copy. */
+  messages?: {
+    status?: string;
+    slowStatus?: string;
+    slowText?: string;
+    showDetails?: string;
+    hideDetails?: string;
+  };
+  /** Public adapter options; the renderer dependency's declarations stay private. */
   orb?: {
     state?:
       | "working"
@@ -90,10 +98,14 @@ export function GenieLoading({
       </div>
       <div className="og-genie-copy">
         <span className="sr-only" role="status">
-          {slow ? "Preparing your task. Taking longer than usual." : "Preparing your task."}
+          {slow
+            ? (options?.messages?.slowStatus ?? "Preparing your task. Taking longer than usual.")
+            : (options?.messages?.status ?? "Preparing your task.")}
         </span>
         <span key={slow ? "slow" : phrase} className="og-genie-phrase" aria-hidden="true">
-          {slow ? "A little longer than usual…" : phrases[phrase % phrases.length]}
+          {slow
+            ? (options?.messages?.slowText ?? "A little longer than usual…")
+            : phrases[phrase % phrases.length]}
         </span>
         {showDetails || detailsOpen ? (
           <button
@@ -102,7 +114,9 @@ export function GenieLoading({
             aria-expanded={detailsOpen}
             onClick={onShowDetails}
           >
-            {detailsOpen ? "Hide details" : "Behind the magic"}
+            {detailsOpen
+              ? (options?.messages?.hideDetails ?? "Hide details")
+              : (options?.messages?.showDetails ?? "Behind the magic")}
             <span aria-hidden="true"> ↗</span>
           </button>
         ) : null}

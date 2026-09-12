@@ -59,6 +59,7 @@ type OrganizationAdminSection =
   | "developer"
   | "billing";
 type WorkspaceSettingsSection =
+  | "learning"
   | "general"
   | "members"
   | "tools"
@@ -408,6 +409,7 @@ const workspaceSettingsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { section?: WorkspaceSettingsSection } => {
     const section =
       search.section === "general" ||
+      search.section === "learning" ||
       search.section === "members" ||
       search.section === "tools" ||
       search.section === "plugins" ||
@@ -425,8 +427,15 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
-  validateSearch: (search: Record<string, unknown>): { view?: "instructions" | "skills" } =>
-    search.view === "instructions" || search.view === "skills" ? { view: search.view } : {},
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: "instructions" | "skills" | "files"; file?: string; review?: boolean } => ({
+    ...(search.review === true ? { review: true } : {}),
+    ...(search.view === "instructions" || search.view === "skills" || search.view === "files"
+      ? { view: search.view }
+      : {}),
+    ...(typeof search.file === "string" ? { file: search.file } : {}),
+  }),
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -717,17 +726,15 @@ function WorkspaceSettings() {
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  const { view } = workspaceStateRoute.useSearch();
-  if (view === "skills")
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/plugins"
-        params={{ workspaceId }}
-        search={{ section: "skills" }}
-        replace
-      />
-    );
-  return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
+  const { view, file, review } = workspaceStateRoute.useSearch();
+  return (
+    <LazyWorkspaceStateRoute
+      workspaceId={workspaceId}
+      view={view}
+      review={review}
+      {...(file ? { fileId: file } : {})}
+    />
+  );
 }
 
 function Artifacts() {

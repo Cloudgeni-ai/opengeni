@@ -701,7 +701,6 @@ const { workspace } = await client.ensureWorkspace({
 });
 
 await client.updateWorkspaceSettings(workspace.id, {
-  memoryEnabled: true,
   agentHumanInputEnabled: true,
 });
 

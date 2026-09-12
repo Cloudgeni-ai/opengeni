@@ -20,48 +20,25 @@ Product shape, invariants, execution, and ownership.
 
 ## 2. What OpenGeni is
 
-OpenGeni's self-hostable, session-based agent control plane owns
-identity, tenancy, sessions, human intervention, goals, recovery,
-compute, files, artifacts, usage, and observability.
+OpenGeni is a self-hostable, session-based agent runtime. Postgres owns durable
+truth; Temporal coordinates execution; NATS transports reconstructible events.
+The control plane owns identity, tenancy, sessions, human intervention, goals,
+recovery, compute, files, artifacts, usage, and observability. The API authorizes
+clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
+and Gateway realtime WebSockets. Workers run agents in provisioned sandboxes or
+Connected Machines.
 
-HTTP authorizes public control and bounded browser access to
-storage, sandboxes, relays, Codex WebRTC, and Gateway realtime WebSockets.
-Workers execute agents in sandboxes or Connected Machines.
-Postgres owns durable truth; Temporal coordinates work; NATS transports
-reconstructible live updates and Connected Machine traffic.
+The main surfaces are sessions and goals; tools and connections; Knowledge,
+instructions and Skills; files and editable artifacts; and SDK, React and web
+clients. The focused ownership map in §13 gives each area's canonical sources.
 
-Surfaces (canonical sources in §13):
-
-- **Sessions:** turn control, queues, goals, approvals, human input, titles, history.
-- **Voice:** realtime sessions and editable drafts; Send persists transcription.
-  Workspace billing/fallback settings govern provider selection; successful or
-  uncertain attempts pin it. See [transcription](transcription.md).
-- **Compute:** provisioned sandboxes and user-owned Connected Machines.
-- **Tools:** MCP, capabilities, Codemode, connections, and authorized adapters.
-- **Knowledge:** Documents/RAG, Agent Knowledge, typed Memory, preferences,
-  instructions, organization identity, and learning policy retain distinct authority.
-- **Artifacts:** files, media, editable documents, browser/ComputerSession control,
-  terminals, and published outputs.
-- **Clients:** SDK, React, web console, in-process embedding.
-  Native and host products share Connect/Sites behavior; hosts own presentation
-  and authoring prompts. External users require explicit live membership;
-  linking never merges identities. Inline credentials remain supported and
-  durable renewal is opt-in. `asUser()` supplies canonical identity, not a second
-  session end-user label. Human private/shared visibility is distinct from optional
-  cross-tree `agentAccess`; user Memory follows the verified active-turn user,
-  while task notes cover temporary tree-local coordination. Site SDK forwarding
-  binds the workspace destination and uses ordinary API authorization, not a
-  fixed page-operation list; tool calls retain version-pinned catalogs.
-  See [embedding authority internals](embedding-authority-internals.md),
-  [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md).
-
-- **[Feedback](feedback.md)** and **operations:** metering, entitlements, billing,
-  deployment, observability, release evidence.
-
-Canonical introductions: [`../README.md`](../README.md),
-[`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
-
-Skills: [`content, authority, and migration`](skills-lifecycle.md).
+External users require explicit live membership. `asUser()` supplies canonical
+identity; an end-user label does not. Private/shared visibility differs from
+cross-tree `agentAccess`. Personal Knowledge follows the verified active-turn
+user; task notes cover temporary tree coordination. Linking never merges users.
+See [product integration](product-integration.md),
+[embedding authority](embedding-authority-internals.md),
+[Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
 
 ---
 
@@ -195,16 +172,29 @@ Stores are not interchangeable:
 | `session_system_updates` | Durable machine-origin inputs such as child results and schedules | Synthetic human messages |
 | `session_goals` | The standing objective and continuation obligation | Workflow-local state |
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
-| Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
+| Knowledge entries, instructions, Skills, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | Conversation history or temporary task notes |
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Workspace Memory stores retrieval context. It is enabled by default: exact
-live agent attempts autonomously save and correct active facts, decisions,
-incidents, fixes, and outcomes independently of Learning mode. A workspace
-opt-out disables agent writes. Private sessions can read shared facts, but
-mutations require their exact writable scope. Memory is distinct from Skills,
-instructions, organization profiles, and reviewed Knowledge.
+Knowledge is the canonical retrieval system after maintenance migration 0461.
+Original file bytes stay in object storage; exact source/finding/group revisions,
+pinned evidence, relationships, publication decisions and review receipts live
+in Postgres. Keyword and embedding indexes are rebuildable. The same schema
+serves personal, workspace and organization scopes; access precedes ranking and
+relationships never grant access. Conversation history and task notes are separate.
+
+Agent learning centralizes Knowledge, instructions and Skills in Automatic,
+Review first and Off settings, with sparse chat/task overrides and immutable
+accepted-turn policy snapshots. Review first queues inactive changes without
+pausing the agent. Explicit pending-proposal retrieval lets agents reuse and
+correct unapproved entries; default retrieval stays published-only. Pending
+content grants no publication or instruction authority. Instructions and Skills
+retain their native authorities. Agent instruction changes are non-destructive
+by default: new rules append to the exact active baseline, updates/removals use a
+unique exact-text anchor, and complete replacement must be explicit. Every path
+retains active-head compare-and-set and the standing instruction budget.
+The old Memory and reviewed-Knowledge authoring lanes are retired; historical
+records remain audit/compatibility evidence. See [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy. Off
 rejects agent-authored identity changes before proposal creation, Require approval
@@ -758,41 +748,27 @@ These producers all converge on the ordinary session/turn runtime:
   repositories only; file attachments require explicit selection (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Session header and sidebar schedule indicators use `Session.hasSchedules`, derived by one batched indexed lookup of non-deleted `scheduled_tasks.reusable_session_id` targets after session authorization. Paused schedules remain linked. Creation metadata is only historical run-grouping provenance. The schedules list accepts a server-side `sessionId` filter; the web route passes `targetSessionId` on navigation.
-The existing lineage refresh also carries `sessionHasSchedules` for the open header and schedule flags for its nodes, so external schedule mutations converge through the existing 30-second header / 15-second sidebar refreshes without a new polling loop or event protocol.
+Schedule indicators derive from authorized, non-deleted reusable-session targets,
+including paused schedules, through existing lineage refreshes. Creation metadata
+is historical provenance; the schedules API filters by `sessionId`.
 
-For an existing session, a scheduled turn that omits its turn-level `tools`
-field inherits the durable session tool policy; explicit `tools: []` remains an
-empty override.
+Scheduled turns inherit the session tool policy when `tools` is omitted;
+`tools: []` remains an empty override. Standalone scheduler-owned turns use a
+`user`-role task boundary with immutable task/run/update IDs. This conversation
+role grants no human authority: scheduler initiation and causal-human/connection
+snapshots remain frozen. Occurrences attached to human/API turns retain the
+internal `system` envelope.
 
-A pure scheduled-occurrence batch that creates a standalone scheduler-owned
-turn is persisted in model-facing history as a direct `user`-role task boundary
-carrying the immutable scheduled task, run, and update ids. That role is
-conversation structure only: the logical turn still freezes the scheduler
-service as initiator, retains its causal-human and personal-connection authority
-snapshots, and remains a scheduled run in audit and settlement. Scheduled
-occurrences attached to an existing human/API turn, and all other machine-input
-batches, keep the internal `system`-role envelope.
+The `skip` policy locks and admits only idle existing/reusable sessions. Status,
+goal reset, run settlement and update append share a transaction; admitted work
+sets `queued` even when pause or realtime ownership withholds its wake. New
+sessions admit their creating occurrence.
 
-For `skip`, a scheduled occurrence targeting an existing or reusable session is
-admitted only when that session's locked status is exactly `idle`. The status
-check, optional reusable-goal reset, run settlement, and pending-update append
-share the ordinary session event transaction, so concurrent occurrences cannot
-both cross the same idle boundary and a skipped occurrence cannot mutate the
-goal. An admitted occurrence persists `queued` to consume that boundary even
-when a pause or active realtime lease withholds its workflow wake. A newly
-generated session still admits the occurrence that creates it.
-
-Pausing or soft-deleting a scheduled task is a durable first-claim cutoff. The
-task lifecycle transaction locks each nonterminal agent run and marks it
-skipped only when no scheduler-owned turn exists. A concurrent deposit
-therefore either commits first and is invalidated, or observes the terminal run
-and cannot publish; a concurrent claim either creates its turn first and
-remains recoverable, or observes the skipped run and cancels the pending update
-without starting model, tool, or sandbox work. Resuming the task never revives
-those pre-pause deposits. A database delivery fence rejects `pending` to
-`delivered` transitions for terminal scheduled runs, so a rolling old worker
-cannot bypass the cutoff before the new claim logic is fully deployed.
+Pause/delete establishes a first-claim cutoff: runs without a scheduler-owned
+turn become skipped, while already claimed turns remain recoverable. Deposit,
+claim and task lifecycle locks serialize this decision. Resume never revives
+pre-pause deposits, and a delivery fence rejects updates for terminal runs even
+from old workers during a rolling deployment.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
@@ -873,9 +849,9 @@ remain behind progressive search.
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
-Repository `.agents/skills` contains only maintainer (`opengeni`) and external
-integration (`opengeni-client`) guidance. Runtime skills live in
-`packages/runtime/src/bundled_*_skills`, shipped without repository-agent copies.
+Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
+ship directly from `packages/runtime/src/bundled_*_skills`. Worker defaults include
+`opengeni-visualize` and `document-parsing`, unless overridden by explicit host selection.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
@@ -909,15 +885,20 @@ explicitly when needed. Generated images and video follow paid-operation and
 artifact-retention fences; provider bytes do not become permanent prompt
 history.
 
-Documents/RAG and scoped Knowledge are retrieval systems whose authority is
-checked before ranking. Agent Knowledge is the product view over workspace
-instructions, Skills, accepted Memory, organization knowledge, and related
-governance sources; those underlying authorities remain separate. Editable
-documents, spreadsheets, and presentations use a canonical artifact model with
-native and WASM kernels; Office formats are import/export forms, not the mutable
-source of truth.
+Knowledge is the product destination for retained sources and findings, with
+Files, Instructions and Skills as persistent tabs on the Agent Knowledge page.
+`apps/web/src/components/knowledge/agent-knowledge-page.tsx` owns that shared
+page navigation, including historical Memory and Documents links. Groups appear
+as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
+citations and shared groups connect information from different sources without
+changing its ownership. Connector ingestion runs through ordinary scheduled
+agents with frozen source selections and Agent learning policy. Attempt-bound
+source tools retain files and prepare canonical source entries; agents save the
+useful findings. Parsing and indexing remain mechanical services. Original bytes
+and search caches have separate storage jobs. Review controls
+publication, while action permissions remain independent.
 
-Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
+Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
 [`image-generation.md`](image-generation.md),
 [`artifact-engine.md`](artifact-engine.md), and
@@ -1196,6 +1177,11 @@ identity present in its exact attempt catalog. The host
 injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
+
+HTML-only Sites and inline chat previews share the SDK bridge and renderer.
+See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
+for loading, versioning, visualization assets, and retained images.
+
 Multiple SDK clients in the same document retain independent ports; connecting
 one must not cancel another. Workspace SDK requests have no endpoint allowlist:
 the host binds routing; API handlers authorize. Published calls use viewer auth;
@@ -1245,8 +1231,10 @@ The attempt-frozen connector Allow/Ask/Block policy and
 `connector_action_requests` ledger apply to model and Codemode execution only.
 Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
 use the ordinary `requireApproval` classification and preserve a caller-generated
-operation id only for provider-specific handling. Sites bypass that per-call
-approval after active-version allowlist revalidation. These direct surfaces do
+operation id only for provider-specific handling. Sites retain ordinary per-call
+approval after active-Site and selected-version allowlist revalidation. Older
+published versions remain callable using their own declared tools and the
+viewer’s current permissions. These direct surfaces do
 not synthesize attempt-owned connector rows or a second generalized exactly-once
 journal.
 
@@ -1277,6 +1265,9 @@ and controller/session/target binding, the API repeats that validation against
 its durable `ComputerSession` binding before forwarding the exact bytes, and the
 SDK retains its independent verification. The browser extension is an attachment
 client, not an authorization service.
+
+Native macOS operations drain Cocoa pools and clean up pending capture starts.
+Desktop discovery proceeds independently of semantic inspection.
 
 New capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
@@ -1450,7 +1441,7 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 | NATS Core | Live fanout, invalidation, request/reply, and Connected Machine transport | Reconnect and rebuild from durable truth |
 | Object storage | Files, generated media, recordings, exports, retained evidence, and portable sandbox archives | Provider durability plus Postgres ownership receipts |
 | Sandbox/provider storage | Live workspace and optional native checkpoints | Must be fenced and represented by durable lease/checkpoint evidence |
-| Search indexes | Document and memory retrieval projections | Rebuildable from authorized source records |
+| Search indexes | Canonical Knowledge retrieval projections | Rebuildable from authorized source records |
 
 Postgres tables are cross-service contracts. Forward migrations and the exact
 runtime-role/RLS posture are owned by `@opengeni/db`; this document does not
@@ -1468,7 +1459,7 @@ but do not replace access control.
 
 Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 `packages/storage/src/index.ts`, `packages/documents/src/index.ts`,
-[`knowledge-retrieval.md`](knowledge-retrieval.md), and
+[`knowledge.md`](knowledge.md), and
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
 
 ---
@@ -1571,6 +1562,8 @@ Subsystem routing; complete topic map: [`README.md`](README.md).
 ### Contracts, access, and persistence
 
 External actors and Site viewer authority: [embedding authority internals](embedding-authority-internals.md).
+External membership lookup and opt-in grant/cancellation receipts reuse native
+organization-workspace lifecycle authority; see [external membership operation recovery](external-membership-operations.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
@@ -1607,8 +1600,8 @@ External actors and Site viewer authority: [embedding authority internals](embed
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Documents, RAG, or Knowledge retrieval | `packages/documents/`, `apps/api/src/routes/documents.ts` | [`knowledge-retrieval.md`](knowledge-retrieval.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
-| Agent Knowledge, Memory, preferences, instructions, organization identity, or learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
+| Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
+| Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
@@ -1657,18 +1650,29 @@ Personal MCP use requires an owner-issued exact-session grant, with shared-resul
 acknowledgement for shared conversations. The composer restores only active grants
 matching visibility and authority epoch; credentials alone grant no use.
 
+Host-owned shared MCP servers may explicitly select `hostBinding.selection:
+"accepted_turn"` instead of a fixed binding. The configuration fixes the entire
+destination/provider/scope/resource definition except account identity; only an
+immutable accepted turn/task snapshot chooses the exact owner binding. Worker
+resolution and every physical use retain native live authority checks. An empty
+realtime session creates no turn authority; its first text Send captures the
+current participant's selection. See [remote host MCP credentials](remote-mcp-credentials.md).
+
+Native remote MCP resolver registration is organization-owned configuration,
+keyed by the authoritative workspace `externalSource`. Only a live organization
+service-admin key administers it; participants cannot choose callback routes.
+Any retained registration opts the organization into exact namespace routing,
+with no static fallback. Endpoint/secret updates preserve registration identity
+and accepted authority but increment a live physical-use transport generation.
+The registry uses native encrypted storage and metadata-only operation receipts;
+it is not a general webhook registry. Canonical sources:
+`packages/core/src/remote-mcp-credentials.ts`,
+`packages/core/src/application/host-mcp-resolvers.ts`, and
+`packages/db/src/host-mcp-resolvers.ts`.
+
 ### Embeddable connection presentation
 
-`@opengeni/react/connect` exports `ConnectionLogo`, `ConnectionInstalled`,
-`ConnectionServiceRow`, `ConnectionOptionRow`, `ConnectionCatalog`, and
-`ConnectionTypePicker`; scoped styling is in `@opengeni/react/connect.css`.
-These components accept data and callbacks, without app routing or provider
-credentials. `ConnectPanel` and `ConnectChooser` optionally use the catalogue
-presentation over the existing shared connection controller.
-The web Capabilities route owns tabs, global search, and curated ordering.
-`apps/web/src/components/capabilities/connection-services.ts` groups explicit
-provider identities without merging their independent authorization options.
-Northstar demonstrates the same SDK catalogue with its existing API proxy.
+Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).
 
 ### Public skill discovery
 

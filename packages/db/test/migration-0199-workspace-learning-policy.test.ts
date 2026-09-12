@@ -1,6 +1,7 @@
+import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { resolveWorkspaceLearningPolicyEffectiveMode } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import {
@@ -152,7 +153,7 @@ beforeAll(async () => {
       },
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0199-workspace-learning-policy");
+    shared = await acquirePreKnowledgeTestDatabase("migration-0199-workspace-learning-policy");
   }
   if (!shared) {
     if (requireRealDatabase)

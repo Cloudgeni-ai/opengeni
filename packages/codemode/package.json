@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/codemode",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "Attempt-frozen programmatic tool catalog and execution authority for OpenGeni.",
   "license": "Apache-2.0",
   "repository": {
@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*"
   },
   "devDependencies": {

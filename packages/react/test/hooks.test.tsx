@@ -1420,29 +1420,39 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
-  test("shared empty event logs do not probe the goal endpoint", async () => {
-    let reads = 0;
-    const client = fakeClient({
-      getGoal: async () => {
-        reads += 1;
-        return fakeGoal();
-      },
-    });
-    const hook = await renderHook(
-      () =>
-        useGoal(SESSION_ID, {
-          client,
-          workspaceId: WORKSPACE_ID,
-          events: noEvents,
-        }),
-      undefined,
-    );
-    await flush();
-    expect(reads).toBe(0);
-    expect(hook.result.current.goal).toBeNull();
-    expect(hook.result.current.loading).toBe(false);
-    await hook.unmount();
-  });
+  test.each([{ events: [] }, { events: [makeEvent(1, "goal.set")] }])(
+    "shared event logs load authoritative goals on mount: %j",
+    async ({ events: initialEvents }) => {
+      const events = [...initialEvents];
+      let reads = 0;
+      let streams = 0;
+      const client = fakeClient({
+        streamEvents: () => {
+          streams += 1;
+          throw new Error("Shared feeds must not open a second stream");
+        },
+        getGoal: async () => {
+          reads += 1;
+          return fakeGoal();
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useGoal(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            events,
+          }),
+        undefined,
+      );
+      await flush();
+      expect(reads).toBe(1);
+      expect(streams).toBe(0);
+      expect(hook.result.current.goal).not.toBeNull();
+      expect(hook.result.current.loading).toBe(false);
+      await hook.unmount();
+    },
+  );
 
   test("pause and resume PATCH the goal and update local state", async () => {
     const calls: { status: string; rationale?: string | undefined }[] = [];
@@ -1526,7 +1536,7 @@ describe("useGoal", () => {
       undefined,
     );
     await flush();
-    // Populate the goal (shared-feed skips the initial auto-load).
+    // Explicit refresh remains supported alongside the initial snapshot.
     await flushing(async () => {
       await hook.result.current.refresh();
     });
@@ -1554,10 +1564,10 @@ describe("useGoal", () => {
       [] as SessionEvent[],
     );
     await flush();
-    expect(reads).toBe(0);
+    expect(reads).toBe(1);
     await hook.rerender([makeEvent(1, "goal.paused")]);
     await flush(250);
-    expect(reads).toBe(1);
+    expect(reads).toBe(2);
     expect(hook.result.current.isPaused).toBe(true);
     await hook.unmount();
   });
@@ -1585,7 +1595,7 @@ describe("useGoal", () => {
       [] as SessionEvent[],
     );
     await flush();
-    expect(reads).toBe(0);
+    expect(reads).toBe(1);
 
     await hook.rerender([
       makeEvent(1, "agent.message.delta"),
@@ -1596,7 +1606,7 @@ describe("useGoal", () => {
     ]);
     await flush(250);
 
-    expect(reads).toBe(1);
+    expect(reads).toBe(2);
     expect(hook.result.current.goal?.continuation?.state).toBe("scheduled");
     await hook.unmount();
   });
@@ -1626,10 +1636,11 @@ describe("useGoal", () => {
     await flush();
 
     const pendingRefresh = hook.result.current.refresh();
-    expect(reads).toEqual([SESSION_ID]);
+    expect(reads).toEqual([SESSION_ID, SESSION_ID]);
+    const resolvePrevious = resolveGoal!;
     await hook.rerender(otherSessionId);
     await flushing(async () => {
-      resolveGoal!(fakeGoal({ text: "stale goal from the previous session" }));
+      resolvePrevious(fakeGoal({ text: "stale goal from the previous session" }));
       await pendingRefresh;
     });
 

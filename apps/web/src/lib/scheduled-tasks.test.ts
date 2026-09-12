@@ -746,3 +746,22 @@ test("session schedule navigation includes matches beyond the first page", async
   expect(offsets).toEqual([0, 100, 200]);
   expect(result).toEqual(tasks);
 });
+
+test("editing an ordinary source task preserves its source binding and private learning scope", () => {
+  const task = scheduledTask();
+  const source = knowledgeSyncAction({
+    destination: { kind: "personal", workspaceId: task.workspaceId, subjectId: "user:owner" },
+  });
+  task.agentConfig.knowledgeSource = source;
+  task.metadata.knowledgeSourceSync = { sourceEnabled: true, connectionPaused: true };
+  const form = formStateFromScheduledTask(task);
+  expect(form.knowledgeSource).toEqual(source);
+  expect(
+    agentConfigFromFormState({ ...form, prompt: "Read changes and retain useful decisions" }, task)
+      .knowledgeSource,
+  ).toEqual(source);
+  expect(scheduledTaskStateLabel(task)).toMatchObject({
+    active: false,
+    reason: "connection_paused",
+  });
+});

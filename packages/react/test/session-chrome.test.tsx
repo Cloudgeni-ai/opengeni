@@ -746,95 +746,126 @@ describe("SessionChrome", () => {
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
-  test("expands queue and reveals hover actions wired to queue APIs", async () => {
-    const calls: string[] = [];
-    const appliedDrafts: Array<NonNullable<ComposerState["draft"]>> = [];
-    const checkedOut: NonNullable<ComposerState["draft"]> = {
-      revision: 3,
-      text: "first queued prompt",
-      resources: [],
-      model: "model-x",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sourceTurnId: "11111111-1111-4111-8111-111111111111",
-      sourceTurnVersion: 1,
-      updatedAt: new Date().toISOString(),
-    };
-    const q = queue({
-      removeTurn: async (turnId) => {
-        calls.push(`remove:${turnId}`);
-        return true;
-      },
-      steerTurn: async (turnId) => {
-        calls.push(`steer:${turnId}`);
-        return true;
-      },
-      moveTurn: async (turnId, before) => {
-        calls.push(`move:${turnId}:${before ?? "null"}`);
-        return true;
-      },
-      editTurn: async (turnId) => {
-        calls.push(`edit:${turnId}`);
-        return checkedOut;
-      },
-    });
-    mounted = await renderComponent(
-      <SessionChrome
-        queue={q}
-        composer={composer({
-          applyDraft: (draft) => appliedDrafts.push(draft),
-        })}
-      />,
-    );
+  test.each([
+    { replace: false, succeeds: true },
+    { replace: true, succeeds: true },
+    { replace: false, succeeds: false },
+    { replace: true, succeeds: false },
+  ])(
+    "queue actions hand focus back only after successful checkout: %j",
+    async ({ replace, succeeds }) => {
+      const calls: string[] = [];
+      const appliedDrafts: Array<NonNullable<ComposerState["draft"]>> = [];
+      const checkedOut: NonNullable<ComposerState["draft"]> = {
+        revision: 3,
+        text: "first queued prompt",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: "11111111-1111-4111-8111-111111111111",
+        sourceTurnVersion: 1,
+        updatedAt: new Date().toISOString(),
+      };
+      const q = queue({
+        removeTurn: async (turnId) => {
+          calls.push(`remove:${turnId}`);
+          return true;
+        },
+        steerTurn: async (turnId) => {
+          calls.push(`steer:${turnId}`);
+          return true;
+        },
+        moveTurn: async (turnId, before) => {
+          calls.push(`move:${turnId}:${before ?? "null"}`);
+          return true;
+        },
+        editTurn: async (turnId) => {
+          calls.push(`edit:${turnId}`);
+          return succeeds ? checkedOut : null;
+        },
+      });
+      mounted = await renderComponent(
+        <SessionChrome
+          queue={q}
+          composer={composer({
+            hasDraftContent: () => replace,
+            applyDraft: (draft) => {
+              appliedDrafts.push(draft);
+              calls.push("apply-draft");
+            },
+          })}
+          onComposerFocus={() => calls.push("focus-composer")}
+        />,
+      );
 
-    const queueChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="queue"]',
-    );
-    expect(queueChip).not.toBeNull();
-    expect(
-      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
-    ).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
+      const queueChip = mounted.container.querySelector<HTMLButtonElement>(
+        '[data-og-session-chrome-signal="queue"]',
+      );
+      expect(queueChip).not.toBeNull();
+      expect(
+        mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+      ).not.toBeNull();
+      expect(
+        mounted.container.querySelector('[data-og-session-chrome-open="true"]'),
+      ).not.toBeNull();
 
-    const remove = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Remove queued prompt 1"]',
-    );
-    const steer = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Steer queued prompt 1"]',
-    );
-    const edit = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Edit queued prompt 1"]',
-    );
-    const moveDown = mounted.container.querySelector<HTMLButtonElement>(
-      '[aria-label="Move queued prompt 1 down"]',
-    );
-    expect(remove).not.toBeNull();
-    expect(steer).not.toBeNull();
-    expect(edit).not.toBeNull();
-    expect(moveDown).not.toBeNull();
-    expect(steer?.disabled).toBe(true);
+      const remove = mounted.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Remove queued prompt 1"]',
+      );
+      const steer = mounted.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Steer queued prompt 1"]',
+      );
+      const edit = mounted.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Edit queued prompt 1"]',
+      );
+      const moveDown = mounted.container.querySelector<HTMLButtonElement>(
+        '[aria-label="Move queued prompt 1 down"]',
+      );
+      expect(remove).not.toBeNull();
+      expect(steer).not.toBeNull();
+      expect(edit).not.toBeNull();
+      expect(moveDown).not.toBeNull();
+      expect(steer?.disabled).toBe(true);
 
-    // The optimistic→authoritative row handoff must settle before pointer
-    // actions become available; otherwise a press can be lost on DOM replace.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 260));
-    });
-    expect(steer?.disabled).toBe(false);
+      // The optimistic→authoritative row handoff must settle before pointer
+      // actions become available; otherwise a press can be lost on DOM replace.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 260));
+      });
+      expect(steer?.disabled).toBe(false);
 
-    await act(async () => {
-      steer?.click();
-      remove?.click();
-      edit?.click();
-      moveDown?.click();
-    });
-    expect(calls).toContain("steer:11111111-1111-4111-8111-111111111111");
-    expect(calls).toContain("remove:11111111-1111-4111-8111-111111111111");
-    expect(calls).toContain("edit:11111111-1111-4111-8111-111111111111");
-    expect(appliedDrafts).toEqual([checkedOut]);
-    expect(
-      calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:")),
-    ).toBe(true);
-  });
+      await act(async () => {
+        steer?.click();
+        remove?.click();
+        edit?.click();
+        moveDown?.click();
+      });
+      if (replace) {
+        expect(calls).not.toContain("focus-composer");
+        expect(calls).not.toContain("apply-draft");
+        const keep = Array.from(mounted.container.querySelectorAll("button")).find(
+          (button) => button.textContent === "Keep current draft",
+        );
+        await act(async () => keep!.click());
+        expect(calls).not.toContain("focus-composer");
+        await act(async () => edit!.click());
+        const confirm = Array.from(mounted.container.querySelectorAll("button")).find(
+          (button) => button.textContent === "Replace and edit",
+        );
+        await act(async () => confirm!.click());
+      }
+      expect(calls).toContain("steer:11111111-1111-4111-8111-111111111111");
+      expect(calls).toContain("remove:11111111-1111-4111-8111-111111111111");
+      expect(calls).toContain("edit:11111111-1111-4111-8111-111111111111");
+      expect(appliedDrafts).toEqual(succeeds ? [checkedOut] : []);
+      if (succeeds) expect(calls.slice(-2)).toEqual(["apply-draft", "focus-composer"]);
+      else expect(calls).not.toContain("focus-composer");
+      expect(
+        calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:")),
+      ).toBe(true);
+    },
+  );
 
   test("explains pending child receipts and opens only their typed source", async () => {
     const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

@@ -1,3 +1,4 @@
+import { createKnowledgeIndexingActivities } from "./activities/knowledge-indexing";
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
@@ -29,6 +30,7 @@ export function createControlActivitiesFromServices(
   return {
     ...createAutomationActivities(services),
     ...createDocumentActivities(services, resolveDocumentServices),
+    ...createKnowledgeIndexingActivities(services, resolveDocumentServices),
     ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),

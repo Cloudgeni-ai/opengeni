@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "5.2.0",
+  "version": "6.0.0",
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -118,7 +118,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun run build:css && bun ../../scripts/build-typescript-package.ts",
+    "build": "bun run build:css && bun ../../scripts/generate-visualization-assets.ts && bun ../../scripts/build-typescript-package.ts",
     "build:css": "bun scripts/build-compiled-css.ts",
     "check:css": "bun scripts/build-compiled-css.ts --check",
     "demo": "vite dev demo --port 3100",

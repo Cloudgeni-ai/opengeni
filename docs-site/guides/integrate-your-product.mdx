@@ -86,18 +86,18 @@ Use one workspace per customer when their documents, instructions, Connections, 
 
 | Product behavior                                 | `agentAccess` | `memory`      |
 | ------------------------------------------------ | ------------- | ------------- |
-| Each conversation works independently            | `"session"`   | `"session"`   |
+| Each conversation works independently            | `"session"`   | `false`       |
 | Independent conversations remember the same user | `"session"`   | `"user"`      |
 | One user's conversations can collaborate         | `"user"`      | `"user"`      |
 | The tenant's conversations can collaborate       | `"workspace"` | `"workspace"` |
 
-The chat API defaults to `agentAccess: "session"`; omitted `memory` follows `agentAccess`. Supply a `user` label for user-scoped access and memory. Use `memory: false` to disable Memory tools for that conversation; its durable conversation history remains available. Memory also needs to be enabled for the workspace.
+The chat API defaults to `agentAccess: "session"` and `memory: false`. With user or workspace access, omitted `memory` follows that scope. The compatibility option `memory` accepts `"user"`, `"workspace"`, or `false`. `false` initializes Knowledge authoring to Off while authorized retrieval and conversation history remain available. A supplied `user` must come from your server authentication; the facade resolves it through `asUser()` into canonical authority.
 
-A session can reach its own child tree. Across trees, both sessions must permit access, and the more restrictive setting wins. User-scoped access requires the same product/user label. An optional embedding-host restriction can narrow access further.
+A session can reach its own child tree. Its `agentAccess` restricts outbound access to other sessions; target visibility, permissions and any embedding-host restriction still apply. User-scoped access requires the same canonical user.
 
-User and session memory can read shared workspace facts, but their saves, corrections, and deletions stay in their own memory layer. Memory does not grant access to another session's transcript. See [Memory and knowledge](/concepts/memory-and-knowledge).
+Personal Knowledge can read authorized shared entries, but personal saves and corrections stay in the verified user's layer. Task notes cover temporary session-tree work. Knowledge grants no transcript access. See [Knowledge and agent learning](/concepts/memory-and-knowledge).
 
-These choices are set when the session is created. Reopening an existing conversation with different options does not change its stored policy. The raw session API uses `agentAccess`, `endUser: { source, id }`, and `memoryScope` (including `"off"`); its default agent access remains `"workspace"`.
+These choices are set when the session is created. Reopening an existing conversation with different options does not change its stored policy. The raw session API uses `agentAccess`, the non-authoritative `endUser` label, and compatibility `memoryScope: "workspace" | "user" | "off"`; its default agent access remains `"workspace"`.
 
 <Note>
   Agent access is separate from human visibility. These product-created sessions remain shared for

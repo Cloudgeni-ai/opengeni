@@ -13,6 +13,8 @@ export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
    * UseFileAttachmentsResult.addFiles} (the explicit picker / drop path)
    * bypasses it.
    */
+  /** Retain original uploads in the chat owner’s personal scope when private. */
+  scope?: "workspace" | "personal";
   pasteFilter?: ((file: File) => boolean) | undefined;
 };
 
@@ -212,6 +214,7 @@ export function useFileAttachments(
           filename: file.name || "file",
           contentType: file.type || "application/octet-stream",
           data: file,
+          ...(options.scope ? { scope: options.scope } : {}),
         })
         .then((asset) => {
           if (scopeGeneration.current !== generation) return;
@@ -252,7 +255,7 @@ export function useFileAttachments(
           );
         });
     },
-    [client, workspaceId],
+    [client, workspaceId, options.scope],
   );
 
   const addFiles = useCallback(

@@ -142,11 +142,16 @@ export function CopyHoverFrame({
       <div
         data-og-annotation-chrome=""
         className={cn(
-          "mt-1 flex h-7 items-center gap-1.5",
+          "flex h-6 items-center gap-1.5 pointer-coarse:h-11",
           align === "end" ? "justify-end" : "justify-start",
         )}
       >
-        <CopyButton text={copyText} label={label} reveal="group-hover" />
+        <CopyButton
+          text={copyText}
+          label={label}
+          reveal="group-hover"
+          className="size-6 pointer-coarse:size-11"
+        />
         {trailing}
       </div>
     </div>

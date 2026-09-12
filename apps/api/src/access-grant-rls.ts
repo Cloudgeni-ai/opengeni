@@ -4,7 +4,7 @@ import {
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { withSessionRlsActorContext } from "@opengeni/db";
+import { freezeAgentLearningPolicy, withSessionRlsActorContext } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export async function withAccessGrantSessionRlsContext<T>(
@@ -21,10 +21,22 @@ export async function withAccessGrantSessionRlsContext<T>(
   }
   try {
     const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+    const learning = await freezeAgentLearningPolicy(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: {
+        kind: "agent",
+        sessionId: actor.callerSessionId,
+        turnId: actor.turnId,
+        attemptId: actor.attemptId,
+        executionGeneration: actor.executionGeneration,
+      },
+    });
     return await withSessionRlsActorContext(
       {
         subjectId: actor.subjectId,
         initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+        privateFileOwnerSubjectId: learning.defaultScope === "personal" ? learning.subjectId : null,
       },
       fn,
     );

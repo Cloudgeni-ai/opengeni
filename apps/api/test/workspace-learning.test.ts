@@ -91,7 +91,7 @@ async function request(
 }
 
 describe("workspace learning API", () => {
-  test("keeps settings human-admin-only and exposes bounded CAS history", async () => {
+  test("preserves human-admin history and retires competing policy mutations", async () => {
     const empty = await request("/learning");
     expect(empty.status).toBe(200);
     expect(await empty.json()).toMatchObject({
@@ -115,86 +115,19 @@ describe("workspace learning API", () => {
     });
     expect(denied.status).toBe(403);
 
-    const firstResponse = await request("/learning/revisions", {
-      method: "POST",
-      body: { workspaceMode: "suggest" },
-    });
-    expect(firstResponse.status).toBe(201);
-    const first = (await firstResponse.json()) as { id: string; revision: number };
-    expect(first.revision).toBe(1);
-
-    const firstActivation = await request(`/learning/revisions/${first.id}/activate`, {
-      method: "POST",
-      body: {
-        expectedCurrentRevisionId: null,
-        expectedActivationVersion: 0,
-        reason: "Require approval for learned changes",
-      },
-    });
-    expect(firstActivation.status).toBe(200);
-    expect(await firstActivation.json()).toMatchObject({
-      head: { revisionId: first.id, activationVersion: 1 },
-      event: { type: "activate", activationVersion: 1 },
-    });
-
-    const secondResponse = await request("/learning/revisions", {
-      method: "POST",
-      body: {
-        workspaceMode: "automatic",
-        supersedesRevisionId: first.id,
-        sourceOverrides: [{ kind: "task-note", id: "note:finance", mode: "suggest" }],
-      },
-    });
-    expect(secondResponse.status).toBe(201);
-    const second = (await secondResponse.json()) as { id: string; revision: number };
-
-    const secondActivation = await request(`/learning/revisions/${second.id}/activate`, {
-      method: "POST",
-      body: {
-        expectedCurrentRevisionId: first.id,
-        expectedActivationVersion: 1,
-        reason: "Enable guarded automatic learning",
-      },
-    });
-    expect(secondActivation.status).toBe(200);
-
-    const staleRollback = await request("/learning/rollback", {
-      method: "POST",
-      body: {
-        targetRevisionId: first.id,
-        expectedCurrentRevisionId: first.id,
-        expectedActivationVersion: 1,
-        reason: "Stale rollback",
-      },
-    });
-    expect(staleRollback.status).toBe(409);
-
-    const rollback = await request("/learning/rollback", {
-      method: "POST",
-      body: {
-        targetRevisionId: first.id,
-        expectedCurrentRevisionId: second.id,
-        expectedActivationVersion: 2,
-        reason: "Restore approval-required learning",
-      },
-    });
-    expect(rollback.status).toBe(200);
-    expect(await rollback.json()).toMatchObject({
-      head: { revisionId: first.id, activationVersion: 3 },
-      event: { type: "rollback", activationVersion: 3 },
-    });
-
-    const history = await request("/learning?limit=10");
-    expect(history.status).toBe(200);
-    expect(await history.json()).toMatchObject({
-      head: { revisionId: first.id, activationVersion: 3 },
-      revisions: [{ id: second.id }, { id: first.id }],
-      policyEvents: [
-        { type: "rollback", activationVersion: 3 },
-        { type: "activate", activationVersion: 2 },
-        { type: "activate", activationVersion: 1 },
-      ],
-      effectiveBoundary: "next_accepted_attempt",
+    for (const path of [
+      "/learning/revisions",
+      "/learning/revisions/00000000-0000-4000-8000-000000000001/activate",
+      "/learning/rollback",
+    ]) {
+      const retired = await request(path, { method: "POST", body: {} });
+      expect(retired.status).toBe(410);
+      expect(await retired.json()).toMatchObject({ error: { code: "learning_settings_replaced" } });
+    }
+    expect(await (await request("/learning")).json()).toMatchObject({
+      head: null,
+      revisions: [],
+      policyEvents: [],
     });
   });
 });

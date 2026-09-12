@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 export const BundledSkillId = z.enum([
+  "builtin:opengeni-visualize",
+  "builtin:document-parsing",
   "builtin:opengeni-skills",
   "builtin:opengeni-projects",
   "builtin:opengeni-documents",

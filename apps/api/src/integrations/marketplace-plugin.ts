@@ -5,7 +5,7 @@ import { HTTPException } from "hono/http-exception";
 /** Adapt only indexed portable components. Never silently drop required components. */
 export function marketplacePlugin(url: string) {
   const source = snapshot.sources.find((candidate) =>
-    candidate.entries.some((item) => item.sourceUrl === url),
+    candidate.entries.some((entry) => entry.sourceUrl === url),
   );
   const item = source?.entries.find((candidate) => candidate.sourceUrl === url);
   if (!item || !source) return null;

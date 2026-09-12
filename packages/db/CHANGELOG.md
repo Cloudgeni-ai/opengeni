@@ -1,5 +1,32 @@
 # @opengeni/db
 
+## 5.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Minor Changes
+
+- ad9dc2f: Add a non-provisioning external identity lookup and opt-in, operation-keyed service workspace onboarding. Cancellation-bearing revocation reuses native membership teardown and the organization-workspace receipt ledger to fence a delayed grant, including when no membership exists yet. Legacy unkeyed onboarding remains unchanged and cannot be fenced retroactively.
+- da4a85f: Add native organization-admin MCP credential resolver registration by stable workspace externalSource. Support encrypted, idempotent generation-checked endpoint/secret rotation and revocation with fail-closed namespace routing and live physical-use fencing. Existing accepted participant, schedule and child authority remains unchanged. Migration 0463 requires maintenance and matching API/worker binaries.
+
+### Patch Changes
+
+- 50ac837: Add explicit accepted-turn host binding selection for shared conversations. Capture each participant's exact owner delegation without changing the configured destination or borrowing creator credentials, preserve fixed bindings and scheduled/child live authority checks, and apply session-local server configuration to follow-up selection. Document the supported empty-session then first-text admission flow.
+- 71fd840: Accept Microsoft's token responses that omit offline_access from access-token scopes. Require a refresh token as proof of offline access, preserve that capability after refresh, and continue rejecting missing resource permissions.
+- 123cf57: Make agent-authored workspace instruction changes non-destructive: append new rules by default, require one exact anchor for edits or removals, and reserve complete replacement for an explicit mode while preserving baseline conflict checks and instruction budgets.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/config@1.2.1
+  - @opengeni/codemode@0.5.8
+  - @opengeni/codex@0.2.23
+
 ## 4.4.0
 
 ### Minor Changes

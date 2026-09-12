@@ -12,7 +12,7 @@ import {
   publishedHtmlArtifactDocument,
   type PublishedHtmlArtifactToolBridge,
 } from "@opengeni/react/artifacts";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,14 @@ export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument }
 
 export function ArtifactSandbox(props: {
   html: string;
+  height?: number;
+  autoHeight?: boolean;
+  theme?: "light" | "dark";
+  headerControls?: ReactNode;
   title: string;
+  /** Hide the visible title/icon while retaining the accessible iframe title. */
+  showTitle?: boolean;
+  showLiveStatus?: boolean;
   versionLabel?: string;
   className?: string;
   editDisabled?: boolean;
@@ -59,12 +66,15 @@ export function ArtifactSandbox(props: {
               Back
             </Button>
           ) : null}
-          {!focused ? (
+          {!focused && props.showTitle !== false ? (
             <span className="grid size-6 shrink-0 place-items-center rounded-md bg-surface-2 text-fg-muted">
               <Globe2Icon className="size-3.5" />
             </span>
           ) : null}
-          <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
+          {props.showTitle !== false && (
+            <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
+          )}
+          {props.headerControls}
           {props.versionLabel ? (
             <Badge
               variant="outline"
@@ -103,10 +113,12 @@ export function ArtifactSandbox(props: {
               <span className="sm:hidden">Edit</span>
             </Button>
           ) : null}
-          <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
-            <span className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10" />
-            Live
-          </span>
+          {props.showLiveStatus !== false && (
+            <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
+              <span className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10" />
+              Live
+            </span>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -133,6 +145,9 @@ export function ArtifactSandbox(props: {
         key={reloadKey}
         title={props.title}
         html={props.html}
+        autoHeight={props.autoHeight && !focused}
+        theme={props.theme}
+        style={!focused && props.height ? { height: props.height } : undefined}
         toolBridge={props.toolBridge}
         className={cn(
           "h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",

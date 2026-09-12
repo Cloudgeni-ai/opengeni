@@ -331,6 +331,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/session-capability-cards.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",

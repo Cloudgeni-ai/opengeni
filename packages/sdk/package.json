@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "5.1.0",
+  "version": "6.0.0",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -34,6 +34,10 @@
       "types": "./src/browser.ts",
       "default": "./src/browser.ts"
     },
+    "./site-document": {
+      "types": "./src/site-document.ts",
+      "default": "./src/site-document.ts"
+    },
     "./site": {
       "types": "./src/site.ts",
       "default": "./src/site.ts"
@@ -41,6 +45,10 @@
     "./github-repositories": {
       "types": "./src/github-repositories.ts",
       "default": "./src/github-repositories.ts"
+    },
+    "./knowledge": {
+      "types": "./src/knowledge.ts",
+      "default": "./src/knowledge.ts"
     },
     "./document-authority": {
       "types": "./src/document-authority.ts",
@@ -113,7 +121,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun ../../scripts/build-typescript-package.ts",
+    "build": "bun ../../scripts/generate-site-browser-runtime.ts && bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

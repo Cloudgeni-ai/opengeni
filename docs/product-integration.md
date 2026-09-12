@@ -107,13 +107,13 @@ conversation:
 | Support desk: each agent stays in its chat tree | `"session"` (facade default) | `false` (default) |
 | One customer's agents may reach that same user's chats | `"user"` with authenticated `asUser` identity | `"user"` |
 | A team that collaborates across chats | `"workspace"` | `"workspace"` |
-| Any of the above without Memory tools | any | `false` |
+| Any of the above with Knowledge authoring initially Off | any | `false` |
 
 `agentAccess` is enforced for agents in the single session-authorization seam:
 a session's own tree (its children and their children) is always reachable,
 peers are reachable when the caller's task scope and ordinary target authorization
-allow it. Target task scope adds no incoming restriction. `memory` selects which Memory rows the agent reads and where it saves:
-user-scoped memories use the verified user of the active turn, not an arbitrary
+allow it. Target task scope adds no incoming restriction. `memory` is the compatibility option selecting Knowledge authoring scope:
+personal entries use the verified user of the active turn, not an arbitrary
 product label or the person who first created a shared conversation. Use task
 notes for temporary conversation-tree coordination. There is no active session
 Memory scope. The facade's `user` selects the server-side `asUser()` client; the
@@ -195,8 +195,9 @@ agent attempt may read, message, and control another session in the same
 workspace only when the caller's `agentAccess` and target resource authorization allow it; the seam in
 `packages/core/src/session-authorization.ts` enforces outbound-only task scope,
 always allows a session's own tree, and filters `sessions_list` and the session
-list routes the same way. Turning `memoryEnabled` off only disables workspace
-Memory retrieval/saving; use `memoryScope` for per-session memory behavior.
+list routes the same way. Agent learning Off prevents Knowledge authoring while
+existing authorized retrieval remains available. The compatibility `memoryScope`
+field selects personal or workspace authoring; `off` initializes authoring to Off.
 
 A top-level session created by an unscoped organization service key is
 `workspace_shared`. The owning-user `user_private` / **Only me** capability
@@ -322,7 +323,6 @@ if (workspace.kind !== "shared") {
 await productBoundaries.storeOpenGeniWorkspaceId(productBoundary.id, workspace.id);
 
 await client.updateWorkspaceSettings(workspace.id, {
-  memoryEnabled: true,
   agentHumanInputEnabled: true,
 });
 

@@ -492,24 +492,19 @@ full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, the legacy prompt bytes remain unchanged.
 
-Turn acceptance freezes `memoryEnabled`, `memoryPromptMode`, and a bounded
-projection of legacy workspace instructions in one immutable turn-context
-snapshot. The first exact attempt creates a content-free selection receipt that
-binds that snapshot to the accepted logical turn. Its default `retrieval_only`
-(migration 0271; absent settings resolve to it) removes
-the broad Memory V1 working-set block. Every existing Memory kind remains
-available through explicit agent search; legacy preference and procedure rows
-are historical context rather than behavioral authority. The former
-`legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
-omits it and retains mandatory instruction policy plus the always-visible
-structured preference and configured Skill descriptors. At the ordinary model
-request boundary, metadata-only telemetry records the exact attempt, existing
-governance snapshot ids, inclusion reason, authority class, root/child role,
-UTF-8 size, and estimated tokens without recording content. Replacement
-attempts reuse the receipt, its bounded legacy Memory candidate identities, and
-the exact whole-entry subset that fit the original prompt budget. Current
-authorization, lifecycle, version, and content-hash revalidation may remove a
-rendered candidate but never add a newer or originally budget-omitted one.
+Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
+the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
+chat or scheduled-run context. Child work and replacement attempts reuse their
+producer's accepted policy. Legacy `memoryEnabled` opt-outs are converted to the
+Knowledge setting; the old setting cannot be changed after 0461.
+
+Retained Knowledge is retrieval context. It is not ambient conversation memory
+or behavioral authority. Explicit `view: "needs_review"` lets agents inspect and correct unapproved proposals without activating them. Normal search excludes pending revisions; source ACLs,
+exact evidence revisions and scope checks apply before ranking. Review-first
+saves return inactive receipts and let the turn continue. Mandatory instructions
+and Skill descriptors retain their existing governance snapshots and prompt
+composition; private company profile composition and root/child rules are unchanged.
+See [`knowledge.md`](knowledge.md) for storage, migration and review.
 
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
@@ -1927,7 +1922,7 @@ to a batch carrying other machine input restarts the no-input streak.
 Full detail in `docs/goals.md`; goals are bounded by budget/admission policy and
 explicit lifecycle control, not an inferred progress score.
 
-## Memory — three stores, three jobs
+## Conversation, audit history and retained Knowledge
 
 A session's content lives in three places. Keep them straight; reaching for the
 wrong one is the classic mistake.

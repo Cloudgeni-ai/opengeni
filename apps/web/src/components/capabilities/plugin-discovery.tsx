@@ -161,6 +161,7 @@ export function PluginDiscovery({
               .map((plugin) => (
                 <button
                   key={plugin.pluginKey}
+                  data-installed-plugin={plugin.pluginKey}
                   type="button"
                   className="og-plugin-discovery-row"
                   onClick={() => void openInstalled(plugin)}

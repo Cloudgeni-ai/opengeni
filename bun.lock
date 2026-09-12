@@ -188,6 +188,7 @@
         "@opengeni/network": "workspace:*",
         "@opengeni/observability": "workspace:*",
         "@opengeni/runtime": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
         "@opengeni/storage": "workspace:*",
         "@opengeni/tool-gateway": "workspace:*",
         "@opengeni/xai-subscription": "workspace:*",
@@ -349,6 +350,7 @@
       "version": "0.5.6",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
         "@opengeni/tool-gateway": "workspace:*",
       },
       "devDependencies": {

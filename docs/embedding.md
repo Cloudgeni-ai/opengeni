@@ -13,6 +13,28 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+### Durable participant-owned host tools
+
+For shared conversations, configure the explicit native
+`connectionRef.hostBinding: {selection: "accepted_turn"}` descriptor with
+`authoritySource: "host"`, `subjectScope: "subject"`, no `connectionId`, and the
+exact provider/scope/resource constraints. Each authenticated `asUser()` caller
+selects its own durable delegation on each accepted Send/Steer; configuration
+alone never grants use. Fixed binding references retain their exact-match rule.
+An empty `startMode: "realtime"` create has no turn and takes no selection;
+the first text `sendMessage` captures its own explicit selection normally.
+See [remote host MCP credentials](remote-mcp-credentials.md) for registration,
+selection, replay, scheduled/child inheritance and physical-use checks.
+
+Standalone embedding backends can register an organization-owned credential
+resolver with `putHostMcpResolver`, keyed by their stable workspace
+`externalSource`. Future `ensureWorkspace` calls select it without per-workspace
+configuration. Registration is service-admin-only; participant `asUser` calls
+still select their own accepted binding. Endpoint/secret rotation changes the
+transport generation, not accepted user authority. The first registration opts
+the organization into exact namespace routing with no static fallback; see the
+linked guide for the explicit legacy-migration acknowledgement.
+
 ### Skill reading in direct runtime hosts
 
 For direct `buildOpenGeniAgent` use, pass `skillActivations` to provide immutable
@@ -954,7 +976,7 @@ registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 Accepted `user.message` events intentionally have no direct turn ID. Migration
-`0460_host_export_message_attribution.sql` derives export initiator and origin
+`0461_host_export_message_attribution.sql` derives export initiator and origin
 from the exact same-account/workspace/session turn whose `trigger_event_id`
 references the message, after the accepting transaction commits its turn. It
 never derives sender authority from payload fields or the session creator.

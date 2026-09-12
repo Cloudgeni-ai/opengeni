@@ -54,7 +54,7 @@ workspace-scoped agent authority and resources. Default to:
 | Data is shared but chats are private | Per user/chat, with equivalent scoped data access |
 
 A live agent with the relevant first-party session tools can reach unrelated
-sessions in the same workspace. Turning workspace Memory off does not change
+sessions in the same workspace. Turning Knowledge authoring off does not change
 that. Removing all unnecessary cross-session and workspace-wide tools is useful
 defense in depth for an explicitly softer design, but a hard requirement needs
 separate workspaces.

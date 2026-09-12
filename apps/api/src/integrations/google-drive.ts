@@ -1,3 +1,8 @@
+import {
+  scheduledTaskKnowledgeSource,
+  requireScheduledTaskKnowledgeSource,
+  knowledgeSourceAgentConfig,
+} from "@opengeni/contracts";
 import { createHash, randomBytes } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "./connect-authority";
@@ -188,7 +193,7 @@ export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
   );
   let triggered = 0;
   for (const task of tasks) {
-    if (task.action.kind !== "knowledge_source_sync" || task.status !== "active") continue;
+    if (!scheduledTaskKnowledgeSource(task) || task.status !== "active") continue;
     const externalSourceId =
       typeof task.metadata.externalSourceId === "string" ? task.metadata.externalSourceId : null;
     const selectedSource = externalSourceId ? selectedById.get(externalSourceId) : null;
@@ -808,20 +813,20 @@ async function deauthorizeGoogleDriveConnectionSources(
     connection.workspaceId,
     connection.id,
     async (task) => {
-      if (task.action.initiatingSubjectId !== subjectId) return;
+      if (requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== subjectId) return;
       const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
         accountId: task.accountId,
         workspaceId: task.workspaceId,
-        sourceId: task.action.sourceId,
+        sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
         initiatingSubjectId: subjectId,
       });
       if (!resolved || resolved.source.lifecycleState !== "active") return;
       await deauthorizeKnowledgeSourceRetrieval(deps.db, {
         accountId: task.accountId,
         workspaceId: task.workspaceId,
-        sourceId: task.action.sourceId,
-        audience: task.action.destination,
-        operationId: `google-drive-deauthorize:${connection.id}:${authorityVersion}:${task.action.sourceId}:${reasonCode}`,
+        sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
+        audience: requireScheduledTaskKnowledgeSource(task).destination,
+        operationId: `google-drive-deauthorize:${connection.id}:${authorityVersion}:${requireScheduledTaskKnowledgeSource(task).sourceId}:${reasonCode}`,
         reasonCode,
         actor: {
           kind: "human",
@@ -837,7 +842,7 @@ async function forEachGoogleDriveConnectionTask(
   deps: ApiRouteDeps,
   workspaceId: string,
   connectionId: string,
-  fn: (task: ScheduledTask & { action: { kind: "knowledge_source_sync" } }) => Promise<void>,
+  fn: (task: ScheduledTask) => Promise<void>,
 ): Promise<void> {
   const tasks = await listKnowledgeSourceSyncTasksForConnection(deps.db, workspaceId, connectionId);
   for (const task of tasks) {
@@ -1393,11 +1398,11 @@ async function materializeGoogleDriveKnowledgeSchedules(
     let source = null as Awaited<ReturnType<typeof upsertKnowledgeSource>> | null;
     let existingTask = null as (typeof connectionTasks)[number] | null;
     for (const task of connectionTasks) {
-      if (task.action.kind !== "knowledge_source_sync") continue;
+      if (!scheduledTaskKnowledgeSource(task)) continue;
       const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        sourceId: task.action.sourceId,
+        sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
         initiatingSubjectId: input.subjectId,
       });
       if (resolved?.source.externalSourceId !== identity.externalSourceId) continue;
@@ -1499,7 +1504,10 @@ async function materializeGoogleDriveKnowledgeSchedules(
       task = await updateScheduledTask(deps.db, input.workspaceId, existingTask.id, {
         name: `Sync Google Drive: ${selectedSource.name}`,
         overlapPolicy: "buffer_one",
-        action,
+        action: { kind: "agent_turn" },
+        agentConfig: knowledgeSourceAgentConfig(action, existingTask.agentConfig),
+        refreshPersonalResourceAuthority: true,
+        authorityUpdatedBy: { kind: "subject", subjectId: input.subjectId },
         metadata: {
           ...existingTask.metadata,
           connectorKind: "google_drive",
@@ -1531,16 +1539,11 @@ async function materializeGoogleDriveKnowledgeSchedules(
           status: "active",
           schedule,
           overlapPolicy: "buffer_one",
-          action,
+          action: { kind: "agent_turn" },
           runMode: "new_session_per_run",
           targetSessionId: null,
           connectionAuthorities: [],
-          agentConfig: {
-            prompt: "Knowledge source synchronization",
-            resources: [],
-            tools: [],
-            metadata: {},
-          },
+          agentConfig: knowledgeSourceAgentConfig(action),
           variableSetId: null,
           environmentId: null,
           rigId: null,
@@ -1565,11 +1568,11 @@ async function materializeGoogleDriveKnowledgeSchedules(
   }
 
   for (const task of connectionTasks) {
-    if (task.action.kind !== "knowledge_source_sync") continue;
+    if (!scheduledTaskKnowledgeSource(task)) continue;
     const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sourceId: task.action.sourceId,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
       initiatingSubjectId: input.subjectId,
     });
     if (!resolved || enabledIds.has(resolved.source.externalSourceId)) continue;
@@ -1613,10 +1616,10 @@ export async function preflightKnowledgeSourceScheduleAuthorization(
   input: { task: ScheduledTask; subjectId: string },
 ): Promise<void> {
   const { task } = input;
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (
-    task.action.initiatingSubjectId !== input.subjectId ||
-    task.action.connection.ownerSubjectId !== input.subjectId
+    requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
+    requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId
   ) {
     throw new HTTPException(403, {
       message: "knowledge source schedule requires the exact initiating subject",
@@ -1642,10 +1645,10 @@ export async function revokeKnowledgeSourceScheduleAuthorization(
   input: { task: ScheduledTask; subjectId: string },
 ): Promise<void> {
   const { task } = input;
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (
-    task.action.initiatingSubjectId !== input.subjectId ||
-    task.action.connection.ownerSubjectId !== input.subjectId
+    requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
+    requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId
   ) {
     throw new HTTPException(403, {
       message: "knowledge source schedule requires the exact initiating subject",
@@ -1665,11 +1668,11 @@ export async function revokeKnowledgeSourceScheduleAuthorization(
     taskId: task.id,
     accountId: task.accountId,
     workspaceId: task.workspaceId,
-    connectionId: task.action.connection.connectionId,
-    connectionVersion: task.action.connection.connectionVersion,
-    sourceId: task.action.sourceId,
-    sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
-    sourceConfigGeneration: task.action.sourceConfigGeneration,
+    connectionId: requireScheduledTaskKnowledgeSource(task).connection.connectionId,
+    connectionVersion: requireScheduledTaskKnowledgeSource(task).connection.connectionVersion,
+    sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
+    sourceLifecycleGeneration: requireScheduledTaskKnowledgeSource(task).sourceLifecycleGeneration,
+    sourceConfigGeneration: requireScheduledTaskKnowledgeSource(task).sourceConfigGeneration,
     externalSourceId,
     subjectId: input.subjectId,
   });

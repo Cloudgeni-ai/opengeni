@@ -594,3 +594,52 @@
 @media (prefers-reduced-motion: reduce) {
   .og-genie-phrase { animation: none; }
 }
+
+/* A single softly lit reel: motion stays inside the header's fixed footprint. */
+.og-rolling-status { display:flex; align-items:center; gap:12px; min-width:0; width:100%; }
+.og-rolling-window { position:relative; display:block; flex:1; min-width:0; height:24px; overflow:hidden;  }
+.og-rolling-face { position:absolute; inset:0; display:flex; align-items:center;  }
+.og-rolling-label { display:flex; align-items:center; gap:8px; min-width:0; width:100%; font-size:13px; font-weight:450; line-height:20px; color:var(--og-color-fg-muted); }
+.og-rolling-label > svg { flex-shrink:0; }
+.og-rolling-count { flex-shrink:0; font-size:11px; color:var(--og-color-fg-subtle); font-variant-numeric:tabular-nums; }
+
+/* The complete text line rolls as one surface, without moving its layout box. */
+.og-command-reel { display:flex; flex:1; align-items:center; gap:8px; min-width:0; transform-origin:50% 50%; }
+/* Render reasoning Markdown as one clipped preview; full formatting lives inside. */
+.og-reasoning-preview,
+.og-reasoning-preview :is(div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,blockquote,pre) {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+.og-reasoning-preview br { display: none; }
+.og-reasoning-preview :is(p,li,h1,h2,h3,h4)::after { content: " "; }
+
+/* Details consume leftover width; they never push the activity name away. */
+.og-reel-title { flex:0 0 auto; min-width:0; max-width:75%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.og-reel-title:only-child { max-width:100%; }
+.og-reel-preview { flex:1 1 0%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* Focused beam: one shared light source clipped to the entire text row. */
+.og-command-reel-running,
+.og-rolling-status[data-running="true"] .og-command-reel {
+  background-image:linear-gradient(90deg, light-dark(#898c94,#686b76) 42%, light-dark(#f0f1f4,#fff) 50%, light-dark(#898c94,#686b76) 58%);
+  background-size:300% 100%;
+  background-position:100% 0;
+  background-clip:text;
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  animation:og-activity-sweep 3.6s linear infinite;
+}
+@keyframes og-activity-sweep {
+  from { background-position:100% 0; }
+  to { background-position:0% 0; }
+}
+@media (prefers-reduced-motion:reduce), (forced-colors:active) {
+ .og-command-reel-running,
+ .og-rolling-status[data-running="true"] .og-command-reel {
+   animation:none; background:none; -webkit-text-fill-color:currentColor;
+ }
+}

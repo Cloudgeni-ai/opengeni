@@ -17,6 +17,7 @@ import type {
   TurnInitiator,
   TurnInitiatorContext,
 } from "@opengeni/contracts";
+import { hostMcpCredentialUseGuard } from "@opengeni/contracts";
 import {
   ConnectionUseAuthoritySnapshot,
   type ConnectionUseAttribution,
@@ -48,6 +49,7 @@ import type {
   AcceptedConnectionUseResolution,
 } from "./connection-authority";
 import { connectionScopeKey } from "./connection-scopes";
+import { hostMcpBindingMatchesSelection } from "@opengeni/contracts/host-mcp-bindings";
 
 const MAX_CREDENTIAL_PLACEMENTS = 32;
 const MAX_CREDENTIAL_NAME_BYTES = 256;
@@ -193,6 +195,10 @@ export type HostMcpCredentialResolverContext = {
   /** Backend-owned live validator. Never populate from caller JSON or a host
    * credential response. Omission denies every explicit durable reference. */
   authorizeDurableBinding?: (request: McpCredentialsRequest) => Promise<boolean>;
+  /** Backend-only accepted-work lookup, not a host response or registry fallback. */
+  resolveAcceptedBinding?: (
+    request: McpCredentialsRequest,
+  ) => Promise<McpServerConnectionRef | null>;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -325,8 +331,8 @@ export function buildHostConnectionTokenResolver(
       ...(toolName ? { toolName } : {}),
       ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
     };
-    const snapshot = structuredClone(request);
-    const requestedRef = structuredClone(input.connectionRef);
+    // Freeze configuration before any asynchronous authority lookup.
+    let requestedRef = structuredClone(request.connectionRef);
     const credentialTarget = input.credentialTarget ?? "mcp";
     const durableDenial = (
       reason: McpCredentialAuthNeededReason,
@@ -337,6 +343,32 @@ export function buildHostConnectionTokenResolver(
       authoritySource: "host",
       ...(requestedRef.connectionId ? { connectionId: requestedRef.connectionId } : {}),
     });
+    if (requestedRef.hostBinding && "selection" in requestedRef.hostBinding) {
+      if (!context.resolveAcceptedBinding || !context.authorizeDurableBinding)
+        return durableDenial("unsupported_auth");
+      try {
+        const concrete = await context.resolveAcceptedBinding(structuredClone(request));
+        if (!concrete?.hostBinding || "selection" in concrete.hostBinding)
+          return durableDenial("personal_authority_unavailable");
+        const { hostBinding, ...connectionRef } = concrete;
+        if (
+          !hostMcpBindingMatchesSelection(
+            {
+              id: hostBinding.bindingId,
+              generation: hostBinding.generation,
+              definition: { serverId: request.serverId, destinationUrl, connectionRef },
+            },
+            request,
+          )
+        )
+          return durableDenial("personal_authority_unavailable");
+        request.connectionRef = structuredClone(concrete);
+        requestedRef = structuredClone(concrete);
+      } catch {
+        return durableDenial("refresh_failed");
+      }
+    }
+    const snapshot = structuredClone(request);
     const authorized = async () => {
       try {
         if (
@@ -362,14 +394,27 @@ export function buildHostConnectionTokenResolver(
       if (denial) return durableDenial(denial);
     }
     const result = await resolve(structuredClone(snapshot));
+    const routeGuard = result.status === "ok" ? result[hostMcpCredentialUseGuard] : undefined;
+    const routeAuthorized = async () => {
+      try {
+        return routeGuard ? await routeGuard() : true;
+      } catch {
+        return false;
+      }
+    };
     if (requiresAuthorization) {
       const denial = await authorized();
       if (denial) return durableDenial(denial);
     }
+    if (routeGuard && !(await routeAuthorized())) return durableDenial("refresh_failed");
     assertHostMcpCredentialScope(result, context);
     const normalized = normalizeHostCredentialResolution(result, requestedRef, credentialTarget);
-    return normalized.status === "ok" && requiresAuthorization
-      ? { ...normalized, authorizeProviderRequest: async () => (await authorized()) === null }
+    return normalized.status === "ok" && (requiresAuthorization || routeGuard)
+      ? {
+          ...normalized,
+          authorizeProviderRequest: async () =>
+            (await authorized()) === null && (await routeAuthorized()),
+        }
       : normalized;
   };
 }
@@ -415,6 +460,14 @@ export function buildHostGatewayConnectionTokenResolver(
     await reauthorize();
     const result = await resolve(structuredClone(request));
     await reauthorize();
+    const routeGuard = result.status === "ok" ? result[hostMcpCredentialUseGuard] : undefined;
+    if (routeGuard) {
+      try {
+        if (!(await routeGuard())) return deny("refresh_failed");
+      } catch {
+        return deny("refresh_failed");
+      }
+    }
     for (const field of ["accountId", "workspaceId", "requestId"] as const) {
       if (result[field] !== request[field])
         throw new Error(`host gateway credential ${field} scope mismatch`);
@@ -430,7 +483,7 @@ export function buildHostGatewayConnectionTokenResolver(
       authorizeProviderRequest: async () => {
         try {
           await reauthorize();
-          return true;
+          return routeGuard ? await routeGuard() : true;
         } catch {
           return false;
         }
@@ -1548,6 +1601,15 @@ export async function refreshOAuthConnectionCredential(
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);
   const scopeText = stringValue(payload.scope);
   const returnedScopes = scopeText?.split(/[\s,]+/).filter(Boolean) ?? [];
+  // A successful Microsoft refresh proves offline access, although Microsoft
+  // reports only access-token permissions in the response's scope field.
+  if (
+    scopeText &&
+    ref.providerDomain.toLowerCase() === "graph.microsoft.com" &&
+    !returnedScopes.some((scope) => scope.toLowerCase() === "offline_access")
+  ) {
+    returnedScopes.push("offline_access");
+  }
   const refreshTokenExpiresIn =
     typeof payload.refresh_token_expires_in === "number"
       ? payload.refresh_token_expires_in
@@ -1574,7 +1636,14 @@ export async function refreshOAuthConnectionCredential(
       "Bearer",
     ...(expiresAt ? { expires_at: expiresAt.toISOString() } : {}),
     ...(resource ? { resource } : {}),
-    ...(scopeText ? { scope: scopeText } : {}),
+    ...(scopeText
+      ? {
+          scope:
+            ref.providerDomain.toLowerCase() === "graph.microsoft.com"
+              ? returnedScopes.join(" ")
+              : scopeText,
+        }
+      : {}),
     ...(refreshTokenExpiresAt ? { refresh_token_expires_at: refreshTokenExpiresAt } : {}),
     ...(clientSecret && !personalGitHub
       ? { client_secret: clientSecret, token_endpoint_auth_method: authMethod }

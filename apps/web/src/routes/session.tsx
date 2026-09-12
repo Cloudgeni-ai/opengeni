@@ -1,3 +1,4 @@
+import { retainedImageId } from "@opengeni/react";
 import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
@@ -15,7 +16,11 @@ import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-b
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
-import { MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
+import {
+  MessageTimeline,
+  SessionChrome,
+  KnowledgeActivityProvider,
+} from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,
@@ -153,6 +158,17 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const InlineChatImage = lazy(() =>
+  import("@/components/artifacts/inline-chat-image").then((module) => ({
+    default: module.InlineChatImage,
+  })),
+);
+const ChatInteractiveBlock = lazy(() =>
+  import("@/components/artifacts/chat-interactive-block").then((module) => ({
+    default: module.ChatInteractiveBlock,
+  })),
+);
 
 const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
 const SessionCommands = lazy(() =>
@@ -1537,7 +1553,14 @@ function SessionChatPane(props: {
   );
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
-  const attachments = useFileAttachments();
+  const attachments = useFileAttachments({
+    scope:
+      props.session.tenancy?.visibility === "private" ||
+      props.session.memoryScope === "user" ||
+      context.workspaces.find((w) => w.id === props.session.workspaceId)?.kind === "personal"
+        ? "personal"
+        : "workspace",
+  });
   const repositories = useFollowUpRepositories(props.session);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
@@ -2139,6 +2162,31 @@ function SessionChatPane(props: {
     ],
   );
 
+  const renderImage = useCallback(
+    (image: { src: string; alt: string }) => {
+      const artifactId = retainedImageId(image.src);
+      return artifactId ? (
+        <Suspense fallback={<span role="status">Loading image…</span>}>
+          <InlineChatImage
+            key={props.session.workspaceId + ":" + artifactId}
+            workspaceId={props.session.workspaceId}
+            artifactId={artifactId}
+            alt={image.alt}
+          />
+        </Suspense>
+      ) : null;
+    },
+    [props.session.workspaceId],
+  );
+  const renderInteractiveBlock = useCallback(
+    (block: { kind: "html" | "site"; content: string }) => (
+      <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <ChatInteractiveBlock workspaceId={props.session.workspaceId} {...block} />
+      </Suspense>
+    ),
+    [props.session.workspaceId],
+  );
+
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
@@ -2150,11 +2198,13 @@ function SessionChatPane(props: {
             text={text}
             streaming={item.streaming}
             onSandboxFile={props.onOpenSandboxFile}
+            renderInteractiveBlock={renderInteractiveBlock}
+            renderImage={renderImage}
           />
         </div>
       );
     },
-    [props.onOpenSandboxFile, props.session.workspaceId],
+    [props.onOpenSandboxFile, props.session.workspaceId, renderInteractiveBlock, renderImage],
   );
 
   return createElement(
@@ -2230,96 +2280,112 @@ function SessionChatPane(props: {
             </FailureRecoveryBoundary>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-            <MessageTimeline
-              key={props.session.id}
-              className="h-full"
-              items={timelineWithOptimisticSends}
-              events={props.events}
-              status={props.session.status}
-              computeLabel={computeLabel}
-              renderMessageText={renderMessageText}
-              renderMessageActions={renderMessageActions}
-              onAnnotate={composer.addAnnotation}
-              draftAnnotations={composer.annotations}
-              onDraftAnnotationSelect={composer.requestAnnotationReview}
-              onOpenSession={props.onOpenSession}
-              onMemoryClick={props.onMemoryClick}
-              onReconnect={props.onReconnect}
-              renderAuthNeeded={renderAuthNeeded}
-              resolveProviderLogo={props.resolveProviderLogo}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-              hasOlder={props.hasOlder}
-              loadingOlder={props.loadingOlder}
-              onLoadOlder={props.onLoadOlder}
-              hasNewer={props.hasNewer}
-              loadingNewer={props.loadingNewer}
-              onLoadNewer={props.onLoadNewer}
-              loadingOldest={props.loadingOldest}
-              onJumpToStart={async () => {
-                await props.onJumpToStart();
-              }}
-              onJumpToLatest={props.onJumpToLatest}
-              trailingState={
-                props.humanInput.requests.length > 0 &&
-                props.session.status === "requires_action" ? (
-                  <div className="pb-1" data-human-input-timeline-surface="">
-                    <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                      <HumanInputSurface
-                        loadSkillReview={loadSkillReview}
-                        requests={props.humanInput.requests}
-                        respondingRequestId={props.humanInput.respondingRequestId}
-                        error={props.humanInput.mutationError?.message}
-                        onSubmit={(requestId, response) =>
-                          props.humanInput.respond(requestId, response).then(() => undefined)
-                        }
-                      />
-                    </Suspense>
-                  </div>
-                ) : undefined
-              }
-              emptyState={
-                props.queue.stoppingPreviousAttempt ? (
-                  <EmptyState
-                    className="min-h-[24rem]"
-                    icon={
-                      <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                    }
-                    title={
-                      props.queue.effectiveControl?.state === "paused"
-                        ? "Stopping current work"
-                        : "Stopping previous work"
-                    }
-                    description={
-                      props.queue.effectiveControl?.state === "paused"
-                        ? "Waiting for the current command to stop safely. Queued work stays saved."
-                        : "Your direction is saved. It starts after the previous command stops safely."
-                    }
-                  />
-                ) : props.initialLoading ? (
-                  // History is still fetching — a quiet shimmer, not the
-                  // "waiting for the first step" copy (that's for NEW sessions).
-                  <div className="grid min-h-[24rem] place-items-center text-sm">
-                    <span className="og-shimmer-text font-medium">Loading conversation…</span>
-                  </div>
-                ) : (
-                  <EmptyState
-                    className="min-h-[24rem]"
-                    icon={
-                      props.session.status === "running" ||
-                      props.session.status === "recovering" ? (
-                        <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                      ) : (
-                        <MessagesSquareIcon className="size-4" />
-                      )
-                    }
-                    title={timelineEmptyStateCopy.title}
-                    description={timelineEmptyStateCopy.description}
-                  />
+            <KnowledgeActivityProvider
+              onInspect={props.onMemoryClick}
+              onRetryFile={(fileId) =>
+                composer.send(
+                  `Retry searchable source preparation for attached file ${fileId}. Use knowledge_retain_file and report its result.`,
                 )
               }
-            />
+              retryDisabled={
+                composer.hasDraftContent() ||
+                composer.sending ||
+                composer.draftLoading ||
+                !hasComposerPolicy
+              }
+            >
+              <MessageTimeline
+                turnSummary={{ rolling: true }}
+                key={props.session.id}
+                className="h-full"
+                items={timelineWithOptimisticSends}
+                events={props.events}
+                status={props.session.status}
+                computeLabel={computeLabel}
+                renderMessageText={renderMessageText}
+                renderMessageActions={renderMessageActions}
+                onAnnotate={composer.addAnnotation}
+                draftAnnotations={composer.annotations}
+                onDraftAnnotationSelect={composer.requestAnnotationReview}
+                onOpenSession={props.onOpenSession}
+                onMemoryClick={props.onMemoryClick}
+                onReconnect={props.onReconnect}
+                renderAuthNeeded={renderAuthNeeded}
+                resolveProviderLogo={props.resolveProviderLogo}
+                loadRetainedScreenshot={loadRetainedScreenshot}
+                loadRetainedArtifact={loadRetainedArtifact}
+                loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                hasOlder={props.hasOlder}
+                loadingOlder={props.loadingOlder}
+                onLoadOlder={props.onLoadOlder}
+                hasNewer={props.hasNewer}
+                loadingNewer={props.loadingNewer}
+                onLoadNewer={props.onLoadNewer}
+                loadingOldest={props.loadingOldest}
+                onJumpToStart={async () => {
+                  await props.onJumpToStart();
+                }}
+                onJumpToLatest={props.onJumpToLatest}
+                trailingState={
+                  props.humanInput.requests.length > 0 &&
+                  props.session.status === "requires_action" ? (
+                    <div className="pb-1" data-human-input-timeline-surface="">
+                      <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                        <HumanInputSurface
+                          loadSkillReview={loadSkillReview}
+                          requests={props.humanInput.requests}
+                          respondingRequestId={props.humanInput.respondingRequestId}
+                          error={props.humanInput.mutationError?.message}
+                          onSubmit={(requestId, response) =>
+                            props.humanInput.respond(requestId, response).then(() => undefined)
+                          }
+                        />
+                      </Suspense>
+                    </div>
+                  ) : undefined
+                }
+                emptyState={
+                  props.queue.stoppingPreviousAttempt ? (
+                    <EmptyState
+                      className="min-h-[24rem]"
+                      icon={
+                        <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                      }
+                      title={
+                        props.queue.effectiveControl?.state === "paused"
+                          ? "Stopping current work"
+                          : "Stopping previous work"
+                      }
+                      description={
+                        props.queue.effectiveControl?.state === "paused"
+                          ? "Waiting for the current command to stop safely. Queued work stays saved."
+                          : "Your direction is saved. It starts after the previous command stops safely."
+                      }
+                    />
+                  ) : props.initialLoading ? (
+                    // History is still fetching — a quiet shimmer, not the
+                    // "waiting for the first step" copy (that's for NEW sessions).
+                    <div className="grid min-h-[24rem] place-items-center text-sm">
+                      <span className="og-shimmer-text font-medium">Loading conversation…</span>
+                    </div>
+                  ) : (
+                    <EmptyState
+                      className="min-h-[24rem]"
+                      icon={
+                        props.session.status === "running" ||
+                        props.session.status === "recovering" ? (
+                          <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                        ) : (
+                          <MessagesSquareIcon className="size-4" />
+                        )
+                      }
+                      title={timelineEmptyStateCopy.title}
+                      description={timelineEmptyStateCopy.description}
+                    />
+                  )
+                }
+              />
+            </KnowledgeActivityProvider>
           </div>
         </>
       )}
@@ -2467,6 +2533,17 @@ function SessionChatPane(props: {
             controlsLeading={
               <>
                 <ComposerMobilePlus
+                  chatSettings={{
+                    workspaceId: props.session.workspaceId,
+                    sessionId: props.session.id,
+                    scope:
+                      props.session.tenancy?.visibility === "private" ||
+                      props.session.memoryScope === "user" ||
+                      isPersonalWorkspace(workspace, context.managedSelfContext)
+                        ? "personal"
+                        : "workspace",
+                    canEdit: workspacePermissions.includes("sessions:control"),
+                  }}
                   disabled={terminal || composer.sending}
                   fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                   servers={selectableSessionMcpServers}

@@ -42,3 +42,22 @@ export function siteSessionPath(
   }
   return rewritten;
 }
+
+/** Preserve SDK request semantics while the host supplies identity and transport headers. */
+export function siteRequestHeaders(input: HeadersInit): Headers {
+  const headers = new Headers(input);
+  const connectionHeaders = (headers.get("connection") ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase());
+  for (const name of [...headers.keys()]) {
+    if (
+      connectionHeaders.includes(name) ||
+      /^(authorization|proxy-authorization|cookie|cookie2|host|origin|referer|connection|keep-alive|proxy-connection|te|trailer|transfer-encoding|upgrade|content-length|accept-encoding|forwarded|x-api-key)$/i.test(
+        name,
+      ) ||
+      /^(sec-|x-forwarded-|x-opengeni-(access-key|external-actor|site-|managed-actor))/i.test(name)
+    )
+      headers.delete(name);
+  }
+  return headers;
+}

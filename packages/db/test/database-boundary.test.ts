@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import * as database from "../src/database";
+import * as membershipAccess from "../src/workspace-membership-access";
 import * as root from "../src/index";
 import type {
   CreateDbOptions as RootCreateDbOptions,
@@ -40,6 +41,8 @@ describe("database foundation boundary", () => {
 
   test("keeps the existing root runtime and type surface compatible", () => {
     expect(root.createDb).toBe(database.createDb);
+    expect(root.grantWorkspaceAccess).toBe(membershipAccess.grantWorkspaceAccess);
+    expect(root.listWorkspaceMembers).toBe(membershipAccess.listWorkspaceMembers);
     expect(root.registerDbBinding).toBe(database.registerDbBinding);
     expect(root.rlsContextForWorkspace).toBe(database.rlsContextForWorkspace);
     expect(root.rlsStrategyFor).toBe(database.rlsStrategyFor);

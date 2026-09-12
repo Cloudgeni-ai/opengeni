@@ -1,4 +1,24 @@
 import type {
+  KnowledgeOriginalFileDownload,
+  AgentLearningContext,
+  AgentLearningSettingsRecord,
+  AgentLearningOverrideRecord,
+  SaveAgentLearningSettingsRequest,
+  KnowledgeEntryListRequest,
+  KnowledgeEntryListResponse,
+  KnowledgeReviewBatchListRequest,
+  KnowledgeReviewBatchListResponse,
+  KnowledgeEntryRecord,
+  KnowledgeEntrySaveRequest,
+  KnowledgeEntryWriteReceipt,
+  KnowledgeEntryReviewRequest,
+  KnowledgeEntryBatchReviewRequest,
+  KnowledgeEntryRestoreRequest,
+  AgentInstructionReviewRequest,
+  AgentInstructionReceipt,
+  AgentInstructionReviewListResponse,
+} from "./knowledge";
+import type {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifactDetailResponse,
@@ -247,7 +267,6 @@ import type {
   CreateFileUploadResponse,
   CreateGitHubAppManifestRequest,
   CreateGitHubAppManifestResponse,
-  CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -269,8 +288,6 @@ import type {
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
-  DocumentSearchRequest,
-  DocumentSearchResponse,
   EnableCapabilityRequest,
   EnablePackRequest,
   FileAsset,
@@ -284,8 +301,6 @@ import type {
   GoogleDriveDisconnectRequest,
   SaveGoogleDriveIntegrationSourceRequest,
   GoogleDriveLifecycleActionRequest,
-  KnowledgeMemory,
-  KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListOrganizationSessionsOptions,
   ListManagedOrganizationMembershipsResponse,
@@ -478,7 +493,6 @@ import type {
   TranscriptionRecordingResponse,
   UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
-  UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   ApplySessionGoalRevisionRequest,
@@ -506,8 +520,6 @@ import type {
   ProposeRigChangeRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-  WorkspaceMemorySearchRequest,
-  WorkspaceMemorySearchResponse,
   WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
@@ -545,14 +557,9 @@ import type {
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
 import type {
-  ActivateWorkspaceLearningPolicyRevisionRequest,
-  CreateWorkspaceLearningPolicyRevisionRequest,
   GovernedLearningActivationUndoReceipt,
-  RollbackWorkspaceLearningPolicyRevisionRequest,
   WorkspaceLearningHistoryOptions,
   WorkspaceLearningHistoryResponse,
-  WorkspaceLearningPolicyMutationResponse,
-  WorkspaceLearningPolicyRevision,
 } from "./workspace-learning";
 import type {
   ActivateCompanyProfileRevisionRequest,
@@ -572,7 +579,6 @@ import type {
   WorkspaceStateGetOptions,
   WorkspaceStateResponse,
 } from "./workspace-state";
-import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -5042,28 +5048,6 @@ export class OpenGeniClient {
     );
   }
 
-  /** Permission-filtered Company Brain package with authorized guidance bodies. */
-  getCompanyBrain(workspaceId: string): Promise<CompanyBrainOkfPackage> {
-    return this.requestJson<CompanyBrainOkfPackage>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/company-brain`,
-    );
-  }
-
-  /** Download the deterministic Markdown/YAML Company Brain package. */
-  async exportCompanyBrainOkf(workspaceId: string): Promise<CompanyBrainOkfDownload> {
-    const response = await this.requestResponse(
-      "GET",
-      `/v1/workspaces/${workspaceId}/company-brain/export`,
-    );
-    const headers = response.headers;
-    return {
-      content: await response.text(),
-      contentType: headers.get("content-type") ?? "text/markdown",
-      filename: headers.get("content-disposition")?.split('"')[1] ?? "company-brain.okf.md",
-    };
-  }
-
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
   }
@@ -5099,40 +5083,6 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceLearningHistoryResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/learning${query ? `?${query}` : ""}`,
-    );
-  }
-
-  async createWorkspaceLearningPolicyRevision(
-    workspaceId: string,
-    request: CreateWorkspaceLearningPolicyRevisionRequest,
-  ): Promise<WorkspaceLearningPolicyRevision> {
-    return await this.requestJson<WorkspaceLearningPolicyRevision>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/learning/revisions`,
-      request,
-    );
-  }
-
-  async activateWorkspaceLearningPolicyRevision(
-    workspaceId: string,
-    revisionId: string,
-    request: ActivateWorkspaceLearningPolicyRevisionRequest,
-  ): Promise<WorkspaceLearningPolicyMutationResponse> {
-    return await this.requestJson<WorkspaceLearningPolicyMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/learning/revisions/${encodeURIComponent(revisionId)}/activate`,
-      request,
-    );
-  }
-
-  async rollbackWorkspaceLearningPolicyRevision(
-    workspaceId: string,
-    request: RollbackWorkspaceLearningPolicyRevisionRequest,
-  ): Promise<WorkspaceLearningPolicyMutationResponse> {
-    return await this.requestJson<WorkspaceLearningPolicyMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/learning/rollback`,
-      request,
     );
   }
 
@@ -6092,6 +6042,7 @@ export class OpenGeniClient {
           {
             filename: input.filename,
             contentType: input.contentType,
+            ...(input.scope ? { scope: input.scope } : {}),
             sizeBytes,
             sha256,
           },
@@ -6129,6 +6080,20 @@ export class OpenGeniClient {
     return await withTimeout(
       30_000,
       async (signal) => await this.completeFileUpload(workspaceId, upload.uploadId, { signal }),
+    );
+  }
+
+  async listFiles(
+    workspaceId: string,
+    options: import("./types").FileListRequest = {},
+  ): Promise<import("./types").FileListResponse> {
+    const query = new URLSearchParams();
+    if (options.scope) query.set("scope", options.scope);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.cursor) query.set("cursor", options.cursor);
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/files${query.size ? `?${query}` : ""}`,
     );
   }
 
@@ -6442,13 +6407,6 @@ export class OpenGeniClient {
     );
   }
 
-  async listDocumentBases(workspaceId: string): Promise<DocumentBase[]> {
-    return await this.requestJson<DocumentBase[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-bases`,
-    );
-  }
-
   async getDocumentBase(workspaceId: string, baseId: string): Promise<DocumentBase> {
     return await this.requestJson<DocumentBase>(
       "GET",
@@ -6476,31 +6434,11 @@ export class OpenGeniClient {
     );
   }
 
-  /**
-   * List every Document the current human can manage from this workspace,
-   * including portable personal and organization-scoped Documents whose
-   * immutable ingestion workspace is different.
-   */
-  async listAccessibleDocuments(workspaceId: string): Promise<Document[]> {
-    return await this.requestJson<Document[]>("GET", `/v1/workspaces/${workspaceId}/documents`);
-  }
-
   /** Read the immutable source file through the Document's effective authority. */
   async getDocumentOriginalFile(workspaceId: string, documentId: string): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
       `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file`,
-    );
-  }
-
-  /** Mint a source-file URL through the Document's effective authority. */
-  async createDocumentOriginalFileDownloadUrl(
-    workspaceId: string,
-    documentId: string,
-  ): Promise<FileDownloadUrlResponse> {
-    return await this.requestJson<FileDownloadUrlResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/documents/${documentId}/original-file/download-url`,
     );
   }
 
@@ -6537,18 +6475,6 @@ export class OpenGeniClient {
     );
   }
 
-  /** Retry indexing for a failed document. */
-  async reindexDocument(
-    workspaceId: string,
-    baseId: string,
-    documentId: string,
-  ): Promise<Document> {
-    return await this.requestJson<Document>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents/${documentId}/reindex`,
-    );
-  }
-
   /**
    * Delete a document from a base. Removes the document row and its indexed
    * chunks while leaving the uploaded file asset available for other uses.
@@ -6560,85 +6486,180 @@ export class OpenGeniClient {
     );
   }
 
-  async searchDocuments(
+  /** Unified retained sources, findings and groups. Only published entries are returned by default. */
+  async listKnowledgeEntries(
     workspaceId: string,
-    baseId: string,
-    request: Omit<DocumentSearchRequest, "baseIds">,
-  ): Promise<DocumentSearchResponse> {
-    return await this.requestJson<DocumentSearchResponse>(
+    request: KnowledgeEntryListRequest = {},
+  ): Promise<KnowledgeEntryListResponse> {
+    return this.requestJson(
       "POST",
-      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/search`,
+      `/v1/workspaces/${workspaceId}/knowledge/entries/search`,
       request,
     );
   }
 
-  async searchKnowledge(
+  async getKnowledgeEntry(
     workspaceId: string,
-    request: DocumentSearchRequest,
-  ): Promise<DocumentSearchResponse> {
-    return await this.requestJson<DocumentSearchResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/knowledge/search`,
-      request,
-    );
-  }
-
-  async listKnowledgeMemories(
-    workspaceId: string,
-    request: KnowledgeMemorySearchRequest = {},
-  ): Promise<KnowledgeMemory[]> {
-    const params = new URLSearchParams();
-    if (request.query) params.set("query", request.query);
-    if (request.status) params.set("status", request.status);
-    if (request.kind) params.set("kind", request.kind);
-    if (request.scope) params.set("scope", request.scope);
-    if (request.limit) params.set("limit", String(request.limit));
-    const query = params.toString();
-    return await this.requestJson<KnowledgeMemory[]>(
+    entryId: string,
+    options: {
+      revisionId?: string;
+      view?: "published" | "needs_review" | "archived" | "rejected";
+    } = {},
+  ): Promise<KnowledgeEntryRecord> {
+    const search = new URLSearchParams();
+    if (options.revisionId !== undefined) search.set("revisionId", options.revisionId);
+    if (options.view !== undefined) search.set("view", options.view);
+    const query = search.toString();
+    return this.requestJson(
       "GET",
-      `/v1/workspaces/${workspaceId}/knowledge/memories${query ? `?${query}` : ""}`,
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}${query ? `?${query}` : ""}`,
     );
   }
 
-  async getKnowledgeMemory(workspaceId: string, memoryId: string): Promise<KnowledgeMemory> {
-    return await this.requestJson<KnowledgeMemory>(
+  /** Open the original file associated with an accessible retained source revision. */
+  async createKnowledgeFileDownloadUrl(
+    workspaceId: string,
+    entryId: string,
+    revisionId?: string,
+  ): Promise<KnowledgeOriginalFileDownload> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}/file/download-url`,
+      revisionId ? { revisionId } : {},
+    );
+  }
+
+  async saveKnowledgeEntry(
+    workspaceId: string,
+    request: KnowledgeEntrySaveRequest,
+  ): Promise<KnowledgeEntryWriteReceipt> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/knowledge/entries`, request);
+  }
+
+  async reviewKnowledgeEntry(
+    workspaceId: string,
+    request: KnowledgeEntryReviewRequest,
+  ): Promise<KnowledgeEntryWriteReceipt> {
+    const { entryId, ...body } = request;
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}/review`,
+      body,
+    );
+  }
+
+  async listKnowledgeReviewBatches(
+    workspaceId: string,
+    options: KnowledgeReviewBatchListRequest = {},
+  ): Promise<KnowledgeReviewBatchListResponse> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options))
+      if (value !== undefined) query.set(key, String(value));
+    return this.requestJson(
       "GET",
-      `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`,
+      `/v1/workspaces/${workspaceId}/knowledge/review-groups?${query}`,
     );
   }
 
-  async createKnowledgeMemory(
+  /** Atomically review up to 100 selected entries, including their pending dependencies. */
+  async reviewKnowledgeEntries(
     workspaceId: string,
-    request: CreateKnowledgeMemoryRequest,
-  ): Promise<KnowledgeMemory> {
-    return await this.requestJson<KnowledgeMemory>(
+    request: KnowledgeEntryBatchReviewRequest,
+  ): Promise<{ receipts: KnowledgeEntryWriteReceipt[] }> {
+    return this.requestJson(
       "POST",
-      `/v1/workspaces/${workspaceId}/knowledge/memories`,
+      `/v1/workspaces/${workspaceId}/knowledge/entries/review`,
       request,
     );
   }
 
-  async updateKnowledgeMemory(
+  async listKnowledgeEntryHistory(
     workspaceId: string,
-    memoryId: string,
-    request: UpdateKnowledgeMemoryRequest,
-  ): Promise<KnowledgeMemory> {
-    return await this.requestJson<KnowledgeMemory>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`,
-      request,
+    entryId: string,
+    beforeRevision?: number,
+  ): Promise<{
+    entries: KnowledgeEntryListResponse["entries"];
+    beforeRevision: number | null;
+  }> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}/history${beforeRevision ? `?beforeRevision=${beforeRevision}` : ""}`,
     );
   }
 
-  /** Hybrid (semantic + keyword) search over the workspace's agent-visible memory. */
-  async searchWorkspaceMemories(
+  async restoreKnowledgeEntry(
     workspaceId: string,
-    request: WorkspaceMemorySearchRequest,
-  ): Promise<WorkspaceMemorySearchResponse> {
-    return await this.requestJson<WorkspaceMemorySearchResponse>(
+    request: KnowledgeEntryRestoreRequest,
+  ): Promise<KnowledgeEntryWriteReceipt> {
+    const { entryId, ...body } = request;
+    return this.requestJson(
       "POST",
-      `/v1/workspaces/${workspaceId}/knowledge/memories/search`,
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}/restore`,
+      body,
+    );
+  }
+
+  async archiveKnowledgeEntry(
+    workspaceId: string,
+    entryId: string,
+    request: {
+      operationId: string;
+      expectedVersion: number;
+    },
+  ): Promise<KnowledgeEntryWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}/archive`,
       request,
+    );
+  }
+
+  async getAgentLearningSettings(
+    workspaceId: string,
+    scope: "workspace" | "personal" | "context",
+    source?: AgentLearningContext,
+  ): Promise<AgentLearningSettingsRecord> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/agent-learning/read`, {
+      scope,
+      source,
+    });
+  }
+
+  async saveAgentLearningSettings(
+    workspaceId: string,
+    request: SaveAgentLearningSettingsRequest,
+  ): Promise<AgentLearningSettingsRecord> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/agent-learning`, request);
+  }
+
+  async listAgentLearningOverrides(
+    workspaceId: string,
+    scope: "workspace" | "personal",
+  ): Promise<AgentLearningOverrideRecord[]> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-learning/overrides?scope=${scope}`,
+    );
+  }
+
+  async reviewAgentInstruction(
+    workspaceId: string,
+    request: AgentInstructionReviewRequest,
+  ): Promise<AgentInstructionReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-learning/instructions/review`,
+      request,
+    );
+  }
+
+  async listAgentInstructionReviews(
+    workspaceId: string,
+    cursor?: string,
+  ): Promise<AgentInstructionReviewListResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-learning/instructions/reviews${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
     );
   }
 
@@ -7276,6 +7297,18 @@ export class OpenGeniClient {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/restore`,
+      request,
+    );
+  }
+
+  async rejectWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/reject`,
       request,
     );
   }

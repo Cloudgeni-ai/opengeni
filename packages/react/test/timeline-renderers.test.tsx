@@ -2267,7 +2267,7 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     ],
   };
 
-  test("running single-op: row shimmers (running class) and shows in-flight copy, not 'Edited'", async () => {
+  test("running single-op: row animates (running class) and shows in-flight copy, not 'Edited'", async () => {
     const item = toolItem({
       name: "apply_patch_call",
       raw: rawSingleOp,
@@ -2282,14 +2282,14 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     // Must show "Applying" verb, not the settled "Edited" verb.
     expect(text).toContain("Applying");
     expect(text).not.toContain("Edited");
-    // The shimmer class must be present on the title element.
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    // The running animation must be present on the text line.
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
   });
 
-  test("running multi-op: row shimmers and shows file count as in-flight, not settled count", async () => {
+  test("running multi-op: row animates and shows file count as in-flight, not settled count", async () => {
     const item = toolItem({
       name: "apply_patch_call",
       raw: rawMultiOp,
@@ -2305,7 +2305,7 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
     expect(text).toContain("Applying");
     expect(text).toContain("2");
     expect(text).not.toContain("Edited");
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
@@ -2367,7 +2367,7 @@ describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
 /* ---- Running-state: write_stdin ------------------------------------------- */
 
 describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
-  test("running write_stdin: row shimmers and shows 'sending…', not settled 'sent'", async () => {
+  test("running write_stdin: row animates and shows 'sending…', not settled 'sent'", async () => {
     const item = toolItem({
       name: "write_stdin",
       arguments: JSON.stringify({ session_id: "sess-42", chars: "ls\n" }),
@@ -2383,8 +2383,8 @@ describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
     expect(text.toLowerCase()).toContain("sending");
     // Must NOT show the settled "sent" copy.
     expect(text).not.toContain("sent");
-    // Shimmer class must be on the title.
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    // Running animation must be on the text line.
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();
@@ -2411,7 +2411,7 @@ describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
 /* ---- Running-state: view_image -------------------------------------------- */
 
 describe("ViewImageRenderer — running state (in-flight affordance)", () => {
-  test("running view_image: row shimmers (not settled); body shows 'reading' copy on expand", async () => {
+  test("running view_image: row animates (not settled); body shows 'reading' copy on expand", async () => {
     const item = toolItem({
       name: "view_image",
       arguments: JSON.stringify({ path: "/tmp/screenshot.png" }),
@@ -2422,8 +2422,8 @@ describe("ViewImageRenderer — running state (in-flight affordance)", () => {
     const r = await renderComponent(<Renderer item={item} />);
     await flush();
 
-    // Shimmer class must be present on the title — this is the in-flight signal.
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    // Running animation must be present on the text line — this is the in-flight signal.
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     // Expand the row to see the body note.
@@ -2443,7 +2443,7 @@ describe("ViewImageRenderer — running state (in-flight affordance)", () => {
 /* ---- Running-state: environment_set_variable ------------------------------ */
 
 describe("SecretSetRenderer — running state (in-flight affordance)", () => {
-  test("running environment_set_variable: row shimmers and shows 'setting…'", async () => {
+  test("running environment_set_variable: row animates and shows 'setting…'", async () => {
     const item = toolItem({
       name: "environment_set_variable",
       arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
@@ -2458,7 +2458,7 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     expect(text.toLowerCase()).toContain("setting");
     // Settled copy "write-only · never returned" must NOT appear during in-flight.
     expect(text).not.toContain("write-only");
-    const shimmer = r.container.querySelector(".og-shimmer-text");
+    const shimmer = r.container.querySelector(".og-command-reel-running");
     expect(shimmer).not.toBeNull();
 
     await r.unmount();

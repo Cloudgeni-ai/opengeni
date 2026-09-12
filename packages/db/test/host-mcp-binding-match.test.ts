@@ -93,10 +93,12 @@ test("binding match denies changes to immutable request selection", () => {
       input.connectionRef.resource = "other";
     },
     (input) => {
-      input.connectionRef.hostBinding!.generation++;
+      if (input.connectionRef.hostBinding && "generation" in input.connectionRef.hostBinding)
+        input.connectionRef.hostBinding.generation++;
     },
     (input) => {
-      input.connectionRef.hostBinding!.bindingId = crypto.randomUUID();
+      if (input.connectionRef.hostBinding && "bindingId" in input.connectionRef.hostBinding)
+        input.connectionRef.hostBinding.bindingId = crypto.randomUUID();
     },
     (input) => {
       delete input.connectionRef.hostBinding;

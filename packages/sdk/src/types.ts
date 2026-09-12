@@ -1,6 +1,8 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
 export type BundledSkillId =
+  | "builtin:opengeni-visualize"
+  | "builtin:document-parsing"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
   | "builtin:opengeni-documents"
@@ -711,7 +713,11 @@ export type McpConnectionAuthoritySelection = {
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
   authoritySource?: "host" | undefined;
-  hostBinding?: { bindingId: string; generation: number } | undefined;
+  /** accepted_turn is configuration-only; each accepted owner must select a grant. */
+  hostBinding?:
+    | { bindingId: string; generation: number }
+    | { selection: "accepted_turn" }
+    | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
@@ -1901,6 +1907,10 @@ export const SESSION_EVENT_TYPES = [
   "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
+  "knowledge.confirmation.recovered",
+  "instruction.confirmation.recovered",
+  "knowledge.source.prepared",
+  "knowledge.source.failed",
   "goal.set",
   "goal.updated",
   "goal.progress",
@@ -2805,6 +2815,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
   resources: ResourceRef[];
@@ -2946,6 +2957,7 @@ export type CreateSessionRequest = {
   // Exact actor-private pre-session draft revision represented by this create.
   // The server consumes only this revision after durable initialization.
   expectedNewSessionDraftRevision?: number | undefined;
+  agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
@@ -3041,6 +3053,15 @@ export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
 export type Permission = KnownPermission | (string & {});
 
 export type FirstPartyMcpToolName =
+  | "knowledge_search"
+  | "knowledge_get"
+  | "knowledge_browse"
+  | "knowledge_save"
+  | "knowledge_retain_file"
+  | "knowledge_retain_message"
+  | "knowledge_archive"
+  | "instruction_policy_save"
+  | "instruction_policy_get"
   | "set_session_title"
   | "goal_set"
   | "goal_update"
@@ -4975,6 +4996,7 @@ export type ComposerDraft = {
 };
 
 export type NewSessionDraftOptions = {
+  agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
@@ -5237,6 +5259,7 @@ export type SaveNewSessionDraftRequest = Omit<
 
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
+  knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;
   tools?: ToolRef[] | undefined;
@@ -5253,6 +5276,10 @@ export type ScheduledTaskAgentConfigInput = {
 };
 
 export type CreateAgentScheduledTaskRequest = {
+  agentLearning?: {
+    scope: "workspace" | "personal";
+    settings: import("./knowledge").AgentLearningOverrides;
+  };
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   action?: { kind: "agent_turn" } | undefined;
@@ -5640,7 +5667,15 @@ export type ProposeRigChangeRequest =
 
 export type FileStatus = "pending_upload" | "ready" | "failed" | "expired" | "deleted";
 
+export type FileListRequest = {
+  scope?: "all" | "workspace" | "personal";
+  limit?: number;
+  cursor?: string;
+};
+export type FileListResponse = { files: FileAsset[]; nextCursor: string | null };
+
 export type FileAsset = {
+  scope?: "workspace" | "personal" | undefined;
   id: string;
   workspaceId: string;
   status: FileStatus;
@@ -5902,6 +5937,7 @@ export type RetainedArtifactDownload = {
 };
 
 export type CreateFileUploadRequest = {
+  scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   sizeBytes: number;
@@ -5932,6 +5968,7 @@ export type FileDownloadUrlResponse = {
 export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string;
 
 export type UploadFileInput = {
+  scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   data: FileUploadData;

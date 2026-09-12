@@ -15,6 +15,93 @@ policy. The bearer authenticates OpenGeni to the resolver, not to the tool.
 Store this configuration in the deployment's secret manager, never browser
 configuration, session data, or a Skill.
 
+## Native instance registration
+
+Independent embedding instances can instead register one resolver per stable
+workspace `externalSource`. Use a server-side organization API key with literal
+`account:admin`; `asUser`, `asLinkedUser`, workspace keys, delegated tokens, and
+browser cookies cannot administer these routes. Registration configures transport,
+not a tool permission, binding, grant, membership, or accepted initiator.
+
+```ts
+const resolver = await service.putHostMcpResolver(organizationId, "instance:example", {
+  operationId: registrationOperationId, // retain and reuse for exact retries
+  expectedGeneration: 0, // create; updates require the current generation
+  url: "https://backend.example/opengeni/mcp-credentials",
+  bearerToken: resolverSecret, // server-side secret, never browser configuration
+});
+const { workspace } = await service.ensureWorkspace({
+  accountId: organizationId,
+  externalSource: "instance:example",
+  externalId: customerId,
+  name: customerName,
+});
+```
+
+The HTTP contract is `PUT`/`GET
+/v1/organizations/:organizationId/mcp-credential-resolvers/:externalSource` and
+`POST .../:externalSource/revoke`. Encode the source as a path segment; the SDK
+does this automatically. `PUT` requires `operationId`, `expectedGeneration`,
+`url`, and `bearerToken`; optional `timeoutMs` retains the remote adapter's
+100–30,000 ms range and 10,000 ms default. `GET` and mutation responses contain
+metadata only. `revokeHostMcpResolver` requires an operation ID and current
+generation. Schemas live in `@opengeni/contracts/host-mcp-resolvers`.
+
+Source matching uses the authoritative workspace row and exact organization;
+sources are trimmed, case-sensitive routing labels, not external-user identity
+sources or access grants. Register before or after creating workspaces. Every
+future `ensureWorkspace` with that source uses the registration automatically.
+No per-workspace resolver configuration, per-instance runtime restart, or custom
+dispatcher is needed once the native-support release is deployed.
+
+The **first registration opts the whole organization into namespace routing**.
+When a static account resolver exists, that first PUT must explicitly set
+`acknowledgeLegacyRoutingReplacement: true`, otherwise it returns 409 without
+writing. Organizations with no registration rows retain static routing. Once
+any row exists, including a revoked row, an absent workspace source, unregistered
+source, inactive registration, or database failure denies resolution; there is
+no fallback to the static account endpoint or another instance. Existing
+workspaces without a matching source must be considered before opting in.
+API/worker static configuration must be consistent during legacy migration.
+There is no delete or return-to-legacy operation.
+
+PUT also rotates the endpoint/secret or reactivates the same stable registration.
+Every update requires the current generation and a complete explicit bearer;
+changing a URL never forwards the previous bearer automatically. Updates and
+revocation increment generation. Concurrent stale updates return 409. Reusing
+an operation ID with the exact normalized request and actor returns its original
+metadata receipt, **without restoring its old endpoint, secret, or status**.
+Different input under that ID conflicts. Authentication and the exact live admin
+key are rechecked on replay. Use GET for current state; receipts are historical.
+
+An administrator is trusted to update transport for the same instance. Existing
+still-authorized turns, schedules, and children may resolve at the new endpoint
+without regranting; their immutable initiator and accepted binding/grant snapshots
+never change. Credentials resolved under a superseded generation are denied at
+physical use. Revocation blocks resolution/use; explicit reactivation restores
+transport eligibility only, not revoked membership, binding, grant, or attempt
+authority. Already-dispatched remote requests cannot be recalled.
+
+The native adapter reuses the same callback envelope, pinned outbound HTTP rules,
+redirect refusal, response/timeout bounds, and exact credential scope validation.
+HTTPS is required except loopback HTTP in local/test; private-network destinations
+remain governed by the existing network policy. Secrets use native AES-GCM
+encryption under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, with registration,
+organization, source, endpoint and generation verified inside the encrypted
+bundle. Idempotency stores a domain-separated keyed digest and metadata receipt,
+not plaintext secrets. Provider credentials are not persisted or cached.
+
+### Native registration rollout
+
+Migration `0463_host_mcp_resolver_registration.sql` is maintenance-only because
+it changes the exact runtime table/role contract. Stop old API/control/turn
+workers, supply the complete application role list, migrate and provision roles,
+then start the matching binaries. Do not restart pre-0463 binaries afterward.
+In-process hosts that explicitly supply their own credential port retain
+precedence; opting into native routing uses `createNativeRemoteMcpCredentialsPort`.
+
+## Accepted tool authority
+
 New host references require the existing fleet admission flag
 `OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED` and explicit
 `connectionRef.authoritySource: "host"`. This remote adapter does not capture
@@ -101,9 +188,39 @@ Select grants in `createSession` using
 `selectedHostMcpDelegations: [{serverId, delegationId, generation}]`. This requires
 a verified direct external owner with session-create and connection-read access,
 an enabled host-authority fleet admission switch, and an explicitly selected MCP
-server whose configured URL and `connectionRef.hostBinding` exactly match the
-registered binding. It does not rewrite the server configuration or auto-select
-tools. The grant's visibility must match the new session. New-session admission
+server whose configured URL and binding selection match the registered binding.
+The original fixed `connectionRef.hostBinding: {bindingId, generation}` contract
+still requires exact identity, generation and definition. For a shared server
+whose participants use their own accounts, explicitly configure:
+
+```ts
+connectionRef: {
+  authoritySource: "host",
+  hostBinding: { selection: "accepted_turn" },
+  subjectScope: "subject",
+  providerDomain: "tools.example",
+  provider: "example",
+  kind: "delegated",
+  scopes: ["read"],
+}
+```
+
+This configuration-only descriptor forbids `connectionId`. It is a selection
+constraint, not a registry grant: each accepted direct turn must select its
+authenticated owner's delegation. Registration still takes a concrete binding
+definition with `connectionId` and without `hostBinding`. Admission requires the
+same server, canonical HTTPS destination and complete provider/kind/domain/
+scope/resource/subject-scope definition; only the account identifier may differ.
+There is no wildcard, ambient owner lookup or automatic subset widening. The
+immutable turn/task snapshot stores the exact selected binding and generation.
+The worker resolves the descriptor only through that snapshot and the existing
+live authority checks, then passes a concrete fixed reference to the host and
+revalidates before physical use. Missing capture denies; another participant's
+grant, the creator's account and a stale attempt are never fallback authority.
+Session-local MCP configuration follows the same rule on create and follow-up.
+
+This does not rewrite the server configuration or auto-select tools.
+The grant's visibility must match the new session. New-session admission
 practically uses an `always` grant; session-bound grants target existing sessions.
 Direct `sendMessage` and `steerMessage` accept the same explicit selection on
 each message, with session-control and connection-read authority. They capture
@@ -115,7 +232,13 @@ on replay conflicts; successful replay does not recapture authority or revive a
 revoked grant. A failed capture leaves no initial turn, events, or authority row
 (a repairable keyed session shell may remain). Follow-up operation IDs similarly
 bind the canonical selection, and failed capture rolls back the prompt receipt,
-events and turn. Realtime initial capture remains unsupported.
+events and turn. `startMode: "realtime"` creates an empty session with no accepted
+turn; initial selection on that create remains unsupported. For an ordinary
+text conversation, create the empty shell without selections, then submit the
+first text through `sendMessage` with that participant's explicit
+`selectedHostMcpDelegations` and `clientEventId`. This captures authority on the
+first real text turn just like every later Send/Steer. It does not grant voice
+provider delegations authority or inherit a selection from empty-shell creation.
 Same-session goal continuations and child-result resumptions use a separate
 causal capture path. Migration 0435 proves the consumed machine update names
 the exact source turn, matches the unchanged session epoch and visibility, and
@@ -152,6 +275,9 @@ Session-bound grants never cross into children. An agent-created scheduled task
 likewise derives only successor-eligible selections from its current accepted
 attempt; it cannot enumerate or borrow the creator's other accounts. The separate
 causal-human field is retained even when the initiating actor is the scheduler.
+Fixed and accepted-turn server descriptors use the same exact configuration
+comparison for agent-created tasks. Scheduled, child and goal execution resolve
+only their own inherited snapshots, never reselect an owner's current account.
 
 ### Request-time gateway
 

@@ -985,7 +985,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       toast.error("Connection failed", { description: reason ?? undefined });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   // Resume an OAuth round-trip. The callback lands back on this path with
   // ?integration_oauth=success|error; we read it once, strip it from the URL,
@@ -1031,7 +1031,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   // An agent recommendation deep-links to the same human-reviewed setup sheet
   // as a marketplace click. Loading the live catalog again prevents an old
@@ -1089,7 +1089,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setQuery(domain);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items]);
+  }, [loading, items, setQuery]);
 
   async function resumeOAuthConnect(
     itemId: string | null,
@@ -1434,6 +1434,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                   </Button>
                 </div>
               ) : null}
+
               <InstalledStrip
                 title="Connected"
                 items={
@@ -1662,7 +1663,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                   search?.focus({ preventScroll: true });
                 }}
                 importSkillRef={importSkillRef}
-                section={searchingAll ? "skills" : activeTab === "skills" ? "skills" : "plugins"}
+                section={searchingAll ? "all" : activeTab === "skills" ? "skills" : "plugins"}
                 query={query}
                 client={client}
                 workspaceId={workspaceId}

@@ -1,3 +1,5 @@
+import { fileOwnerContextForAccess } from "../domain/file-owner";
+import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   NewSessionDraft,
   SaveNewSessionDraftRequest,
@@ -184,7 +186,7 @@ async function hydrateNewSessionDraft(
 }
 
 /** Read the authenticated actor's server-authoritative pre-session composer state. */
-export async function getActorNewSessionDraft(
+async function getActorNewSessionDraftInFileScope(
   deps: Pick<NewSessionDraftDependencies, "settings" | "db">,
   grant: AccessGrant,
   workspaceId: string,
@@ -219,7 +221,7 @@ export async function getActorNewSessionDraft(
  * draft may represent incomplete options, while no invalid option can become a
  * session without passing that single canonical create boundary.
  */
-export async function saveActorNewSessionDraft(
+async function saveActorNewSessionDraftInFileScope(
   deps: NewSessionDraftDependencies,
   grant: AccessGrant,
   workspaceId: string,
@@ -253,7 +255,16 @@ export async function saveActorNewSessionDraft(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(deps.db, grant.accountId, workspaceId, grant.subjectId, resources);
+  await validateFileResources(
+    deps.db,
+    grant.accountId,
+    workspaceId,
+    grant.subjectId,
+    resources,
+    externalAuthorization
+      ? await fileOwnerContextForAccess(deps, externalAuthorization, "sessions:create")
+      : undefined,
+  );
   assertConfiguredModel(deps.settings, input.model);
   await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, input.model);
 
@@ -298,4 +309,27 @@ export async function saveActorNewSessionDraft(
     }
     throw error;
   }
+}
+
+export async function getActorNewSessionDraft(
+  deps: Parameters<typeof getActorNewSessionDraftInFileScope>[0],
+  grant: AccessGrant,
+  workspaceId: string,
+  authorization?: AccessGrantAuthorization,
+): Promise<NewSessionDraftValue> {
+  const actor = authorization
+    ? await fileOwnerContextForAccess(deps, authorization, "sessions:read")
+    : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, () =>
+    getActorNewSessionDraftInFileScope(deps, grant, workspaceId),
+  );
+}
+export async function saveActorNewSessionDraft(
+  ...args: Parameters<typeof saveActorNewSessionDraftInFileScope>
+): Promise<NewSessionDraftValue> {
+  const [deps, grant, , , , authorization] = args;
+  const actor = authorization
+    ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
+    : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
 }

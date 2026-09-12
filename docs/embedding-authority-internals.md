@@ -207,3 +207,48 @@ creation starts with empty metadata rather than copying this attribution.
 Its wire/helper identity reference preserves case and Unicode without
 normalization; limits are UTF-8 bytes (1,024 for IDs, 200 for namespaces), and
 text that cannot round-trip through PostgreSQL is rejected before querying.
+
+## Inline HTML and chat previews
+
+HTML-only Sites can explicitly include
+`<script src="/__opengeni/site-tools/client.js"></script>` before author scripts.
+The existing Codemode Site request handler serves the installed SDK's generated
+browser runtime at that path. Published frames resolve that optional tag using
+the viewer's deployed SDK; ordinary bundled React Sites are unchanged. This
+is the same SDK and bridge, not another protocol. SDK builds regenerate the
+browser entry with `scripts/generate-site-browser-runtime.ts`. Published HTML
+and sandbox previews use their respective host SDK versions, with the existing
+bridge/API compatibility checks. No package-image delivery or Bun build change
+is required for existing Sites.
+Assistant messages opt into `opengeni-html` and `opengeni-site` fences through
+the shared Markdown host callback. Only source-complete fences mount previews;
+user messages and ordinary HTML fences remain inert Markdown. The web host's
+`ChatInteractiveBlock` uses the existing `ArtifactSandbox` and published frame
+for both. Saved Site embeds load through `loadSiteSnapshot`, optionally selecting
+a saved version and its exact tool declarations. Inline HTML uses the same
+bridge without a fabricated Site identity; API calls retain ordinary current
+viewer authorization and tool approval. No sandbox download is needed to render
+message-owned HTML.
+Inline visualizations receive the shared visualization stylesheet and helper scripts,
+with frame-scoped resize messages and theme updates; ordinary Sites are unchanged.
+The CSS/helpers under packages/react are canonical. generate-visualization-assets.ts
+generates both the renderer constants and the visualization skill’s preview/export
+assets from them. The default opengeni-visualize skill owns detailed inline design
+guidance; the main operational prompt only routes to it and to opengeni-sites.
+Markdown image references use artifact:<uuid>. The native chat resolves metadata
+through the current workspace API and reuses the retained-artifact image loader
+(object URL cleanup, unavailable states, and current viewer authentication).
+Neither sandbox paths nor storage credentials are embedded in message image URLs.
+
+## Connection presentation
+
+`@opengeni/react/connect` exports `ConnectionLogo`, `ConnectionInstalled`,
+`ConnectionServiceRow`, `ConnectionOptionRow`, `ConnectionCatalog`, and
+`ConnectionTypePicker`; scoped styling is in `@opengeni/react/connect.css`.
+These components accept data and callbacks, without app routing or provider
+credentials. `ConnectPanel` and `ConnectChooser` optionally use the catalogue
+presentation over the existing shared connection controller.
+The web Capabilities route owns tabs, global search, and curated ordering.
+`apps/web/src/components/capabilities/connection-services.ts` groups explicit
+provider identities without merging their independent authorization options.
+Northstar demonstrates the same SDK catalogue with its existing API proxy.

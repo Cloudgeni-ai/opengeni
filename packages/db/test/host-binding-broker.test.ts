@@ -41,6 +41,84 @@ const credential = (input: McpCredentialsRequest): McpCredentialResolution => ({
   headers: { authorization: "Bearer synthetic" },
 });
 
+function fixedBinding(input: Pick<McpCredentialsRequest, "connectionRef">) {
+  const binding = input.connectionRef.hostBinding;
+  if (!binding || "selection" in binding) throw new Error("Expected fixed fixture binding");
+  return binding;
+}
+
+test("accepted-turn configuration cannot reach a host without native capture and exact concrete validation", async () => {
+  const input = request();
+  input.connectionRef = {
+    authoritySource: "host",
+    providerDomain: "mcp.example",
+    subjectScope: "subject",
+    hostBinding: { selection: "accepted_turn" },
+  };
+  let calls = 0;
+  const host = async (r: McpCredentialsRequest) => {
+    calls++;
+    return credential(r);
+  };
+  expect((await buildHostConnectionTokenResolver(host, context)(input)).status).toBe("auth_needed");
+  const base = { ...context, authorizeDurableBinding: async () => true };
+  expect((await buildHostConnectionTokenResolver(host, base)(input)).status).toBe("auth_needed");
+  for (const resolved of [
+    null,
+    input.connectionRef,
+    { ...request().connectionRef, subjectScope: "subject" as const, scopes: ["extra"] },
+  ]) {
+    expect(
+      (
+        await buildHostConnectionTokenResolver(host, {
+          ...base,
+          resolveAcceptedBinding: async () => resolved,
+        })(input)
+      ).status,
+    ).toBe("auth_needed");
+  }
+  expect(calls).toBe(0);
+});
+
+test("accepted-turn lookup and physical validation retain immutable configuration and concrete selection", async () => {
+  const input = request();
+  input.connectionRef = {
+    authoritySource: "host",
+    providerDomain: "mcp.example",
+    subjectScope: "subject",
+    hostBinding: { selection: "accepted_turn" },
+  };
+  const concrete = { ...request().connectionRef, subjectScope: "subject" as const };
+  let active = true;
+  const seen: McpCredentialsRequest[] = [];
+  const resolver = buildHostConnectionTokenResolver(
+    async (r) => {
+      seen.push(r);
+      return credential(r);
+    },
+    {
+      ...context,
+      resolveAcceptedBinding: async (r) => {
+        expect(r.connectionRef).toEqual(input.connectionRef);
+        input.connectionRef.providerDomain = "mutated.example";
+        r.connectionRef.providerDomain = "also-mutated.example";
+        return concrete;
+      },
+      authorizeDurableBinding: async (r) => {
+        expect(r.connectionRef).toEqual(concrete);
+        return active;
+      },
+    },
+  );
+  const result = await resolver(input);
+  expect(result.status).toBe("ok");
+  expect(seen).toHaveLength(1);
+  expect(seen[0]!.initiator).toEqual(context.initiator);
+  if (result.status !== "ok") throw new Error("Expected concrete credential");
+  active = false;
+  expect(await result.authorizeProviderRequest!()).toBe(false);
+});
+
 test("durable host refs never call the provider without an explicit live validator", async () => {
   let calls = 0;
   const resolve = buildHostConnectionTokenResolver(async (input) => {
@@ -65,15 +143,15 @@ test("revocation during host resolution discards credentials and validation rece
   const resolve = buildHostConnectionTokenResolver(
     async (hostRequest) => {
       active = false;
-      hostRequest.connectionRef.hostBinding!.generation = 99;
-      input.connectionRef.hostBinding!.generation = 88;
+      fixedBinding(hostRequest).generation = 99;
+      fixedBinding(input).generation = 88;
       return credential(hostRequest);
     },
     {
       ...context,
       authorizeDurableBinding: async (snapshot) => {
-        generations.push(snapshot.connectionRef.hostBinding!.generation);
-        snapshot.connectionRef.hostBinding!.generation = 77;
+        generations.push(fixedBinding(snapshot).generation);
+        fixedBinding(snapshot).generation = 77;
         return active;
       },
     },
@@ -146,8 +224,8 @@ test("each physical request rechecks durable authority after credential resoluti
   const resolve = buildHostConnectionTokenResolver(async (snapshot) => credential(snapshot), {
     ...context,
     authorizeDurableBinding: async (snapshot) => {
-      generations.push(snapshot.connectionRef.hostBinding!.generation);
-      snapshot.connectionRef.hostBinding!.generation = 99;
+      generations.push(fixedBinding(snapshot).generation);
+      fixedBinding(snapshot).generation = 99;
       if (unavailable) throw new Error("database unavailable");
       return active;
     },
@@ -156,7 +234,7 @@ test("each physical request rechecks durable authority after credential resoluti
   expect(result.status).toBe("ok");
   if (result.status !== "ok") throw new Error("expected credential resolution");
   expect(result.authorizeProviderRequest).toBeTypeOf("function");
-  input.connectionRef.hostBinding!.generation = 88;
+  fixedBinding(input).generation = 88;
   expect(await result.authorizeProviderRequest!()).toBe(true);
   active = false;
   expect(await result.authorizeProviderRequest!()).toBe(false);

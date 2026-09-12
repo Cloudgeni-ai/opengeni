@@ -254,6 +254,14 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
 // cancel only the exact paged session-list GET dispatched by that same phase.
 const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES = DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
 
+// The rail's review badge issues one bounded, read-only POST search when a
+// workspace document mounts. A deliberate whole-document replacement can
+// cancel only that exact same-phase read before headers, just like the catalog
+// and paged-session hooks above. Resets and cross-phase actor transitions stay
+// governed by the stricter ledgers below.
+const DOCUMENT_KNOWLEDGE_REVIEW_CANCELLATION_PHASES =
+  DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
+
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
   ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
@@ -405,15 +413,17 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       input.failure,
     );
   const isActorOwnedRead =
-    input.method === "GET" &&
-    (pathname === "/v1/auth/get-session" ||
-      pathname === "/v1/auth/session-set" ||
-      pathname === "/v1/workspaces" ||
-      (pathname === "/v1/billing" &&
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
-          requestUrl.searchParams.get("accountId") ?? "",
-        )) ||
-      pathname.startsWith("/v1/workspaces/"));
+    (input.method === "GET" &&
+      (pathname === "/v1/auth/get-session" ||
+        pathname === "/v1/auth/session-set" ||
+        pathname === "/v1/workspaces" ||
+        (pathname === "/v1/billing" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+            requestUrl.searchParams.get("accountId") ?? "",
+          )) ||
+        pathname.startsWith("/v1/workspaces/"))) ||
+    (input.method === "POST" &&
+      /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname));
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
   );
@@ -426,8 +436,11 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   const startedAt = input.startedAt;
   const failedAt = input.failedAt;
   const reloadStartedAt = input.crossTabReloadStartedAt;
+  const isExactNeutralRaceAbort =
+    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) ||
+    (input.engine === "webkit" && input.failure.trim() === "Load request cancelled");
   const isExpectedNeutralRaceReloadCancellation =
-    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) &&
+    isExactNeutralRaceAbort &&
     input.method === "GET" &&
     pathname === "/v1/auth/session-set" &&
     input.actorEpoch === null &&
@@ -505,6 +518,16 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/sessions$/u.test(pathname) &&
     requestUrl.searchParams.get("view") === "page";
+  const isExpectedDocumentKnowledgeReviewCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "POST" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_KNOWLEDGE_REVIEW_CANCELLATION_PHASES.has(input.responsePhase) &&
+    /^\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/knowledge\/entries\/search$/iu.test(
+      pathname,
+    );
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -529,6 +552,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentSessionPageCancellation ||
+    isExpectedDocumentKnowledgeReviewCancellation ||
     isExpectedDocumentBootstrapCancellation ||
     isExpectedWebKitReauthenticationChunkCancellation
   ) {
@@ -857,7 +881,9 @@ function observeBrowser(page: Page): BrowserProblems {
     // the strict failure ledger. This tracker prevents a full-document goto
     // from tearing down background finite reads from the just-selected actor.
     const isFiniteApiRead =
-      request.method() === "GET" &&
+      (request.method() === "GET" ||
+        (request.method() === "POST" &&
+          /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))) &&
       pathname.startsWith("/v1/") &&
       !pathname.endsWith("/stream") &&
       !pathname.includes("/live-events/stream");
@@ -2831,6 +2857,20 @@ describe("provider-neutral browser account acceptance", () => {
       ],
     };
     expect(requestFailureProblem(input)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...input,
+        engine: "webkit",
+        failure: "Load request cancelled",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...input,
+        engine: "chromium",
+        failure: "Load request cancelled",
+      }),
+    ).not.toBeNull();
     for (const changed of [
       { failure: "NS_ERROR_NET_RESET" },
       { method: "POST" },
@@ -3150,6 +3190,37 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=array`,
       }),
     ).toContain("/sessions");
+    const documentKnowledgeReviewRead = {
+      ...oldActorRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "primary-set-sign-in",
+      method: "POST",
+      responsePhase: "primary-set-sign-in",
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/knowledge/entries/search`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(documentKnowledgeReviewRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...documentKnowledgeReviewRead,
+        dispatchPhase: "second-tab-bootstrap",
+        responsePhase: "second-tab-bootstrap",
+      }),
+    ).toBeNull();
+    for (const changed of [
+      { failure: "net::ERR_CONNECTION_RESET" },
+      { method: "GET" },
+      { actorEpoch: null },
+      { responsePhase: "second-tab-bootstrap" },
+      {
+        dispatchPhase: "responsive-accessibility-evidence",
+        responsePhase: "responsive-accessibility-evidence",
+      },
+      {
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/knowledge/entries/review`,
+      },
+    ]) {
+      expect(requestFailureProblem({ ...documentKnowledgeReviewRead, ...changed })).not.toBeNull();
+    }
     const crossTabBootstrapRead = {
       ...oldActorRead,
       actorEpoch: null,
@@ -4042,6 +4113,40 @@ describe("provider-neutral browser account acceptance", () => {
     }
   });
 
+  test("repeated finite review reads finish without native transport cancellation", async () => {
+    const reviewAccount = await createActualUser({
+      displayName: "Review Reader",
+      email: `review-reader-${RUN_ID}@example.test`,
+      organizationName: "Review Reader Organization",
+    });
+    const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    try {
+      const page = await browser.newPage();
+      const problems = observeBrowser(page);
+      setBrowserPhase(problems, "primary-set-sign-in");
+      await signIn(page, reviewAccount);
+      await waitForFiniteReadQuiescence(problems);
+      setBrowserPhase(problems, "stable-finite-review-reads");
+      // Exercise repeated real SDK reads in a stable document. Each iteration
+      // must reach a native terminal before another poll; no routing, fetch
+      // replacement, navigation, or cancellation exemption is involved.
+      for (let i = 0; i < 100; i++) {
+        const pending = page.waitForResponse((response) =>
+          response.url().endsWith("/knowledge/entries/search"),
+        );
+        await page.evaluate(() =>
+          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
+        );
+        const response = await pending;
+        expect(response.status()).toBe(200);
+        await waitForFiniteReadQuiescence(problems);
+      }
+      await expectNoBrowserProblems(problems);
+    } finally {
+      await browser.close();
+    }
+  }, 180_000);
+
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
@@ -4056,6 +4161,13 @@ describe("provider-neutral browser account acceptance", () => {
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
+    const draftRequests: Array<{ method: string; pathname: string }> = [];
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (pathname.endsWith("/new-session-draft")) {
+        draftRequests.push({ method: request.method(), pathname });
+      }
+    });
     const secondTabProblems = observeBrowser(secondTab);
     const otherProblems = observeBrowser(otherPage);
 
@@ -4297,8 +4409,50 @@ describe("provider-neutral browser account acceptance", () => {
       expect(secondTab.url()).not.toContain(alpha.workspaceId);
 
       setBrowserPhase(pageProblems, "cross-slot-deep-link");
-      await selectAccount(page, beta, alpha);
+      const draftRequestStart = draftRequests.length;
+      const targetDraftPath = `/v1/workspaces/${alpha.workspaceId}/new-session-draft`;
+      const targetDraftRequests = () =>
+        draftRequests
+          .slice(draftRequestStart)
+          .filter(({ pathname }) => pathname === targetDraftPath);
+      const capabilityUrl = `**/v1/workspaces/${alpha.workspaceId}/session-tenancy/capabilities`;
+      let releaseCapabilities!: () => void;
+      const capabilitiesReleased = new Promise<void>((resolve) => {
+        releaseCapabilities = resolve;
+      });
+      let capabilitiesIntercepted!: () => void;
+      const capabilitiesPending = new Promise<void>((resolve) => {
+        capabilitiesIntercepted = resolve;
+      });
+      const holdCapabilities = async (route: Route) => {
+        capabilitiesIntercepted();
+        await capabilitiesReleased;
+        await route.continue();
+      };
+      await page.route(capabilityUrl, holdCapabilities);
+      try {
+        await selectAccount(page, beta, alpha);
+        await capabilitiesPending;
+        // Deliberately outlast the autosave debounce while visibility is unknown.
+        // Hydrating early would acknowledge a temporary workspace-visible value,
+        // then autosave the passive Personal projection as a user edit.
+        await page.waitForTimeout(600);
+        expect(targetDraftRequests()).toEqual([]);
+        const hydrated = page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === targetDraftPath &&
+            response.request().method() === "GET" &&
+            response.status() === 200,
+        );
+        releaseCapabilities();
+        await hydrated;
+      } finally {
+        releaseCapabilities();
+        await page.unroute(capabilityUrl, holdCapabilities);
+      }
       await waitForFiniteReadQuiescence(pageProblems);
+      await page.waitForTimeout(600);
+      expect(targetDraftRequests().filter(({ method }) => method !== "GET")).toEqual([]);
       await page.goto(`${publicOrigin}/sessions/${beta.sessionId}`, {
         waitUntil: "domcontentloaded",
       });

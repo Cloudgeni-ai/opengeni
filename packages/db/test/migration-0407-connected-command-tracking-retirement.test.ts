@@ -147,7 +147,11 @@ test("a fixed frontier drains multiple batches without revisiting claims even wi
     (account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
     select account_id,workspace_id,session_id,provider,'running',control_workspace_id,enrollment_id,connection_instance_id,gen_random_uuid()::text,now() - interval '1 minute'
     from session_background_commands cross join generate_series(1,24) where id=${value.id}`;
-  const dueBefore = new Date();
+  // The frontier and reconciliation leases use PostgreSQL's clock. Docker's
+  // clock can trail the Mac slightly, which would make a host Date a future
+  // frontier and permit zero-TTL claims to be selected again.
+  const [clock] = await owner`select clock_timestamp() as frontier`;
+  const dueBefore = new Date(clock!.frontier);
   const claim = () =>
     claimConnectedMachineSessionBackgroundCommands(client.db, {
       claimId: crypto.randomUUID(),

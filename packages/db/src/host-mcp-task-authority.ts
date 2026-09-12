@@ -9,6 +9,8 @@ import {
   HostMcpTaskAuthority,
   HostMcpBindingDefinition,
   HostMcpOwnerSubject,
+  hostMcpBindingMatchesSelection,
+  type HostMcpBindingSelection,
 } from "@opengeni/contracts/host-mcp-bindings";
 import { getScheduledTaskRevisionAuthority } from "./scheduled-task-revision-authority";
 import { getHostMcpLiveAttempt } from "./live-session-attempt";
@@ -287,11 +289,7 @@ export async function inheritHostMcpTaskAuthoritiesFromAttempt(
   db: Database,
   task: ScheduledTask,
   source: { sessionId: string; turnId: string; attemptId: string; executionGeneration: number },
-  configured: Array<{
-    bindingId: string;
-    bindingGeneration: number;
-    definition: HostMcpBindingDefinition;
-  }>,
+  configured: HostMcpBindingSelection[],
 ): Promise<void> {
   const proof = await getScheduledTaskRevisionAuthority(db, {
     accountId: task.accountId,
@@ -333,12 +331,13 @@ export async function inheritHostMcpTaskAuthoritiesFromAttempt(
       const selected: SelectedHostMcpTaskGrant[] = [];
       for (const row of rows) {
         const a = HostMcpAcceptedAuthority.parse(row.canonical_snapshot);
-        const server = configured.find((c) => c.definition.serverId === a.definition.serverId);
+        const server = configured.find((c) => c.serverId === a.definition.serverId);
         if (!server) continue;
         if (
-          server.bindingId !== a.bindingId ||
-          server.bindingGeneration !== a.bindingGeneration ||
-          stableJson(server.definition) !== stableJson(a.definition)
+          !hostMcpBindingMatchesSelection(
+            { id: a.bindingId, generation: a.bindingGeneration, definition: a.definition },
+            server,
+          )
         )
           throw new HostMcpDelegationAuthorityError("Host task source destination changed");
         const delegation = await getHostMcpDelegation(tx, owner, a.delegationId);
@@ -373,7 +372,9 @@ export async function inheritHostMcpTaskAuthoritiesFromAttempt(
         selected.push({
           delegationId: a.delegationId,
           generation: a.delegationGeneration,
-          ...server,
+          bindingId: a.bindingId,
+          bindingGeneration: a.bindingGeneration,
+          definition: a.definition,
         });
       }
       return selected;

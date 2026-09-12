@@ -33,8 +33,17 @@ describe("BundlesSection", () => {
     ] as const) {
       const rendered = await renderSection({ query });
       try {
-        expect(rowIds(rendered.container)).toEqual([expected]);
-        expect(count(rendered.container)).toBe("1 results");
+        if (expected.startsWith("plugin:")) {
+          expect(
+            rendered.container
+              .querySelector("[data-installed-plugin]")
+              ?.getAttribute("data-installed-plugin"),
+          ).toBe("example/research");
+          expect(rowIds(rendered.container)).toEqual([]);
+        } else {
+          expect(rowIds(rendered.container)).toEqual([expected]);
+          expect(count(rendered.container)).toBe("1 results");
+        }
         expect(rendered.container.querySelector('input[type="search"]')).toBeNull();
       } finally {
         await rendered.unmount();
@@ -51,7 +60,7 @@ describe("BundlesSection", () => {
       await rendered.unmount();
     }
   });
-  test("lists every provenance through one uniform row under one heading", async () => {
+  test("lists skills and workflow templates alongside installed plugins", async () => {
     const rendered = await renderSection();
     try {
       const heading = rendered.container.querySelector("#bundles-heading");
@@ -63,16 +72,15 @@ describe("BundlesSection", () => {
       const rows = rowIds(rendered.container);
       expect(rows).toEqual([
         "pack:infra-ops",
-        "plugin:example/research",
         "imported:skill:release-operator-abc123",
         "skill:terraform",
       ]);
-      // Every one of them is the same component, and the aria-label overrides
-      // the visible line inside the button, so the taxonomy the row shows is
-      // spoken between the name and the state rather than lost.
+      // Skill and template rows preserve their provenance in the accessible name.
+      expect(rendered.container.querySelector("[data-installed-plugin]")?.textContent).toContain(
+        "Research suite",
+      );
       expect(rowNames(rendered.container)).toEqual([
         "Infrastructure operations. Workflow template, registered in this workspace. Not installed",
-        "Research suite. Plugin, imported from source. Installed",
         "release-operator. Skill, imported from source. Installed",
         "Terraform. Skill, curated by OpenGeni. Installed",
       ]);
@@ -101,7 +109,8 @@ describe("BundlesSection", () => {
   test("reports how much of the bundle list the search is showing", async () => {
     const rendered = await renderSection();
     try {
-      expect(count(rendered.container)).toBe("4 results");
+      expect(count(rendered.container)).toBe("3 results");
+      expect(rendered.container.querySelectorAll("[data-installed-plugin]")).toHaveLength(1);
     } finally {
       await rendered.unmount();
     }
@@ -311,6 +320,7 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   if (failed) {
     return {
       listCapabilities: async () => ({ items: [], installations: [] }),
+      searchPublicSkills: async () => ({ items: [] }),
       discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
       listInstalledSkills: async () => {
         throw new Error("network is down");
@@ -321,9 +331,10 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
     } as unknown as OpenGeniBrowserClient;
   }
   return {
-    listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
+    searchPublicSkills: async () => ({ items: [] }),
     listCapabilities: async () => ({ items: empty ? [] : catalogItems(), installations: [] }),
     discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
+    listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
   } as unknown as OpenGeniBrowserClient;
 }

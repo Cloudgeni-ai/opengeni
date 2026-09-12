@@ -4,6 +4,9 @@ import postgres from "postgres";
 import {
   bootstrapWorkspace,
   createDb,
+  saveKnowledgeEntry,
+  getKnowledgeEntry,
+  type KnowledgeContext,
   createSession,
   getOrganizationPrivateSessionSettings,
   nestedPostgresSqlState,
@@ -415,13 +418,6 @@ async function seedResources(
   `;
   resources.push({ family: "document", table: "documents", id: document!.id });
 
-  const [memory] = await db.admin<{ id: string }[]>`
-    insert into knowledge_memories (account_id, workspace_id, text)
-    values (${accountId}, ${workspaceId}, 'evidence workspace knowledge')
-    returning id
-  `;
-  resources.push({ family: "knowledge memory", table: "knowledge_memories", id: memory!.id });
-
   const [task] = await db.admin<{ id: string }[]>`
     insert into scheduled_tasks (
       name, schedule, temporal_schedule_id, agent_config, account_id, workspace_id,
@@ -601,7 +597,6 @@ describe("organization tenancy isolation evidence", () => {
       file: "visible",
       "document base": "visible",
       document: "visible",
-      "knowledge memory": "visible",
       "scheduled task": "visible",
       "api key": "visible",
     });
@@ -1085,4 +1080,30 @@ describe("organization tenancy isolation evidence", () => {
       "42501",
     );
   });
+});
+
+test("canonical Knowledge is visible only through its own organization's capability", async () => {
+  if (!fixture || !client) return;
+  const context = (organization: Fixture["orgB"]): KnowledgeContext => ({
+    accountId: organization.accountId,
+    workspaceId: organization.workspaceId,
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId: fixture!.humanSubjectId,
+      writeScopes: ["workspace"],
+      settingsScopes: [],
+      review: true,
+    },
+  });
+  const entryId = crypto.randomUUID();
+  await saveKnowledgeEntry(client.db, context(fixture.orgA), {
+    operationId: crypto.randomUUID(),
+    entryId,
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: { kind: "fact", title: "Organization isolation", content: "This fact belongs to A." },
+  });
+  expect((await getKnowledgeEntry(client.db, context(fixture.orgA), entryId))?.id).toBe(entryId);
+  expect(await getKnowledgeEntry(client.db, context(fixture.orgB), entryId)).toBeNull();
 });

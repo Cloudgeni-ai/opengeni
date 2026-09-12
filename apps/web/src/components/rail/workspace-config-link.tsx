@@ -46,6 +46,7 @@ export function WorkspaceConfigLink(props: {
   variant: "browse" | "menu" | "rail";
   active?: boolean;
   collapsed?: boolean;
+  needsReview?: boolean;
   onNavigate?: () => void;
 }) {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
@@ -55,12 +56,19 @@ export function WorkspaceConfigLink(props: {
       <Link
         to={item.to}
         params={{ workspaceId }}
+        search={props.needsReview ? { review: true } : {}}
         {...(active === undefined
           ? { activeProps: { "data-active": "true" as const } }
           : { "data-active": active ? ("true" as const) : undefined })}
-        aria-label={collapsed ? item.label : undefined}
+        aria-label={
+          props.needsReview ? `${item.label}, needs review` : collapsed ? item.label : undefined
+        }
         title={
-          collapsed ? [item.label, item.description].filter(Boolean).join(" — ") : item.description
+          props.needsReview
+            ? "Knowledge needs review"
+            : collapsed
+              ? [item.label, item.description].filter(Boolean).join(" — ")
+              : item.description
         }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted transition-colors pointer-coarse:h-10",
@@ -73,6 +81,15 @@ export function WorkspaceConfigLink(props: {
         <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
         <WorkspaceConfigGlyph icon={item.icon} className="size-4 shrink-0" />
         {!collapsed ? <span className="min-w-0 truncate">{item.label}</span> : null}
+        {props.needsReview ? (
+          <span
+            aria-hidden="true"
+            className={cn(
+              "shrink-0 rounded-full bg-amber-500",
+              collapsed ? "absolute right-1 top-1 size-2 ring-2 ring-surface" : "ml-auto size-2",
+            )}
+          />
+        ) : null}
       </Link>
     );
     return link;

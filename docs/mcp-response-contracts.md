@@ -204,7 +204,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
 | First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
 | First-party: `variable_set_set_variable`, deprecated `environment_set_variable` | Mutation | v1 receipt; secret values are never returned |
-| Docs: `memory_propose` | Mutation | v1 receipt |
+| First-party: `knowledge_save` | Mutation | Bounded revision/publication receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |
 | First-party: `github_repositories_list` | List | Existing bounded list/read result |
 | First-party: `x_accounts_list`, `reddit_accounts_list`, `social_connections_list`, `social_posts_recent` | List | Existing bounded provider/account or aggregate list result |
@@ -214,14 +214,14 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |
 | First-party: `scheduled_tasks_get` | Read | Compact summary by default; optional explicitly bounded entity projection |
-| First-party: `memory_search` | List/read | Existing bounded search result |
+| First-party: `knowledge_search`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status |
 | First-party: `sandboxes_list` | List | Existing fleet projection |
 | First-party: `rig_list`, `sessions_list`, `variable_set_list`, deprecated `environment_list` | List | Existing compact list projections; variable values are never returned |
 | First-party: `rig_get`, `session_get` | Read | Existing exact-ID, bounded detail projections |
 | First-party: `session_events` | List/read | Existing paginated and byte-bounded monitoring result |
 | First-party: `session_wait` | Read (blocking) | Byte-bounded per-target compact event summaries plus exact `latestSequence` cursors, own pending-update count, `waitedMs`, `timedOut` |
 | Docs: `list_document_bases` | List | Existing document-base list result |
-| Docs: `search_documents`, `knowledge_search`, `memory_search` | List/read | Existing bounded retrieval result |
+| Docs: `search_documents`, `knowledge_search` | List/read | Existing bounded retrieval result |
 | Docs: `fetch_document_chunk`, `knowledge_fetch` | Read | Explicit chunk read result |
 | First-party: `sandbox_attach`, `sandbox_swap` | Action output | The returned routing target and epoch are the essential result of the action, not an echo of the request |
 | First-party: `run_on` | Action output | Essential remote stdout/read/write result |
@@ -308,6 +308,8 @@ legacy full-session top-level `id` during migration.
 
 ## Measured byte and context reduction
 
+These historical pre-knowledge measurements include the retired Memory tool; they do
+not describe the current Knowledge API or impose its former content limit.
 The deterministic regression fixture uses production-style pretty-printed JSON
 and UTF-8 byte measurement. Approximate tokens are `ceil(bytes / 4)`; they are a
 coarse comparison, not provider billing truth. Pathological inputs cover two

@@ -22,8 +22,13 @@ export const embeddingMigrationTail = [
   "0455_external_link_inventory_labels.sql",
   "0456_social_connection_versions.sql",
   "0457_canonical_session_scope_subject.sql",
+  "0458_skill_review_wire_compatibility.sql",
   // Compiles against the linked-authority row type from 0449 and validates
   // scheduled/host authority. It must not run while those prerequisites are
   // marked applied but deliberately absent in a historical cutover fixture.
   "0459_mcp_operations.sql",
+  "0461_unified_knowledge.sql",
+  // Patches the instruction writer introduced by 0461, so historical fixtures
+  // must replay it after that writer rather than before its original creation.
+  "0462_agent_instruction_non_destructive_edits.sql",
 ];

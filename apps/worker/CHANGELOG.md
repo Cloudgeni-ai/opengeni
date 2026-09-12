@@ -1,5 +1,35 @@
 # @opengeni/worker-bundle
 
+## 1.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Patch Changes
+
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [71fd840]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/config@1.2.1
+  - @opengeni/core@3.0.0
+  - @opengeni/db@5.0.0
+  - @opengeni/sdk@6.0.0
+  - @opengeni/runtime@3.0.0
+  - @opengeni/codemode@0.5.8
+  - @opengeni/codex@0.2.23
+  - @opengeni/documents@0.8.29
+  - @opengeni/events@0.4.27
+  - @opengeni/github@0.7.12
+  - @opengeni/observability@0.8.28
+  - @opengeni/storage@0.2.129
+  - @opengeni/tool-gateway@0.1.9
+
 ## 0.29.0
 
 ### Minor Changes

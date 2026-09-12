@@ -89,18 +89,37 @@ shared workspace. An explicitly authorized service onboarding operation may use:
 await serviceClient.addExternalWorkspaceMember(authorizedWorkspaceId, {
   identity: { externalId: authenticatedUser.id, source: "my-product" },
   permissions: ["workspace:read", "connections:read", "connections:write"],
+  operationId: onboardingOperationId,
 });
 ```
 
 Do this only after the host has approved membership, not on every arbitrary
 browser request. The service needs `members:manage` and may not grant authority
-beyond its ceiling. Identical onboarding replays safely; different permissions
-conflict instead of overwriting a subsequently reduced grant. Installation also
+beyond its ceiling. Persist `onboardingOperationId` before the call. Exact keyed
+replays return historical identity without restoring removed membership; different
+permissions conflict instead of overwriting a subsequently reduced grant. Installation also
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
 
 ### Removal and account-wide lifecycle
+
+For recoverable onboarding, establish and retain the identity anchor before
+granting membership. Service `lookupExternalIdentity(organizationId, identity)`
+is non-provisioning and returns content-free identity/membership IDs, statuses and
+separate revisions, including suspended/offboarded identities. It requires
+`members:manage` and does not reactivate an identity. A missing result is not proof
+that an earlier unkeyed request cannot still provision one.
+
+To withdraw this external member's workspace access while fencing a pending keyed
+grant, call `cancelExternalWorkspaceMemberGrant(organizationId, workspaceId,
+organizationMembershipId, { operationId: cancellationOperationId,
+cancelGrantOperationId: onboardingOperationId })`. Persist both distinct UUIDs;
+retry the exact cancellation body after response loss. This reuses native
+teardown and fences the named grant even if membership is absent. It withdraws
+current workspace membership, not just one session. New grant IDs are explicit
+new onboarding, never retries. Legacy requests without `operationId` remain
+unfenced: drain old writers before claiming late-grant protection.
 
 Use the service client's existing `removeWorkspaceMember(workspaceId, subjectId)`
 to remove an external actor from a shared workspace. It requires `members:manage`,
@@ -288,6 +307,25 @@ binding provenance; it is not required to use `asUser` or Connect. See
 live actor/binding authority; the remote adapter alone does not implement
 offboarding, native linking or a complete external execution gateway.
 
+For independent backend instances, the server-only organization admin client
+can use `putHostMcpResolver(organizationId, externalSource, request)` once per
+stable workspace source. Future `ensureWorkspace` calls use the exact registered
+source without workspace-specific resolver setup. PUT requires `operationId`,
+`expectedGeneration` (0 for create), `url`, and a complete `bearerToken`.
+`getHostMcpResolver` returns metadata only; `revokeHostMcpResolver` requires an
+operation ID/current generation. `asUser`, `asLinkedUser`, workspace keys and
+browser cookies cannot administer routes. Existing bindings/grants and accepted
+initiators do not change when an admin rotates transport.
+
+The first registration opts the whole organization into namespace routing; a
+configured legacy resolver requires `acknowledgeLegacyRoutingReplacement: true`.
+Any retained row, even revoked, prevents static fallback. Missing/inactive
+sources deny rather than choosing another instance. Retried operations return
+historical metadata without restoring old configuration. Always GET current
+state before a new CAS update, and explicitly supply the secret for a new URL.
+Generation checks invalidate old resolved credentials before physical use;
+already-dispatched requests cannot be recalled. Keep every secret server-side.
+
 The request-time workspace tool gateway accepts verified external users and
 organization service keys. Tool catalog/operation permission filtering and
 existing approval semantics still apply. The new lanes recheck current key and
@@ -321,7 +359,7 @@ external-owner checks apply, including at transaction commit. Revocation uses
 the observed delegation generation. These operations persist grant metadata;
 select them explicitly on `createSession` with
 `selectedHostMcpDelegations: [{serverId, delegationId, generation}]`. The selected
-tool's configured URL and host binding reference must match; the operator's host
+tool's configured URL and host binding selection must match; the operator's host
 authority admission switch must be enabled. This does not auto-install or rewrite
 tools. New sessions use reusable (`always`) grants with matching visibility.
 Selections participate in idempotency: changed or omitted replay selections
@@ -335,7 +373,20 @@ Same-session goal continuations and child-result resumptions inherit only the
 exact causal turn's accepted selection. Live revocation still blocks use; a
 revoked selection is not revived by resumption. Children inherit only the exact
 spawning turn's `always` grants for servers they select with unchanged visibility;
-session-bound grants never cross to a child. Realtime initial selection remains unsupported.
+session-bound grants never cross to a child. Fixed `{bindingId,generation}`
+references remain exact-match. Shared per-participant tools can explicitly use
+`connectionRef.hostBinding:{selection:"accepted_turn"}` with host authority,
+subject scope and no configured connectionId. The complete configured
+destination/provider/scope/resource definition remains exact; only the account
+identifier comes from each accepted owner's selected binding. Registry bindings
+still contain a concrete connectionId and no hostBinding. The worker resolves
+only immutable accepted snapshots and revalidates at every physical use, including
+scheduled and child work. Missing selections never borrow creator credentials.
+Realtime empty-shell creation still takes no selection: call createSession with
+`startMode:"realtime"` and no initialMessage or selectedHostMcpDelegations, then
+send the first text with its authenticated participant's explicit selection and
+clientEventId. The first real text turn captures normally; this grants no voice
+provider authority.
 Use the same `selectedHostMcpDelegations` field on `createScheduledTask` or
 `updateScheduledTask` for browser-independent jobs. Omitted update selections
 preserve existing choices; `[]` clears them for future revisions. New/reusable

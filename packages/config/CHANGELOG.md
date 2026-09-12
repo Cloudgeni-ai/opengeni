@@ -1,5 +1,19 @@
 # @opengeni/config
 
+## 1.2.1
+
+### Patch Changes
+
+- 50ac837: Add explicit accepted-turn host binding selection for shared conversations. Capture each participant's exact owner delegation without changing the configured destination or borrowing creator credentials, preserve fixed bindings and scheduled/child live authority checks, and apply session-local server configuration to follow-up selection. Document the supported empty-session then first-text admission flow.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/codex@0.2.23
+
 ## 1.2.0
 
 ### Minor Changes

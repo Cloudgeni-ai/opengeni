@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
+import { StreamClose, StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   ComputerActionReceipt,
@@ -336,6 +336,80 @@ describe("ComputerSession React resources", () => {
     await hook.unmount();
   });
 
+  test.each(["pending", "failed"])(
+    "allows switching targets while the initial observation is %s",
+    async (initialState) => {
+      const windowTarget = target();
+      const screenTarget = target("screen-1", "screen");
+      const inputRequests: unknown[] = [];
+      let settleInitial!: (value: ComputerObservation) => void;
+      const initial = new Promise<ComputerObservation>((resolve) => {
+        settleInitial = resolve;
+      });
+      const client = fakeClient({
+        getComputerSession: async () => ({ ...computerSession(), platform: "macos" }),
+        listComputerTargets: async () => ({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [windowTarget, screenTarget],
+        }),
+        observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+          if (targetId === screenTarget.id) return observation(screenTarget);
+          if (initialState === "failed") throw new Error("Observation timed out");
+          return await initial;
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, request) => {
+          inputRequests.push(request);
+          return { ...receipt(observation(windowTarget), request.operationId), observation: null };
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useComputerSession({
+            client,
+            workspaceId: WORKSPACE_ID,
+            computerSessionId: COMPUTER_SESSION_ID,
+            pollIntervalMs: 60_000,
+          }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        expect(hook.result.current.targets).toHaveLength(2);
+        expect(hook.result.current.selectedTarget?.id).toBe(windowTarget.id);
+        expect(hook.result.current.observation).toBeNull();
+        await actRun(async () => {
+          await hook.result.current.act({ type: "keyboard", action: "type", value: "hello" });
+          await hook.result.current.act({ type: "clipboard", operation: "paste" });
+        });
+        expect(inputRequests).toHaveLength(2);
+        for (const request of inputRequests) {
+          expect(request).toMatchObject({
+            targetId: windowTarget.id,
+            expectedTargetGeneration: windowTarget.targetGeneration,
+            expectedObservationId: null,
+            expectedFrameId: null,
+          });
+        }
+        await actRun(async () => {
+          await hook.result.current.selectTarget(screenTarget.id);
+        });
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+        expect(hook.result.current.observation?.target.id).toBe(screenTarget.id);
+        await actRun(async () => {
+          settleInitial(observation(windowTarget));
+        });
+        await flush(5);
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+        expect(hook.result.current.observation?.target.id).toBe(screenTarget.id);
+        expect(hook.result.current.error).toBeNull();
+      } finally {
+        settleInitial(observation(windowTarget));
+        await hook.unmount();
+      }
+    },
+  );
+
   test("keeps target selection local and fences semantic and pixel actions exactly", async () => {
     const windowTarget = target();
     const screenTarget = target("screen-1", "screen");
@@ -526,6 +600,89 @@ describe("ComputerSession frame stream", () => {
     expect(hook.result.current.frame).toBeNull();
     expect(sockets[0]?.closed).toBe(true);
     await hook.unmount();
+  });
+
+  test("accepts restarted frame sequences after attachment renewal", async () => {
+    const sockets: FakeComputerSocket[] = [];
+    let attaches = 0;
+    const client = fakeClient({
+      attachComputerSession: async () => ({
+        ...attachment("window-1"),
+        expiresAt: new Date(Date.now() + (++attaches === 1 ? 2_000 : 120_000)).toISOString(),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "window-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await dispatch(sockets[0]!, "open");
+      await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 100).buffer });
+      await flush(10);
+      expect(hook.result.current.frame?.sequence).toBe(100);
+      await flush(1_100);
+      expect(sockets).toHaveLength(2);
+      await dispatch(sockets[1]!, "open");
+      await dispatch(sockets[1]!, "message", { data: frameMessage("window-1", 2).buffer });
+      await dispatch(sockets[1]!, "message", { data: frameMessage("window-1", 1).buffer });
+      await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 101).buffer });
+      await flush(10);
+      expect(hook.result.current.state).toBe("live");
+      expect(hook.result.current.frame?.sequence).toBe(2);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("exposes an error after sockets exhaust the bounded reconnect attempts", async () => {
+    const sockets: FakeComputerSocket[] = [];
+    const client = fakeClient({
+      attachComputerSession: async () => ({
+        ...relayAttachment("window-1"),
+        expiresAt: new Date(Date.now() + 2_000).toISOString(),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "window-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      for (const [index, delay] of [300, 550, 10].entries()) {
+        await dispatch(sockets[index]!, "open");
+        await dispatch(sockets[index]!, "close");
+        await flush(delay);
+      }
+      expect(sockets).toHaveLength(3);
+      expect(hook.result.current.state).toBe("error");
+      expect(hook.result.current.error?.message).toBe("Desktop view lost connection.");
+      await flush(550);
+      expect(sockets).toHaveLength(3);
+    } finally {
+      await hook.unmount();
+    }
   });
 
   test("uses the distinct Computer relay stream kind", async () => {
@@ -1035,6 +1192,114 @@ describe("ComputerViewer", () => {
     expect(rendered.container.textContent).toContain("Reconnect");
     await rendered.unmount();
   });
+
+  for (const recovery of ["Reconnect", "Refresh desktops"]) {
+    test(`recovers an ended desktop producer through ${recovery} after a visible frame`, async () => {
+      const current = computerSession();
+      const currentTarget = target();
+      const sockets: FakeComputerSocket[] = [];
+      let attachmentCalls = 0;
+      const client = fakeClient({
+        listComputerSessions: async () => ({ revision: 1, sessions: [current] }),
+        getComputerSession: async () => current,
+        listComputerTargets: async () => ({
+          computerSessionId: current.id,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        }),
+        observeComputerTarget: async () => observation(currentTarget),
+        attachComputerSession: async () => {
+          attachmentCalls += 1;
+          return {
+            ...relayAttachment(currentTarget.id),
+            expiresAt: new Date(Date.now() + 2_000).toISOString(),
+          };
+        },
+      });
+      const rendered = await renderComponent(
+        <ComputerViewer
+          client={client}
+          workspaceId={WORKSPACE_ID}
+          sessionId={SESSION_ID}
+          webSocketFactory={(url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          }}
+        />,
+      );
+      try {
+        await flush(40);
+        const showFrame = async (socket: FakeComputerSocket) => {
+          await dispatch(socket, "open");
+          await dispatch(socket, "message", {
+            data: relayMessage(
+              2,
+              StreamOpenAck.encode({
+                accepted: true,
+                error: undefined,
+                resumeFromSeq: "0",
+              }).finish(),
+            ),
+          });
+          await dispatch(socket, "message", {
+            data: relayMessage(
+              3,
+              StreamFrame.encode({
+                channelId: "computer-channel-1",
+                seq: "1",
+                data: frameMessage(currentTarget.id, 1),
+                producedAtMs: String(Date.now()),
+              }).finish(),
+            ),
+          });
+          await flush(10);
+        };
+        const canvas = rendered.container.querySelector("canvas")!;
+        const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
+          "textarea[aria-label='Desktop keyboard input']",
+        )!;
+        await showFrame(sockets[0]!);
+        expect(canvas.classList.contains("invisible")).toBe(false);
+        expect(keyboard.disabled).toBe(false);
+
+        await dispatch(sockets[0]!, "message", {
+          data: relayMessage(
+            4,
+            StreamClose.encode({
+              channelId: "computer-channel-1",
+              reason: 0,
+              message: "producer ended",
+            }).finish(),
+          ),
+        });
+        await flush(10);
+        expect(rendered.container.textContent).toContain("Live view disconnected");
+        expect(canvas.classList.contains("invisible")).toBe(true);
+        expect(keyboard.disabled).toBe(true);
+        // The old grant renewal must not revive a terminal producer behind
+        // the error panel without either recovery action below.
+        await flush(1_100);
+        expect(attachmentCalls).toBe(1);
+
+        const retry = [...rendered.container.querySelectorAll("button")].find(
+          (button) =>
+            button.textContent?.trim() === recovery ||
+            button.getAttribute("aria-label") === recovery,
+        );
+        expect(retry).toBeDefined();
+        await actRun(() => retry!.click());
+        await flush(40);
+        expect(attachmentCalls).toBe(2);
+        await showFrame(sockets[1]!);
+        expect(canvas.classList.contains("invisible")).toBe(false);
+        expect(keyboard.disabled).toBe(false);
+        expect(rendered.container.textContent).not.toContain("Live view disconnected");
+      } finally {
+        await rendered.unmount();
+      }
+    });
+  }
 
   test("pins an exact ComputerSession requested by Browser navigation", async () => {
     const current = computerSession();

@@ -375,7 +375,7 @@ export async function completeApiIntegrationProviderOAuth(
     if (!providerScopesInclude(definition, token.scopes, state.authorizeScopes)) {
       throw new ProviderOAuthCallbackError("scope_not_granted");
     }
-    const grantedScopes = token.scopes.length > 0 ? token.scopes : state.authorizeScopes;
+    let grantedScopes = token.scopes.length > 0 ? token.scopes : state.authorizeScopes;
     const identity = await verifyProviderIdentity(deps, definition, token);
     if (
       state.expectedProviderPrincipalId &&
@@ -414,6 +414,11 @@ export async function completeApiIntegrationProviderOAuth(
     }
     if (!refreshToken) {
       throw new ProviderOAuthCallbackError("refresh_token_missing");
+    }
+    // Microsoft omits offline_access from access-token scopes. The new or
+    // previously verified refresh token proves this capability instead.
+    if (definition.provider.id === "microsoft") {
+      grantedScopes = uniqueStrings([...grantedScopes, "offline_access"]);
     }
     const credentialEncrypted = encryptEnvironmentValue(
       key,
@@ -926,7 +931,11 @@ function providerScopesInclude(
     return value;
   };
   const granted = new Set(effective.map(normalize));
-  return definition.authentication.scopes.every((scope) => granted.has(normalize(scope)));
+  return definition.authentication.scopes.every(
+    (scope) =>
+      (definition.provider.id === "microsoft" && normalize(scope) === "offline_access") ||
+      granted.has(normalize(scope)),
+  );
 }
 
 function providerOAuthReturnUrl(

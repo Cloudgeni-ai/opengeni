@@ -1,5 +1,7 @@
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
+import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
+export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
@@ -806,6 +808,15 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_complete",
   "goal_pause",
   "goal_resume",
+  "knowledge_search",
+  "knowledge_get",
+  "knowledge_browse",
+  "knowledge_save",
+  "knowledge_retain_file",
+  "knowledge_retain_message",
+  "knowledge_archive",
+  "instruction_policy_save",
+  "instruction_policy_get",
   "memory_search",
   "memory_save",
   "memory_correct",
@@ -997,8 +1008,53 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
+export const RETIRED_AGENT_LEARNING_TOOL_NAMES = [
+  "memory_search",
+  "memory_save",
+  "memory_correct",
+  "knowledge_propose",
+  "knowledge_correct",
+  "task_note_promote_instruction_policy",
+  "task_note_promote_preference",
+  "instruction_policy_propose",
+  "preference_propose",
+  "remember",
+  "remember_confirm",
+] as const satisfies readonly FirstPartyMcpToolName[];
+const retiredLearningTools = new Set<FirstPartyMcpToolName>(RETIRED_AGENT_LEARNING_TOOL_NAMES);
+
+/** Runtime interpretation only: never rewrite accepted conversation/tool receipts. */
+export function currentAgentLearningToolSelection(
+  names: readonly FirstPartyMcpToolName[],
+): FirstPartyMcpToolName[] {
+  const selected = new Set(names);
+  if (selected.has("memory_search")) {
+    selected.add("knowledge_search");
+    selected.add("knowledge_get");
+    selected.add("knowledge_browse");
+  }
+  // The unified writer can create and correct. A legacy create-only or
+  // correct-only allowlist does not implicitly gain the other capability.
+  if (selected.has("memory_save") && selected.has("memory_correct")) {
+    selected.add("knowledge_save");
+  }
+  if (
+    selected.has("instruction_policy_propose") ||
+    selected.has("task_note_promote_instruction_policy")
+  ) {
+    selected.add("instruction_policy_save");
+    selected.add("instruction_policy_get");
+  }
+  // Only already-selected legacy confirmations survive for paused turn recovery.
+  // New defaults never advertise this tool and it cannot create proposals.
+  return [...selected].filter(
+    (name) => name === "remember_confirm" || !retiredLearningTools.has(name),
+  );
+}
+
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -1031,6 +1087,7 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
+    !retiredLearningTools.has(name) &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -4115,10 +4172,15 @@ export const McpServerConnectionRef = z
     connectionId: z.string().min(1).optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
-    /** Opt-in durable reference. A live execution validator is mandatory. */
+    /** Durable fixed reference, or an explicit configuration-only selector.
+     * accepted_turn resolves only from immutable accepted-work authority. */
     hostBinding: z
-      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
-      .strict()
+      .union([
+        z
+          .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+          .strict(),
+        z.object({ selection: z.literal("accepted_turn") }).strict(),
+      ])
       .optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
@@ -4134,7 +4196,19 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
-    if (reference.authoritySource === "host" && !reference.connectionId) {
+    const acceptedTurn = reference.hostBinding && "selection" in reference.hostBinding;
+    if (
+      acceptedTurn &&
+      (reference.connectionId !== undefined || reference.subjectScope !== "subject")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message:
+          "Accepted-turn selection requires subject scope and forbids a configured connectionId",
+      });
+    }
+    if (reference.authoritySource === "host" && !reference.connectionId && !acceptedTurn) {
       context.addIssue({
         code: "custom",
         message: "host authority requires connectionId",
@@ -4148,7 +4222,7 @@ export const McpServerConnectionRef = z
         message: "Durable binding requires host authority",
       });
     if (!reference.selectedResources) return;
-    if (!reference.connectionId) {
+    if (!reference.connectionId && !acceptedTurn) {
       context.addIssue({
         code: "custom",
         message: "selectedResources requires connectionId",
@@ -4402,8 +4476,12 @@ export type ConnectionCredentialPlacement = {
   prefix?: string;
 };
 
+/** Backend-only physical-use fence. Never serialized or accepted from a host response. */
+export const hostMcpCredentialUseGuard: unique symbol = Symbol("hostMcpCredentialUseGuard");
+
 export type McpCredentialResolution =
   | {
+      [hostMcpCredentialUseGuard]?: () => Promise<boolean>;
       status: "ok";
       /** Scope echoes are mandatory and verified before any header is used. */
       accountId: string;
@@ -4986,6 +5064,7 @@ export const FileUploadStatus = z.enum([
 export type FileUploadStatus = z.infer<typeof FileUploadStatus>;
 
 export const FileAsset = z.object({
+  scope: z.enum(["workspace", "personal"]).optional(),
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   status: FileStatus,
@@ -5001,7 +5080,22 @@ export const FileAsset = z.object({
 });
 export type FileAsset = z.infer<typeof FileAsset>;
 
+export const FileListRequest = z
+  .object({
+    scope: z.enum(["all", "workspace", "personal"]).default("all"),
+    limit: z.number().int().min(1).max(50).default(30),
+    cursor: z.string().max(2048).optional(),
+  })
+  .strict();
+export type FileListRequest = z.input<typeof FileListRequest>;
+export const FileListResponse = z.object({
+  files: z.array(FileAsset),
+  nextCursor: z.string().nullable(),
+});
+export type FileListResponse = z.infer<typeof FileListResponse>;
+
 export const CreateFileUploadRequest = z.object({
+  scope: z.enum(["workspace", "personal"]).optional(),
   filename: z.string().min(1),
   contentType: z.string().min(1),
   sizeBytes: z.number().int().positive(),
@@ -7493,6 +7587,7 @@ export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftReque
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
  */
 export const NewSessionDraftOptions = withVariableSetIdAlias({
+  agentLearning: AgentLearningOverrides.optional(),
   visibility: SessionVisibility.optional(),
   sandboxBackend: SandboxBackend.optional(),
   targetSandboxId: z.string().uuid().optional(),
@@ -9125,6 +9220,9 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     .strict();
   return {
     bundledSkillIds: BundledSkillSelection.optional(),
+    // Frozen with the ordinary scheduled run. This selects a connector source;
+    // fetching happens only through that run's live agent tool.
+    knowledgeSource: KnowledgeSourceSyncAction.optional(),
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
       : z.string().min(1),
@@ -9189,6 +9287,39 @@ export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(false))
   .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
+
+/** Legacy actions are readable for migration/cleanup, never new dispatch. */
+export function scheduledTaskKnowledgeSource(task: {
+  action: ScheduledTaskAction;
+  agentConfig: { knowledgeSource?: KnowledgeSourceSyncAction | undefined };
+}): KnowledgeSourceSyncAction | null {
+  return task.action.kind === "knowledge_source_sync"
+    ? task.action
+    : (task.agentConfig.knowledgeSource ?? null);
+}
+
+export function requireScheduledTaskKnowledgeSource(
+  task: Parameters<typeof scheduledTaskKnowledgeSource>[0],
+): KnowledgeSourceSyncAction {
+  const source = scheduledTaskKnowledgeSource(task);
+  if (!source) throw new Error("Scheduled task has no selected Knowledge source");
+  return source;
+}
+
+export function knowledgeSourceAgentConfig(
+  source: KnowledgeSourceSyncAction,
+  existing?: ScheduledTaskAgentConfig,
+): ScheduledTaskAgentConfig {
+  return {
+    prompt:
+      "Fetch the selected source with knowledge_source_fetch. Read the retained source content and save useful facts, decisions, requirements or incidents with knowledge_save, linking evidence and relevant groups. Correct existing knowledge when the source changes. Continue fetching when the tool reports more content. Follow this task's Agent learning settings and summarize what changed.",
+    resources: [],
+    tools: [],
+    metadata: {},
+    ...existing,
+    knowledgeSource: source,
+  };
+}
 
 /** Ingress-bounded agent config for create/update requests. */
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
@@ -9497,6 +9628,10 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
+  agentLearning: z
+    .object({ scope: z.enum(["workspace", "personal"]), settings: AgentLearningOverrides })
+    .strict()
+    .optional(),
   name: ScheduledTaskNameInput,
   schedule: ScheduledTaskScheduleSpec,
   action: z
@@ -9558,14 +9693,10 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
   .strict()
   .transform((value) => ({
     ...value,
+    action: { kind: "agent_turn" as const },
     runMode: "new_session_per_run" as const,
     targetSessionId: null,
-    agentConfig: {
-      prompt: "Knowledge source synchronization",
-      resources: [],
-      tools: [],
-      metadata: {},
-    },
+    agentConfig: knowledgeSourceAgentConfig(value.action),
     variableSetId: null,
     environmentId: null,
     rigId: null,
@@ -9580,6 +9711,16 @@ export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskReque
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias({
+    agentLearning: z
+      .object({
+        scope: z.enum(["workspace", "personal"]),
+        baselineScope: z.enum(["workspace", "personal"]).optional(),
+        operationId: z.uuid(),
+        expectedVersion: z.number().int().nonnegative(),
+        settings: AgentLearningOverrides,
+      })
+      .strict()
+      .optional(),
     name: ScheduledTaskNameInput.optional(),
     schedule: ScheduledTaskScheduleSpec.optional(),
     runMode: ScheduledTaskRunMode.optional(),
@@ -12734,6 +12875,10 @@ export const SessionEventType = z.enum([
   "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
+  "knowledge.confirmation.recovered",
+  "instruction.confirmation.recovered",
+  "knowledge.source.prepared",
+  "knowledge.source.failed",
   "goal.set",
   "goal.updated",
   "goal.progress",
@@ -13018,6 +13163,10 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "agent.toolCall.output",
     "tool.auth_needed",
     "artifact.created",
+    "knowledge.confirmation.recovered",
+    "instruction.confirmation.recovered",
+    "knowledge.source.prepared",
+    "knowledge.source.failed",
   ],
   provider_account: [
     "agent.model.usage",
@@ -15064,6 +15213,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // selection history. A newer sibling draft survives, while every failed
       // pre-initialization create leaves the submitted draft intact.
       expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+      agentLearning: AgentLearningOverrides.optional(),
       // A child may lower its inherited limit freely; an increase requires
       // workspace:admin and is checked again at the DB transaction boundary.
       maxNestedAgentDepth: NestedAgentDepthValue.optional(),
@@ -17139,6 +17289,8 @@ export * from "./company-profile";
 export * from "./company-brain";
 export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
+export * from "./agent-learning";
+export * from "./knowledge-entries";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";
 export * from "./preference-registry";

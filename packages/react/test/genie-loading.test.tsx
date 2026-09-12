@@ -1,12 +1,52 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
 import { ActivityRail } from "../src/timeline/activity-rail";
+import { GenieLoading, GenieLoadingOptionsContext } from "../src/timeline/genie-loading";
 import { MessageTimeline } from "../src/components/message-timeline";
 import { StartupTimings } from "../src/timeline/startup-timings";
 import { setStartupDetails } from "../src/timeline/startup-preference";
 import type { StartupPhaseItem } from "../src/timeline/types";
 import { registerDom, renderComponent, flush } from "./render-hook";
 registerDom();
+const messages = {
+  status: "Préparation en cours",
+  slowStatus: "La préparation prend plus de temps",
+  slowText: "Encore un instant…",
+  showDetails: "Afficher les détails",
+  hideDetails: "Masquer les détails",
+};
+const options = { phrases: ["Préparation…"], messages };
+test("native messages localize normal, slow, and expanded states without replacing rendering", async () => {
+  for (const age of [0, 16_000, 31_000]) {
+    for (const detailsOpen of [false, true]) {
+      let clicks = 0;
+      const r = await renderComponent(
+        <GenieLoadingOptionsContext.Provider value={options}>
+          <GenieLoading
+            startedAt={new Date(Date.now() - age).toISOString()}
+            detailsOpen={detailsOpen}
+            onShowDetails={() => clicks++}
+          />
+        </GenieLoadingOptionsContext.Provider>,
+      );
+      expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
+        age >= 30_000 ? messages.slowStatus : messages.status,
+      );
+      expect(r.container.querySelector(".og-genie-phrase")?.textContent).toBe(
+        age >= 30_000 ? messages.slowText : "Préparation…",
+      );
+      const button = r.container.querySelector("button");
+      if (age >= 15_000 || detailsOpen) {
+        expect(button?.textContent).toContain(
+          detailsOpen ? messages.hideDetails : messages.showDetails,
+        );
+        await act(async () => button!.click());
+        expect(clicks).toBe(1);
+      } else expect(button).toBeNull();
+      await r.unmount();
+    }
+  }
+});
 afterEach(() => setStartupDetails(false));
 function phase(overrides: Partial<StartupPhaseItem> = {}): StartupPhaseItem {
   return {
@@ -236,5 +276,151 @@ test("hosts can customize phrases and orb dimensions", async () => {
   );
   expect(r.container.textContent).toContain("Custom wish");
   expect((r.container.querySelector(".og-genie-orb") as HTMLElement).style.width).toBe("20px");
+  await r.unmount();
+});
+
+test("rolling steps start closed and preserve explicit expansion", async () => {
+  const item = {
+    kind: "tool-call" as const,
+    id: "tool1",
+    callId: "call1",
+    turnId: "turn",
+    name: "exec_command",
+    raw: undefined,
+    arguments: { cmd: "bun test" },
+    output: "secret detail",
+    status: "running" as const,
+    occurredAt: new Date().toISOString(),
+  };
+  const r = await renderComponent(
+    <MessageTimeline items={[item]} turnSummary={{ rolling: true }} />,
+  );
+  expect(r.container.querySelector(".og-rolling-status")).toBeNull();
+  await r.rerender(
+    <MessageTimeline
+      items={[item, { ...item, id: "tool2", callId: "call2", arguments: { cmd: "bun run build" } }]}
+      turnSummary={{ rolling: true }}
+    />,
+  );
+  const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
+  expect(r.container.textContent).toContain("+1 earlier");
+  expect(r.container.textContent).toContain("bun test");
+  expect(r.container.textContent).toContain("bun run build");
+  // Both faces exist during the first standalone-to-reel transition.
+  expect(r.container.querySelectorAll(".og-rolling-face").length).toBe(2);
+  await act(async () => trigger.click());
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  await r.rerender(
+    <MessageTimeline
+      items={[
+        item,
+        { ...item, id: "tool2", callId: "call2", arguments: { cmd: "bun run typecheck" } },
+      ]}
+      turnSummary={{ rolling: true }}
+    />,
+  );
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  await r.unmount();
+});
+
+test("reasoning previews render emphasis instead of raw Markdown markers", async () => {
+  const r = await renderComponent(
+    <ActivityRail
+      items={[
+        {
+          kind: "reasoning",
+          id: "markdown-thought",
+          turnId: "turn",
+          text: "**Checking the repository** before continuing.",
+          streaming: false,
+          occurredAt: new Date().toISOString(),
+        },
+      ]}
+    />,
+  );
+  await flush();
+  expect(r.container.textContent).toContain("Checking the repository");
+  expect(r.container.textContent).not.toContain("**");
+  expect(r.container.querySelector(".og-reasoning-preview strong")?.textContent).toBe(
+    "Checking the repository",
+  );
+  await r.unmount();
+});
+
+test("rolling reasoning keeps its live Markdown preview", async () => {
+  const items = [
+    phase(),
+    {
+      kind: "reasoning" as const,
+      id: "r1",
+      turnId: "turn",
+      text: "**First thought**",
+      streaming: false,
+      occurredAt: new Date().toISOString(),
+    },
+    {
+      kind: "reasoning" as const,
+      id: "r2",
+      turnId: "turn",
+      text: "**Current thought**",
+      streaming: true,
+      occurredAt: new Date().toISOString(),
+    },
+  ];
+  const r = await renderComponent(
+    <MessageTimeline items={items} turnSummary={{ rolling: true }} />,
+  );
+  await flush();
+  expect(r.container.querySelector(".og-reel-title")?.textContent).toBe("Thinking");
+  expect(r.container.querySelector(".og-reel-preview")?.textContent).toContain("Current thought");
+  await r.unmount();
+});
+
+test("rolling sandbox and worker steps reuse descriptive compact rows", async () => {
+  const { RollingActivity } = await import("../src/timeline/rolling-activity");
+  const shared = {
+    turnId: "turn",
+    status: "running" as const,
+    occurredAt: new Date().toISOString(),
+  };
+  const r = await renderComponent(
+    <RollingActivity
+      items={[
+        {
+          ...shared,
+          kind: "sandbox",
+          id: "sandbox",
+          name: "exec",
+          command: "sleep 20",
+          output: "",
+        },
+      ]}
+    />,
+  );
+  await flush();
+  expect(r.container.textContent).toContain("sleep 20");
+  expect(
+    r.container.querySelector('.og-rolling-status[data-running="true"] .og-command-reel'),
+  ).not.toBeNull();
+  await r.rerender(
+    <RollingActivity
+      items={[
+        {
+          ...shared,
+          kind: "worker",
+          id: "worker",
+          callId: "call",
+          action: "spawn",
+          prompt: "Inspect the repository",
+          workerSessionId: null,
+          failure: null,
+        },
+      ]}
+    />,
+  );
+  expect(r.container.textContent).toContain("Spawning worker");
+  expect(r.container.textContent).toContain("Inspect the repository");
   await r.unmount();
 });

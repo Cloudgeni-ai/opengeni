@@ -1897,9 +1897,9 @@ export type BuildAgentOptions = {
   attemptConnectorActionBindings?: readonly AttemptConnectorActionBinding[];
   /** Exact open-suffix call the current human approved before this agent was rebuilt. */
   approvedToolCallId?: string;
-  // Workspace Memory V1 working-set block, resolved by the worker per turn.
-  // Composed after the workspace persona/CORE/codemode substrate and before
-  // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
+  // Historical prompt-replay/embedding compatibility slot. New Knowledge is
+  // retrieved through tools and must not be composed here as standing guidance.
+  // Omitted/blank preserves the existing prompt bytes.
   workspaceMemory?: string;
   // Exact-attempt active policy and preference descriptor block. When present,
   // runtime uses the structured governance precedence branch; absent preserves
@@ -2075,7 +2075,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Reusable conditional guidance belongs in Skills. Skill changes use the shared file lifecycle governed by Learning mode, not Knowledge evidence or confidence. Follow Skill management guidance only when it is present in the Skill index. Use remember lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
+    "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save when useful for future work, whether requested explicitly or learned during ordinary work. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files and automatically prepare source text when authoring is enabled. Use knowledge_retain_file for a newly fetched file or failed preparation. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2130,11 +2130,9 @@ export function appendPersistentSessionSettings(
 }
 
 /**
- * Appends the workspace memory working-set block to the already-composed
- * (workspace + CORE + generic substrate) instructions, joined by " ". The
- * memory slice is workspace-ground and intentionally lands before
- * per-session instructions. An absent/blank value is a no-op that returns the
- * composed string byte-for-byte.
+ * Historical prompt-composition compatibility helper. New Knowledge uses
+ * retrieval tools; this slot preserves existing embedding/replay inputs only.
+ * An absent/blank value returns the composed string byte-for-byte.
  */
 export function appendWorkspaceMemory(composed: string, workspaceMemory?: string): string {
   const trimmed = workspaceMemory?.trim();
@@ -2435,6 +2433,7 @@ export function buildOpenGeniAgent(
   // are equivalent. Reading supplied Skill files never needs either.
   const filesystemAvailable = (options.activeSandboxBackend ?? settings.sandboxBackend) !== "none";
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    defaults: !hostSuppliedSkillCatalog,
     editableArtifacts: !hostSuppliedSkillCatalog && editableArtifactToolsAvailable,
     sites: !hostSuppliedSkillCatalog && filesystemAvailable,
     videoGeneration: !hostSuppliedSkillCatalog && Boolean(options.videoGeneration),
@@ -2619,8 +2618,8 @@ export function buildOpenGeniAgent(
     //      when a codemode token was minted for this managed-sandbox turn,
     //   4. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
-    //   5. + workspace memory working set, ONLY when the workspace setting is on
-    //      and the worker resolved a nonblank block — appendWorkspaceMemory,
+    //   5. + a nonblank historical memory compatibility block, when supplied;
+    //      canonical Knowledge is retrieved through tools,
     //   6. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
     //   7. + host context for this exact turn, when supplied,
@@ -11101,3 +11100,5 @@ function sortJson(value: unknown): unknown {
   }
   return value;
 }
+
+export { createFirstPartyAttemptClient } from "./first-party-client";

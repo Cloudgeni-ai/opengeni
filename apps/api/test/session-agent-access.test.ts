@@ -11,6 +11,9 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createSession as createDbSession,
+  getSession,
+  initializeSessionStartAtomically,
   resolveSessionMemoryAgentScope,
   type DbClient,
 } from "@opengeni/db";
@@ -52,8 +55,10 @@ const AGENT_TOOLS = [
   "session_events",
   "sessions_list",
   "session_create",
-  "memory_search",
-  "memory_save",
+  "knowledge_search",
+  "knowledge_get",
+  "knowledge_browse",
+  "knowledge_save",
 ] as const;
 const u1: SessionScopeSubjectId = "user:u_1";
 const u2: SessionScopeSubjectId = "user:u_2";
@@ -100,7 +105,9 @@ function dependencies(): ApiRouteDeps {
       deleteScheduledTaskSchedule: noop,
       triggerScheduledTask: noop,
     } as unknown as SessionWorkflowClient,
-    objectStorage: null,
+    // Session admission only needs the dependency to be configured before it
+    // validates an existing file reference; these tests never read file bytes.
+    objectStorage: {} as never,
     githubStateSecret: "session-agent-access-state",
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({ embedder: undefined }) as never,
@@ -558,53 +565,91 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     expect(widenedMemory.isError).toBe(true);
   });
 
-  test("memory tools follow the session's frozen memory scope", async () => {
+  test("a service-initiated attempt can attach a workspace file to its child", async () => {
     if (!available) return;
     const f = await fixture();
-    const treeOwner = await createSession(f, { memoryScope: "user" });
-    const peer = await createSession(f, {});
-    const silent = await createSession(f, { memoryScope: "off" });
-    const ownerServer = await agentServer(f, await liveAttempt(f, treeOwner.id));
-    const peerServer = await agentServer(f, await liveAttempt(f, peer.id));
-    const silentServer = await agentServer(f, await liveAttempt(f, silent.id));
-
-    expect(registeredToolNames(silentServer)).not.toContain("memory_search");
-    expect(registeredToolNames(silentServer)).not.toContain("memory_save");
-    expect(registeredToolNames(ownerServer)).toEqual(
-      expect.arrayContaining(["memory_search", "memory_save"]),
-    );
-
-    const saved = (await expectAllowed(
-      callTool(ownerServer, "memory_save", {
-        text: "quokka deployment window is Tuesday for this tree",
-        kind: "semantic",
+    const parent = await createDbSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "Run scheduled service work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "service", subjectId: "scheduler:test" },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: parent.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attempt = await liveAttempt(f, parent.id);
+    const fileId = crypto.randomUUID();
+    await shared!.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, bucket, object_key
+      ) values (
+        ${fileId}, ${f.accountId}, ${f.workspaceId}, 'ready', 'service-note.txt',
+        'service-note.txt', 'text/plain', 4, 'test', ${fileId}
+      )
+    `;
+    const server = await agentServer(f, attempt);
+    const created = (await expectAllowed(
+      callTool(server, "session_create", {
+        initialMessage: "Read the attached service note",
+        resources: [{ kind: "file", fileId }],
       }),
     )) as { resource: { id: string } };
-    const [row] = await shared!.admin<Array<{ scopeType: string; scopeSubjectId: string }>>`
-      select scope_type as "scopeType", scope_subject_id as "scopeSubjectId"
-      from knowledge_memories where id = ${saved.resource.id}`;
-    expect(row).toEqual({ scopeType: "user", scopeSubjectId: f.subjectId });
+    const child = await getSession(client.db, f.workspaceId, created.resource.id);
+    expect(child?.resources).toEqual([expect.objectContaining({ kind: "file", fileId })]);
+  });
 
-    const ownerResults = (await expectAllowed(
-      callTool(ownerServer, "memory_search", { query: "quokka" }),
-    )) as { results: Array<{ memory: { id: string } }> };
-    expect(ownerResults.results.map((entry) => entry.memory.id)).toEqual([saved.resource.id]);
-    const peerResults = (await expectAllowed(
-      callTool(peerServer, "memory_search", { query: "quokka" }),
-    )) as { results: Array<{ memory: { id: string } }> };
-    expect(peerResults.results).toEqual([]);
-
-    const peerSaved = (await expectAllowed(
-      callTool(peerServer, "memory_save", { text: "quokka pricing is shared", kind: "semantic" }),
-    )) as { resource: { id: string } };
-    const [peerRow] = await shared!.admin<Array<{ scopeType: string }>>`
-      select scope_type as "scopeType" from knowledge_memories where id = ${peerSaved.resource.id}`;
-    expect(peerRow).toEqual({ scopeType: "workspace" });
-    const ownerAfter = (await expectAllowed(
-      callTool(ownerServer, "memory_search", { query: "quokka" }),
-    )) as { results: Array<{ memory: { id: string } }> };
-    expect(new Set(ownerAfter.results.map((entry) => entry.memory.id))).toEqual(
-      new Set([saved.resource.id, peerSaved.resource.id]),
+  test("Knowledge follows personal/shared scope while Off blocks only authoring", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const owner = await createSession(f, { memoryScope: "user" });
+    const peer = await createSession(f, {});
+    const silent = await createSession(f, { memoryScope: "off" });
+    const ownerServer = await agentServer(f, await liveAttempt(f, owner.id));
+    const peerServer = await agentServer(f, await liveAttempt(f, peer.id));
+    const silentServer = await agentServer(f, await liveAttempt(f, silent.id));
+    expect(registeredToolNames(ownerServer)).not.toContain("memory_save");
+    expect(registeredToolNames(silentServer)).toContain("knowledge_search");
+    const request = (content: string) => ({
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: { kind: "fact", title: "Quokka deployment", content },
+    });
+    const saved = (await expectAllowed(
+      callTool(ownerServer, "knowledge_save", request("quokka deployment is Tuesday")),
+    )) as { entryId: string };
+    const [row] = await shared!.admin<Array<{ scope: string; subject: string }>>`
+      select scope,scope_subject_id as subject from knowledge_entries where id=${saved.entryId}`;
+    expect(row).toEqual({ scope: "personal", subject: f.subjectId });
+    const search = async (server: Awaited<ReturnType<typeof agentServer>>) =>
+      (
+        (await expectAllowed(callTool(server, "knowledge_search", { query: "quokka" }))) as {
+          entries: { id: string }[];
+        }
+      ).entries.map((e) => e.id);
+    expect(await search(ownerServer)).toEqual([saved.entryId]);
+    expect(await search(peerServer)).toEqual([]);
+    const sharedEntry = (await expectAllowed(
+      callTool(peerServer, "knowledge_save", request("quokka shared pricing")),
+    )) as { entryId: string };
+    expect(new Set(await search(ownerServer))).toEqual(
+      new Set([saved.entryId, sharedEntry.entryId]),
     );
+    expect(await search(silentServer)).toEqual([sharedEntry.entryId]);
+    expect(
+      (await callTool(silentServer, "knowledge_save", request("quokka must not be saved"))).isError,
+    ).toBe(true);
   });
 });

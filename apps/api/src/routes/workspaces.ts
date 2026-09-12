@@ -398,16 +398,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy
     // workspace yields the retryable 503 instead of parking this request.
-    const workspace = await updateWorkspaceSettingsWithToolDefaults(
-      deps.db,
-      workspaceId,
-      parsed.data,
-      { requireWorkspace, updateWorkspaceSettings },
-      {
-        controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-      },
-    );
-    return c.json(Workspace.parse(workspace));
+    try {
+      const workspace = await updateWorkspaceSettingsWithToolDefaults(
+        deps.db,
+        workspaceId,
+        parsed.data,
+        { requireWorkspace, updateWorkspaceSettings },
+        {
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+        },
+      );
+      return c.json(Workspace.parse(workspace));
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "0A000") {
+        throw new HTTPException(409, {
+          message:
+            "Memory settings moved to Settings > Agent learning. Refresh the app to change them.",
+        });
+      }
+      throw error;
+    }
   });
 
   // Per-workspace model/provider availability policy (the HARD blocker over

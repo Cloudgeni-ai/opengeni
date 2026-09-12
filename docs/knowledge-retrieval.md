@@ -1,5 +1,7 @@
 # Agent Knowledge retrieval
 
+> **After migration 0461:** New retrieval uses canonical Knowledge entries and rebuildable keyword/vector projections. The legacy Documents/Memory search endpoints are retired. See [Knowledge and Agent learning](knowledge.md) for the current runtime. The older model below documents historical storage and receipts.
+
 This document is the canonical contract for the permission-first agent Knowledge
 read surface. It is a projection over authorized, ready Documents; it does not
 create another durable store, a prompt-injection path, or behavioral authority.

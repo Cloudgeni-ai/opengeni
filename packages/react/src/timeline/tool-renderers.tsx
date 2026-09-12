@@ -1,3 +1,5 @@
+import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { useRetainedImageObjectUrl } from "./retained-image";
 import {
   parseSandboxFileArtifactReceipt,
   type GitFileDiff,
@@ -34,7 +36,7 @@ import {
   VideoIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useState, type ReactNode } from "react";
 import { formatBytes, stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
@@ -71,6 +73,7 @@ import {
   TermBlock,
   Thumbnail,
   ActivityDisclosure,
+  CompactActivityContext,
   type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
@@ -96,9 +99,12 @@ const ICON_SIZE = "size-3.5";
  * left-to-right.
  */
 function RunningPreview({ children }: { children: ReactNode }) {
+  const compact = useContext(CompactActivityContext);
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="size-1.5 shrink-0 animate-og-pulse rounded-full bg-og-status-running" />
+      {!compact && (
+        <span className="size-1.5 shrink-0 animate-og-pulse rounded-full bg-og-status-running" />
+      )}
       <span className="min-w-0 truncate">{children}</span>
     </span>
   );
@@ -764,95 +770,6 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
       {batched ? <BodyNote>{batched}</BodyNote> : null}
     </ActivityDisclosure>
   );
-}
-
-type RetainedImageState =
-  | { kind: "loading" }
-  | { kind: "ready"; url: string }
-  | { kind: "unavailable"; label: string }
-  | { kind: "error"; message: string };
-
-function useRetainedImageObjectUrl(
-  artifact: RetainedArtifactReference,
-  load: ToolRendererProps["loadRetainedArtifact"],
-): RetainedImageState {
-  const [state, setState] = useState<RetainedImageState>({ kind: "loading" });
-  // Function outputs are commonly serialized JSON. Parsing them creates a new
-  // object on every render, so depend on the immutable wire value rather than
-  // object identity; otherwise the loader can refetch after its own setState.
-  const artifactValue = retainedArtifactValue(artifact);
-  const stableArtifactRef = useRef({ value: artifactValue, artifact });
-  if (stableArtifactRef.current.value !== artifactValue) {
-    stableArtifactRef.current = { value: artifactValue, artifact };
-  }
-  const stableArtifact = stableArtifactRef.current.artifact;
-  useEffect(() => {
-    if (!load) {
-      setState({ kind: "unavailable", label: "retrieval is not configured" });
-      return;
-    }
-    const controller = new AbortController();
-    let objectUrl: string | null = null;
-    setState({ kind: "loading" });
-    void load(stableArtifact, controller.signal)
-      .then((source) => {
-        if (controller.signal.aborted) return;
-        if (!source) {
-          setState({ kind: "unavailable", label: "bytes are unavailable" });
-          return;
-        }
-        if (!(source instanceof Uint8Array)) {
-          if (!source.url.trim()) {
-            setState({ kind: "unavailable", label: "URL is unavailable" });
-            return;
-          }
-          setState({ kind: "ready", url: source.url });
-          return;
-        }
-        objectUrl = URL.createObjectURL(
-          new Blob([source as unknown as BlobPart], { type: stableArtifact.contentType }),
-        );
-        setState({ kind: "ready", url: objectUrl });
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        const status =
-          error && typeof error === "object" && "status" in error
-            ? Number((error as { status?: unknown }).status)
-            : null;
-        setState(
-          status === 404
-            ? { kind: "unavailable", label: "deleted" }
-            : status === 410
-              ? { kind: "unavailable", label: "expired or unavailable" }
-              : { kind: "error", message: "retrieval failed" },
-        );
-      });
-    return () => {
-      controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [stableArtifact, load]);
-  return state;
-}
-
-function retainedArtifactValue(artifact: RetainedArtifactReference): string {
-  return [
-    artifact.artifactId,
-    artifact.kind,
-    artifact.contentType,
-    artifact.originalBytes,
-    artifact.sha256,
-    artifact.retainedAt,
-    artifact.dimensions?.width ?? "",
-    artifact.dimensions?.height ?? "",
-    artifact.retention.policy,
-    artifact.retention.expiresAt ?? "",
-    artifact.retrieval.method,
-    artifact.retrieval.path,
-    artifact.retrieval.acceptRanges,
-    artifact.retrieval.maxRangeBytes,
-  ].join("\0");
 }
 
 function RetainedSessionImageDisclosure({
@@ -2370,7 +2287,54 @@ function GenericToolIcon({ name }: { name: string }) {
 
 /* ---- the default registry -------------------------------------------------- */
 
+function KnowledgeSaveRenderer({ item }: ToolRendererProps) {
+  const output = unwrapMcpOutput(item.output);
+  const parsed = tryParseJson(output.text);
+  if (item.status === "running" || output.isError || !parsed || typeof parsed !== "object")
+    return <GenericRenderer item={item} />;
+  const value = parsed as Record<string, unknown>;
+  const receipt = (value.status === "retained" ? value.receipt : value) as
+    | Record<string, unknown>
+    | undefined;
+  if (
+    !receipt ||
+    typeof receipt.entryId !== "string" ||
+    !["published", "pending", "rejected", "archived"].includes(String(receipt.outcome))
+  )
+    return <GenericRenderer item={item} />;
+  const args = parseToolArgs(item.arguments);
+  const entry = args.entry as Record<string, unknown> | undefined;
+  return (
+    <KnowledgeReceiptRow
+      outcome={receipt.outcome as "published" | "pending" | "rejected" | "archived"}
+      entryId={receipt.entryId}
+      title={
+        typeof entry?.title === "string"
+          ? entry.title
+          : typeof value.filename === "string"
+            ? value.filename
+            : undefined
+      }
+      source={value.status === "retained" || value.retained === true}
+    />
+  );
+}
+
 const BASE_ENTRIES: ToolRegistryEntry[] = [
+  ...[
+    "knowledge_save",
+    "knowledge_archive",
+    "knowledge_retain_file",
+    "knowledge_retain_message",
+    "task_note_promote_knowledge",
+  ].flatMap((name) =>
+    [name, `opengeni__${name}`, `mcp__opengeni__${name}`].map((trustedName) => ({
+      match: "name" as const,
+      name: trustedName,
+      matchPrefixedLeaf: false,
+      render: KnowledgeSaveRenderer,
+    })),
+  ),
   // Provider-native items carry `raw.type` on the wire — this is their source of
   // truth and is consulted first by the registry.
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },

@@ -4112,7 +4112,7 @@ describe("runtime event normalization", () => {
     "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
     "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Reusable conditional guidance belongs in Skills. Skill changes use the shared file lifecycle governed by Learning mode, not Knowledge evidence or confidence. Follow Skill management guidance only when it is present in the Skill index. Use remember lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
+    "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save when useful for future work, whether requested explicitly or learned during ordinary work. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files and automatically prepare source text when authoring is enabled. Use knowledge_retain_file for a newly fetched file or failed preparation. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
   ].join(" ");
   const defaultSkillIndex = [
     "## Skills",
@@ -4120,6 +4120,7 @@ describe("runtime event normalization", () => {
     "Management tools are lazy and available through tool search.",
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+    '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Proactively use to show how something works; explore \'what happens when\', \'what changes\', or \'help me understand\'; compare or inspect; create simulations, maps, charts, graphs, and mockups. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
@@ -4478,7 +4479,7 @@ describe("runtime event normalization", () => {
       sandboxWorkspaceRoot: "/srv/project",
       codemodeAvailable: true,
     });
-    expect(staticInstructions(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(() =>
       buildOpenGeniAgent(testSettings(codemodeOn), [], {
         codemodeAvailable: false,
@@ -11442,11 +11443,13 @@ describe("runtime Skill activation", () => {
     ],
   };
 
-  test("without explicit activation only the default document guidance is indexed", () => {
+  test("without explicit activation default document and visualization guidance are indexed", () => {
     const composition = composeRuntimeSkills([]);
+    expect(composition.configuredNames).toEqual([]);
     const index = composition.index;
     expect(index.map((entry) => ({ id: entry.id, name: entry.name }))).toEqual([
       { id: "native-tool:document-parsing", name: "document-parsing" },
+      { id: "native-tool:opengeni-visualize", name: "opengeni-visualize" },
     ]);
   });
 
@@ -11907,15 +11910,18 @@ describe("runtime Skill activation", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
       skillCatalog: [],
     });
-    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toEqual([
-      "document-parsing",
-    ]);
+    expect(runtimeSkillIndexForAgent(agent)).toEqual([]);
     expect(
       agent.tools.filter((tool) => tool.type === "function" && tool.name === "skill_read"),
     ).toHaveLength(0);
-    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain("opengeni-sites");
+    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
+      "native-tool:opengeni-sites",
+    );
     expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
       "document-parsing",
+    );
+    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
+      "native-tool:opengeni-visualize",
     );
     expect(() =>
       buildOpenGeniAgent(testSettings(), [], {

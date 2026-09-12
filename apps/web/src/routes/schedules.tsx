@@ -1,6 +1,8 @@
+import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { loadSessionSchedules } from "@/lib/scheduled-tasks";
-// Shared schedules for agent turns and deterministic knowledge-source syncs,
+import { loadSessionSchedules, scheduledLearningDestinationKey } from "@/lib/scheduled-tasks";
+// Shared schedules for agent turns, including connected-source Knowledge tasks,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
 import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
@@ -458,7 +460,18 @@ export function SchedulesRoute({
     }
     setBusyTaskId("new");
     try {
+      const scope = scheduledLearningScope(
+        form,
+        sessions,
+        isPersonalWorkspace(
+          context.workspaces.find((item) => item.id === workspaceId) ?? null,
+          context.managedSelfContext,
+        ),
+      );
       await client.createScheduledTask(workspaceId, {
+        ...(form.agentLearning && Object.keys(form.agentLearning).length
+          ? { agentLearning: { scope, settings: form.agentLearning } }
+          : {}),
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
@@ -508,6 +521,26 @@ export function SchedulesRoute({
     setBusyTaskId(task.id);
     try {
       await client.updateScheduledTask(workspaceId, task.id, {
+        ...(form.agentLearningVersion !== undefined &&
+        (form.agentLearningDirty ||
+          form.agentLearningDestinationKey !== scheduledLearningDestinationKey(form))
+          ? {
+              agentLearning: {
+                scope: scheduledLearningScope(
+                  form,
+                  sessions,
+                  isPersonalWorkspace(
+                    context.workspaces.find((item) => item.id === workspaceId) ?? null,
+                    context.managedSelfContext,
+                  ),
+                ),
+                baselineScope: form.agentLearningBaselineScope,
+                operationId: crypto.randomUUID(),
+                expectedVersion: form.agentLearningVersion,
+                settings: form.agentLearning ?? {},
+              },
+            }
+          : {}),
         name: form.name.trim() || form.prompt.trim().slice(0, 64),
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
@@ -634,6 +667,8 @@ export function SchedulesRoute({
               />
             ) : (
               <ScheduledTaskForm
+                workspaceId={workspaceId}
+                taskId={task.id}
                 key={task.id}
                 initialState={formStateFromScheduledTask(task, {
                   model: context.model,
@@ -695,6 +730,7 @@ export function SchedulesRoute({
             </Notice>
           ) : null}
           <ScheduledTaskForm
+            workspaceId={workspaceId}
             key={recurringSourceSessionId ?? "new"}
             initialState={
               recurringSourceSessionId
@@ -744,7 +780,7 @@ export function SchedulesRoute({
           <EmptyState
             icon={<CalendarClockIcon className="size-4" />}
             title="No schedules yet"
-            description="Schedule an agent run or connector sync."
+            description="Schedule recurring agent work."
             action={
               <Button
                 type="button"
@@ -803,6 +839,7 @@ export function SchedulesRoute({
         onOpenChange={(next) => (next ? undefined : setConfirmDelete(null))}
         title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
         description={
+          confirmDelete?.agentConfig.knowledgeSource ||
           confirmDelete?.action.kind === "knowledge_source_sync"
             ? "Deletes this schedule and disables its source. Re-enable it from the connector."
             : "Deletes future runs; existing sessions are kept."
@@ -947,9 +984,15 @@ function ScheduledTaskCard(props: {
                 </span>
               </button>
             </CollapsibleTrigger>
-            {task.action.kind === "knowledge_source_sync" ? (
+            {task.agentConfig.knowledgeSource || task.action.kind === "knowledge_source_sync" ? (
               <div className="mt-1 text-2xs text-fg-subtle">
-                {knowledgeSyncSourceLabel(task.action)}
+                {knowledgeSyncSourceLabel(
+                  task.agentConfig.knowledgeSource ??
+                    (task.action as Extract<
+                      ScheduledTask["action"],
+                      { kind: "knowledge_source_sync" }
+                    >),
+                )}
               </div>
             ) : (
               <SchedulePersonalConnectionDisclosure connections={task.personalConnections} />
@@ -1242,7 +1285,31 @@ function ScheduleTimeField(props: {
   );
 }
 
+function scheduledLearningScope(
+  form: ScheduledTaskFormState,
+  sessions: Session[],
+  personal: boolean,
+): "personal" | "workspace" {
+  if (
+    form.agentLearningBaselineScope &&
+    form.agentLearningDestinationKey === scheduledLearningDestinationKey(form)
+  )
+    return form.agentLearningBaselineScope;
+  const target =
+    form.runMode === "existing_session"
+      ? sessions.find((session) => session.id === form.targetSessionId)
+      : null;
+  return form.knowledgeSource?.destination.kind === "personal" ||
+    personal ||
+    target?.tenancy?.visibility === "private" ||
+    target?.memoryScope === "user"
+    ? "personal"
+    : "workspace";
+}
+
 function ScheduledTaskForm(props: {
+  workspaceId: string;
+  taskId?: string;
   initialState: ScheduledTaskFormState;
   submitLabel: string;
   busy: boolean;
@@ -1259,7 +1326,54 @@ function ScheduledTaskForm(props: {
   onSubmit: (form: ScheduledTaskFormState) => void;
   onCancel?: () => void;
 }) {
+  const context = useAppContext();
   const [form, setForm] = useState(props.initialState);
+  const [learningOpen, setLearningOpen] = useState(false);
+  const learningScope = scheduledLearningScope(
+    form,
+    props.sessions,
+    isPersonalWorkspace(
+      context.workspaces.find((item) => item.id === props.workspaceId) ?? null,
+      context.managedSelfContext,
+    ),
+  );
+  const baselineDestinationKey = scheduledLearningDestinationKey(props.initialState);
+  const [learningLoading, setLearningLoading] = useState(Boolean(props.taskId));
+  const [learningError, setLearningError] = useState<string | null>(null);
+  const [learningRetry, setLearningRetry] = useState(0);
+  useEffect(() => {
+    if (!props.taskId) return;
+    let current = true;
+    setLearningLoading(true);
+    setLearningError(null);
+    void context.client
+      .getAgentLearningSettings(props.workspaceId, "context", {
+        kind: "scheduled_task",
+        id: props.taskId,
+      })
+      .then((record) => {
+        if (current)
+          setForm((previous) => ({
+            ...previous,
+            agentLearning: record.settings,
+            agentLearningVersion: record.version,
+            agentLearningBaselineScope: record.ownerKey.startsWith("personal:")
+              ? "personal"
+              : "workspace",
+            agentLearningDestinationKey: baselineDestinationKey,
+            agentLearningDirty: false,
+          }));
+      })
+      .catch((reason) => {
+        if (current) setLearningError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (current) setLearningLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [context.client, props.workspaceId, props.taskId, baselineDestinationKey, learningRetry]);
   const [cadence, setCadenceState] = useState<ScheduledTaskCadence>(() =>
     scheduledTaskCadence(props.initialState),
   );
@@ -1527,6 +1641,50 @@ function ScheduledTaskForm(props: {
         </div>
       </FormDisclosure>
 
+      <FormDisclosure
+        title="Agent learning"
+        summary="Optional defaults for this task"
+        open={learningOpen}
+        onOpenChange={setLearningOpen}
+      >
+        {learningLoading ? (
+          <p role="status" className="text-sm text-fg-muted">
+            Loading task settings…
+          </p>
+        ) : learningError ? (
+          <p role="alert" className="text-sm text-status-error">
+            Learning settings are unavailable. You can still save other task changes.
+            <span className="block text-xs">{learningError}</span>
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={() => setLearningRetry((value) => value + 1)}
+            >
+              Retry
+            </Button>
+          </p>
+        ) : (
+          <AgentLearningDraftEditor
+            workspaceId={props.workspaceId}
+            scope={learningScope}
+            value={form.agentLearning ?? {}}
+            disabled={props.busy}
+            onChange={(value) =>
+              setForm((previous) => ({
+                ...previous,
+                agentLearning: value,
+                agentLearningDirty: true,
+              }))
+            }
+          />
+        )}
+        {props.taskId ? (
+          <p className="text-xs text-fg-muted">
+            Applied when you save changes. Cancel discards these edits.
+          </p>
+        ) : null}
+      </FormDisclosure>
+
       <section className="grid gap-3" aria-labelledby="schedule-editor-heading">
         <Label id="schedule-editor-heading">Schedule</Label>
         <div
@@ -1610,7 +1768,11 @@ function ScheduledTaskForm(props: {
             Cancel
           </Button>
         ) : null}
-        <Button type="button" onClick={() => props.onSubmit(form)} disabled={props.busy}>
+        <Button
+          type="button"
+          onClick={() => props.onSubmit(form)}
+          disabled={props.busy || learningLoading}
+        >
           {props.busy ? (
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : (

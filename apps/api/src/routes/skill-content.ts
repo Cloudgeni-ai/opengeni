@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { SkillFile, type SkillWriteReceipt } from "@opengeni/contracts";
 import {
   approveSkill,
+  rejectSkill,
   listSkills,
   readSkill,
   requireAccessGrant,
@@ -168,7 +169,7 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
     );
     return c.json(receipt);
   });
-  for (const operation of ["approve", "restore"] as const) {
+  for (const operation of ["approve", "reject", "restore"] as const) {
     app.post(`${base}/:skillId/${operation}`, async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
@@ -181,7 +182,12 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       );
       if (!current) throw new HTTPException(404, { message: "Skill not found" });
       authorizePreferenceRegistryScopeMutation(access, current.scope);
-      const apply = operation === "approve" ? approveSkill : restoreSkill;
+      const apply =
+        operation === "approve"
+          ? approveSkill
+          : operation === "reject"
+            ? rejectSkill
+            : restoreSkill;
       return c.json(
         await skillMutation(() =>
           apply(deps.db, {

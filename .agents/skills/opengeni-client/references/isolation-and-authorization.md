@@ -2,7 +2,7 @@
 
 ## Start from who may share, not from workspace count
 
-An OpenGeni organization is the administrative and billing container. An organization workspace is the operational boundary for sessions, events, files, documents, connections, installed capabilities, workspace Memory, settings, and agent access.
+An OpenGeni organization is the administrative and billing container. An organization workspace is the operational boundary for sessions, events, files, documents, connections, installed capabilities, workspace Knowledge, settings, and agent access.
 
 Use the smallest group allowed to share those workspace-scoped capabilities as the workspace mapping unit:
 
@@ -23,15 +23,15 @@ A workspace is control-plane state, not a dedicated cluster or permanently runni
 - A top-level session created by an organization API key defaults to workspace visibility.
 - Private or Only-me sessions require verified owning-user authority and organization activation. Native managed sessions and the server-side `asUser()` path establish that authority; a raw `endUser` payload does not.
 - An agent must pass ordinary permissions and private-session ownership checks. The caller's `agentAccess` narrows outbound reach: `session` stays in its root tree; `user` requires matching non-null canonical scope users across trees; `workspace` adds no further restriction. The target's `agentAccess` never restricts inbound access. None of these modes overrides private visibility.
-- Workspace Memory controls retrieval and saving of workspace facts. Turning it off does not remove session history, change session visibility, or neutralize cross-session tools.
-- Hiding session-list and session-get alone is incomplete. Events, waiting, messaging, control, discovery, workspace Memory, documents, notes, or other workspace-wide tools may still cross the intended boundary.
+- Knowledge learning controls agent authoring. Turning it off leaves authorized retrieval available and does not remove session history, change session visibility, or neutralize cross-session tools.
+- Hiding session-list and session-get alone is incomplete. Events, waiting, messaging, control, discovery, workspace Knowledge, documents, notes, or other workspace-wide tools may still cross the intended boundary.
 
 One workspace per end user or One workspace per chat remains possible when the
 resources and integration configuration themselves must be isolated, but is not
 required merely to make a conversation private. Use the canonical private
 session boundary for transcripts; choose separate workspaces for workspace
 resources. Remove unnecessary tools as defense in depth, never as a substitute
-for either boundary. User Memory follows the verified active-turn user; task
+for either boundary. Personal Knowledge follows the verified active-turn user; task
 notes cover task-local coordination. Session-scoped Memory is retired without
 promoting historical rows into workspace visibility.
 
@@ -43,7 +43,7 @@ For a customer-facing headless session, never rely accidentally on omission:
 - Omitting firstPartyMcpTools selects the deployment's non-connector default catalog; an explicit empty list exposes none.
 - Build an allowlist from the product's actual use case and the live SDK type or client configuration.
 - Exclude cross-session tools unless collaboration is an explicit feature. Current examples include sessions_list, session_get, session_events, session_wait, session_send_message, session_pause, session_resume, session_steer, session_human_input_respond, set_other_session_title, and workspace-scoped discovery. Recheck the live catalog rather than treating this list as permanent.
-- Also examine Memory, knowledge, notes, files, artifacts, browsers, computers, scheduling, and capability-management tools. A tool is safe only when both its scope and its necessity fit the product.
+- Also examine Knowledge, notes, files, artifacts, browsers, computers, scheduling, and capability-management tools. A tool is safe only when both its scope and its necessity fit the product.
 - A tool allowlist narrows what the model can invoke; it does not repair an incorrectly shared workspace, an over-broad provider token, or a vulnerable customer API.
 
 ## Backend mapping pattern

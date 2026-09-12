@@ -21,6 +21,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 import { registerApiKeyRoutes, organizationApiKeyPermissions } from "../src/routes/api-keys";
 import { registerVideoGenerationRoutes } from "../src/routes/video-generation";
+import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learning";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
@@ -137,6 +138,7 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerApiKeyRoutes(registered, deps);
   registerWorkspaceRoutes(registered, deps);
   registerWorkspaceLearningRoutes(registered, deps);
+  registerKnowledgeRoutes(registered, deps);
   registerVideoGenerationRoutes(registered, deps);
   return registered;
 }
@@ -219,11 +221,11 @@ describe("managed personal workspace access", () => {
     const saved = await app.request(`${base}/settings`, {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ memoryEnabled: false, voiceInput: { enabled: false } }),
+      body: JSON.stringify({ voiceInput: { enabled: false } }),
     });
     expect(saved.status).toBe(200);
     expect(await saved.json()).toMatchObject({
-      settings: { memoryEnabled: false, voiceInput: { enabled: false } },
+      settings: { voiceInput: { enabled: false } },
     });
     const video = await app.request(`${base}/video-generation/policy`, {
       method: "PUT",
@@ -253,26 +255,39 @@ describe("managed personal workspace access", () => {
     expect(timer.status).toBe(200);
     const timed = await app.request(base, { headers });
     expect(((await timed.json()) as Workspace).inferenceControl.pauseAt).not.toBeNull();
-    const revisionResponse = await app.request(`${base}/learning/revisions`, {
+    const currentLearning = await app.request(`${base}/agent-learning/read`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ scope: "personal" }),
+    });
+    expect(currentLearning.status).toBe(200);
+    const baseline = (await currentLearning.json()) as {
+      version: number;
+      settings: Record<string, string>;
+    };
+    const changedLearning = await app.request(`${base}/agent-learning`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        scope: "personal",
+        operationId: crypto.randomUUID(),
+        expectedVersion: baseline.version,
+        settings: { ...baseline.settings, knowledge: "off" },
+      }),
+    });
+    expect(changedLearning.status).toBe(200);
+    expect(await changedLearning.json()).toMatchObject({ settings: { knowledge: "off" } });
+    const instructionReviews = await app.request(`${base}/agent-learning/instructions/reviews`, {
+      headers,
+    });
+    expect(instructionReviews.status).toBe(200);
+    expect(await instructionReviews.json()).toMatchObject({ entries: [] });
+    const retired = await app.request(`${base}/learning/revisions`, {
       method: "POST",
       headers,
       body: JSON.stringify({ workspaceMode: "off", sourceOverrides: [] }),
     });
-    expect(revisionResponse.status).toBe(201);
-    const revision = (await revisionResponse.json()) as { id: string };
-    const activated = await app.request(`${base}/learning/revisions/${revision.id}/activate`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        expectedCurrentRevisionId: null,
-        expectedActivationVersion: 0,
-        reason: "Personal owner settings test",
-      }),
-    });
-    expect(activated.status).toBe(200);
-    const history = await app.request(`${base}/learning`, { headers });
-    expect(history.status).toBe(200);
-    expect(await history.json()).toMatchObject({ head: { revisionId: revision.id } });
+    expect(retired.status).toBe(410);
     for (const [method, path, body] of [
       ["POST", "/members", { subjectId: "user:outsider", permissions: ["workspace:read"] }],
       ["POST", "/api-keys", { name: "No delegation", permissions: ["workspace:read"] }],
@@ -288,6 +303,48 @@ describe("managed personal workspace access", () => {
     const [count] = await shared.admin<Array<{ count: number }>>`
       select count(*)::int as count from workspace_memberships where workspace_id = ${personalWorkspaceId}`;
     expect(count?.count).toBe(0);
+  });
+
+  test("Personal Knowledge uses the canonical API and validates pagination before retrieval", async () => {
+    if (!app) return;
+    const headers = { cookie: "session=present", "content-type": "application/json" };
+    const base = `http://x/v1/workspaces/${personalWorkspaceId}/knowledge/entries`;
+    const entryId = crypto.randomUUID();
+    const saved = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        entryId,
+        expectedVersion: 0,
+        scope: "personal",
+        entry: {
+          kind: "note",
+          title: "Personal research",
+          content: "A retained customer observation.",
+          source: { kind: "manual" },
+        },
+      }),
+    });
+    expect(saved.status).toBe(201);
+    expect(await saved.json()).toMatchObject({ entryId, outcome: "published" });
+    const tooMany = await app.request(`${base}/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ limit: 51, scope: "personal" }),
+    });
+    expect(tooMany.status).toBe(422);
+    const listing = await app.request(`${base}/search`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ limit: 50, scope: "personal" }),
+    });
+    expect(listing.status).toBe(200);
+    expect(await listing.json()).toMatchObject({
+      entries: [
+        { id: entryId, scope: "personal", revision: { title: "Personal research", kind: "note" } },
+      ],
+    });
   });
 
   test("Personal settings deny delegated owner lookalikes and read-only shared-workspace cookies", async () => {

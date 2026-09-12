@@ -4,6 +4,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DelegatedAccessTokenPayload,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  RETIRED_AGENT_LEARNING_TOOL_NAMES,
 } from "../src";
 
 const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
@@ -76,14 +77,29 @@ describe("first-party MCP tool-name contract", () => {
 
   test("keeps connector-wide tools outside the ordinary default selection", () => {
     expect(
-      FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name)),
+      FIRST_PARTY_MCP_TOOL_NAMES.filter(
+        (name) =>
+          !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(name) &&
+          !(RETIRED_AGENT_LEARNING_TOOL_NAMES as readonly string[]).includes(name),
+      ),
     ).toEqual([...EXPLICIT_ONLY_CONNECTOR_TOOLS]);
   });
 
-  test("includes autonomous workspace Memory tools in the ordinary default selection", () => {
+  test("selects structured Knowledge tools and excludes retired learning tools by default", () => {
     expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toEqual(
-      expect.arrayContaining(["memory_search", "memory_save", "memory_correct"]),
+      expect.arrayContaining([
+        "knowledge_search",
+        "knowledge_get",
+        "knowledge_browse",
+        "knowledge_save",
+        "knowledge_retain_file",
+        "knowledge_retain_message",
+        "instruction_policy_save",
+      ]),
     );
+    for (const name of RETIRED_AGENT_LEARNING_TOOL_NAMES) {
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain(name);
+    }
   });
 
   test("resource attachment remains independent of model-visible first-party tools", () => {
