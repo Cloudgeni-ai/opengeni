@@ -8,6 +8,7 @@ import {
   getSessionAuthorityProjection,
   initializeSessionStartAtomically,
   recordSandboxFilePublication,
+  requireWorkspace,
   withSessionRlsActorContext,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -47,11 +48,24 @@ postgresTest(
       await owned.admin.begin(async (tx) => {
         await tx`SET LOCAL session_replication_role = replica`;
         await tx`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Catalog provenance')`;
-        await tx`INSERT INTO workspaces(id,account_id,name,kind,settings) VALUES(${workspaceId},${accountId},'Shared catalog','shared','{}'),(${personalWorkspaceId},${accountId},'Owner Personal','personal','{}')`;
+        // Workspace kind is derived from organization membership's Personal
+        // pointer; there is intentionally no physical workspaces.kind column.
+        await tx`INSERT INTO workspaces(id,account_id,name,settings) VALUES(${workspaceId},${accountId},'Shared catalog','{}'),(${personalWorkspaceId},${accountId},'Owner Personal','{}')`;
         await tx`INSERT INTO organization_memberships(id,account_id,subject_id,role,status,personal_workspace_id) VALUES(${membershipId},${accountId},${ownerSubject},'owner','active',${personalWorkspaceId})`;
         await tx`INSERT INTO workspace_memberships(account_id,workspace_id,subject_id,role,permissions) VALUES(${accountId},${workspaceId},${ownerSubject},'member','["files:read","sessions:read"]'),(${accountId},${workspaceId},${viewerSubject},'member','["files:read","sessions:read"]')`;
-        await tx`INSERT INTO workspace_inference_controls(workspace_id,account_id) VALUES(${workspaceId},${accountId})`;
+        await tx`INSERT INTO workspace_inference_controls(workspace_id,account_id) VALUES(${workspaceId},${accountId}),(${personalWorkspaceId},${accountId})`;
       });
+      for (const [id, kind] of [
+        [workspaceId, "shared"],
+        [personalWorkspaceId, "personal"],
+      ] as const)
+        expect(
+          (
+            await withSessionRlsActorContext({ subjectId: ownerSubject }, () =>
+              requireWorkspace(client!.db, id),
+            )
+          ).kind,
+        ).toBe(kind);
       const create = () =>
         createSession(client!.db, {
           accountId,

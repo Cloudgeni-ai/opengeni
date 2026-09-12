@@ -131,11 +131,16 @@ postgresTest(
       const privileges =
         await owned.admin`SELECT has_table_privilege('opengeni_app','opengeni_private.sandbox_file_publications','SELECT') AS read, has_table_privilege('opengeni_app','opengeni_private.sandbox_file_publications','INSERT') AS write`;
       expect(privileges[0]).toMatchObject({ read: false, write: false });
-      const raw = postgres(appUrl.toString(), { max: 1 });
+      const raw = postgres(appUrl.toString(), {
+        max: 1,
+        connection: { statement_timeout: 30_000 },
+      });
       try {
+        // Bun's rejection matcher does not start postgres-js's lazy Query.
+        // Execute it first, and prove denial rather than accepting any failure.
         await expect(
-          raw`SELECT opengeni_private.record_sandbox_file_publication(${scope.accountId},${scope.workspaceId},${firstId},${session.id})`,
-        ).rejects.toThrow();
+          raw`SELECT opengeni_private.record_sandbox_file_publication(${scope.accountId},${scope.workspaceId},${firstId},${session.id})`.execute(),
+        ).rejects.toMatchObject({ code: "42501" });
         const configs =
           await owned.admin`SELECT p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
           WHERE n.nspname='opengeni_private' AND p.proname IN ('record_sandbox_file_publication','list_sandbox_file_publications')`;
@@ -156,7 +161,7 @@ postgresTest(
           expect(page.map((row) => row.file_id).sort()).toEqual([firstId, revisedId].sort());
         });
       } finally {
-        await raw.end();
+        await raw.end({ timeout: 5 });
       }
     } finally {
       await client?.close();
