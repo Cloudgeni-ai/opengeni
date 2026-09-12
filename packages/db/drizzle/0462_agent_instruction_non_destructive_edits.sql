@@ -10,7 +10,11 @@ DECLARE actor jsonb; mode text; operation text:=p_request->>'operation'; fingerp
   operation_id uuid:=(p_request->>'operationId')::uuid; revision_id uuid; batch uuid; actor_subject text;
   target jsonb:=p_request->'target'; context jsonb; expected_revision uuid; expected_version bigint;
   head workspace_instruction_policy_heads%ROWTYPE; revision workspace_instruction_policy_revisions%ROWTYPE;
-  prior agent_instruction_operations%ROWTYPE; content_hash text; outcome text; link record; version bigint;
+  -- Keep this forward CREATE OR REPLACE compilable in historical partial-replay
+  -- fixtures that predate 0461. Supported deployments have the table before
+  -- this function can execute; the untyped record acquires its row descriptor
+  -- from the SELECT below.
+  prior record; content_hash text; outcome text; link record; version bigint;
   edit_mode text; requested_content text; old_text text; new_text text; current_content text;
   resolved_content text; first_position integer; second_position integer;
 BEGIN
