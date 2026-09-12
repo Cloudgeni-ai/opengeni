@@ -37,3 +37,30 @@ test("catalogue searches option descriptions and handles no matches", () => {
     renderToStaticMarkup(<ConnectionCatalog services={[service]} query="unknown" />),
   ).toContain("No connections match");
 });
+
+test("each default detail row has one button and no misleading plus action", () => {
+  for (const option of service.options) {
+    const html = renderToStaticMarkup(
+      <ConnectionServiceRow service={{ ...service, options: [option] }} />,
+    );
+    expect(html.match(/<button/g)).toHaveLength(1);
+    expect(html).not.toContain("og-connection-details-action");
+    expect(html).toContain("›");
+    expect(html).not.toContain(">+</span>");
+  }
+  const grouped = renderToStaticMarkup(<ConnectionServiceRow service={service} />);
+  expect(grouped.match(/<button/g)).toHaveLength(2);
+});
+
+test("a distinct host-supplied action remains a sibling of the details button", () => {
+  const html = renderToStaticMarkup(
+    <ConnectionServiceRow
+      service={{
+        ...service,
+        options: [{ ...service.options[0]!, action: <button>Connect now</button> }],
+      }}
+    />,
+  );
+  expect(html.match(/<button/g)).toHaveLength(2);
+  expect(html).toContain("</button><button>Connect now</button>");
+});
