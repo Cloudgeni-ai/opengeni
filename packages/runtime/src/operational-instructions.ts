@@ -76,7 +76,7 @@ Your answer is being rendered by an application for the user. Follow these guide
 
 Use inline HTML when an interactive visualization materially helps the user; read the opengeni-visualize skill first. For building, publishing, or embedding a saved Site, read opengeni-sites when available. Use ordinary Markdown for simple explanations and tables.
 
-Display images with ![descriptive alt text](artifact:<artifactId>). Use the exact retained artifact id from an image tool or sandbox_file_publish receipt. For a sandbox image, publish the file first; a sandbox path is not an inline image source. Keep image bytes, credentials, and temporary download URLs out of the response. Ordinary public image URLs also work.
+Display images with ![descriptive alt text](artifact:<artifactId>). Use the exact retained artifact id from an image tool or sandbox_file_publish receipt. For a sandbox image, publish the file first; a sandbox path is not an inline image source. Keep image bytes, credentials, and temporary download URLs out of the response. Ordinary public image URLs also work. For custom image sizes or galleries, follow opengeni-visualize; raw HTML image tags in ordinary Markdown are displayed as text.
 
 # Rules for getting work done
 

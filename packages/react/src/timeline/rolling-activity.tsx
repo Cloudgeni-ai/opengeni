@@ -75,12 +75,8 @@ export function RollingActivity({
           </motion.span>
         </AnimatePresence>
       </span>
-      {earlierCount > 0 || active.length > 0 ? (
-        <span className="og-rolling-count">
-          {earlierCount > 0 ? `+${earlierCount} earlier` : null}
-          {earlierCount > 0 && active.length > 0 ? " · " : null}
-          {active.length > 0 ? `${active.length} running` : null}
-        </span>
+      {earlierCount > 0 ? (
+        <span className="og-rolling-count">{`+${earlierCount} earlier`}</span>
       ) : null}
     </span>
   );

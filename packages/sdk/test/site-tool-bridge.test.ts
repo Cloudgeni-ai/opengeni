@@ -31,9 +31,18 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
       ["x-opengeni-site-id", "forged-site"],
       ["x-opengeni-site-version", "forged-version"],
       ["accept", "text/event-stream"],
+      ["range", "bytes=0-1023"],
+      ["if-none-match", "image-version"],
+      ["idempotency-key", "operation-1"],
     ] as [string, string][],
   };
   await bridge.fetch!(message, new AbortController().signal);
+  for (const [name, value] of [
+    ["range", "bytes=0-1023"],
+    ["if-none-match", "image-version"],
+    ["idempotency-key", "operation-1"],
+  ])
+    expect(new Headers(requests[0]!.init.headers).get(name!)).toBe(value!);
   expect(requests[0]!.path).toBe("/v1/workspaces/workspace/sessions");
   expect(new Headers(requests[0]!.init.headers).get("authorization")).toBeNull();
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-external-actor")).toBeNull();

@@ -35,7 +35,7 @@ import {
   VideoIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { formatBytes, stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
@@ -72,6 +72,7 @@ import {
   TermBlock,
   Thumbnail,
   ActivityDisclosure,
+  CompactActivityContext,
   type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
@@ -97,9 +98,12 @@ const ICON_SIZE = "size-3.5";
  * left-to-right.
  */
 function RunningPreview({ children }: { children: ReactNode }) {
+  const compact = useContext(CompactActivityContext);
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="size-1.5 shrink-0 animate-og-pulse rounded-full bg-og-status-running" />
+      {!compact && (
+        <span className="size-1.5 shrink-0 animate-og-pulse rounded-full bg-og-status-running" />
+      )}
       <span className="min-w-0 truncate">{children}</span>
     </span>
   );

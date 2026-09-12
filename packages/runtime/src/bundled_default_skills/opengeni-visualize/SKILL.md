@@ -9,8 +9,9 @@ description: "Create visualizations and interactive tools directly in conversati
 - A request to preview, explain, or explore a proposed interface in the conversation is an in-conversation visualization request.
 - Create a visual only when the user needs to see or explore it in the conversation and it materially improves the explanation. Do not create an inline visual merely because the request involves data, charts, or an interactive page.
 - Use a normal Markdown table when the user asks for a table; return it directly and do not create a visualization file.
+- Custom image sizing or gallery layout is also an inline HTML use case, even without interactive controls.
 - Use normal Markdown for a static explanation that needs no interaction. Use HTML for dynamics, spatial motion, adjustable inputs, and other visuals.
-- In user-facing prose, describe only what the visual helps the user see or decide. Keep it concise and do not repeat information already clear from the visual. Never announce this skill, a visualization surface, widgets, HTML, SVG, scripts, local files, inline data, or implementation details.
+- In user-facing prose, describe only what the visual helps the user see or decide. Keep it concise and do not repeat information already clear from the visual. Avoid unsolicited implementation commentary; explain the implementation when the user asks.
 
 ## Context compaction
 
@@ -21,7 +22,7 @@ Reload this Skill before creating or updating an inline visualization after comp
 ### Message source
 
 - Write the visualization directly into your reply in an `opengeni-html` fenced code block. The timeline retains and renders this HTML; no sandbox file or upload is required.
-- Ordinary `html` code blocks remain source code. Use the dedicated fence only for a visualization the user should interact with in chat.
+- Ordinary `html` code blocks remain source code. Use the dedicated fence for visuals rendered in chat, including static galleries and diagrams.
 - For workspace tools, include `<script src="/__opengeni/site-tools/client.js"></script>` before your own scripts, then call `createOpenGeniSiteClient()`. Discover exact tool names and schemas before authoring calls. This uses the existing viewer permissions and approval flow. Never put credentials, workspace ids, or deployment URLs in the fragment. Use `opengeni-sites` for a saved, reusable page or app.
 - Build the visual in the conversation. Use the open project when the user asks for a site, app page, component, or change to existing project files.
 - Do not create a Site or publish a file merely to show a self-contained visualization.
@@ -48,6 +49,12 @@ For ordinary REST SDK operations use `site.client` and `site.workspaceId`; read
 `opengeni-sites` for those workflows and package types. No real workspace id or
 API endpoint is needed in authored HTML.
 
+Read-only data can load when the visual opens. Run operations that change data
+from an explicit user action, not automatically on rendering or reopening chat.
+Do not automatically retry a failed mutation: it may already have succeeded.
+Use the actual returned tool schema and result; do not assume every tool returns
+plain JSON. Close the client on page exit.
+
 - Write only an HTML fragment: no `<!doctype>`, `<html>`, `<head>`, or `<body>`.
 - Write literal markup: use `<div class="card">Hi</div>` plus a real newline, never `<div class=\"card\">Hi</div>\n`. Never embed the fragment in an inline Python, JavaScript, or shell string. Read it back; rewrite literal `\"` or `\n`.
 - Keep CSS and JavaScript in the fragment only when base classes are insufficient. Use version-pinned libraries when useful. Network requests are allowed; handle loading and failures. Use the OpenGeni client for authenticated workspace tools instead of copying credentials or calling provider APIs directly.
@@ -68,6 +75,48 @@ For a normal inline image, use Markdown outside this HTML block:
 `sandbox_file_publish` first and use its exact returned id. The artifact scheme
 is resolved by Markdown; it is not an ordinary browser image URL inside HTML.
 
+### Images inside HTML
+
+Use this path for custom image sizing, side-by-side galleries, or images inside
+a visualization. Reuse the existing images; do not regenerate or republish them
+just to change their layout. Raw HTML in ordinary Markdown is displayed as text.
+Inside an `opengeni-html` fragment, `artifact:` is not a browser URL.
+
+Include the client script above. Discover the Files tool once, then request a
+fresh URL at render time for each exact file ID from its receipt:
+
+```js
+const site = createOpenGeniSiteClient();
+const catalog = await site.tools.$catalog();
+const tool = catalog.entries.find(entry =>
+  entry.identity.serverId === "files" &&
+  entry.identity.toolName === "files_get_download_url"
+);
+if (!tool) throw new Error("Image access unavailable");
+
+const result = await site.tools.$call(tool.identity, { fileId });
+const text = result.content.find(part => part.type === "text");
+if (!text) throw new Error("Image download unavailable");
+const { downloadUrl } = JSON.parse(text.text);
+image.src = downloadUrl.url;
+```
+
+The Files tool returns MCP text content containing JSON, including
+`downloadUrl.url`. Use normal CSS for width, grid/flex layout, and responsiveness.
+An `img` can use this URL directly; fetching a Blob is unnecessary for display.
+Set load/error handlers before assigning `src`, show loading/failure visibly,
+and request a fresh URL when retrying. Close the client on page exit.
+
+Keep durable file IDs in the fragment, not signed URLs from an earlier tool call:
+those expire. Use the exact File ID returned by a tool; do not guess one from an
+arbitrary artifact. Generated images in OpenGeni have a backing File with the
+same ID. Public image URLs can be used directly.
+
+This workflow needs no package installation, SDK-source inspection, shell commands,
+or separate preview server. If the tool is unavailable, show that clearly rather
+than guessing endpoints or searching installed packages. For saved Sites using
+this workflow, include the Files tool identity in their requested tools.
+
 ### External resources
 
 - Prefer version-pinned resources from cdn.jsdelivr.net, esm.sh, unpkg.com, or cdnjs.cloudflare.com. These are recommendations, not an exclusive network allowlist. A third-party resource can fail; make loading failures visible.
@@ -75,6 +124,7 @@ is resolved by Markdown; it is not an ordinary browser image URL inside HTML.
 ## Exporting an existing visualization
 
 - Keep the reply fragment as the editable inline source. When the user asks to save or export it, write a standalone HTML document in the sandbox, include assets/base.css and assets/helpers.html from this skill plus the fragment, and publish the exact file with sandbox_file_publish.
+- A downloaded HTML file has no OpenGeni tool host. For an offline export, embed the displayed data and images; keep live tool access in a Site. Do not claim live tools work in a standalone download.
 - When the user asks to publish or host an existing visualization, use opengeni-sites. A Site can be a small HTML component or a React application; follow that Skill for preview, tool access, and publication.
 - For a general website request, build a responsive Site directly rather than applying the inline visualization workflow.
 - Do not claim an export or Site was published before its tool confirms success.
@@ -145,7 +195,7 @@ Choose the smallest composition that fits.
 - Keep the top-level surface transparent and unframed, and fill the available conversation width. Design for the conversation width (roughly 736px), and support widths down to 320px. Stack side-by-side content when it no longer fits.
 - At every supported width, text, controls, cards, toolbars, and dynamic content must fit without overlap or clipping. Reflow by stacking or wrapping; use `.table-responsive` only when table columns cannot fit. The host sizes the frame to its content up to 1,200px, with scrolling above that limit. Avoid fixed outer widths, other horizontal overflow, internal scrolling, `position: fixed`, and viewport-height layouts.
 - Size every SVG from its actual container. At narrow widths, reduce ticks, declutter annotations, and keep visible text at least 11 screen pixels; never shrink a fixed-width `viewBox`.
-- Keep native tab order; never add `tabindex`.
+- Prefer native controls and their tab order. Use `tabindex="0"` only when a custom interactive mark needs keyboard focus, with equivalent keyboard behavior; never use positive tabindex values.
 - Use native `button`, `input`, `select`, and `textarea` elements with matching utilities; never recreate controls.
 - Keep browser or utility focus styles; never override them.
 - On coarse pointers, provide non-overlapping effective targets about 44px by 44px without breaking 320px layouts; visible icons and marks may stay small. Keep fine-pointer controls compact, and let shared utilities own touch sizing and at least 16px editable-field text.
@@ -179,7 +229,7 @@ Choose the smallest composition that fits.
 
 ### Surfaces and layout
 
-- `.card`: The only card-like HTML surface. Use its base class unchanged for a necessary numeric summary, selected-item summary, or bounded interactive field. Before adding a fill, border, radius, or shadow to any layout container, either use `.card` or leave it transparent and unframed; never recreate card chrome on rows, panels, tiles, sections, or wrappers. Keep charts, maps, diagrams, tables, controls, and the whole visualization unframed. Never nest cards; show 2-4 summaries near the top only when useful. Structural groupings and repeated content are not bounded interactive fields. Organize them with layout or visual marks, not container chrome.
+- `.card`: The only card-like HTML surface. Use its base class unchanged for a necessary numeric summary, selected-item summary, or bounded interactive field. Before adding a fill, border, radius, or shadow to any layout container, either use `.card` or leave it transparent and unframed; never recreate card chrome on rows, panels, tiles, sections, or wrappers. Keep charts, maps, diagrams, tables, controls, and the whole visualization unframed. Never nest cards; show at most three summaries near the top only when changing metrics are central. Structural groupings and repeated content are not bounded interactive fields. Organize them with layout or visual marks, not container chrome.
 - `.viz-stat`: Use a summary `.card` with one muted label, one `.viz-stat-value`, and at most one short context or delta line.
 - `.viz-grid`: Use for peer metrics or choices instead of a custom grid. It creates as many equal-width columns as fit and stacks when narrow. Never use it for the whole visual or a horizontally scrolling card row. Keep groups to 2-3 columns at 736px and controls in a separate row.
 - `.viz-row`: Use as a wrapping horizontal group with centered related values or inline actions that may wrap when narrow.
@@ -237,7 +287,7 @@ Choose the smallest composition that fits.
 
 ## Charts
 
-- Prefer inline SVG for simple charts and version-pinned version-pinned CDN libraries when native interaction, scales, legends, or layout materially improve the result.
+- Prefer inline SVG for simple charts and version-pinned CDN libraries when native interaction, scales, legends, or layout materially improve the result.
 - Resolve theme colors before passing them to canvas or chart APIs that cannot parse CSS variables or `light-dark(...)`; redraw when the theme changes.
 - Use a tooltip unless it would distract from a simple, directly labeled chart. Keep chart-library tooltips and grouped legend interactions native; never replace them with a custom one-point tooltip. For SVG, attach `data-tooltip` directly to the real pointer-accessible mark and include its label, value, and units; the sandbox handles themed positioning, keyboard focus, and touch.
 - Animate transitions between chart states so lines and marks move to their new values, resampling paths when point counts differ. Do not animate initial appearance or use fade-only effects; never loop motion, and honor `prefers-reduced-motion`.

@@ -1,3 +1,4 @@
+import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import { OpenGeniApiError } from "./errors";
 import { siteSessionPath, type SiteHttpRequest } from "./site-http";
 import type { OpenGeniSiteToolCatalog } from "./site";
@@ -79,15 +80,12 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               message.method,
               input.artifactId,
             );
-            const headers = new Headers();
+            const headers = siteRequestHeaders(message.headers);
             if (input.artifactId) {
               headers.set("x-opengeni-site-id", input.artifactId);
               headers.set("x-opengeni-site-version", input.siteVersionId);
             }
-            for (const [name, value] of message.headers) {
-              if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
-                headers.set(name, value);
-            }
+
             return input.fetchResponse!(path, {
               method: message.method,
               signal,

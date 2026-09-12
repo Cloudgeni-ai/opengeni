@@ -1,3 +1,4 @@
+import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import { randomUUID } from "node:crypto";
 import { generateToolDeclarations } from "@opengeni/tool-gateway";
 import { SITE_BROWSER_RUNTIME, SITE_CLIENT_SCRIPT_PATH } from "@opengeni/sdk/site-document";
@@ -40,13 +41,7 @@ export function createCodemodeSiteRequestHandler(
         const response = await active.sessionRequest(path, {
           method: request.method,
           signal: request.signal,
-          headers: {
-            "content-type": request.headers.get("content-type") ?? "application/json",
-            accept: request.headers.get("accept") ?? "application/json",
-            ...(request.headers.has("last-event-id")
-              ? { "last-event-id": request.headers.get("last-event-id")! }
-              : {}),
-          },
+          headers: siteRequestHeaders(request.headers),
           ...(request.body ? { body: await request.text() } : {}),
         });
         // Fetch decodes compressed upstream bodies. Forward decoded bytes with

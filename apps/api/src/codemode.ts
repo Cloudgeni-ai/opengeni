@@ -1,3 +1,4 @@
+import { siteRequestHeaders } from "@opengeni/contracts/site-session-http";
 import {
   codemodeDispatchSubject,
   decodeCodemodeDispatchAck,
@@ -93,14 +94,9 @@ export async function codemodeSessionRequest(
   const target = new URL(request.url);
   const rewritten = siteSessionPath(path, authority.workspaceId, request.method);
   const url = new URL(rewritten, target.origin);
-  const headers = new Headers({
-    authorization: `Bearer ${token}`,
-    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-  });
-  for (const name of ["content-type", "accept", "last-event-id"]) {
-    const value = request.headers.get(name);
-    if (value) headers.set(name, value);
-  }
+  const headers = siteRequestHeaders(request.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  headers.set(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
   return new Request(url, {
     method: request.method,
     headers,

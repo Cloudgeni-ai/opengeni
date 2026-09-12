@@ -54,6 +54,8 @@ function InlineHtml({ workspaceId, content }: ChatInteractiveBlockProps) {
   return (
     <ArtifactSandbox
       title="Preview"
+      showTitle={false}
+      showLiveStatus={false}
       html={html}
       toolBridge={toolBridge}
       height={360}
