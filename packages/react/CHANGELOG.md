@@ -1,5 +1,28 @@
 # @opengeni/react
 
+## 6.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Minor Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+- 46a0267: Load authoritative goals on mount when reusing a shared event feed. Add optional native loading messages for accessible status, slow waits, and details controls, preserving English defaults. Expose SessionChrome's successful queue-checkout composer focus handoff.
+
+### Patch Changes
+
+- 48c624f: Show discovered desktop targets immediately so slow or failed semantic inspection cannot block the live view or switching windows and screens.
+- d5582c1: Accept restarted frame sequences after a fresh desktop attachment so automatic renewal does not freeze the last image. Preserve frame ordering within a stream and reject detached sockets.
+- 49d43e6: Show desktop connection errors and Reconnect after an established stream fails or socket retries are exhausted, and let Refresh desktops retry a failed stream.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [efeaa9c]
+  - @opengeni/sdk@6.0.0
+
 ## 5.2.0
 
 ### Minor Changes
