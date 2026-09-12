@@ -495,6 +495,18 @@ same-origin `/demo-api` proxy and the exact published SDK/React entrypoints.
 
 ## Composer customization (`@opengeni/react/composer`)
 
+`SessionChrome` accepts `onComposerFocus` for queue editing. Connect it to
+`controller.focusInput` from `useChatComposerController`, or focus a custom
+input through its ref. Chrome calls it after a successful checkout and
+`composer.applyDraft`, including confirmed draft replacement; failed checkout
+and pending/cancelled replacement do not request focus. The host retains
+ownership of the input and no DOM selector or global focus event is needed.
+
+When sharing `useSessionEvents().events` with `useGoal`, the hook still fetches
+the authoritative goal on mount and target changes, even when the supplied log
+already contains goal events. The shared log drives subsequent invalidations
+without opening another event stream. A 404 remains a normal goal-less state.
+
 Use `ChatComposer` for the standard layout and its `controlsStart`, `header`,
 and `messages` props for small additions. For a different layout, import the
 headless controller and compound primitives as a namespace. The controller is

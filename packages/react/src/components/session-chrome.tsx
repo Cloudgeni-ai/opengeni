@@ -100,6 +100,11 @@ export type SessionChromeProps = {
   queue: UseTurnQueueResult;
   /** Needed for queue edit → composer checkout. Omit with `readOnly`. */
   composer?: ComposerState | undefined;
+  /** Focus the composer after a successful queue checkout has applied its draft.
+   * Connect to the composer controller's `focusInput`, or a custom input ref.
+   * Never called for failed checkout or while replacement awaits confirmation.
+   */
+  onComposerFocus?: (() => void) | undefined;
   goal?: UseGoalResult | null | undefined;
   /** Expanded agents body (host supplies tree / list). */
   agentsPanel?: ReactNode;
@@ -431,6 +436,7 @@ export function SessionChrome({
   sessionStatus,
   queue,
   composer,
+  onComposerFocus,
   goal,
   agentsPanel,
   commandsPanel,
@@ -802,7 +808,10 @@ export function SessionChrome({
                     expectedDraftRevision: composer.draftRevision,
                     replaceDraft: true,
                   });
-                  if (checkedOut) composer.applyDraft(checkedOut);
+                  if (checkedOut) {
+                    composer.applyDraft(checkedOut);
+                    onComposerFocus?.();
+                  }
                 })();
               }
             : undefined
@@ -819,7 +828,10 @@ export function SessionChrome({
                         expectedDraftRevision: composer.draftRevision,
                         replaceDraft: false,
                       });
-                      if (checkedOut) composer.applyDraft(checkedOut);
+                      if (checkedOut) {
+                        composer.applyDraft(checkedOut);
+                        onComposerFocus?.();
+                      }
                     })();
                   },
                 );

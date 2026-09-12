@@ -32,6 +32,32 @@ Hosts can customize the SDK without editing its source:
 Orb states use the `thinking-orbs` component's typed options. Omitted settings
 keep the defaults; an empty phrase list also falls back to the defaults.
 
+To brand or localize the native visual, supply `genieLoading.phrases` and
+`genieLoading.messages`. Every message is optional and defaults to the existing
+English copy:
+
+```tsx
+<MessageTimeline
+  events={events}
+  genieLoading={{
+    phrases: ["Preparing…"],
+    messages: {
+      status: "Preparing your task.",
+      slowStatus: "Preparing your task. Taking longer than usual.",
+      slowText: "A little longer than usual…",
+      showDetails: "Show details",
+      hideDetails: "Hide details",
+    },
+  }}
+/>
+```
+
+`status` and `slowStatus` are the stable screen-reader announcements; phrase
+rotation stays decorative. The slow text appears after 30 seconds, while the
+details button appears after 15 seconds (or whenever details are open). Message
+overrides preserve native timing, accessibility, and details behavior. Empty
+phrase arrays retain the default phrase list.
+
 For an entirely different visual, supply `genieLoading.render`:
 
 ```tsx

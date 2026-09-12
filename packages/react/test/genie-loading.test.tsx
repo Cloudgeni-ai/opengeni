@@ -1,12 +1,52 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
 import { ActivityRail } from "../src/timeline/activity-rail";
+import { GenieLoading, GenieLoadingOptionsContext } from "../src/timeline/genie-loading";
 import { MessageTimeline } from "../src/components/message-timeline";
 import { StartupTimings } from "../src/timeline/startup-timings";
 import { setStartupDetails } from "../src/timeline/startup-preference";
 import type { StartupPhaseItem } from "../src/timeline/types";
 import { registerDom, renderComponent, flush } from "./render-hook";
 registerDom();
+const messages = {
+  status: "Préparation en cours",
+  slowStatus: "La préparation prend plus de temps",
+  slowText: "Encore un instant…",
+  showDetails: "Afficher les détails",
+  hideDetails: "Masquer les détails",
+};
+const options = { phrases: ["Préparation…"], messages };
+test("native messages localize normal, slow, and expanded states without replacing rendering", async () => {
+  for (const age of [0, 16_000, 31_000]) {
+    for (const detailsOpen of [false, true]) {
+      let clicks = 0;
+      const r = await renderComponent(
+        <GenieLoadingOptionsContext.Provider value={options}>
+          <GenieLoading
+            startedAt={new Date(Date.now() - age).toISOString()}
+            detailsOpen={detailsOpen}
+            onShowDetails={() => clicks++}
+          />
+        </GenieLoadingOptionsContext.Provider>,
+      );
+      expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
+        age >= 30_000 ? messages.slowStatus : messages.status,
+      );
+      expect(r.container.querySelector(".og-genie-phrase")?.textContent).toBe(
+        age >= 30_000 ? messages.slowText : "Préparation…",
+      );
+      const button = r.container.querySelector("button");
+      if (age >= 15_000 || detailsOpen) {
+        expect(button?.textContent).toContain(
+          detailsOpen ? messages.hideDetails : messages.showDetails,
+        );
+        await act(async () => button!.click());
+        expect(clicks).toBe(1);
+      } else expect(button).toBeNull();
+      await r.unmount();
+    }
+  }
+});
 afterEach(() => setStartupDetails(false));
 function phase(overrides: Partial<StartupPhaseItem> = {}): StartupPhaseItem {
   return {
