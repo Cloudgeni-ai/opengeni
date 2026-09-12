@@ -592,7 +592,10 @@ state remains application-owned; durable draft and session state remain in
   directly in chat and supersedes the current direction. Resume is always an
   explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
-  `clientEventId` across retries so the server dedupes. `composer.policy` and
+  `clientEventId` across retries so the server dedupes. Draft reads retry transient
+  failures, including request timeouts, with backoff. Successful refreshes clear
+  draft-read errors without dismissing Send, Steer, or control errors; a draft
+  sync timeout does not mean the agent turn has stopped. `composer.policy` and
   `setModel` / `setReasoningEffort` / `setLatencyMode` expose the exact policy
   owned by that actor/session draft; policy is `null` until hydration completes.
   `sendExtras` (object or function evaluated at send time) is only for

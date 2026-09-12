@@ -677,6 +677,8 @@ export function useComposer(
   const [acceptedControl, setAcceptedControl] = useState<EffectiveSessionControl | null>(null);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  // Background draft reads recover independently of Send/Steer/control failures.
+  const [draftReadError, setDraftReadError] = useState<Error | null>(null);
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
   const [draftLoading, setDraftLoading] = useState(Boolean(sessionId) && durableDrafts);
   const [draftSaving, setDraftSaving] = useState(false);
@@ -794,6 +796,7 @@ export function useComposer(
     setAcceptedControl(null);
     setResuming(false);
     setError(null);
+    setDraftReadError(null);
     setDraft(null);
     setDraftLoading(Boolean(sessionId) && durableDrafts);
     setDraftSaving(false);
@@ -920,6 +923,7 @@ export function useComposer(
       if (targetKeyRef.current !== targetKey) return;
       if (!sessionId || !durableDrafts) {
         setDraftLoading(false);
+        setDraftReadError(null);
         return;
       }
       let retry = draftReadRetryRef.current;
@@ -993,6 +997,8 @@ export function useComposer(
         if (retry.timer !== null) clearTimeout(retry.timer);
         retry.failures = 0;
         retry.timer = null;
+        // Recovery also counts when the server returns the same draft revision.
+        setDraftReadError(null);
         const currentRevision = draftRef.current?.revision ?? -1;
         // Reconnect and client-generation effects can legitimately ask for the
         // draft again. A same-revision response is not new authority: publishing
@@ -1045,12 +1051,18 @@ export function useComposer(
         }
       } catch (cause) {
         if (
+          !requestAbort.signal.aborted &&
           generation === targetGeneration.current &&
           targetKeyRef.current === targetKey &&
           readTicket === draftReadGeneration.current
         ) {
-          setError(asError(cause));
+          const problem = asError(cause);
+          const timedOut = problem.name === "TimeoutError";
+          setDraftReadError(
+            timedOut ? new Error("Draft sync timed out. Retrying…", { cause }) : problem,
+          );
           if (
+            timedOut ||
             cause instanceof TypeError ||
             (cause && typeof cause === "object" && "retryable" in cause && cause.retryable === true)
           ) {
@@ -2639,6 +2651,7 @@ export function useComposer(
   const clearError = useCallback(() => {
     if (targetKeyRef.current !== targetKey) return;
     setError(null);
+    setDraftReadError(null);
     setDraftConflict(null);
   }, [targetKey]);
   // `valueRef` is the synchronous composer authority. React state exists to
@@ -2706,7 +2719,7 @@ export function useComposer(
     resolveDraftConflict,
     restoredResources: identityMatches ? restoredResources : [],
     removeRestoredResource,
-    error: identityMatches ? error : null,
+    error: identityMatches ? (error ?? draftReadError) : null,
     clearError,
   };
 }
