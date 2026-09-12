@@ -110,7 +110,7 @@ describe("bundled editable-artifact skills", () => {
     }
   });
 
-  test("teaches Sites as approval-free exact-version tool clients", async () => {
+  test("teaches Sites to respect viewer authority and normal tool approvals", async () => {
     for (const name of SITE_SKILL_NAMES) {
       const skill = await readFile(
         join(repoRoot, "packages/runtime/src/bundled_site_skills", name, "SKILL.md"),
@@ -121,7 +121,8 @@ describe("bundled editable-artifact skills", () => {
       expect(skill).toContain("opengeni__artifacts_create");
       expect(skill).toContain("opengeni__artifacts_get_source");
       expect(skill).toContain("opengeni__artifacts_publish");
-      expect(skill).toContain("do not open\n   per-call approval dialogs");
+      expect(skill).toContain("publishing it grants\n   no tool authority");
+      expect(skill).toContain("normal tool approval rules");
       expect(skill).toContain("viewer's\n   live workspace, permission, and connection authority");
       expect(skill).not.toContain("declined approvals");
       expect(skill).not.toContain("one-shot approval dialog");

@@ -157,7 +157,7 @@ export function EmptyCreditsNotice({
       .getBilling({ accountId })
       .then((summary) => {
         if (!active) return;
-        setEmpty(summary.balance.balanceMicros <= 0);
+        setEmpty(summary.mode !== "disabled" && summary.balance.balanceMicros <= 0);
         setStripeEnabled(summary.mode === "stripe");
       })
       .catch(() => {

@@ -105,6 +105,7 @@ function App() {
                   </span>
                 </span>
                 <span className="command">
+                  {/* Fixed character positions form this decorative animation. */}
                   {Array.from(text).map((char, n) => (
                     <span
                       key={text.slice(0, n + 1)}

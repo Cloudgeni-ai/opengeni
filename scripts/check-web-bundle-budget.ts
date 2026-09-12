@@ -459,8 +459,12 @@ const effectiveBudgets = {
   // stay in the shared graph; the chat UI remains outside it. Both trees have
   // 31 direct-session files and identical CSS. Bound only this measured delta
   // with the existing raw headroom and gzip platform-skew policy.
+  // Inline image/fence support, with HTML/Site previews loaded on demand:
+  // Bun 1.4 macOS/arm64 measures 2,354,899 raw / 661,228 gzip across 33 files.
+  // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    wholeKibEnvelope(2_354_899),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),
     // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
@@ -469,6 +473,7 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    wholeKibEnvelope(661_228, 1.5 * kib),
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
     // Untouched main 0f3dc9a02 measures 640,863 gzip bytes on macOS/arm64;
     // the instruction-save head measures 640,920 locally and 640,937 in the

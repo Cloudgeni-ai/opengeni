@@ -873,9 +873,9 @@ remain behind progressive search.
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
-Repository `.agents/skills` contains only maintainer (`opengeni`) and external
-integration (`opengeni-client`) guidance. Runtime skills live in
-`packages/runtime/src/bundled_*_skills`, shipped without repository-agent copies.
+Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
+ship directly from `packages/runtime/src/bundled_*_skills`. Worker defaults include
+`opengeni-visualize` and `document-parsing`, unless overridden by explicit host selection.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
@@ -1196,6 +1196,11 @@ identity present in its exact attempt catalog. The host
 injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
+
+HTML-only Sites and inline chat previews share the SDK bridge and renderer.
+See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
+for loading, versioning, visualization assets, and retained images.
+
 Multiple SDK clients in the same document retain independent ports; connecting
 one must not cancel another. Workspace SDK requests have no endpoint allowlist:
 the host binds routing; API handlers authorize. Published calls use viewer auth;
@@ -1245,8 +1250,10 @@ The attempt-frozen connector Allow/Ask/Block policy and
 `connector_action_requests` ledger apply to model and Codemode execution only.
 Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
 use the ordinary `requireApproval` classification and preserve a caller-generated
-operation id only for provider-specific handling. Sites bypass that per-call
-approval after active-version allowlist revalidation. These direct surfaces do
+operation id only for provider-specific handling. Sites retain ordinary per-call
+approval after active-Site and selected-version allowlist revalidation. Older
+published versions remain callable using their own declared tools and the
+viewer’s current permissions. These direct surfaces do
 not synthesize attempt-owned connector rows or a second generalized exactly-once
 journal.
 
@@ -1663,16 +1670,7 @@ matching visibility and authority epoch; credentials alone grant no use.
 
 ### Embeddable connection presentation
 
-`@opengeni/react/connect` exports `ConnectionLogo`, `ConnectionInstalled`,
-`ConnectionServiceRow`, `ConnectionOptionRow`, `ConnectionCatalog`, and
-`ConnectionTypePicker`; scoped styling is in `@opengeni/react/connect.css`.
-These components accept data and callbacks, without app routing or provider
-credentials. `ConnectPanel` and `ConnectChooser` optionally use the catalogue
-presentation over the existing shared connection controller.
-The web Capabilities route owns tabs, global search, and curated ordering.
-`apps/web/src/components/capabilities/connection-services.ts` groups explicit
-provider identities without merging their independent authorization options.
-Northstar demonstrates the same SDK catalogue with its existing API proxy.
+Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).
 
 ### Public skill discovery
 

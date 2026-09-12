@@ -48,7 +48,7 @@ import {
   requireWorkspace,
   withCodexAppsRequestAuthorization,
   consumeToolGatewayApproval,
-  getWorkspaceArtifact,
+  getWorkspaceArtifactContentRef,
   issueToolGatewayApproval,
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
@@ -719,24 +719,25 @@ function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   throw error;
 }
 
-async function requireWorkspaceSiteToolAuthorization(
+export async function requireWorkspaceSiteToolAuthorization(
   db: ApiRouteDeps["db"],
   grant: AccessGrant,
   context: WorkspaceSiteToolContext,
+  resolveVersion = getWorkspaceArtifactContentRef,
 ): Promise<void> {
   try {
-    const detail = await getWorkspaceArtifact(db, grant.workspaceId, context.siteArtifactId);
-    const currentVersion = detail.artifact.currentVersion;
-    const requested = currentVersion?.requestedTools.some(
+    const { status, version } = await resolveVersion(
+      db,
+      grant.workspaceId,
+      context.siteArtifactId,
+      context.siteVersionId,
+    );
+    const requested = version.requestedTools.some(
       (identity) =>
         identity.serverId === context.identity.serverId &&
         identity.toolName === context.identity.toolName,
     );
-    if (
-      detail.artifact.status !== "active" ||
-      currentVersion?.id !== context.siteVersionId ||
-      !requested
-    ) {
+    if (status !== "active" || version.id !== context.siteVersionId || !requested) {
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
     }
   } catch (error) {

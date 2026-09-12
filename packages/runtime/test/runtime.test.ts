@@ -4120,6 +4120,7 @@ describe("runtime event normalization", () => {
     "Management tools are lazy and available through tool search.",
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+    '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Proactively use to show how something works; explore \'what happens when\', \'what changes\', or \'help me understand\'; compare or inspect; create simulations, maps, charts, graphs, and mockups. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
@@ -4478,7 +4479,7 @@ describe("runtime event normalization", () => {
       sandboxWorkspaceRoot: "/srv/project",
       codemodeAvailable: true,
     });
-    expect(staticInstructions(agent.instructions)).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(() =>
       buildOpenGeniAgent(testSettings(codemodeOn), [], {
         codemodeAvailable: false,
@@ -11442,11 +11443,12 @@ describe("runtime Skill activation", () => {
     ],
   };
 
-  test("without explicit activation only the default document guidance is indexed", () => {
+  test("without explicit activation default document and visualization guidance are indexed", () => {
     const composition = composeRuntimeSkills([]);
     const index = composition.index;
     expect(index.map((entry) => ({ id: entry.id, name: entry.name }))).toEqual([
       { id: "native-tool:document-parsing", name: "document-parsing" },
+      { id: "native-tool:opengeni-visualize", name: "opengeni-visualize" },
     ]);
   });
 
@@ -11909,11 +11911,14 @@ describe("runtime Skill activation", () => {
     });
     expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toEqual([
       "document-parsing",
+      "opengeni-visualize",
     ]);
     expect(
       agent.tools.filter((tool) => tool.type === "function" && tool.name === "skill_read"),
     ).toHaveLength(0);
-    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain("opengeni-sites");
+    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
+      "native-tool:opengeni-sites",
+    );
     expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
       "document-parsing",
     );

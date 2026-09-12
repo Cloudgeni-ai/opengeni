@@ -8,6 +8,7 @@ import type { Settings } from "@opengeni/config";
 import {
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
+  WorkspaceArtifactNotFoundError,
 } from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
 import { testSettings } from "@opengeni/testing";
@@ -19,6 +20,7 @@ import {
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   requireWorkspaceToolGatewayGrant,
+  requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewaySettingsForGrant,
   workspaceToolGatewayDeclarations,
@@ -28,6 +30,48 @@ import {
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const subjectId = "user:workspace-tool-gateway-test";
+
+describe("Site version tool authorization", () => {
+  const context = {
+    siteArtifactId: "44444444-4444-4444-8444-444444444444",
+    siteVersionId: "55555555-5555-4555-8555-555555555555",
+    identity: { serverId: "inventory", toolName: "lookup" },
+  };
+  type Resolver = NonNullable<Parameters<typeof requireWorkspaceSiteToolAuthorization>[3]>;
+  const version = { id: context.siteVersionId, requestedTools: [context.identity] };
+  const resolve = (status = "active", requestedTools = version.requestedTools): Resolver =>
+    (async (_db, workspace, artifact, selectedVersion) => {
+      expect([workspace, artifact, selectedVersion]).toEqual([
+        workspaceId,
+        context.siteArtifactId,
+        context.siteVersionId,
+      ]);
+      return { status, version: { ...version, requestedTools } };
+    }) as Resolver;
+
+  test("authorizes the selected saved version without requiring it to be current", async () => {
+    await expect(
+      requireWorkspaceSiteToolAuthorization({} as never, grant(), context, resolve()),
+    ).resolves.toBeUndefined();
+  });
+
+  test("still rejects archived Sites and tools absent from the selected version", async () => {
+    for (const resolver of [resolve("archived"), resolve("active", [])]) {
+      await expect(
+        requireWorkspaceSiteToolAuthorization({} as never, grant(), context, resolver),
+      ).rejects.toMatchObject({ status: 403 });
+    }
+  });
+
+  test("rejects a missing version or one belonging to another Site or workspace", async () => {
+    const missing: Resolver = async () => {
+      throw new WorkspaceArtifactNotFoundError("Artifact version not found");
+    };
+    await expect(
+      requireWorkspaceSiteToolAuthorization({} as never, grant(), context, missing),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+});
 
 function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
   return {
