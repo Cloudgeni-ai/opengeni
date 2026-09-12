@@ -101,9 +101,39 @@ Select grants in `createSession` using
 `selectedHostMcpDelegations: [{serverId, delegationId, generation}]`. This requires
 a verified direct external owner with session-create and connection-read access,
 an enabled host-authority fleet admission switch, and an explicitly selected MCP
-server whose configured URL and `connectionRef.hostBinding` exactly match the
-registered binding. It does not rewrite the server configuration or auto-select
-tools. The grant's visibility must match the new session. New-session admission
+server whose configured URL and binding selection match the registered binding.
+The original fixed `connectionRef.hostBinding: {bindingId, generation}` contract
+still requires exact identity, generation and definition. For a shared server
+whose participants use their own accounts, explicitly configure:
+
+```ts
+connectionRef: {
+  authoritySource: "host",
+  hostBinding: { selection: "accepted_turn" },
+  subjectScope: "subject",
+  providerDomain: "tools.example",
+  provider: "example",
+  kind: "delegated",
+  scopes: ["read"],
+}
+```
+
+This configuration-only descriptor forbids `connectionId`. It is a selection
+constraint, not a registry grant: each accepted direct turn must select its
+authenticated owner's delegation. Registration still takes a concrete binding
+definition with `connectionId` and without `hostBinding`. Admission requires the
+same server, canonical HTTPS destination and complete provider/kind/domain/
+scope/resource/subject-scope definition; only the account identifier may differ.
+There is no wildcard, ambient owner lookup or automatic subset widening. The
+immutable turn/task snapshot stores the exact selected binding and generation.
+The worker resolves the descriptor only through that snapshot and the existing
+live authority checks, then passes a concrete fixed reference to the host and
+revalidates before physical use. Missing capture denies; another participant's
+grant, the creator's account and a stale attempt are never fallback authority.
+Session-local MCP configuration follows the same rule on create and follow-up.
+
+This does not rewrite the server configuration or auto-select tools.
+The grant's visibility must match the new session. New-session admission
 practically uses an `always` grant; session-bound grants target existing sessions.
 Direct `sendMessage` and `steerMessage` accept the same explicit selection on
 each message, with session-control and connection-read authority. They capture
@@ -115,7 +145,13 @@ on replay conflicts; successful replay does not recapture authority or revive a
 revoked grant. A failed capture leaves no initial turn, events, or authority row
 (a repairable keyed session shell may remain). Follow-up operation IDs similarly
 bind the canonical selection, and failed capture rolls back the prompt receipt,
-events and turn. Realtime initial capture remains unsupported.
+events and turn. `startMode: "realtime"` creates an empty session with no accepted
+turn; initial selection on that create remains unsupported. For an ordinary
+text conversation, create the empty shell without selections, then submit the
+first text through `sendMessage` with that participant's explicit
+`selectedHostMcpDelegations` and `clientEventId`. This captures authority on the
+first real text turn just like every later Send/Steer. It does not grant voice
+provider delegations authority or inherit a selection from empty-shell creation.
 Same-session goal continuations and child-result resumptions use a separate
 causal capture path. Migration 0435 proves the consumed machine update names
 the exact source turn, matches the unchanged session epoch and visibility, and
@@ -152,6 +188,9 @@ Session-bound grants never cross into children. An agent-created scheduled task
 likewise derives only successor-eligible selections from its current accepted
 attempt; it cannot enumerate or borrow the creator's other accounts. The separate
 causal-human field is retained even when the initiating actor is the scheduler.
+Fixed and accepted-turn server descriptors use the same exact configuration
+comparison for agent-created tasks. Scheduled, child and goal execution resolve
+only their own inherited snapshots, never reselect an owner's current account.
 
 ### Request-time gateway
 

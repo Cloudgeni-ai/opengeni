@@ -6,6 +6,7 @@ import {
   buildHostConnectionTokenResolver,
   getSessionTurnForAttempt,
   authorizeDirectHostMcpUse,
+  resolveAcceptedHostMcpBinding,
   resolveAcceptedConnectionUse,
   sessionTenancyProductActivated,
   type Database,
@@ -66,6 +67,7 @@ export function connectionTokenResolverForTurn(input: {
           initiator: input.turn.initiator,
           initiatorContext: input.turn.initiatorContext,
           surface: "model",
+          resolveAcceptedBinding: (request) => resolveAcceptedHostMcpBinding(hostDb, request),
           // Only immutable captured direct-turn authority is currently supported.
           // Direct, scheduled and exact causal/child snapshots are validated;
           // no authority follows merely from a binding or creator identity.

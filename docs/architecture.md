@@ -1648,6 +1648,14 @@ Personal MCP use requires an owner-issued exact-session grant, with shared-resul
 acknowledgement for shared conversations. The composer restores only active grants
 matching visibility and authority epoch; credentials alone grant no use.
 
+Host-owned shared MCP servers may explicitly select `hostBinding.selection:
+"accepted_turn"` instead of a fixed binding. The configuration fixes the entire
+destination/provider/scope/resource definition except account identity; only an
+immutable accepted turn/task snapshot chooses the exact owner binding. Worker
+resolution and every physical use retain native live authority checks. An empty
+realtime session creates no turn authority; its first text Send captures the
+current participant's selection. See [remote host MCP credentials](remote-mcp-credentials.md).
+
 ### Embeddable connection presentation
 
 Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).

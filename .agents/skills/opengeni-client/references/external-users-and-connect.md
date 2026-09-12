@@ -321,7 +321,7 @@ external-owner checks apply, including at transaction commit. Revocation uses
 the observed delegation generation. These operations persist grant metadata;
 select them explicitly on `createSession` with
 `selectedHostMcpDelegations: [{serverId, delegationId, generation}]`. The selected
-tool's configured URL and host binding reference must match; the operator's host
+tool's configured URL and host binding selection must match; the operator's host
 authority admission switch must be enabled. This does not auto-install or rewrite
 tools. New sessions use reusable (`always`) grants with matching visibility.
 Selections participate in idempotency: changed or omitted replay selections
@@ -335,7 +335,20 @@ Same-session goal continuations and child-result resumptions inherit only the
 exact causal turn's accepted selection. Live revocation still blocks use; a
 revoked selection is not revived by resumption. Children inherit only the exact
 spawning turn's `always` grants for servers they select with unchanged visibility;
-session-bound grants never cross to a child. Realtime initial selection remains unsupported.
+session-bound grants never cross to a child. Fixed `{bindingId,generation}`
+references remain exact-match. Shared per-participant tools can explicitly use
+`connectionRef.hostBinding:{selection:"accepted_turn"}` with host authority,
+subject scope and no configured connectionId. The complete configured
+destination/provider/scope/resource definition remains exact; only the account
+identifier comes from each accepted owner's selected binding. Registry bindings
+still contain a concrete connectionId and no hostBinding. The worker resolves
+only immutable accepted snapshots and revalidates at every physical use, including
+scheduled and child work. Missing selections never borrow creator credentials.
+Realtime empty-shell creation still takes no selection: call createSession with
+`startMode:"realtime"` and no initialMessage or selectedHostMcpDelegations, then
+send the first text with its authenticated participant's explicit selection and
+clientEventId. The first real text turn captures normally; this grants no voice
+provider authority.
 Use the same `selectedHostMcpDelegations` field on `createScheduledTask` or
 `updateScheduledTask` for browser-independent jobs. Omitted update selections
 preserve existing choices; `[]` clears them for future revisions. New/reusable

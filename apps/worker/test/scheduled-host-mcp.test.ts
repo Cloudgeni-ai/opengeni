@@ -19,6 +19,7 @@ import {
   captureHostMcpTaskAuthorities,
   claimSessionWorkForAttempt,
   authorizeDirectHostMcpUse,
+  resolveAcceptedHostMcpBinding,
   buildHostConnectionTokenResolver,
   revokeHostMcpDelegation,
   createSession,
@@ -48,7 +49,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-test("scheduled host grants survive browser-independent dispatch in every run mode and revoke at physical use", async () => {
+async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_turn") {
   for (const runMode of ["new_session_per_run", "reusable_session", "existing_session"] as const) {
     const [account] = await shared!
       .admin`insert into managed_accounts (name) values ('scheduled host fixture') returning id`;
@@ -89,6 +90,7 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
           authoritySource: "host",
           connectionId: "product-account",
           providerDomain: "host.fixture.invalid",
+          subjectScope: "subject",
         },
       },
     });
@@ -108,11 +110,20 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
       ...binding.definition.connectionRef,
       hostBinding: { bindingId: binding.id, generation: 1 },
     };
+    const configuredRef =
+      selectionMode === "fixed"
+        ? connectionRef
+        : {
+            authoritySource: "host" as const,
+            providerDomain: "host.fixture.invalid",
+            subjectScope: "subject" as const,
+            hostBinding: { selection: "accepted_turn" as const },
+          };
     const mcpServer = {
       id: "product",
       url: binding.definition.destinationUrl,
       transport: "streamable_http" as const,
-      connectionRef,
+      connectionRef: configuredRef,
     };
     const target =
       runMode === "existing_session"
@@ -234,9 +245,10 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
       {
         ...request,
         authorizeDurableBinding: (candidate) => authorizeDirectHostMcpUse(client.db, candidate),
+        resolveAcceptedBinding: (candidate) => resolveAcceptedHostMcpBinding(client.db, candidate),
       },
     );
-    const credential = await resolve(request);
+    const credential = await resolve({ ...request, connectionRef: configuredRef });
     expect(credential.status).toBe("ok");
     if (credential.status !== "ok") throw new Error("No scheduled host credential");
     expect(await credential.authorizeProviderRequest?.()).toBe(true);
@@ -261,7 +273,7 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
       metadata: {},
       captureHostAuthority: (tx, accepted) =>
         inheritHostMcpTaskAuthoritiesFromAttempt(tx, accepted, sourceActor, [
-          { bindingId: binding.id, bindingGeneration: 1, definition: binding.definition },
+          { ...binding.definition, connectionRef: configuredRef },
         ]),
     });
     expect(
@@ -321,6 +333,13 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
       initiatorContext: childClaim.turn.initiatorContext,
     };
     expect(await authorizeDirectHostMcpUse(client.db, childRequest)).toBe(true);
+    if (selectionMode === "accepted_turn")
+      expect(
+        await resolveAcceptedHostMcpBinding(client.db, {
+          ...childRequest,
+          connectionRef: configuredRef,
+        }),
+      ).toEqual(connectionRef);
     await revokeHostMcpDelegation(client.db, owner, delegation.id, 1);
     expect(
       await authorizeDirectHostMcpUse(client.db, childRequest, (snapshot) =>
@@ -329,7 +348,13 @@ test("scheduled host grants survive browser-independent dispatch in every run mo
     ).toBe(false);
     expect(snapshots).toHaveLength(1);
     expect(await credential.authorizeProviderRequest?.()).toBe(false);
-    expect((await resolve(request)).status).not.toBe("ok");
+    expect((await resolve({ ...request, connectionRef: configuredRef })).status).not.toBe("ok");
     expect(renewals).toBe(1);
   }
-}, 60_000);
+}
+
+test.each(["fixed", "accepted_turn"] as const)(
+  "scheduled %s host grants survive browser-independent dispatch in every run mode and revoke at physical use",
+  verifyScheduledHostSelection,
+  60_000,
+);

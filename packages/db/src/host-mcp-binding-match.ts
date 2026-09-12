@@ -14,6 +14,7 @@ export function hostMcpBindingMatchesRequest(
   const { hostBinding, ...connectionRef } = request.connectionRef;
   if (
     !hostBinding ||
+    "selection" in hostBinding ||
     binding.status !== "active" ||
     binding.revokedAt !== null ||
     binding.id !== hostBinding.bindingId ||
