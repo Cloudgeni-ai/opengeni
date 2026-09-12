@@ -361,7 +361,13 @@ export async function managedActorFetch(
     const finiteSseBatch = finiteSseBatchKind(response, boundedHttp1Sse);
     const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch !== null;
     if (detachedResponse) {
-      const bytes = await readFiniteResponseBytes(response);
+      // Let the native Body consumer own finite JSON through transport
+      // completion. Manually releasing its reader at decoded EOF can make
+      // Chromium report ERR_ABORTED even after every JSON byte was delivered.
+      // Keep the existing explicit reader lifecycle for bounded SSE batches.
+      const bytes = isFiniteJsonResponse(response)
+        ? await response.arrayBuffer()
+        : await readFiniteResponseBytes(response);
       if (responseIsStale()) {
         throw new DOMException(
           "Ignored a response from the previous browser account",
