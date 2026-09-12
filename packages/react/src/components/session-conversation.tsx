@@ -11,11 +11,14 @@ import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import { QueueSurface } from "./queue-surface";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline } from "./message-timeline";
+import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
 
 export type SessionConversationProps = ClientOverride & {
   sessionId: string;
+  /** Localized actions for already-sent user-message disclosure. */
+  userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
   className?: string;
   /** Defaults to filling the host. The host owns available height. */
@@ -32,6 +35,7 @@ export function SessionConversation(props: SessionConversationProps) {
 
 function Conversation({
   sessionId,
+  userMessageDisclosureLabels,
   loadSkillReview,
   client,
   workspaceId,
@@ -71,6 +75,7 @@ function Conversation({
     >
       {error && <p role="alert">{error.message}</p>}
       <MessageTimeline
+        userMessageDisclosureLabels={userMessageDisclosureLabels}
         className="min-h-0 flex-1"
         items={conversationTimeline(feed.timeline, queue, composer)}
         status={status}

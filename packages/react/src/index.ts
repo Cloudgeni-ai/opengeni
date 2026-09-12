@@ -511,7 +511,10 @@ export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
-export type { UserMessageBodyProps } from "./components/user-message-body";
+export type {
+  UserMessageBodyProps,
+  UserMessageDisclosureLabels,
+} from "./components/user-message-body";
 export {
   Markdown,
   sandboxFileLocationFromHref,

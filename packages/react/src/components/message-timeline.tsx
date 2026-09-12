@@ -62,6 +62,7 @@ import {
   UserMessageBody,
   UserMessageDisclosureProvider,
   type UserMessageDisclosureContextValue,
+  type UserMessageDisclosureLabels,
 } from "./user-message-body";
 import {
   createTipFollowState,
@@ -128,6 +129,8 @@ const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-sel
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
 
 export type MessageTimelineProps = {
+  /** Localized user-message disclosure actions, including custom UserMessageBody renderers. */
+  userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   /** Raw session events (projected internally) … */
   events?: SessionEvent[] | undefined;
   /** … or pre-projected items (e.g. from `useSessionEvents().timeline`). */
@@ -404,6 +407,7 @@ function cssEscapeAttribute(value: string): string {
  * with a "jump to latest" affordance when the reader scrolls back.
  */
 export function MessageTimeline({
+  userMessageDisclosureLabels,
   events,
   items,
   status: _status,
@@ -919,8 +923,16 @@ export function MessageTimeline({
     () => ({
       expandedByMessageId: userMessageDisclosureMemoryRef.current,
       beginChange: beginUserMessageDisclosureChange,
+      labels: {
+        showMore: userMessageDisclosureLabels?.showMore,
+        showLess: userMessageDisclosureLabels?.showLess,
+      },
     }),
-    [beginUserMessageDisclosureChange],
+    [
+      beginUserMessageDisclosureChange,
+      userMessageDisclosureLabels?.showMore,
+      userMessageDisclosureLabels?.showLess,
+    ],
   );
   const timelineGroupEntryContext = useMemo<TimelineGroupEntryContext>(
     () => ({
