@@ -1,5 +1,38 @@
 # @opengeni/db
 
+## 4.4.0
+
+### Minor Changes
+
+- e41027c: Add opt-in MCP operation outcome recovery through a configured read-only provider receipt tool. Persist exact operation identity before dispatch, retain original invocation outcomes separately from late receipts, and revalidate current authority across accepted attempts without replaying mutations. Preserve arbitrary SDK call IDs as correlation rather than replacing UUID operation identity.
+
+  Apply the additive operation-ledger migration and runtime-role provisioning, and upgrade all claim-capable workers to the membership-first lock order before enabling provider mappings. Providers must implement the documented observation contract; unsupported providers and historical operations without captured authority are not automatically recoverable.
+
+- 935af4e: Add an authorized standalone session inline MCP credential rotation operation with durable idempotent receipts, exact destination and credential-version fencing, and atomic quiescence checks. Expose the operation through HTTP and the SDK without sending messages, scheduling work, retrying external mutations, or widening connection or attempt authority. Keep existing message-bound credential updates unchanged.
+
+### Patch Changes
+
+- 4e2b59d: Deduplicate concurrent computer-session preparation across both operation unique indexes while preserving workspace-scoped replay and immutable request checks.
+- a1bb8db: Preserve sender attribution for initial and follow-up user messages in host exports by resolving their exact triggering turn. Canonical events, existing exports, and checkpoints remain unchanged.
+- 488a69b: Expose bounded current-failure evidence on session detail reads so recovery diagnostics do not depend on timeline pagination. Show recorded consecutive retry streaks without inventing lifetime totals, and distinguish Codex account assignment, affinity/lease reuse, and actual switches without changing allocation policy.
+
+  Read session status and its replay cursor coherently, decode bounded diagnostics through the lossless storage codec, and record account transitions atomically against the current assignment with attempt-keyed replay and compatible switch reasons.
+
+- 22a9e4d: Bound sandbox acquisition and workspace mutation waits across repeated archive capture attempts. Honor the first observed capture's persisted timeout once, without letting expired or renewed claims replenish the caller's deadline; retain all capture and writer fences.
+
+  Release an exact unpublished drain capture after its provider promise rejects, including after a local timeout, so waiting turns can resume the intact live sandbox. Unresolved captures, published archives, successors, and provider teardown remain fenced.
+
+  Fresh claims allocate a new provider request identity; uninterrupted replacements retain it, preventing stale snapshot replay after an intervening writer re-arms the lease.
+
+- Updated dependencies [4e2b59d]
+- Updated dependencies [e41027c]
+- Updated dependencies [488a69b]
+- Updated dependencies [935af4e]
+- Updated dependencies [d08dbb6]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/config@1.2.0
+  - @opengeni/codemode@0.5.7
+
 ## 4.3.3
 
 ### Patch Changes
