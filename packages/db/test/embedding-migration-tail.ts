@@ -28,4 +28,7 @@ export const embeddingMigrationTail = [
   // marked applied but deliberately absent in a historical cutover fixture.
   "0459_mcp_operations.sql",
   "0461_unified_knowledge.sql",
+  // Patches the instruction writer introduced by 0461, so historical fixtures
+  // must replay it after that writer rather than before its original creation.
+  "0462_agent_instruction_non_destructive_edits.sql",
 ];
