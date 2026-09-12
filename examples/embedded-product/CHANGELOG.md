@@ -1,5 +1,12 @@
 # @opengeni/example-embedded-product
 
+## 0.0.9
+
+### Patch Changes
+
+- Updated dependencies [c1ad490]
+  - @opengeni/react@5.2.0
+
 ## 0.0.8
 
 ### Patch Changes
