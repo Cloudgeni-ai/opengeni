@@ -214,6 +214,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     let group = this.frameStreams.get(targetId);
     while (group?.stopping) {
       await group.done;
+      this.assertOpen();
       group = this.frameStreams.get(targetId);
     }
     if (!group) {
@@ -231,7 +232,9 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     let profile = group.profiles.get(key);
     if (profile?.stopped) {
       await profile.done;
-      profile = group.profiles.get(key);
+      // Retiring the last profile can also retire its group. Reacquire both
+      // from the registry so renewal cannot attach to a detached/stopping source.
+      return this.subscribeFrames(targetId, options);
     }
     let created = false;
     if (!profile) {

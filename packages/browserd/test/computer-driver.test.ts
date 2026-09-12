@@ -14,6 +14,28 @@ const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
 describe("NativeComputerDriver", () => {
+  test("renews a subscription while the last viewer is retiring", async () => {
+    const transport = new FixtureNativeTransport();
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    try {
+      const first = await driver.subscribeFrames("window-1");
+      await first[Symbol.asyncIterator]().next();
+      await first.close();
+      const renewed = await driver.subscribeFrames("window-1");
+      await expect(renewed[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+        done: false,
+        value: { frameId: "frame-2" },
+      });
+      await renewed.close();
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("projects native targets, observations, causal actions, and latest-wins frames", async () => {
     const transport = new FixtureNativeTransport();
     const driver = new NativeComputerDriver({
