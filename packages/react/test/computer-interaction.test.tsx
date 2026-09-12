@@ -602,6 +602,49 @@ describe("ComputerSession frame stream", () => {
     await hook.unmount();
   });
 
+  test("accepts restarted frame sequences after attachment renewal", async () => {
+    const sockets: FakeComputerSocket[] = [];
+    let attaches = 0;
+    const client = fakeClient({
+      attachComputerSession: async () => ({
+        ...attachment("window-1"),
+        expiresAt: new Date(Date.now() + (++attaches === 1 ? 2_000 : 120_000)).toISOString(),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "window-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await dispatch(sockets[0]!, "open");
+      await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 100).buffer });
+      await flush(10);
+      expect(hook.result.current.frame?.sequence).toBe(100);
+      await flush(1_100);
+      expect(sockets).toHaveLength(2);
+      await dispatch(sockets[1]!, "open");
+      await dispatch(sockets[1]!, "message", { data: frameMessage("window-1", 2).buffer });
+      await dispatch(sockets[1]!, "message", { data: frameMessage("window-1", 1).buffer });
+      await dispatch(sockets[0]!, "message", { data: frameMessage("window-1", 101).buffer });
+      await flush(10);
+      expect(hook.result.current.state).toBe("live");
+      expect(hook.result.current.frame?.sequence).toBe(2);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("exposes an error after sockets exhaust the bounded reconnect attempts", async () => {
     const sockets: FakeComputerSocket[] = [];
     const client = fakeClient({
