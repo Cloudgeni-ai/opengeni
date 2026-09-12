@@ -38,7 +38,10 @@ export function registerKnowledgeEntryTools(
   sessionId: string,
 ) {
   if (grant.principalKind !== "agent_attempt") return;
-  async function run(fn: (context: KnowledgeContext) => Promise<unknown>) {
+  async function run(
+    fn: (context: KnowledgeContext) => Promise<unknown>,
+    surface: "knowledge" | "instruction" = "knowledge",
+  ) {
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
       const context: KnowledgeContext = {
@@ -63,15 +66,25 @@ export function registerKnowledgeEntryTools(
     } catch (error) {
       const state = nestedPostgresSqlState(error);
       const message =
-        state === "40001"
-          ? "This entry changed. Read its current revision and retry your correction with the current version."
-          : state === "23505"
-            ? "This operation ID was already used with different input. Reuse it only for an exact retry."
-            : state === "42501"
-              ? "The entry, reference, or write is unavailable in this task's scope and Agent learning policy. Off disables saving, not your task. Do not ask for an approval to continue."
-              : state === "22023" || state === "23514"
-                ? "Invalid Knowledge entry or relationship. Check the referenced IDs and revision before retrying."
-                : "Knowledge is temporarily unavailable. Your task can continue; retry the same operation ID if saving may have succeeded.";
+        surface === "instruction"
+          ? state === "40001"
+            ? "This instruction changed. Read its current content and baseline, then retry the same intended edit against that exact state."
+            : state === "23505"
+              ? "This instruction operation ID was already used with different input. Reuse it only for an exact retry."
+              : state === "42501"
+                ? "The instruction change is unavailable in this task's scope or Agent learning policy. Off disables authoring, not the task. Do not ask for approval to continue."
+                : state === "22023" || state === "23514"
+                  ? "Invalid instruction change. Read the current instruction, use append for a new rule, edit with one exact oldText match to update or remove text, and replace only when the user explicitly wants the complete instruction replaced. The resulting instruction must stay within 600 characters."
+                  : "Workspace instructions are temporarily unavailable. Retry the same operation ID only if the prior change may have succeeded."
+          : state === "40001"
+            ? "This entry changed. Read its current revision and retry your correction with the current version."
+            : state === "23505"
+              ? "This operation ID was already used with different input. Reuse it only for an exact retry."
+              : state === "42501"
+                ? "The entry, reference, or write is unavailable in this task's scope and Agent learning policy. Off disables saving, not your task. Do not ask for an approval to continue."
+                : state === "22023" || state === "23514"
+                  ? "Invalid Knowledge entry or relationship. Check the referenced IDs and revision before retrying."
+                  : "Knowledge is temporarily unavailable. Your task can continue; retry the same operation ID if saving may have succeeded.";
       return {
         isError: true,
         content: [
@@ -237,19 +250,19 @@ export function registerKnowledgeEntryTools(
     "instruction_policy_get",
     {
       description:
-        "Read the current standing instruction and exact baseline for one target before proposing a change. Reading existing instructions remains available when agent authoring is Off.",
+        "Read the current standing instruction and exact baseline for one target before every change. Preserve unrelated rules exactly. Reading remains available when agent authoring is Off.",
       inputSchema: { target: WorkspaceInstructionPolicyTarget },
     },
-    (input) => run((context) => getAgentInstruction(deps.db, context, input.target)),
+    (input) => run((context) => getAgentInstruction(deps.db, context, input.target), "instruction"),
   );
   server.registerTool(
     "instruction_policy_save",
     {
       description:
-        "Save a concise standing workspace instruction through this task's Agent learning policy. Use only for a universal rule that belongs in every applicable prompt; facts and incidents belong in knowledge_save and reusable procedures in skill_save. Read the current policy first and submit its exact baseline. Content is limited to 600 characters. Review first saves an inactive revision and returns pending; continue the task without an approval question.",
+        "Change a concise standing workspace instruction through this task's Agent learning policy. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with oldText that occurs exactly once and newText to update or remove existing text. Use replace only when the user explicitly asks to replace the complete instruction; never reconstruct or summarize unrelated rules. Each supplied text and the resulting instruction are limited to 600 characters. Facts and incidents belong in knowledge_save and reusable procedures in skill_save. Review first saves an inactive revision and returns pending; continue the task without an approval question.",
       inputSchema: AgentInstructionSaveRequest.shape,
     },
-    (input) => run((context) => saveAgentInstruction(deps.db, context, input)),
+    (input) => run((context) => saveAgentInstruction(deps.db, context, input), "instruction"),
   );
   server.registerTool(
     "task_note_promote_knowledge",

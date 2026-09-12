@@ -87,8 +87,11 @@ First-party OpenGeni MCP Knowledge tools:
 - `knowledge_save`, `knowledge_archive`, `knowledge_retain_file`: exact-attempt
   writes through the shared Knowledge lifecycle. Accepted Agent learning controls
   publication: Automatic, Review first, or Off. Off leaves retrieval available.
-- `instruction_policy_save`: the native instruction revision lifecycle, under
-  its own accepted Agent learning category. Skills use their native folder tools.
+- `instruction_policy_save`: a non-destructive edit over the native instruction
+  revision lifecycle, under its own accepted Agent learning category. Read the
+  current baseline first; append new rules by default, use one exact anchored
+  edit for updates/removals, and replace the complete instruction only on an
+  explicit user request. Skills use their native folder tools.
 
 Search published and pending entries before saving; reuse entry IDs and versions
 for corrections and collections across sources. See [Knowledge](knowledge.md).

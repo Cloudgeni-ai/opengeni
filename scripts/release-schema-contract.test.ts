@@ -209,6 +209,9 @@ describe("release schema contract", () => {
     const unifiedKnowledge = completeSourceContract.migrations.some(
       (migration) => migration.path === "0461_unified_knowledge.sql",
     );
+    const agentInstructionNonDestructiveEdits = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0462_agent_instruction_non_destructive_edits.sql",
+    );
     const mcpOperations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0459_mcp_operations.sql",
     );
@@ -238,6 +241,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (agentInstructionNonDestructiveEdits ? 1 : 0) +
         (organizationScopedExternalWorkspaces ? 1 : 0) +
         (durableConnectAttempts ? 1 : 0) +
         (externalIdentityProvisioning ? 1 : 0) +
@@ -339,10 +343,13 @@ describe("release schema contract", () => {
                                                                       : messageBoundarySessionForks
                                                                         ? "0429_message_boundary_session_forks.sql"
                                                                         : "0428_scheduled_task_creator_policy.sql",
+      ...(agentInstructionNonDestructiveEdits
+        ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0461_unified_knowledge.sql",
-      deploymentMode: "maintenance",
+      path: "0462_agent_instruction_non_destructive_edits.sql",
+      deploymentMode: "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1432,6 +1439,9 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const unfilteredSourceContract = await buildCompleteSchemaContract();
+    const agentInstructionNonDestructiveEdits = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0462_agent_instruction_non_destructive_edits.sql",
+    );
     let completeSourceContract = await contractWithoutMigrations([
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -1876,6 +1886,7 @@ describe("release schema contract", () => {
       "0434_ordered_model_history.sql",
       "0436_unobservable_command_idle_drain.sql",
       "0435_skill_chat_confirmation.sql",
+      "0462_agent_instruction_non_destructive_edits.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2209,8 +2220,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0433_unified_skill_lifecycle.sql",
       };
+    if (agentInstructionNonDestructiveEdits)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0462_agent_instruction_non_destructive_edits.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (agentInstructionNonDestructiveEdits ? 1 : 0) +
         (unifiedSkillLifecycle ? 1 : 0) +
         (scheduledTaskCreatorPolicy ? 1 : 0) +
         (codexBookkeepingPreservesSessionRecency ? 1 : 0) +
@@ -2517,6 +2534,9 @@ describe("release schema contract", () => {
         ? { latestMigration: "0428_scheduled_task_creator_policy.sql" }
         : {}),
       ...(unifiedSkillLifecycle ? { latestMigration: "0433_unified_skill_lifecycle.sql" } : {}),
+      ...(agentInstructionNonDestructiveEdits
+        ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

@@ -59,6 +59,9 @@ describe("Agent Knowledge surface", () => {
     expect(prompt).not.toContain("call remember with lane=preference");
     expect(prompt).toContain("instruction_policy_get");
     expect(prompt).toContain("instruction_policy_save");
+    expect(prompt).toContain("Preserve every unrelated existing command exactly");
+    expect(prompt).toContain("editMode=append");
+    expect(prompt).toContain("replace only when the user explicitly asks");
     expect(prompt).toContain("Off prevents agent authoring");
     expect(prompt).toContain("Report the actual receipt");
   });
