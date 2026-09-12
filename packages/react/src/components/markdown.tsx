@@ -619,16 +619,19 @@ function MarkdownImpl({
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
   const components = useMemo(() => markdownComponents(onSandboxFile), [onSandboxFile]);
 
+  const interactiveContext = useMemo(
+    () => ({
+      source: children,
+      ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
+      ...(renderImage ? { renderImage } : {}),
+    }),
+    [children, renderInteractiveBlock, renderImage],
+  );
+
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
   // long links and code blocks wrap/scroll instead of forcing overflow.
   return (
-    <InteractiveContext.Provider
-      value={{
-        source: children,
-        ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
-        ...(renderImage ? { renderImage } : {}),
-      }}
-    >
+    <InteractiveContext.Provider value={interactiveContext}>
       <TooltipProvider delayDuration={400}>
         <div
           ref={bodyRef}

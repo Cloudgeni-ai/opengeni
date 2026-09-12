@@ -32,7 +32,6 @@ const legacyBrowserUnusedMethods = [
   "getPack",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
-  "getRetainedArtifact",
   "getRetainedArtifactContent",
   "getScheduledTask",
   "getSessionRetainedArtifactContent",

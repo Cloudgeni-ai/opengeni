@@ -35,7 +35,7 @@ import {
   VideoIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useState, type ReactNode } from "react";
 import { formatBytes, stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {

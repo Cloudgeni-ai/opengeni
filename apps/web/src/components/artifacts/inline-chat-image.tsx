@@ -115,7 +115,7 @@ function LoadedImage({
     <button
       type="button"
       aria-label={`Expand ${alt || "image"}`}
-      className="block max-w-full cursor-zoom-in rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+      className="block max-w-full cursor-zoom-in rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       onClick={(event) => lightbox.open(state.url, alt, event.currentTarget, "Image")}
     >
       {image}
