@@ -503,6 +503,7 @@ describe("timeline scroll ownership browser regression", () => {
             new Promise<{
               longTasks: number[];
               maxFrameIntervalMs: number;
+              committedRowIds: string[];
             }>((resolve) => {
               const longTasks: number[] = [];
               const frames: number[] = [];
@@ -529,6 +530,12 @@ describe("timeline scroll ownership browser regression", () => {
                 resolve({
                   longTasks,
                   maxFrameIntervalMs: Math.max(0, ...intervals),
+                  // A deferred or partially revealed prepend must not pass by
+                  // leaving its work outside the measured frame window.
+                  committedRowIds: Array.from(
+                    document.querySelectorAll("[data-timeline-row]"),
+                    (row) => row.getAttribute("data-timeline-row")!,
+                  ),
                 });
               };
               requestAnimationFrame(() => {
@@ -544,6 +551,10 @@ describe("timeline scroll ownership browser regression", () => {
       expect(after.top).toBeCloseTo(before.top ?? 0, 0);
       expect(performance.longTasks).toEqual([]);
       expect(performance.maxFrameIntervalMs).toBeLessThan(50);
+      expect(performance.committedRowIds).toEqual([
+        ...Array.from({ length: 220 }, (_, index) => `row-${900 + index}`),
+        "stream-1",
+      ]);
     } finally {
       await performancePage.close();
     }

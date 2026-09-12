@@ -579,3 +579,18 @@
   pointer-events: none !important;
   z-index: -1 !important;
 }
+
+/* The upstream ThinkingOrb owns motion, visibility pausing, and reduced motion. */
+.og-genie-loading { display: flex; align-items: center; gap: 14px; min-height: 88px; padding: 12px 0; }
+.og-genie-orb { width: 64px; height: 64px; flex: 0 0 64px; }
+.og-genie-orb canvas { display: block; }
+.og-genie-copy { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.og-genie-phrase { color: var(--og-color-fg-muted); font-size: var(--og-font-size-sm); line-height: 1.5; animation: og-genie-phrase-in .65s ease-out both; }
+.og-genie-details { color: var(--og-color-fg-subtle); font-size: var(--og-font-size-xs); min-height: 28px; cursor: pointer; border-radius: 4px; text-align: left; transition: color .2s; }
+.og-genie-details:hover { color: var(--og-color-fg); }
+.og-genie-details:focus-visible { outline: 2px solid #a995e9; outline-offset: 4px; }
+@keyframes og-genie-phrase-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@media (pointer: coarse) { .og-genie-details { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) {
+  .og-genie-phrase { animation: none; }
+}

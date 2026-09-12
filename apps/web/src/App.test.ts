@@ -1624,7 +1624,7 @@ describe("projectSessionTimeline", () => {
 });
 
 describe("summarizeSessionFailure", () => {
-  test("reports the latest failure reason and the re-dispatch history", () => {
+  test("reports the latest failure reason without inferring totals from loaded history", () => {
     const summary = summarizeSessionFailure(
       [
         event(1, "user.message", { text: "Inspect" }),
@@ -1638,8 +1638,7 @@ describe("summarizeSessionFailure", () => {
 
     expect(summary.reason).toBe("Provider exploded");
     expect(summary.failedAt).toBe(event(5, "turn.failed", {}).occurredAt);
-    expect(summary.recoveryCount).toBe(2);
-    expect(summary.failedTurnCount).toBe(2);
+    expect(summary.consecutiveRecoveryCount).toBeNull();
   });
 
   test("preserves provider-internal failure reasons like the timeline does", () => {
@@ -1682,7 +1681,6 @@ describe("summarizeSessionFailure", () => {
     );
     expect(summary.safetyRefusal).toBe(false);
     expect(summary.failedAt).toBe(failure.occurredAt);
-    expect(summary.failedTurnCount).toBe(1);
   });
 
   test("keeps the detailed same-turn failure paired with its pre-claim status", () => {
@@ -1703,7 +1701,6 @@ describe("summarizeSessionFailure", () => {
       "failed",
     );
     expect(summary.reason).toBe("Database connection lost");
-    expect(summary.failedTurnCount).toBe(1);
   });
 
   test("reports nothing for a clean session", () => {
@@ -1712,8 +1709,7 @@ describe("summarizeSessionFailure", () => {
       safetyRefusal: false,
       failedAt: null,
       failureEventId: null,
-      recoveryCount: 0,
-      failedTurnCount: 0,
+      consecutiveRecoveryCount: null,
     });
   });
   test("exposes a legacy safety rejection and clears it on a later unrelated failure", () => {
@@ -3003,3 +2999,54 @@ function pausedControl(
       : null,
   };
 }
+
+describe("authoritative failure diagnostics", () => {
+  const diagnostics = {
+    eventId: "failure-current",
+    sequence: 40,
+    turnId: "current",
+    occurredAt: "2026-09-10T15:00:00Z",
+    payload: { error: "Current provider failure", providerRecoveryCount: 2 },
+  };
+  test("empty, historical and partial pages cannot alter current failure or retry streak", () => {
+    for (const page of [
+      [],
+      [event(1, "turn.failed", { error: "Old failure", providerRecoveryCount: 5 })],
+      [event(2, "turn.recovery.requested", {})],
+    ]) {
+      expect(summarizeSessionFailure(page, "failed", diagnostics, 50)).toMatchObject({
+        reason: "Current provider failure",
+        failureEventId: "failure-current",
+        consecutiveRecoveryCount: 2,
+      });
+    }
+  });
+  test("a newer live failure wins while the detail refresh is in flight", () => {
+    const newer = event(60, "turn.failed", { error: "New failure", providerRecoveryCount: 1 });
+    expect(summarizeSessionFailure([newer], "failed", diagnostics, 50)).toMatchObject({
+      reason: "New failure",
+      consecutiveRecoveryCount: 1,
+    });
+    expect(summarizeSessionFailure([newer], "failed", null, 50)).toMatchObject({
+      reason: "New failure",
+    });
+    expect(
+      summarizeSessionFailure(
+        [{ ...newer, turnAssociation: "late_rejected" }],
+        "failed",
+        diagnostics,
+        50,
+      ),
+    ).toMatchObject({ reason: "Current provider failure" });
+  });
+  test("legacy evidence omits unknown totals and rejects malformed streak counts", () => {
+    for (const count of [undefined, -1, 1.5, "5"]) {
+      expect(
+        summarizeSessionFailure(
+          [event(1, "turn.failed", { error: "failed", providerRecoveryCount: count })],
+          "failed",
+        ).consecutiveRecoveryCount,
+      ).toBeNull();
+    }
+  });
+});

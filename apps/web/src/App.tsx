@@ -39,7 +39,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import {
   parseRootWorkspaceSearch,
   readLastWorkspaceId,
@@ -326,16 +326,24 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "plugins",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>) => ({
-    ...(search.section === "packs" ? { section: "packs" as const } : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
+    ...(search.section === "packs"
+      ? { section: "packs" as const }
+      : search.section === "skills"
+        ? { section: "skills" as const }
+        : {}),
   }),
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>) => ({
-    ...(search.section === "packs" ? { section: "packs" as const } : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
+    ...(search.section === "packs"
+      ? { section: "packs" as const }
+      : search.section === "skills"
+        ? { section: "skills" as const }
+        : {}),
   }),
   component: CapabilitiesLegacyRedirect,
 });
@@ -429,11 +437,13 @@ const workspaceArtifactsRoute = createRoute({
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
 const workspaceEditableArtifactRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts/editable/$artifactId",
+  validateSearch: artifactReturnSearch,
   component: EditableArtifact,
 });
 const workspaceOrganizationRoute = createRoute({
@@ -708,6 +718,15 @@ function WorkspaceSettings() {
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
   const { view } = workspaceStateRoute.useSearch();
+  if (view === "skills")
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/plugins"
+        params={{ workspaceId }}
+        search={{ section: "skills" }}
+        replace
+      />
+    );
   return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
 }
 
@@ -721,11 +740,15 @@ function IdentityLink() {
 }
 
 function ArtifactDetail() {
-  return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
+  const params = workspaceArtifactDetailRoute.useParams();
+  const { fromSession } = workspaceArtifactDetailRoute.useSearch();
+  return <LazyArtifactsRoute {...params} fromSession={fromSession} />;
 }
 
 function EditableArtifact() {
-  return <LazyEditableArtifactRoute {...workspaceEditableArtifactRoute.useParams()} />;
+  const params = workspaceEditableArtifactRoute.useParams();
+  const { fromSession } = workspaceEditableArtifactRoute.useSearch();
+  return <LazyEditableArtifactRoute {...params} fromSession={fromSession} />;
 }
 
 function Organization() {

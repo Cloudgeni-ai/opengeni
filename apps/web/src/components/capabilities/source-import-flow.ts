@@ -15,6 +15,7 @@ export type SourceImportPhase = "source" | "previewing" | "review" | "installing
 export type InstalledSourceSkill = InstalledSkillSummary;
 
 export type SourceImportState = {
+  directPreview?: boolean;
   open: boolean;
   kind: SourceImportKind;
   intent: SourceImportIntent;
@@ -33,7 +34,7 @@ export type SourceImportState = {
 export type SourceImportAction =
   | { type: "open" }
   | { type: "close" }
-  | { type: "new"; kind?: SourceImportKind; operationId: string }
+  | { type: "new"; kind?: SourceImportKind; operationId: string; directPreview?: boolean }
   | { type: "edit_skill"; skill: InstalledSourceSkill; operationId: string }
   | {
       type: "edit_plugin";
@@ -43,10 +44,10 @@ export type SourceImportAction =
   | { type: "kind"; kind: SourceImportKind }
   | { type: "url"; url: string }
   | { type: "phase"; phase: SourceImportPhase; error?: string | null }
-  | { type: "skill_preview"; preview: SkillImportPreview }
+  | { type: "skill_preview"; preview: SkillImportPreview; operationId?: string }
   | { type: "plugin_preview"; preview: PluginPreview }
   | { type: "plugin_binding"; componentKey: string; connectionId: string }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; operationId?: string }
   | { type: "reset" };
 
 export function initialSourceImportState(): SourceImportState {
@@ -81,6 +82,7 @@ export function sourceImportReducer(
         ...initialSourceImportState(),
         open: true,
         kind: action.kind ?? "skill",
+        directPreview: action.directPreview ?? false,
         operationId: action.operationId,
       };
     case "edit_skill":
@@ -128,6 +130,7 @@ export function sourceImportReducer(
         error: action.error === undefined ? state.error : action.error,
       };
     case "skill_preview":
+      if (action.operationId && action.operationId !== state.operationId) return state;
       return {
         ...state,
         phase: "review",
@@ -154,6 +157,7 @@ export function sourceImportReducer(
         bindingsDirty: true,
       };
     case "error":
+      if (action.operationId && action.operationId !== state.operationId) return state;
       return { ...state, phase: "source", error: action.message };
     case "reset":
       return initialSourceImportState();

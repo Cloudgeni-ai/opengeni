@@ -209,9 +209,9 @@ describe("workflow execution graph manifest", () => {
 
     expect(inspection.violations).toEqual([]);
     expect(compareWorkflowExecutionManifest(committed, inspection.manifest)).toEqual([]);
-    expect(inspection.manifest.workflows).toHaveLength(21);
+    expect(inspection.manifest.workflows).toHaveLength(22);
     expect(inspection.manifest.actions).toHaveLength(2);
-    expect(inspection.manifest.uncappedRuns).toHaveLength(202);
+    expect(inspection.manifest.uncappedRuns).toHaveLength(203);
     expect(inspection.manifest.generatedLocalTargets).toHaveLength(3);
     for (const record of [
       ...inspection.manifest.workflows,

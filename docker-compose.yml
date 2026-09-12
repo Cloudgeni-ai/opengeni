@@ -49,6 +49,12 @@ services:
       POSTGRES_USER: opengeni
       POSTGRES_PWD: opengeni
       POSTGRES_SEEDS: postgres
+      # All four Temporal services share this local Postgres with the app.
+      # Production-sized defaults can exhaust its 100 connection slots.
+      SQL_MAX_CONNS: "5"
+      SQL_MAX_IDLE_CONNS: "5"
+      SQL_VIS_MAX_CONNS: "2"
+      SQL_VIS_MAX_IDLE_CONNS: "2"
       BIND_ON_IP: 0.0.0.0
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
     depends_on:
@@ -78,7 +84,7 @@ services:
       start_period: 10s
 
   garage-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: &object-storage-client-image quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
       garage:
         condition: service_healthy
@@ -122,7 +128,7 @@ services:
       retries: 20
 
   minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: *object-storage-client-image
     profiles: ["minio"]
     depends_on:
       minio:

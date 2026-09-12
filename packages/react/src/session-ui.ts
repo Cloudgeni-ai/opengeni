@@ -16,7 +16,10 @@ export type { MessageTimelineProps } from "./components/message-timeline";
 export { createOlderHistoryLoadReceipt } from "./older-history";
 export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
-export type { UserMessageBodyProps } from "./components/user-message-body";
+export type {
+  UserMessageBodyProps,
+  UserMessageDisclosureLabels,
+} from "./components/user-message-body";
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS } from "./timeline/turn-summary";
 export type {
   BuiltInTurnSummaryFacetId,
@@ -43,3 +46,6 @@ export type {
   SessionChromeSignalTone,
 } from "./components/session-chrome";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
+export { StartupTimings } from "./timeline/startup-timings";
+export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
+export type { GenieLoadingOptions } from "./timeline/genie-loading";

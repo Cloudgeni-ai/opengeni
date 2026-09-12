@@ -51,7 +51,24 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fan
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
+const MCP_OPERATION_CAPABILITY_ROUTINE = "mcp_operation_command(jsonb, text, jsonb)";
+const MCP_OPERATION_AUTHORITY_TABLES = [
+  "mcp_operations",
+  "sessions",
+  "session_turns",
+  "session_turn_attempts",
+  "workspaces",
+  "workspace_inference_controls",
+  "organization_memberships",
+  "workspace_memberships",
+  "external_identity_links",
+  "external_link_turn_authorities",
+  "host_mcp_turn_authorities",
+  "scheduled_task_runs",
+] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "guard_mcp_operation_immutable()",
+  "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
   "guard_workspace_owned_skill_history_delete()",
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
@@ -557,6 +574,7 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  MCP_OPERATION_CAPABILITY_ROUTINE,
   "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
@@ -807,6 +825,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
@@ -1381,6 +1400,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_invitation_binding_events",
@@ -2230,6 +2250,19 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (routine.name === MCP_OPERATION_CAPABILITY_ROUTINE) {
+      const missing = MCP_OPERATION_AUTHORITY_TABLES.filter((name) => !tableByName.has(name));
+      if (missing.length > 0) {
+        violations.push(`MCP operation authority tables are missing: ${missing.join(", ")}`);
+      } else if (
+        MCP_OPERATION_AUTHORITY_TABLES.some(
+          (name) => tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `MCP operation capability ${routine.name} authority table owners do not match`,
+        );
       }
     } else if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
       const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
@@ -3385,6 +3418,23 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      [
+        "guard_mcp_operation_immutable()",
+        "mcp_operation_command_scoped(jsonb, text, jsonb)",
+      ].includes(routine.name)
+    ) {
+      if (routine.execute || routine.publicExecute) {
+        violations.push(
+          `runtime or PUBLIC has forbidden EXECUTE on MCP operation internal routine ${routine.name}`,
+        );
+      }
+      if (routine.owner !== tableByName.get("mcp_operations")?.owner) {
+        violations.push(
+          `MCP operation internal routine ${routine.name} owner does not match ledger owner`,
+        );
+      }
+    }
     if (
       [
         "guard_workspace_owned_skill_head_delete()",

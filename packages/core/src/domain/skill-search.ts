@@ -173,6 +173,9 @@ function normalizeResponse(
     if (!isRecord(skill) || typeof skill.id !== "string" || typeof skill.source !== "string")
       throw invalid();
     const parts = skill.id.split("/");
+    // Website-hosted skills cannot use our GitHub import flow. Their presence
+    // must not discard the supported results in the same response.
+    if (parts.length === 2 && skill.source === parts[0]) continue;
     if (
       parts.length !== 3 ||
       !ownerPattern.test(parts[0]!) ||

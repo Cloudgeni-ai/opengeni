@@ -37,6 +37,11 @@ import {
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
+import { createMcpOperationPersistence } from "@opengeni/db/mcp-operations";
+import { createMcpOperationReadStore } from "../mcp-operation-store";
+import { createMcpOperationObserverResolver } from "../mcp-operation-observer";
+import { readMcpOperation } from "../mcp-operation-reader";
+import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
@@ -668,7 +673,66 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       });
     },
   });
+  const operationRecoveryEnabled = githubRestMcp.settings.mcpServers.some(
+    (server) =>
+      server.operationRecovery &&
+      Object.keys(server.operationRecovery).length > 0 &&
+      githubRestMcp.tools.some((tool) => tool.kind === "mcp" && tool.id === server.id),
+  );
+  const operationAttempt = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: attempt.executionGeneration,
+  };
+  const operationPersistence = operationRecoveryEnabled
+    ? createMcpOperationPersistence(db, operationAttempt)
+    : undefined;
+  const operationReadStore = operationRecoveryEnabled
+    ? createMcpOperationReadStore(db, operationAttempt)
+    : undefined;
+  const operationObserver = createMcpOperationObserverResolver({
+    settings: githubRestMcp.settings,
+    workspaceId: input.workspaceId,
+    ...(credentialSubjectId ? { credentialSubjectId } : {}),
+    resolveCredential,
+    assertAttempt: async () => {
+      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
+      const current = await getSessionTurnForAttempt(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.attemptId,
+      );
+      if (
+        !current ||
+        current.id !== turn.id ||
+        current.executionGeneration !== attempt.executionGeneration
+      ) {
+        throw new Error("MCP operation reader no longer owns the executing attempt");
+      }
+    },
+    getEnvironment: async () => {
+      const prepared = eventing.preparedTools;
+      if (!prepared) return null;
+      return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
+    },
+  });
   const attemptToolDefinitions = [
+    ...(operationReadStore
+      ? [
+          createOperationReadAttemptToolDefinition({
+            read: async (selector) =>
+              await readMcpOperation(selector, {
+                ...operationReadStore,
+                resolveObserver: operationObserver,
+              }),
+          }),
+        ]
+      : []),
     ...skillTools,
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
@@ -876,6 +940,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
+        ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
         ...(linkedAuthority
           ? {
               authorizeAttemptExecution: async () => {

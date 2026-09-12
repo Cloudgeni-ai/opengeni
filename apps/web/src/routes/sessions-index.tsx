@@ -991,6 +991,7 @@ function SessionsIndexRouteContent({
                     : undefined,
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
+                  newSessionDraftToolPolicy: persistedToolPolicy,
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
@@ -1045,6 +1046,7 @@ function SessionsIndexRouteContent({
                   ? [launch.skillCapabilityId]
                   : undefined,
                 expectedNewSessionDraftRevision: flushed.revision,
+                newSessionDraftToolPolicy: persistedToolPolicy,
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",

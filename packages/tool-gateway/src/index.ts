@@ -33,12 +33,17 @@ import {
 export type ToolGatewayExecutionContext = {
   operationId: string;
   caller: ToolGatewayCaller;
+  /** Trusted in-process SDK correlation; not operation identity or approval authority. */
+  sourceCallId?: string;
   /** In-process transport metadata; never part of catalog identity or digest. */
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
 };
 
-export type ToolGatewayCallContext = Pick<ToolGatewayExecutionContext, "transportMeta" | "signal">;
+export type ToolGatewayCallContext = Pick<
+  ToolGatewayExecutionContext,
+  "sourceCallId" | "transportMeta" | "signal"
+>;
 
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
@@ -96,6 +101,8 @@ export type ToolGatewayCallLifecycle = {
 
 export type ModelToolGatewayCall = {
   operationId?: string;
+  /** Exact SDK call id supplied by the host, never inferred from arguments or metadata. */
+  sourceCallId?: string;
   modelName: string;
   arguments: Record<string, unknown>;
   subjectId: string;
@@ -265,6 +272,7 @@ export class ToolGateway {
             await definition.execute(request.arguments, {
               operationId,
               caller,
+              ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
               ...(context.transportMeta === undefined
                 ? {}
                 : { transportMeta: context.transportMeta }),
@@ -302,6 +310,7 @@ export class ToolGateway {
       caller: { kind: "model" as const, subjectId: input.subjectId },
     };
     const context = {
+      ...(input.sourceCallId === undefined ? {} : { sourceCallId: input.sourceCallId }),
       ...(input.transportMeta === undefined ? {} : { transportMeta: input.transportMeta }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     };

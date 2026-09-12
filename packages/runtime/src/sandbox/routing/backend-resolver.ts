@@ -66,6 +66,7 @@ export interface SelfhostedConnectionBinding {
   operationResourcePolicy: SelfhostedOperationAdmission["operationResourcePolicy"];
   operationResourcePolicySupported: boolean;
   operationCpuQuotaSupported: boolean;
+  transactionalFsWriteSupported?: boolean;
 }
 
 export interface ActiveBackendResolverDeps {
@@ -404,6 +405,7 @@ export function makeActiveBackendResolver(
         operationResourcePolicy: connection.operationResourcePolicy,
         operationResourcePolicySupported: connection.operationResourcePolicySupported,
         operationCpuQuotaSupported: connection.operationCpuQuotaSupported,
+        transactionalFsWriteSupported: connection.transactionalFsWriteSupported === true,
         // The routing proxy caches this session by sandbox+epoch, but command
         // policy and runner authority are mutable. Re-read one coherent DB
         // snapshot only when a new exec/Git is admitted.

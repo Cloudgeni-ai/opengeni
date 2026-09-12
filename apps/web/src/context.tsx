@@ -382,6 +382,7 @@ export type AppContextValue = {
       installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
+      newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
       targetSandboxId?: string | null;
       workingDir?: string | null;
       /** Workspace folder to file the new session under. */
@@ -1865,6 +1866,7 @@ export function RootRouteComponent() {
       installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
+      newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
       targetSandboxId?: string | null;
       workingDir?: string | null;
       channelId?: string | null;
@@ -1933,6 +1935,7 @@ export function RootRouteComponent() {
           installedSkillIds: options?.installedSkillIds,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
+          newSessionDraftToolPolicy: options?.newSessionDraftToolPolicy,
           defaultModel: model,
           defaultReasoningEffort: reasoningEffort,
           defaultLatencyMode: latencyMode,

@@ -562,6 +562,12 @@ export function DetailBody({
                 </Button>
               </ConnectionActions>
             </div>
+          ) : plan.mode === "setup_required" ? (
+            <p role="status" className="text-sm text-fg-muted">
+              {item.metadata.authDiscovery === "checking"
+                ? "Checking sign-in requirements…"
+                : "Setup required. Check the provider’s instructions, or reopen to retry."}
+            </p>
           ) : item.kind === "mcp" ? (
             <ConnectionActions onCancel={onCancel} busy={busy}>
               <Button
@@ -576,7 +582,7 @@ export function DetailBody({
                 onClick={() => onAction({ type: "enable", item })}
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-                Enable
+                Add to workspace
               </Button>
             </ConnectionActions>
           ) : (
@@ -1109,7 +1115,7 @@ function CuratedSkillProvenanceSection({ item }: { item: CapabilityCatalogItem }
             {metadata.contentSha256 ?? "Unavailable"}
           </span>
         </MetaRow>
-        <MetaRow label="Source commit">
+        <MetaRow label="Source version">
           <span className="min-w-0 break-all font-mono text-fg-muted">
             {metadata.sourceCommit ?? "Unavailable"}
           </span>

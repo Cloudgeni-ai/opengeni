@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { ChevronDownIcon, PlusIcon } from "lucide-react";
 import type {
   SkillRecord,
   SkillScope,
@@ -10,6 +11,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { useAppContext, type AppContextValue } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
@@ -17,15 +24,24 @@ import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions"
 export function SkillsPanel({
   workspaceId,
   personalWorkspace = false,
+  query = "",
+  onFindSkill,
+  onImportSkill,
 }: {
   workspaceId: string;
   personalWorkspace?: boolean;
+  query?: string;
+  onFindSkill?: (() => void) | undefined;
+  onImportSkill?: (() => void) | undefined;
 }) {
   return (
     <SkillsPanelContent
       context={useAppContext()}
       workspaceId={workspaceId}
       personalWorkspace={personalWorkspace}
+      query={query}
+      onFindSkill={onFindSkill}
+      onImportSkill={onImportSkill}
     />
   );
 }
@@ -34,12 +50,19 @@ export function SkillsPanelContent({
   context,
   workspaceId,
   personalWorkspace = false,
+  query = "",
+  onFindSkill,
+  onImportSkill,
 }: {
   context: AppContextValue;
   workspaceId: string;
   personalWorkspace?: boolean;
+  query?: string;
+  onFindSkill?: (() => void) | undefined;
+  onImportSkill?: (() => void) | undefined;
 }) {
   const { client } = context;
+  const editorId = useId();
   const grant = context.accessContext.workspaceGrants.find(
     (entry) => entry.workspaceId === workspaceId,
   );
@@ -125,7 +148,7 @@ export function SkillsPanelContent({
     else action();
   }
 
-  async function loadMore() {
+  const loadMore = useCallback(async () => {
     if (!nextCursor || busy) return;
     const current = generation.current;
     setBusy(true);
@@ -143,7 +166,11 @@ export function SkillsPanelContent({
     } finally {
       if (generation.current === current) setBusy(false);
     }
-  }
+  }, [nextCursor, busy, client, workspaceId]);
+
+  useEffect(() => {
+    if (query.trim() && nextCursor && !busy && !error) void loadMore();
+  }, [query, nextCursor, busy, error, loadMore]);
 
   function show(next: SkillRecord) {
     setRecord(next);
@@ -197,6 +224,39 @@ export function SkillsPanelContent({
         },
       ],
     });
+  }
+  async function changeScope(scope: SkillScope) {
+    if (!record || scope === record.scope) return;
+    if (!record.revisionId) {
+      setRecord({ ...record, scope });
+      return;
+    }
+    const current = ++generation.current;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await client.changePreferenceRegistryScope(workspaceId, record.id, {
+        scope,
+        expectedScopeVersion: record.scopeVersion,
+        reason: "Change skill scope",
+      });
+      const [updated, inventory] = await Promise.all([
+        client.readWorkspaceSkill(workspaceId, record.id, record.revisionId),
+        client.listWorkspaceSkills(workspaceId),
+      ]);
+      if (generation.current !== current) return;
+      // Keep any unsaved file edits while refreshing scope/version metadata.
+      setRecord(updated);
+      setSkills(inventory.skills);
+      setNextCursor(inventory.nextCursor ?? null);
+      setNotice("Skill scope updated.");
+    } catch (reason) {
+      if (generation.current === current)
+        setError(reason instanceof Error ? reason.message : "Could not change skill scope");
+    } finally {
+      if (generation.current === current) setBusy(false);
+    }
   }
   async function mutate(operation: "save" | "approve" | "restore") {
     if (!record) return;
@@ -258,28 +318,49 @@ export function SkillsPanelContent({
     canManage(record.scope) &&
     (record.revisionId === record.activeRevisionId || record.revisionId === null);
   const selected = files.find((file) => file.path === path);
+  const matchingSkills = skills.filter((skill) =>
+    `${skill.title} ${skill.stableKey}`.toLowerCase().includes(query.trim().toLowerCase()),
+  );
 
   return (
-    <section aria-label="Skills" className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <section aria-label="Skills" className="skills-panel space-y-4">
+      <div
+        hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
+        className="flex flex-wrap items-center justify-between gap-3"
+      >
         <div>
-          <h2 className="text-lg font-semibold">Skills</h2>
-          <p className="text-sm text-fg-subtle">
-            Installed and authored instructions, with one file history.
+          <h2 className="text-lg font-semibold">Your skills</h2>
+          <p hidden={Boolean(query.trim())} className="text-sm text-fg-subtle">
+            Create and manage your agent’s instructions.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
           {([personalWorkspace ? "user" : "workspace", "organization"] as const)
             .filter(canManage)
+            .slice(0, 1)
             .map((scope) => (
-              <Button
-                key={scope}
-                variant="outline"
-                disabled={busy}
-                onClick={() => navigate(() => create(scope))}
-              >
-                New {scope === "organization" ? "organization " : ""}Skill
-              </Button>
+              <DropdownMenu key={scope}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="default" disabled={busy}>
+                    <PlusIcon aria-hidden="true" />
+                    New skill
+                    <ChevronDownIcon aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
+                    Create manually
+                  </DropdownMenuItem>
+                  {onFindSkill ? (
+                    <DropdownMenuItem onSelect={onFindSkill}>
+                      Find a skill in the catalogue
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onImportSkill ? (
+                    <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
             ))}
         </div>
       </div>
@@ -306,18 +387,35 @@ export function SkillsPanelContent({
           No Skills yet. Create one here or install one from the catalog.
         </p>
       ) : null}
-      <div className="flex flex-wrap gap-2">
-        {skills.map((skill) => (
-          <Button
+      <div className="skill-list">
+        {matchingSkills.map((skill) => (
+          <button
+            type="button"
+            className="skill-list-row"
             key={skill.id}
-            variant={record?.id === skill.id ? "secondary" : "outline"}
+            aria-expanded={record?.id === skill.id}
+            aria-controls={record?.id === skill.id ? editorId : undefined}
             disabled={busy}
-            onClick={() => navigate(() => void open(skill.id))}
+            onClick={() =>
+              navigate(() => {
+                if (record?.id === skill.id) setRecord(null);
+                else void open(skill.id);
+              })
+            }
           >
-            {skill.title || skill.stableKey} · {skill.scope}
-            {skill.status !== "active" ? ` · ${skill.status}` : ""}
-            {skill.pendingRevisionIds.length ? " · pending changes" : ""}
-          </Button>
+            <span className="min-w-0">
+              <span className="block truncate font-medium">{skill.title || skill.stableKey}</span>
+              {skill.status !== "active" || skill.pendingRevisionIds.length ? (
+                <span className="mt-1 block text-xs text-fg-subtle">
+                  {skill.pendingRevisionIds.length ? "Pending changes" : skill.status}
+                </span>
+              ) : null}
+            </span>
+            <ChevronDownIcon
+              aria-hidden="true"
+              className={`size-4 shrink-0 text-fg-subtle transition-transform ${record?.id === skill.id ? "rotate-180" : ""}`}
+            />
+          </button>
         ))}
         {nextCursor ? (
           <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
@@ -326,19 +424,49 @@ export function SkillsPanelContent({
         ) : null}
       </div>
       {record ? (
-        <div className="space-y-4">
-          <p className="text-xs text-fg-subtle">
+        <div
+          id={editorId}
+          className="skill-editor space-y-4 rounded-xl border border-border p-4 sm:p-5"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-medium">{record.title || record.stableKey || "New skill"}</h3>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => navigate(() => setRecord(null))}
+            >
+              Collapse <ChevronDownIcon aria-hidden="true" className="rotate-180" />
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
             {record.source
               ? "Installed Skill · workspace edits preserve the upstream source"
               : "Authored Skill"}{" "}
-            · {record.scope}
-          </p>
+            <Select
+              aria-label="Skill scope"
+              value={record.scope}
+              disabled={busy || !canManage(record.scope)}
+              onChange={(event) => void changeScope(event.target.value as SkillScope)}
+            >
+              {(["user", "workspace", "organization"] as const)
+                .filter((scope) => scope === record.scope || canManage(scope))
+                .map((scope) => (
+                  <option key={scope} value={scope}>
+                    {scope === "user"
+                      ? "Personal"
+                      : scope === "workspace"
+                        ? "Workspace"
+                        : "Organization"}
+                  </option>
+                ))}
+            </Select>
+          </div>
           <p className="text-sm text-muted-foreground">
-            Edit the name and description in SKILL.md frontmatter. The Skill index is updated from
-            that file when this revision becomes active.
+            Edit the name and description at the top of SKILL.md.
           </p>
           {history.length ? (
-            <label className="block text-sm">
+            <label className="flex flex-wrap items-center gap-3 text-sm">
               History
               <Select
                 aria-label="History"
@@ -359,7 +487,7 @@ export function SkillsPanelContent({
               </Select>
             </label>
           ) : null}
-          <label className="block text-sm">
+          <label className="flex flex-wrap items-center gap-3 text-sm">
             File
             <Select
               aria-label="File"

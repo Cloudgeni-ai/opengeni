@@ -76,9 +76,9 @@ export function PluginSearch({
         suppressAutofill
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
-        placeholder="Search apps, MCP servers, APIs, skills, plugins, and packs"
-        className="h-12 rounded-xl pl-11 text-base transition-none placeholder:text-fg"
-        aria-label="Search all plugins"
+        placeholder="Search connections, skills, and plugins"
+        className="h-11 rounded-lg pl-11 text-sm shadow-none transition-none placeholder:text-fg-subtle"
+        aria-label="Search capabilities"
       />
     </div>
   );

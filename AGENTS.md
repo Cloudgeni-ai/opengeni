@@ -309,6 +309,10 @@ operator procedure.
 
 ## Keeping these notes current
 
+Managed production package availability is reconciled automatically after the
+runtime becomes healthy; it does not wait for later acceptance. See
+`reconcile-production-packages.yml` and `docs/deployment.md`.
+
 If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file, [`docs/architecture.md`](docs/architecture.md), and the relevant `docs/*.md` in the same change. In particular, structural changes (an app/package/sandbox backend added, removed, or renamed; a moved responsibility; a changed invariant, data-flow, or canonical source) belong in `docs/architecture.md` — see its "Keeping this current" section. An out-of-date AGENTS.md or doc is a bug, not a nicety.
 
 ## Keeping docs true
@@ -322,11 +326,22 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Sandbox acquisition and workspace mutation waits honor the first observed
+capture's durable remaining timeout once, within the lifecycle ceiling.
+Expired or replacement captures never replenish a caller's wait. Budget expiry
+returns a fence, not authority to admit a writer or abandon an archive capture.
+A settled capture rejection may release only its exact unpublished claim so a
+waiting turn can re-arm the live box. A timeout alone or an ambiguous teardown
+failure must never release that ownership. See `docs/run-lifecycle.md` for
+capture ownership and recovery.
+
 Sandbox execution is pluggable. `OPENGENI_SANDBOX_BACKEND` selects one of the backends defined by the `SandboxBackend` enum in `packages/contracts/src/index.ts` (the canonical list): `docker`, `modal`, `local`, `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`, `selfhosted`, and `opensandbox`. `docker` is the default and the usual local-dev choice; `modal`, `opensandbox`, and the other cloud backends are provisioned, swappable boxes. OpenSandbox is optional and Kubernetes-native: exact attach is by persisted ID, workspace recovery uses OpenGeni portable tar archives in object storage (required; never silent jsonb stuffing), provider TTL is renewable, and a desktop-class image reports ttyd PTY plus desktop/recording over signed URI-mode ingress when `OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true` (unsigned keeps the lifecycle proxy); native snapshots and `runAs` stay unavailable. When you change the set of backends, update the enum first and treat it as the source of truth — this file and the README follow it.
 
 There are two stock sandbox images. `docker/sandbox.Dockerfile` is the official headless release image (the 7-image BOM). `docker/desktop.Dockerfile` is the Modal Computer/Browser box (Xvfb, XFCE, Chrome, `opengeni-browserd-up`). It is **not** in the BOM and does not ride an API/worker Helm upgrade. Publish it with `.github/workflows/publish-desktop-image.yml` and pin `desktop.imageRef` / `OPENGENI_MODAL_IMAGE_REF` to that digest. Helm and production boot fail closed when Modal desktop is on without a `@sha256:` pin. Never point Modal Computer/Browser at `opengeni-sandbox`. A new pin applies to new sandbox creates only; an existing warm lease stays on the old box until rotate/reap.
 
 The Docker sandbox image includes Terraform, Checkov, AnyDoc, Azure CLI, GitHub CLI, git, jq, curl, and base shell utilities. AnyDoc is a pinned local document-to-Markdown parser; its matching `document-parsing` guidance is opt-in and never downloads code at runtime. Managed sandboxes also provision git-provider CLI auth wrappers for `gh`, `glab`, and `az`; direct provider-token bindings read their current token files at invocation time and pass through cleanly when a token file is absent. A host-owned HTTPS smart-Git broker binding is deliberately Git-only: its bearer is never exported to a provider CLI, and the wrapper fails with guidance to use the configured provider MCP tools. Terraform, Checkov, document-parsing, social-marketing, and provider-specific guidance are immutable opt-in entries under `packages/runtime/src/curated_skill_library`; they are materialized only by an explicit Skill installation, Pack, or session selection and are never deployment-default workspace capabilities.
+
+The runtime also carries a separate `document-parsing` descriptor under `bundled_default_skills`, indexed by default when the runtime owns the Skill catalog. This default guidance points to the preinstalled parser and does not install tools or activate the curated library entry. An explicitly host-owned catalog remains authoritative, including when it is empty.
 
 ### Bring-your-own-compute — the Connected Machine (`selfhosted`)
 

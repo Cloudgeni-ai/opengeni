@@ -160,6 +160,18 @@ function FocusAction({
   view: "instructions" | "skills";
   workspaceId: string;
 }) {
+  if (view === "skills")
+    return (
+      <Link
+        to="/workspaces/$workspaceId/plugins"
+        params={{ workspaceId }}
+        search={{ section: "skills" }}
+        className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+      >
+        {children}
+        <ArrowRightIcon className="size-3" />
+      </Link>
+    );
   return (
     <Link
       to="/workspaces/$workspaceId/state"

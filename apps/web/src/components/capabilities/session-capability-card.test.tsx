@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
+import { sessionAuthRecommendation } from "./session-auth-recommendation";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
-import type { AuthNeededItem } from "@opengeni/react";
+import { buildTimeline, type AuthNeededItem } from "@opengeni/react";
 
 const catalogItem = CapabilityCatalogItem.parse({
   id: "example",
@@ -106,7 +107,7 @@ afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
-async function render(personalAccount = false) {
+async function render(personalAccount = false, missingGrant = false) {
   personal = personalAccount;
   enabled = personalAccount;
   connections = personalAccount ? [{ ...row, subjectId: "owner", authorityId: "authority" }] : [];
@@ -117,8 +118,64 @@ async function render(personalAccount = false) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
+  let notice = item;
+  if (missingGrant) {
+    const startupEvents = [
+      {
+        id: "startup-auth",
+        workspaceId: "workspace",
+        sessionId: "session",
+        turnId: "turn",
+        turnAttemptId: "attempt",
+        sequence: 1,
+        type: "tool.auth_needed",
+        occurredAt: "2026-09-11T00:00:00.000Z",
+        payload: {
+          serverId: "example",
+          providerDomain: "api.example.com",
+          reason: "personal_authority_unavailable",
+        },
+      },
+    ];
+    expect(buildTimeline(startupEvents)).toEqual([]);
+    const requested = buildTimeline([
+      ...startupEvents,
+      {
+        ...startupEvents[0]!,
+        id: "requested-auth",
+        sequence: 2,
+        payload: {
+          serverId: "example",
+          toolName: "capability_authorization_request",
+          providerDomain: "api.example.com",
+          reason: "missing_connection",
+          capability: {
+            id: "example",
+            name: "Example",
+            kind: "mcp",
+            source: "manual",
+            action: "connect",
+            rationale: "Review permission to use your personal account for this request.",
+            requiredVariables: [],
+          },
+        },
+      },
+    ]);
+    const auth = requested.find((entry) => entry.kind === "auth-needed");
+    expect(auth).toBeDefined();
+    if (!auth) throw new Error("Requested authorization event was lost from the timeline");
+    const recommendation = sessionAuthRecommendation(
+      auth,
+      (await context.client.listCapabilities()).items as CapabilityCatalogItem[],
+    );
+    expect(recommendation).toBeDefined();
+    if (!recommendation) throw new Error("Requested authorization did not resolve to consent");
+    notice = recommendation;
+  }
   await act(async () =>
-    root.render(<SessionCapabilityCard item={item} workspaceId="workspace" sessionId="session" />),
+    root.render(
+      <SessionCapabilityCard item={notice} workspaceId="workspace" sessionId="session" />,
+    ),
   );
   return {
     container,
@@ -169,7 +226,9 @@ describe("conversation connection card", () => {
     await h.close();
   });
   test("a personal account requires explicit shared-results consent before completion", async () => {
-    const h = await render(true);
+    const h = await render(true, true);
+    expect(h.container.textContent).toContain("Review permission to use your personal account");
+    expect(issueUserResourceGrant).not.toHaveBeenCalled();
     await act(async () => button(h.container, "Connect Example").click());
     const use = button(h.container, "Use in this");
     expect(use.disabled).toBe(true);

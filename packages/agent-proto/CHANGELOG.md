@@ -1,5 +1,15 @@
 # @opengeni/agent-proto
 
+## 0.6.0
+
+### Minor Changes
+
+- d08dbb6: Support capability-gated transactional large-file edits on Connected Machines,
+  with bounded transfers, verified outcomes, and live authorization checks. Keep
+  legacy agent writes compatible and report oversized outbound requests accurately
+  instead of marking a healthy agent offline. Native agent support is required;
+  unsupported filesystem semantics fail closed.
+
 ## 0.5.1
 
 ### Patch Changes

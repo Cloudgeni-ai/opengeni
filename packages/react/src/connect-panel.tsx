@@ -6,6 +6,7 @@ export type ConnectPanelProps = ConnectSetupProps & {
   returnUrl: string;
   title?: string;
   showAccounts?: boolean;
+  presentation?: "select" | "catalog";
 };
 
 /** Optional composition over the same unstyled surfaces. Import
@@ -15,13 +16,18 @@ export function ConnectPanel({
   returnUrl,
   title = "Connections",
   showAccounts = true,
+  presentation = "select",
   className,
   ...setup
 }: ConnectPanelProps) {
   return (
     <div className={["og-connect", className].filter(Boolean).join(" ")}>
       <h2>{title}</h2>
-      <ConnectChooser controller={setup.controller} returnUrl={returnUrl} />
+      <ConnectChooser
+        presentation={presentation}
+        controller={setup.controller}
+        returnUrl={returnUrl}
+      />
       <ConnectSetup {...setup} />
       {showAccounts && <ConnectAccounts controller={setup.controller} returnUrl={returnUrl} />}
     </div>

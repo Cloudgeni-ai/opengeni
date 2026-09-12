@@ -19,6 +19,11 @@ export type GitHubSkillTreeEntry = Readonly<{
 }>;
 
 export type GitHubSkillSourceClient = Readonly<{
+  downloadSnapshot?(
+    owner: string,
+    repository: string,
+    slug: string,
+  ): Promise<readonly SkillLibraryFile[]>;
   resolveCommit(owner: string, repository: string, ref: string): Promise<string>;
   listTree(
     owner: string,
@@ -52,6 +57,10 @@ export async function resolveSkillImport(
   client: GitHubSkillSourceClient,
 ): Promise<ResolvedSkillImport> {
   const parsed = parseSkillSource(rawUrl);
+  if (parsed.source === "skills_sh" && client.downloadSnapshot) {
+    const files = await client.downloadSnapshot(parsed.owner, parsed.repository, parsed.skillSlug!);
+    return buildResolvedImport(parsed, files, parsed.skillSlug!, null);
+  }
   const sourceCommit = await client.resolveCommit(parsed.owner, parsed.repository, parsed.ref);
   if (!gitCommit.test(sourceCommit)) {
     throw new HTTPException(422, { message: "GitHub returned an invalid source commit" });
@@ -94,6 +103,15 @@ export async function resolveSkillImport(
     }
     return { path: relativeSkillPath(entry.path, sourcePath), content };
   });
+  return buildResolvedImport(parsed, files, sourcePath, sourceCommit);
+}
+
+function buildResolvedImport(
+  parsed: ParsedSkillSource,
+  files: readonly SkillLibraryFile[],
+  sourcePath: string,
+  commit: string | null,
+): ResolvedSkillImport {
   let artifact;
   try {
     artifact = buildPortableSkillArtifact(files);
@@ -103,8 +121,25 @@ export async function resolveSkillImport(
     });
   }
   const repositoryUrl = `https://github.com/${parsed.owner}/${parsed.repository}`;
-  const sourceUrl =
-    sourcePath === "."
+  // The existing revision field holds our content digest for registry snapshots;
+  // snapshots do not provide a Git commit or a repository-relative folder path.
+  const sourceCommit = commit ?? artifact.contentSha256;
+  if (
+    !commit &&
+    artifact.name
+      .toLowerCase()
+      .replace(/[\s_]+/g, "-")
+      .replace(/[^a-z0-9-]/g, "")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "") !== parsed.skillSlug!.toLowerCase()
+  ) {
+    throw new HTTPException(422, {
+      message: "The downloaded skill does not match the requested name",
+    });
+  }
+  const sourceUrl = !commit
+    ? `https://skills.sh/${parsed.owner}/${parsed.repository}/${parsed.skillSlug}`
+    : sourcePath === "."
       ? `${repositoryUrl}/tree/${sourceCommit}`
       : `${repositoryUrl}/tree/${sourceCommit}/${encodeGitHubPath(sourcePath)}`;
   const warnings: string[] = [];
@@ -119,6 +154,7 @@ export async function resolveSkillImport(
   }
   return {
     preview: {
+      markdown: artifact.files.find((file) => file.path === "SKILL.md")?.content,
       source: parsed.source,
       sourceUrl,
       repositoryUrl,

@@ -1,6 +1,12 @@
 import type { Settings } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
 import type { GitHubSkillSourceClient, GitHubSkillTreeEntry } from "./skill-imports";
 import { pinnedFetch, readResponseJsonBounded, readResponseTextBounded } from "@opengeni/network";
+import {
+  PORTABLE_SKILL_MAX_FILES,
+  PORTABLE_SKILL_MAX_TOTAL_BYTES,
+  type SkillLibraryFile,
+} from "@opengeni/runtime/skill-library";
 
 const githubApiBase = "https://api.github.com";
 const githubRequestTimeoutMs = 15_000;
@@ -14,7 +20,32 @@ export function createGitHubSkillSourceClient(
   requestJson: GitHubJsonRequest = (path, maxBytes, label) =>
     githubJson(settings, path, maxBytes, label),
 ): GitHubSkillSourceClient {
+  const readJson = requestJson;
+  const cache = new Map<string, { expires: number; payload: unknown }>();
+  const pending = new Map<string, Promise<unknown>>();
+  requestJson = async (path, maxBytes, label) => {
+    const cached = cache.get(path);
+    if (cached && cached.expires > Date.now()) return cached.payload;
+    const existing = pending.get(path);
+    if (existing) return existing;
+    const task = readJson(path, maxBytes, label).then((payload) => {
+      if (cache.size >= 128) cache.delete(cache.keys().next().value!);
+      cache.set(path, {
+        payload,
+        expires: Date.now() + (path.includes("/commits/") ? 60_000 : 3_600_000),
+      });
+      return payload;
+    });
+    pending.set(path, task);
+    try {
+      return await task;
+    } finally {
+      pending.delete(path);
+    }
+  };
   return {
+    downloadSnapshot: (owner, repository, slug) =>
+      downloadSkillSnapshot(settings, owner, repository, slug),
     resolveCommit: async (owner, repository, ref) => {
       const payload = recordValue(
         await requestJson(
@@ -91,6 +122,61 @@ export function createGitHubSkillSourceClient(
   };
 }
 
+async function downloadSkillSnapshot(
+  settings: Settings,
+  owner: string,
+  repository: string,
+  slug: string,
+): Promise<readonly SkillLibraryFile[]> {
+  const signal = AbortSignal.timeout(githubRequestTimeoutMs);
+  const response = await pinnedFetch(
+    `https://skills.sh/api/download/${[owner, repository, slug].map(encodeURIComponent).join("/")}`,
+    { headers: { accept: "application/json" }, credentials: "omit", redirect: "manual", signal },
+    settings,
+    { label: "Skill download", requireHttpsOutsideLocalTest: true },
+  );
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new HTTPException(response.status === 429 ? 429 : 422, {
+      message:
+        response.status === 429
+          ? "skills.sh is busy. Try again shortly."
+          : response.status === 404
+            ? "This skill has no downloadable snapshot. Import its GitHub folder URL instead."
+            : "Could not download this skill from skills.sh. Try again shortly.",
+    });
+  }
+  // JSON escaping may expand the text payload. Artifact validation below applies
+  // the stricter limits to decoded files, paths, and total content size.
+  const payload = recordValue(
+    await readResponseJsonBounded(
+      response,
+      PORTABLE_SKILL_MAX_TOTAL_BYTES * 6 + 128_000,
+      "Skill download",
+      { signal },
+    ),
+    "Skill download",
+  );
+  if (
+    !Array.isArray(payload.files) ||
+    payload.files.length === 0 ||
+    payload.files.length > PORTABLE_SKILL_MAX_FILES
+  ) {
+    throw new HTTPException(422, { message: "The downloaded skill has an invalid file list" });
+  }
+  return payload.files.map((file) => {
+    if (
+      !file ||
+      typeof file !== "object" ||
+      typeof file.path !== "string" ||
+      typeof file.contents !== "string"
+    ) {
+      throw new HTTPException(422, { message: "The downloaded skill contains an invalid file" });
+    }
+    return { path: file.path, content: file.contents };
+  });
+}
+
 async function githubJson(
   settings: Settings,
   path: string,
@@ -118,7 +204,10 @@ async function githubJson(
       await readResponseTextBounded(response, 8_192, `${label} error`).catch(() => undefined);
       if (response.status === 404) throw new Error(`${label} was not found or is not public`);
       if (response.status === 403 || response.status === 429) {
-        throw new Error(`${label} is temporarily unavailable because GitHub limited the request`);
+        throw new HTTPException(429, {
+          message:
+            "GitHub's public request limit has been reached. Skill search is still available; try previewing again after the limit resets.",
+        });
       }
       throw new Error(`${label} failed with HTTP ${response.status}`);
     }

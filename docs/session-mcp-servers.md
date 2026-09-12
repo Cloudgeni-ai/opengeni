@@ -127,7 +127,8 @@ OpenGeni connection row. Opaque host ids are accepted; standalone connection
 lookups still use their ordinary UUID ids. A session server may use static
 headers, a connection ref, or neither.
 
-Credentials rotate through a `user.message` payload:
+Credentials can still rotate as part of an accepted `user.message` payload;
+that existing Send/Steer behavior is unchanged:
 
 ```json
 {
@@ -149,6 +150,86 @@ successful rotation replaces the encrypted header map and increments
 The connection ref is likewise immutable for the session server. To switch an
 endpoint to a different host connection, create a new session attachment rather
 than treating credential rotation as a connection-rebinding operation.
+
+### Standalone inline credential rotation
+
+An authenticated host can replace credentials without sending a message:
+
+```http
+POST /v1/workspaces/:workspaceId/sessions/:sessionId/mcp-credentials/rotate
+Content-Type: application/json
+
+{
+  "operationKey": "11111111-1111-4111-8111-111111111111",
+  "updates": [{
+    "id": "crm",
+    "expectedCredentialVersion": 1,
+    "expectedServerUrl": "https://tools.example.test/mcp",
+    "headers": { "Authorization": "Bearer synthetic-example" }
+  }]
+}
+```
+
+This strict request accepts 1–64 unique existing server IDs. Header names are
+trimmed, checked for case-insensitive duplicates, and lowercased for request
+identity; header values are not trimmed. Updates and header names are sorted
+before computing their keyed fingerprint. Each header map replaces the entire
+previous map. The URL must match the stored destination exactly. An unknown
+server, changed destination, stale version, duplicate ID, or a server with a
+`connectionRef` rejects the whole operation. This does not create, rebind, or
+change approval policy, allowed tools, connection authority, or recovery policy.
+
+Both `sessions:control` and `mcp_servers:attach` are required. Existing session
+visibility/ownership checks and the optional host callback apply, using the
+distinct `session.mcp.credentials.rotate` authorization operation. A host may
+deny rotation while allowing `session.control`. Agent-attempt credentials are
+not accepted; there is no MCP or Codemode rotation tool. Current authorization
+is revalidated in the mutation transaction, including before receipt replay.
+
+Fresh operations require no accepted/pending credential-consuming work:
+nonterminal turns, live attempts, interrupted attempts without physical
+quiescence, pending machine input, attempt-owned
+in-flight workspace admissions, and active/starting realtime prevent rotation.
+Checks and persistence use the canonical membership/tenancy/control/session
+lock order shared with admission and claim. A historical failed turn, dormant
+goal/schedule, retained historical tool/run receipt, or open viewer alone does not prevent rotation. Work admitted
+after commit uses the new credentials normally. Rotation never edits an
+accepted attempt or refreshes an already-prepared client.
+
+The stable receipt is:
+
+```json
+{
+  "operationKey": "11111111-1111-4111-8111-111111111111",
+  "sessionId": "22222222-2222-4222-8222-222222222222",
+  "servers": [{ "id": "crm", "credentialVersion": 2 }],
+  "appliedAt": "2026-01-01T00:00:00.000Z"
+}
+```
+
+The existing durable command-receipt ledger scopes the key by authenticated
+actor, account/workspace, session, and operation. An exact replay returns the
+original receipt without another write, even after later activity or rotation.
+Reusing that scoped key with different normalized input is a 409. Version,
+destination, and quiescence conflicts are also 409; malformed/brokered requests
+are 422. Existing authentication/session denial statuses remain applicable.
+
+Headers use the existing AES-GCM encryption. Receipt fingerprints use
+domain-separated HMACs, never plaintext or unkeyed hashes of credentials. No
+secret values, header names, ciphertexts, or fingerprints are returned in the
+receipt or added to session events/history. Replacing the deployment encryption
+key makes old receipt verification unavailable: replay returns explicit 503
+`credential_rotation_receipt_key_unavailable`, not a misleading payload conflict
+or a second write. There is no key ring or automatic receipt-key migration.
+Operators must account for existing encrypted credentials and receipt replay
+availability before replacing the encryption key.
+
+The SDK method is `OpenGeniClient.rotateSessionMcpCredentials`. Neither API nor
+SDK retries this mutation automatically. After an ambiguous response, reconcile
+with the same operation key and exact normalized request; do not mint a fresh
+key blindly. No user message, turn, workflow wake, retry, or implicit Resume is
+created. In particular, this operation grants no permission to replay an
+outcome-unknown external tool call or resume a failed turn.
 
 ## Connector action policy enforcement
 

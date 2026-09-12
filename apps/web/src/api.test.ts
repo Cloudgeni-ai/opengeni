@@ -447,6 +447,40 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("owns stale response cleanup rejection after the native body aborts", async () => {
+    const originalFetch = globalThis.fetch;
+    let release!: (response: Response) => void;
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve) => {
+        release = resolve;
+      })) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("aborted-body-old");
+      const pending = managedActorFetch("https://api.example.test/v1/workspaces");
+      configureManagedActorEpoch("aborted-body-new");
+      release(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new DOMException("BodyStreamBuffer was aborted", "AbortError"));
+            },
+          }),
+          { headers: { "x-opengeni-actor-epoch": "aborted-body-old" } },
+        ),
+      );
+      await expect(pending).rejects.toMatchObject({
+        name: "AbortError",
+        message: "Ignored a response from the previous browser account",
+      });
+      // Let the runner observe any unhandled cleanup rejection after the
+      // caller has already received the intentional stale-account error.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("aborts every concurrent pre-header request when the actor rotates", async () => {
     const originalFetch = globalThis.fetch;
     const observedSignals: AbortSignal[] = [];

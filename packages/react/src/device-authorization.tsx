@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { copyTextToClipboard } from "./clipboard";
 
 export type DeviceAuthorizationProps = {
@@ -10,6 +10,13 @@ export type DeviceAuthorizationProps = {
   codeAttributes?: Record<`data-${string}`, string>;
   loadClipboard?: () => Promise<{ copyTextToClipboard(text: string): Promise<boolean> }>;
   onCopyResult?: (copied: boolean) => void;
+  /** Optional host presentation; clipboard state and URL validation remain shared. */
+  render?: (state: {
+    copied: boolean;
+    copyError: boolean;
+    copy: () => Promise<void>;
+    verificationHref: string | undefined;
+  }) => ReactNode;
 };
 
 /** Optional presentation for the existing model-account device APIs. It neither
@@ -61,6 +68,7 @@ export function DeviceAuthorization(props: DeviceAuthorizationProps) {
   } catch {
     /* A malformed provider URL must never become an executable link. */
   }
+  if (props.render) return props.render({ copied, copyError, copy, verificationHref: href });
   return (
     <section className={`og-connect ${props.className ?? ""}`} aria-label="Device authorization">
       <p>{props.description ?? `Enter this code at ${props.providerLabel ?? "the provider"}.`}</p>

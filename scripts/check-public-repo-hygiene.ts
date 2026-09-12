@@ -147,6 +147,23 @@ export function auditPublicText(file: string, source: string): Finding[] {
   for (const match of source.matchAll(HOME_PATH)) {
     const account = match[1]?.toLowerCase();
     if (!account || GENERIC_HOME_NAMES.has(account)) continue;
+    // A nested HTTP resource path containing a home directory segment is not
+    // a machine filesystem root. Keep root paths, file URLs, and query values
+    // subject to the normal check; do not exempt the surrounding line.
+    const nestedHttpPath = [...source.matchAll(/https?:\/\/[^\s"'<>`]+/g)].some((urlMatch) => {
+      try {
+        const parsed = new URL(urlMatch[0]);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+        const raw = /^https?:\/\/[^/?#]+(\/[^?#]*)?/.exec(urlMatch[0]);
+        const pathname = raw?.[1];
+        if (!raw || !pathname) return false;
+        const pathStart = urlMatch.index! + raw[0].length - pathname.length;
+        return match.index! > pathStart && match.index! < pathStart + pathname.length;
+      } catch {
+        return false;
+      }
+    });
+    if (nestedHttpPath) continue;
     findings.push({
       file,
       line: lineAt(source, match.index ?? 0),

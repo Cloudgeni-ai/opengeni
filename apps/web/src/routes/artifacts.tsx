@@ -1,3 +1,4 @@
+import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import type {
   ToolGatewayIdentity,
   WorkspaceArtifactContentResponse,
@@ -63,16 +64,20 @@ function useArtifacts(workspaceId: string, client: Pick<SiteClient, "listWorkspa
 export function ArtifactsRoute({
   workspaceId,
   artifactId,
+  fromSession,
 }: {
   workspaceId: string;
   artifactId?: string;
+  fromSession?: string | undefined;
 }) {
   return artifactId ? (
-    <ArtifactDetailRoute
-      key={`${workspaceId}:${artifactId}`}
-      workspaceId={workspaceId}
-      artifactId={artifactId}
-    />
+    <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
+      <ArtifactDetailRoute
+        key={`${workspaceId}:${artifactId}`}
+        workspaceId={workspaceId}
+        artifactId={artifactId}
+      />
+    </ArtifactSessionPage>
   ) : (
     <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} />
   );

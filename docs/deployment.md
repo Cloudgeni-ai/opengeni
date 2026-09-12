@@ -1349,6 +1349,18 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 
 ## Verified public release
 
+Managed production npm packages are reconciled automatically by
+`reconcile-production-packages.yml` every five minutes (GitHub scheduling may
+delay a run). It reads the healthy production revision and that source's
+immutable candidate package list, then dispatches the existing exact-source
+`publish-packages.yml` when versions are missing. Publication is independent of
+later live acceptance. This is an availability trigger: `/healthz` identifies
+the serving API revision, not proof that every rollout replica is ready.
+Failed publication retries on subsequent checks;
+workflow failures remain visible in Actions. A short deployment-to-publication
+gap is intentional; Site builds can fail during that gap. Full official release
+publication and acceptance evidence remain separate.
+
 `main` is the daily integration branch and remains GitHub's default branch.
 
 Site authoring installs exact registry versions. Stable builds use their source

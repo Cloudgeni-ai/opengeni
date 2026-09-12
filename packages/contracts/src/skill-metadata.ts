@@ -14,8 +14,12 @@ export function parseSkillFrontmatter(markdown: string): {
     uniqueKeys: true,
     prettyErrors: false,
   });
-  if (document.errors.length || document.warnings.length)
-    throw new Error("Skill artifact SKILL.md has invalid YAML frontmatter");
+  if (document.errors.length || document.warnings.length) {
+    const issue = document.errors[0] ?? document.warnings[0]!;
+    throw new Error(
+      `This skill's SKILL.md header contains invalid YAML: ${issue.message}. The source file needs correcting.`,
+    );
+  }
   const metadata: unknown = document.toJS({ maxAliasCount: 20 });
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
     throw new Error("Skill artifact SKILL.md frontmatter must be a mapping");

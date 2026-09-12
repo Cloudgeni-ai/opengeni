@@ -4825,6 +4825,25 @@ export class OpenGeniClient {
     );
   }
 
+  async searchPublicSkills(workspaceId: string, query: string) {
+    return this.requestJson<{
+      provider: "skills_sh";
+      query: string;
+      items: Array<{
+        id: string;
+        name: string;
+        source: string;
+        skillId: string;
+        url: string;
+        installs: number;
+      }>;
+      nextCursor: null;
+    }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/skills/search?q=${encodeURIComponent(query)}`,
+    );
+  }
+
   async listWorkspaces(): Promise<Workspace[]> {
     return await this.requestJson<Workspace[]>("GET", "/v1/workspaces");
   }
@@ -6883,6 +6902,38 @@ export class OpenGeniClient {
     );
   }
 
+  async discoverPlugins(
+    workspaceId: string,
+    options: { id?: string; query?: string; provider?: string; offset?: number } = {},
+  ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
+    return this.requestJson(
+      "GET",
+      "/v1/workspaces/" + workspaceId + "/capabilities/discovery/plugins",
+      undefined,
+      {
+        ...(options.id ? { id: options.id } : {}),
+
+        ...(options.query ? { query: options.query } : {}),
+        ...(options.provider ? { provider: options.provider } : {}),
+        ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
+      },
+    );
+  }
+
+  async inspectMcpAuthentication(
+    workspaceId: string,
+    url: string,
+  ): Promise<{
+    kind: "oauth2" | "none" | "unknown";
+    message?: string;
+  }> {
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/capabilities/discovery/mcp-auth`,
+      { url },
+    );
+  }
+
   /** List installed protocol-neutral OpenAPI and GraphQL Integrations. */
   async listApiIntegrations(workspaceId: string): Promise<ListApiIntegrationsResponse> {
     return await this.requestJson<ListApiIntegrationsResponse>(
@@ -7094,6 +7145,15 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/plugins/preview`,
       request,
     );
+  }
+
+  async getInstalledPluginDetails(
+    workspaceId: string,
+    pluginKey: string,
+  ): Promise<import("@opengeni/contracts").PluginDiscoveryItem> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/plugins/details`, undefined, {
+      pluginKey,
+    });
   }
 
   async listInstalledPlugins(workspaceId: string): Promise<ListInstalledPluginsResponse> {

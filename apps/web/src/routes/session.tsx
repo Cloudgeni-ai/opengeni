@@ -15,7 +15,7 @@ import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-b
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
-import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
+import { MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,
@@ -72,8 +72,8 @@ import {
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
-import { SessionCommands } from "@/components/session/commands";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
+import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
 import {
   SessionVariableSetPicker,
   type SessionVariableSetPickerSharedState,
@@ -153,6 +153,11 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
+const SessionCommands = lazy(() =>
+  import("@/components/session/commands").then((module) => ({ default: module.SessionCommands })),
+);
 
 const SessionCapabilityCard = lazy(async () => ({
   default: (await import("@/components/capabilities/session-capability-card"))
@@ -367,7 +372,12 @@ export function SessionRoute({
   const failure = useMemo(
     () =>
       session && (session.status === "failed" || creditExhausted)
-        ? summarizeSessionFailure(events, session.status)
+        ? summarizeSessionFailure(
+            events,
+            session.status,
+            session.failureDiagnostics,
+            session.lastSequence,
+          )
         : null,
     [events, session, creditExhausted],
   );
@@ -1117,7 +1127,27 @@ function SessionDock(props: {
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
   });
-  const artifactSummaries = artifactState.artifacts;
+  const [artifactRequest, setArtifactRequest] = useState<{
+    sessionId: string;
+    artifactId: string;
+    requestId: number;
+    tab: string;
+  } | null>(null);
+  const currentArtifactRequest =
+    artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
+  const artifactSummaries = [...artifactState.artifacts];
+  // A just-published Site may be linked before discovery refresh completes, or
+  // belong to another session in this workspace. The viewer still authorizes its read.
+  if (
+    currentArtifactRequest &&
+    !artifactSummaries.some((item) => item.id === currentArtifactRequest.artifactId)
+  ) {
+    artifactSummaries.push({
+      id: currentArtifactRequest.artifactId,
+      modality: "site",
+      title: "Site",
+    });
+  }
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "artifacts",
@@ -1137,10 +1167,12 @@ function SessionDock(props: {
           <LazySessionEditableArtifactsWorkspace
             key={props.sessionId}
             workspaceId={props.workspaceId}
+            sessionId={props.sessionId}
             artifacts={artifactSummaries}
             status={artifactState.status}
             onRetry={artifactState.retry}
             initialSelectedArtifactId={dockNavigation.artifactId}
+            openArtifactRequest={currentArtifactRequest}
             onSelectedArtifactIdChange={rememberArtifact}
           />
         </Suspense>
@@ -1171,7 +1203,30 @@ function SessionDock(props: {
       sessionId={props.sessionId}
       preferenceOwnerId={context.accessContext.subjectId}
       events={props.events}
-      primary={props.primary}
+      primary={
+        <ArtifactLinkBoundary
+          workspaceId={props.workspaceId}
+          onOpen={(target) => {
+            // Editable artifacts require their discovered modality; unlisted editor
+            // links retain the normal full-page destination.
+            if (
+              target.editable &&
+              !artifactSummaries.some((item) => item.id === target.id && item.modality !== "site")
+            )
+              return false;
+            setArtifactRequest((previous) => ({
+              sessionId: props.sessionId,
+              artifactId: target.id,
+              requestId: (previous?.requestId ?? 0) + 1,
+              tab: "artifacts",
+            }));
+            return true;
+          }}
+        >
+          {props.primary}
+        </ArtifactLinkBoundary>
+      }
+      openTabRequest={currentArtifactRequest}
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
@@ -2210,15 +2265,17 @@ function SessionChatPane(props: {
                 props.humanInput.requests.length > 0 &&
                 props.session.status === "requires_action" ? (
                   <div className="pb-1" data-human-input-timeline-surface="">
-                    <HumanInputSurface
-                      loadSkillReview={loadSkillReview}
-                      requests={props.humanInput.requests}
-                      respondingRequestId={props.humanInput.respondingRequestId}
-                      error={props.humanInput.mutationError?.message}
-                      onSubmit={(requestId, response) =>
-                        props.humanInput.respond(requestId, response).then(() => undefined)
-                      }
-                    />
+                    <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                      <HumanInputSurface
+                        loadSkillReview={loadSkillReview}
+                        requests={props.humanInput.requests}
+                        respondingRequestId={props.humanInput.respondingRequestId}
+                        error={props.humanInput.mutationError?.message}
+                        onSubmit={(requestId, response) =>
+                          props.humanInput.respond(requestId, response).then(() => undefined)
+                        }
+                      />
+                    </Suspense>
                   </div>
                 ) : undefined
               }
@@ -2351,11 +2408,13 @@ function SessionChatPane(props: {
             readOnly={terminal}
             commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
             commandsPanel={
-              <SessionCommands
-                key={props.session.id}
-                sessionId={props.session.id}
-                readOnly={terminal}
-              />
+              <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
+                <SessionCommands
+                  key={props.session.id}
+                  sessionId={props.session.id}
+                  readOnly={terminal}
+                />
+              </Suspense>
             }
             agentsSignal={agentsSignal}
             agentsPanel={

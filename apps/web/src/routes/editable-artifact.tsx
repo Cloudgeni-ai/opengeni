@@ -1,3 +1,4 @@
+import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { editableArtifactKernelRuntime as documentRuntime } from "@opengeni/artifact-kernel-wasm-document";
 import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/artifact-kernel-wasm-presentation";
 import { editableArtifactKernelRuntime as spreadsheetRuntime } from "@opengeni/artifact-kernel-wasm-spreadsheet";
@@ -40,6 +41,17 @@ const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
 
 /** First-party consumer of the exact public SDK/React editable-artifact API. */
 export function EditableArtifactRoute({
+  fromSession,
+  ...params
+}: Readonly<{ workspaceId: string; artifactId: string; fromSession?: string | undefined }>) {
+  return (
+    <ArtifactSessionPage workspaceId={params.workspaceId} fromSession={fromSession}>
+      <EditableArtifactContent {...params} />
+    </ArtifactSessionPage>
+  );
+}
+
+function EditableArtifactContent({
   workspaceId,
   artifactId,
 }: Readonly<{ workspaceId: string; artifactId: string }>) {

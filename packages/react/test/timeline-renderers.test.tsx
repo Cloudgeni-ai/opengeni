@@ -1,4 +1,5 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { setStartupDetails } from "../src/timeline/startup-preference";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
@@ -2601,6 +2602,8 @@ describe("StartupPhaseRow", () => {
     await r.unmount();
   });
 
+  beforeEach(() => setStartupDetails(true));
+  afterEach(() => setStartupDetails(false));
   test("shows the settled phase duration and truthful sandbox origin", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",

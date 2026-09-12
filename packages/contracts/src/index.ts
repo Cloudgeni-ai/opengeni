@@ -5748,6 +5748,47 @@ export const SessionMcpCredentialUpdateInput = z.object({
 });
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
 
+/** Standalone credential maintenance; never admits or retries model work. */
+export const RotateSessionMcpCredentialsRequest = z
+  .object({
+    operationKey: z.string().uuid(),
+    updates: z
+      .array(
+        z
+          .object({
+            id: SessionMcpServerId,
+            expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
+            expectedServerUrl: httpsUrl,
+            headers: z.record(z.string(), z.string()),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(64),
+  })
+  .strict();
+export type RotateSessionMcpCredentialsRequest = z.infer<typeof RotateSessionMcpCredentialsRequest>;
+
+export const RotateSessionMcpCredentialsReceipt = z
+  .object({
+    operationKey: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    servers: z
+      .array(
+        z
+          .object({
+            id: SessionMcpServerId,
+            credentialVersion: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(64),
+    appliedAt: z.string().datetime(),
+  })
+  .strict();
+export type RotateSessionMcpCredentialsReceipt = z.infer<typeof RotateSessionMcpCredentialsReceipt>;
+
 export const SessionMcpServerMetadata = z
   .object({
     id: SessionMcpServerId,
@@ -6778,6 +6819,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.channel.write",
   "session.variable_sets.write",
   "session.mcp.approval_policy.write",
+  "session.mcp.credentials.rotate",
   "session.tool_policy.write",
   "session.goal.read",
   "session.goal.write",
@@ -11414,6 +11456,7 @@ export const SkillImportFileSummary = z.object({
 export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
 
 export const SkillImportPreview = z.object({
+  markdown: z.string().max(262144).optional(),
   source: SkillImportSource,
   sourceUrl: z.string().url(),
   repositoryUrl: z.string().url(),
@@ -12147,6 +12190,7 @@ export const PluginInstallationSummary = z
     description: z.string().max(4000),
     category: z.string().min(1).max(100),
     tags: z.array(z.string().min(1).max(100)).max(64),
+    logoUrl: z.string().url().max(2048).nullable().optional(),
     sourceUrl: z.string().url().max(2048).nullable(),
     manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
     installationVersion: z.number().int().positive(),
@@ -12322,6 +12366,17 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: z.string().uuid(),
     accountId: z.string().uuid(),
     status: SessionStatus,
+    /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
+    failureDiagnostics: z
+      .object({
+        eventId: z.string().uuid(),
+        sequence: z.number().int().nonnegative(),
+        turnId: z.string().uuid().nullable(),
+        occurredAt: z.string(),
+        payload: z.unknown(),
+      })
+      .nullable()
+      .optional(),
     /** Additive list projection. Detail reads may omit it. */
     backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
     /** Current non-deleted schedules targeting this session, including paused schedules. */
@@ -16159,6 +16214,7 @@ export const MachineRuntimeCapabilities = z.object({
   browserBridge: z.boolean(),
   operationResourcePolicy: z.boolean(),
   operationCpuQuota: z.boolean(),
+  transactionalFsWrite: z.boolean().default(false),
 });
 export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
 
@@ -17099,3 +17155,7 @@ export * from "./remember";
 export * from "./agent-authored-durable-text";
 
 export * from "./feedback";
+
+export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
+export { mcpEndpointIdentity } from "./mcp-endpoint";
+export { pluginMcpUnavailableReason } from "./mcp-endpoint";

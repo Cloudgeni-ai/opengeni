@@ -847,6 +847,70 @@
   pointer-events: none !important;
   z-index: -1 !important;
 }
+:where(.og-root).og-genie-loading,:where(.og-root) .og-genie-loading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 88px;
+  padding: 12px 0;
+}
+:where(.og-root).og-genie-orb,:where(.og-root) .og-genie-orb {
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+}
+:where(.og-root).og-genie-orb canvas,:where(.og-root) .og-genie-orb canvas {
+  display: block;
+}
+:where(.og-root).og-genie-copy,:where(.og-root) .og-genie-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+:where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
+  color: var(--og-color-fg-muted);
+  font-size: var(--og-font-size-sm);
+  line-height: 1.5;
+  animation: og-genie-phrase-in .65s ease-out both;
+}
+:where(.og-root).og-genie-details,:where(.og-root) .og-genie-details {
+  color: var(--og-color-fg-subtle);
+  font-size: var(--og-font-size-xs);
+  min-height: 28px;
+  cursor: pointer;
+  border-radius: 4px;
+  text-align: left;
+  transition: color .2s;
+}
+:where(.og-root).og-genie-details:hover,:where(.og-root) .og-genie-details:hover {
+  color: var(--og-color-fg);
+}
+:where(.og-root).og-genie-details:focus-visible,:where(.og-root) .og-genie-details:focus-visible {
+  outline: 2px solid #a995e9;
+  outline-offset: 4px;
+}
+@keyframes og-genie-phrase-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (pointer: coarse) {
+  :where(.og-root).og-genie-details,:where(.og-root) .og-genie-details {
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.og-root).og-genie-phrase,:where(.og-root) .og-genie-phrase {
+    animation: none;
+  }
+}
 :where(.og-root).pointer-events-auto,:where(.og-root) .pointer-events-auto {
     pointer-events: auto;
   }
@@ -2180,6 +2244,12 @@
 :where(.og-root).border-og-border-strong,:where(.og-root) .border-og-border-strong {
     border-color: var(--og-color-border-strong);
   }
+:where(.og-root).border-og-border\/40,:where(.og-root) .border-og-border\/40 {
+    border-color: var(--og-color-border);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--og-color-border) 40%, transparent);
+    }
+  }
 :where(.og-root).border-og-border\/50,:where(.og-root) .border-og-border\/50 {
     border-color: var(--og-color-border);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2964,6 +3034,9 @@
   }
 :where(.og-root).pl-3\.5,:where(.og-root) .pl-3\.5 {
     padding-left: calc(var(--spacing) * 3.5);
+  }
+:where(.og-root).pl-4,:where(.og-root) .pl-4 {
+    padding-left: calc(var(--spacing) * 4);
   }
 :where(.og-root).pl-5,:where(.og-root) .pl-5 {
     padding-left: calc(var(--spacing) * 5);
