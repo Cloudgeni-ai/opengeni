@@ -11,7 +11,9 @@ const source =
 const output = Bun.file(resolve(directory, "visualization-assets.gen.ts"));
 if (process.argv.includes("--check")) {
   if ((await output.text()) !== source) throw new Error("Regenerate visualization assets");
-} else await Bun.write(output, source);
+} else if (!(await output.exists()) || (await output.text()) !== source) {
+  await Bun.write(output, source);
+}
 // Preview/export copies are generated from the same source as the chat renderer.
 const skillAssets = resolve(
   import.meta.dir,
@@ -24,5 +26,7 @@ for (const [name, content] of [
   const file = Bun.file(resolve(skillAssets, name));
   if (process.argv.includes("--check")) {
     if ((await file.text()) !== content) throw new Error("Regenerate visualization skill assets");
-  } else await Bun.write(file, content);
+  } else if (!(await file.exists()) || (await file.text()) !== content) {
+    await Bun.write(file, content);
+  }
 }

@@ -14,7 +14,6 @@ import {
 } from "./image-generation-operation";
 import type { ResolvedImageGenerationReference } from "./image-generation-references";
 
-
 /** Execute the same standalone subscription image path used by Codex clients. */
 export async function executeCodexImageGeneration(input: {
   db: Database;

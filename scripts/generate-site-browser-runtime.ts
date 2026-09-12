@@ -18,6 +18,9 @@ const destination = resolve(root, "packages/sdk/src/site-browser-runtime.gen.ts"
 if (process.argv.includes("--check")) {
   if ((await Bun.file(destination).text()) !== source)
     throw new Error("Regenerate the Site browser runtime");
-} else {
+} else if (
+  !(await Bun.file(destination).exists()) ||
+  (await Bun.file(destination).text()) !== source
+) {
   await Bun.write(destination, source);
 }
