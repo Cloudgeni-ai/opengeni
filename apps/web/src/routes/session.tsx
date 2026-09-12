@@ -2256,6 +2256,7 @@ function SessionChatPane(props: {
               }
             >
               <MessageTimeline
+                turnSummary={{ rolling: true }}
                 key={props.session.id}
                 className="h-full"
                 items={timelineWithOptimisticSends}

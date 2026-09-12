@@ -1,5 +1,17 @@
 # @opengeni/react
 
+## 5.2.0
+
+### Minor Changes
+
+- c1ad490: Allow hosts to localize user-message disclosure actions through direct component props and the default timeline composition. Each label falls back independently to English, while message expansion, accessible controls, and scroll anchoring retain their existing behavior.
+
+## 5.1.1
+
+### Patch Changes
+
+- 0507f91: Retry timed-out composer draft reads with backoff and clear their warning after a successful refresh, including when the draft revision is unchanged. Keep draft-read failures separate from Send, Steer, and control failures, and identify draft sync timeouts in the composer message.
+
 ## 5.1.0
 
 ### Minor Changes
