@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { MessageTimeline } from "../src/components/message-timeline";
-import type { ToolCallItem } from "../src/timeline/types";
+import { MessageTimeline, type ToolCallItem } from "@opengeni/react";
 import "./styles.css";
 const commands = [
   "rg --files src",
