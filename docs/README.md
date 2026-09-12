@@ -65,6 +65,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `README.md` Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 | Provider-aware image generation | `docs/image-generation.md` | Runtime, worker, artifact, SDK, and React summaries should link instead of restating provider and recovery semantics. |
+| Workspace and session artifact library | `docs/artifact-library.md` | Unified discovery and retained-file presentation; existing Site and editable-artifact authorities remain separate content models. |
 | Public documentation site (docs.opengeni.ai) | `docs-site/` (`docs.json` + MDX; Mintlify deploys it from `main` with subdirectory `/docs-site`) | Site pages link to the canonical homes in this table instead of restating commands, env vars, or SDK signatures. |
 
 ## Rules

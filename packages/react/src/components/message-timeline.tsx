@@ -2,6 +2,10 @@ import { RollingActivity } from "../timeline/rolling-activity";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
+import { parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
+import { unwrapMcpOutput } from "../timeline/parsers";
+import { isRetainedImageContentType } from "../timeline/retained-image";
+import { mcpToolLeaf } from "../timeline/tool-display-name";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -2537,9 +2541,15 @@ const TimelineGroupView = memo(function TimelineGroupView({
   // Settled (or live-fold) activity clusters get a chip. Inside an expanded
   // turn that is the second layer — quiet nested chips under the outer turn
   // summary when contiguous activity naturally clusters (≥2 only).
+  const containsPresentedImage = timelineGroupContainsPresentedImage(group);
+  const hasRememberedImageFold =
+    group.kind === "activity" && containsPresentedImage && foldMemory?.has(group.id);
+  // Primary images stay visible through live narration and the turn wrap.
+  // Manual collapse still belongs to TurnSummary's existing fold memory.
   const activityShouldFold =
-    group.kind === "activity" && !!(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
-  const containsGeneratedImage = timelineGroupContainsGeneratedImage(group);
+    group.kind === "activity" &&
+    !containsPresentedImage &&
+    !!(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
@@ -2548,7 +2558,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
     group.kind === "turn" &&
     (group.outcome === "failed" ||
       timelineGroupContainsAuthNeeded(group) ||
-      containsGeneratedImage);
+      containsPresentedImage);
   // activity-* → turn-* remount: carry resting state so settleFold does not
   // re-open a chip the reader already watched collapse.
   if (group.kind === "turn" && foldMemory && !insideTurn) {
@@ -2589,6 +2599,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
       if (
         turnSummary?.rolling &&
         !startupDetails &&
+        !hasRememberedImageFold &&
         group.items.filter((item) => item.kind !== "startup-phase").length === 1
       ) {
         return (
@@ -2620,8 +2631,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
           !startupDetails &&
           visibleActivity.length === 1 &&
           visibleActivity[0]?.kind === "reasoning";
+        // Untouched images stay primary output, but a reader-owned image fold
+        // must keep its shell across a multi-cluster wrap. A bare rail would
+        // bypass the remembered choice; retaining either state also lets the
+        // reader reopen and close the same chip after settlement.
         const useNestedChip =
-          nestClusterChips && activityShouldFold && !containsGeneratedImage && !singleThought;
+          nestClusterChips && (activityShouldFold || hasRememberedImageFold) && !singleThought;
         if (!useNestedChip) {
           return (
             <ActivityRail
@@ -2663,16 +2678,24 @@ const TimelineGroupView = memo(function TimelineGroupView({
       // flips settleFold (collapse) instead of remounting bare rail → wrapper.
       return (
         <TurnSummary
+          // Apply the primary-output default when a rolling activity first
+          // produces an image; the stable foldKey still preserves user choices.
+          key={containsPresentedImage ? "primary-image" : "activity"}
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
           defaultOpen={
-            group.outcome === "failed" || (!turnSummary?.rolling && !activityShouldFold)
+            group.outcome === "failed" ||
+            containsPresentedImage ||
+            (!turnSummary?.rolling && !activityShouldFold)
               ? true
               : undefined
           }
           liveHeader={
-            turnSummary?.rolling && !group.outcome && !foldLiveCluster ? (
+            turnSummary?.rolling &&
+            !containsPresentedImage &&
+            !group.outcome &&
+            !foldLiveCluster ? (
               <RollingActivity
                 items={group.items}
                 toolRegistry={toolRegistry}
@@ -2862,17 +2885,24 @@ function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
   }
 }
 
-/** Generated images are primary user-visible output, not incidental activity. */
-function timelineGroupContainsGeneratedImage(group: TimelineGroup): boolean {
+/** Deliberately published images are primary output, not incidental screenshots. */
+function timelineGroupContainsPresentedImage(group: TimelineGroup): boolean {
   switch (group.kind) {
     case "item":
       return false;
     case "activity":
-      return group.items.some(
-        (item) => item.kind === "tool-call" && item.name === "generate_image",
-      );
+      return group.items.some((item) => {
+        if (item.kind !== "tool-call") return false;
+        const name = mcpToolLeaf(item.name);
+        if (name === "generate_image" || name === "image_generation_call") return true;
+        if (item.status !== "complete" || name !== "sandbox_file_publish") return false;
+        const output = unwrapMcpOutput(item.output);
+        if (output.isError) return false;
+        const receipt = parseSandboxFileArtifactReceipt(output.text);
+        return receipt !== null && isRetainedImageContentType(receipt.artifact.contentType);
+      });
     case "turn":
-      return group.groups.some(timelineGroupContainsGeneratedImage);
+      return group.groups.some(timelineGroupContainsPresentedImage);
   }
 }
 

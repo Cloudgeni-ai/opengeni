@@ -75,6 +75,13 @@ For a normal inline image, use Markdown outside this HTML block:
 `sandbox_file_publish` first and use its exact returned id. The artifact scheme
 is resolved by Markdown; it is not an ordinary browser image URL inside HTML.
 
+Published outputs are discoverable in the workspace Artifacts library and the
+session panel. Publish screenshots you deliberately present to the user, not
+every temporary capture. Reuse an existing retained reference when showing the
+same image again; never substitute a sandbox filesystem link for its durable
+image reference. Message-owned HTML remains in chat unless explicitly saved as
+a Site; do not create a Site merely to display a PNG.
+
 ### Images inside HTML
 
 Use this path for custom image sizing, side-by-side galleries, or images inside

@@ -32,6 +32,88 @@ afterAll(() => {
 });
 
 describe("SessionEditableArtifactsWorkspace empty states", () => {
+  test("catalog discovery stays in browse mode and a kind-qualified document request cannot select a colliding Site", async () => {
+    const id = "22222222-2222-4222-8222-222222222222";
+    const selections: (string | null)[] = [];
+    const catalogItems = (["site", "document"] as const).map((kind) => ({
+      id,
+      kind,
+      title: kind === "site" ? "Board" : "Brief",
+      status: "active" as const,
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-01T00:00:00Z",
+    }));
+    const route = createRootRoute({
+      component: () => {
+        const [loaded, setLoaded] = useState(false);
+        const [request, setRequest] = useState<{
+          artifactId: string;
+          artifactKind: "document";
+          requestId: number;
+        } | null>(null);
+        return (
+          <>
+            <button data-discover onClick={() => setLoaded(true)}>
+              Discover
+            </button>
+            <button
+              data-open-document
+              onClick={() => setRequest({ artifactId: id, artifactKind: "document", requestId: 1 })}
+            >
+              Open document
+            </button>
+            <SessionEditableArtifactsWorkspace
+              workspaceId="workspace"
+              artifacts={
+                loaded
+                  ? catalogItems.map((item) => ({
+                      id,
+                      title: item.title,
+                      modality: item.kind,
+                      catalogItem: item,
+                    }))
+                  : []
+              }
+              status={loaded ? "ready" : "loading"}
+              onRetry={() => {}}
+              onSelectedArtifactIdChange={(selectedId) => selections.push(selectedId)}
+              openArtifactRequest={request}
+            />
+          </>
+        );
+      },
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      await act(async () =>
+        (container.querySelector("[data-discover]") as HTMLButtonElement).click(),
+      );
+      expect(container.textContent).toContain("Session artifacts");
+      expect(container.querySelector("[data-site-preview]")).toBeNull();
+      expect(selections).toEqual([]);
+      await act(async () =>
+        (container.querySelector("[data-open-document]") as HTMLButtonElement).click(),
+      );
+      expect(
+        (container.querySelector('[aria-label="Choose artifact"]') as HTMLSelectElement).value,
+      ).toBe(`document:${id}`);
+      expect(container.querySelector("[data-site-preview]")).toBeNull();
+      expect(selections).toEqual([`document:${id}`]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
   test("replaced synthetic Sites win over fallback and handled requests preserve manual selection", async () => {
     const discovered = "22222222-2222-4222-8222-222222222222";
     const first = "44444444-4444-4444-8444-444444444444";

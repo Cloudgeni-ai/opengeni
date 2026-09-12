@@ -1,5 +1,5 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
-import { useRetainedImageObjectUrl } from "./retained-image";
+import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
 import {
   parseSandboxFileArtifactReceipt,
   type GitFileDiff,
@@ -783,9 +783,12 @@ function RetainedSessionImageDisclosure({
   batched,
   failed,
   cancelled,
+  filename,
+  defaultOpen,
+  children,
 }: {
   artifact: RetainedArtifactReference;
-  load: ToolRendererProps["loadRetainedScreenshot"];
+  load: ToolRendererProps["loadRetainedArtifact"];
   title: string;
   caption: string;
   noun: "image" | "screenshot";
@@ -794,15 +797,19 @@ function RetainedSessionImageDisclosure({
   batched: string | null;
   failed: boolean;
   cancelled: boolean;
+  filename?: string;
+  defaultOpen?: boolean;
+  children?: ReactNode;
 }) {
   const state = useRetainedImageObjectUrl(artifact, load);
-  const downloadFilename = retainedImageFilename(artifact);
+  const downloadFilename = filename ?? retainedImageFilename(artifact);
 
   return (
     <ActivityDisclosure
       icon={icon}
       iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
       title={title}
+      defaultOpen={defaultOpen}
       failed={failed}
       cancelled={cancelled}
       preview={
@@ -852,6 +859,7 @@ function RetainedSessionImageDisclosure({
         </BodyNote>
       )}
       {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+      {children}
     </ActivityDisclosure>
   );
 }
@@ -945,6 +953,22 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     return <GenericRenderer item={item} />;
   }
 
+  // The closed SDK receipt has already checked the workspace-qualified route.
+  const workspaceId = /^\/v1\/workspaces\/([0-9a-f-]+)\/artifacts\//.exec(
+    receipt.artifact.retrieval.path,
+  )?.[1];
+  const openLink = workspaceId ? (
+    <a
+      href={`/workspaces/${workspaceId}/artifacts/files/${receipt.artifact.artifactId}`}
+      aria-label={`Open ${receipt.filename} in Artifacts`}
+      className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      Open in Artifacts
+    </a>
+  ) : null;
+
   const download = async () => {
     if (!loadRetainedArtifact) {
       setDownloadState("error");
@@ -977,6 +1001,44 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     }
   };
 
+  const downloadButton = (
+    <button
+      type="button"
+      onClick={() => void download()}
+      disabled={downloadState === "loading"}
+      className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1.5 text-og-sm font-medium text-og-fg transition-colors hover:border-og-border-strong hover:bg-og-surface-2 disabled:cursor-wait disabled:opacity-60"
+    >
+      <DownloadIcon className="size-3.5" />
+      {downloadState === "loading"
+        ? "Preparing…"
+        : downloadState === "error"
+          ? "Retry download"
+          : "Download"}
+    </button>
+  );
+
+  if (isRetainedImageContentType(receipt.artifact.contentType)) {
+    return (
+      <RetainedSessionImageDisclosure
+        artifact={receipt.artifact}
+        load={loadRetainedArtifact}
+        title={`Published ${receipt.filename}`}
+        caption={receipt.filename}
+        noun="image"
+        icon={<ImageIcon className={ICON_SIZE} />}
+        lightboxLabel="Image"
+        batched={null}
+        failed={false}
+        cancelled={false}
+        filename={receipt.filename}
+        defaultOpen
+      >
+        {downloadButton}
+        {openLink}
+      </RetainedSessionImageDisclosure>
+    );
+  }
+
   return (
     <ActivityDisclosure
       icon={<DownloadIcon className={ICON_SIZE} />}
@@ -985,19 +1047,8 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
       defaultOpen
       preview={formatBytes(receipt.artifact.originalBytes)}
     >
-      <button
-        type="button"
-        onClick={() => void download()}
-        disabled={downloadState === "loading"}
-        className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1.5 text-og-sm font-medium text-og-fg transition-colors hover:border-og-border-strong hover:bg-og-surface-2 disabled:cursor-wait disabled:opacity-60"
-      >
-        <DownloadIcon className="size-3.5" />
-        {downloadState === "loading"
-          ? "Preparing…"
-          : downloadState === "error"
-            ? "Retry download"
-            : "Download"}
-      </button>
+      {downloadButton}
+      {openLink}
     </ActivityDisclosure>
   );
 }

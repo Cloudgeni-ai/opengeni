@@ -54,6 +54,7 @@ const workspaceRouteContracts = {
     kind: "page",
     source: "routes/artifacts.tsx",
   },
+  workspaceRetainedArtifactRoute: { kind: "page", source: "routes/retained-artifact.tsx" },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",
