@@ -873,13 +873,9 @@ remain behind progressive search.
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
-Repository `.agents/skills` contains only maintainer (`opengeni`) and external
-integration (`opengeni-client`) guidance. Runtime skills are authored directly in
-`packages/runtime/src/bundled_*_skills`; these directories are authoritative and
-shipped as runtime assets, without repository-agent copies or a synchronization step.
-The worker's bundled selection includes `opengeni-visualize` and `document-parsing`
-by default, independently of sandbox or editable-artifact tools. Both remain
-subject to an explicit host selection, including an empty selection.
+Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
+ship directly from `packages/runtime/src/bundled_*_skills`. Worker defaults include
+`opengeni-visualize` and `document-parsing`, unless overridden by explicit host selection.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
@@ -1201,36 +1197,9 @@ injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
 
-HTML-only Sites can explicitly include
-`<script src="/__opengeni/site-tools/client.js"></script>` before author scripts.
-The existing Codemode Site request handler serves the installed SDK's generated
-browser runtime at that path. Published frames resolve that optional tag using
-the viewer's deployed SDK; ordinary bundled React Sites are unchanged. This
-is the same SDK and bridge, not another protocol. SDK builds regenerate the
-browser entry with `scripts/generate-site-browser-runtime.ts`. Published HTML
-and sandbox previews use their respective host SDK versions, with the existing
-bridge/API compatibility checks. No package-image delivery or Bun build change
-is required for existing Sites.
-Assistant messages opt into `opengeni-html` and `opengeni-site` fences through
-the shared Markdown host callback. Only source-complete fences mount previews;
-user messages and ordinary HTML fences remain inert Markdown. The web host's
-`ChatInteractiveBlock` uses the existing `ArtifactSandbox` and published frame
-for both. Saved Site embeds load through `loadSiteSnapshot`, optionally selecting
-a saved version and its exact tool declarations. Inline HTML uses the same
-bridge without a fabricated Site identity; API calls retain ordinary current
-viewer authorization and tool approval. No sandbox download is needed to render
-message-owned HTML.
-Inline visualizations receive the shared visualization stylesheet and helper scripts,
-with frame-scoped resize messages and theme updates; ordinary Sites are unchanged.
-The CSS/helpers under packages/react are canonical. generate-visualization-assets.ts
-generates both the renderer constants and the visualization skill’s preview/export
-assets from them. The default opengeni-visualize skill owns detailed inline design
-guidance; the main operational prompt only routes to it and to opengeni-sites.
-Markdown image references use artifact:<uuid>. The native chat resolves metadata
-through the current workspace API and reuses the retained-artifact image loader
-(object URL cleanup, unavailable states, and current viewer authentication).
-Neither sandbox paths nor storage credentials are embedded in message image URLs.
-
+HTML-only Sites and inline chat previews share the SDK bridge and renderer.
+See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
+for loading, versioning, visualization assets, and retained images.
 
 Multiple SDK clients in the same document retain independent ports; connecting
 one must not cancel another. Workspace SDK requests have no endpoint allowlist:
@@ -1701,16 +1670,7 @@ matching visibility and authority epoch; credentials alone grant no use.
 
 ### Embeddable connection presentation
 
-`@opengeni/react/connect` exports `ConnectionLogo`, `ConnectionInstalled`,
-`ConnectionServiceRow`, `ConnectionOptionRow`, `ConnectionCatalog`, and
-`ConnectionTypePicker`; scoped styling is in `@opengeni/react/connect.css`.
-These components accept data and callbacks, without app routing or provider
-credentials. `ConnectPanel` and `ConnectChooser` optionally use the catalogue
-presentation over the existing shared connection controller.
-The web Capabilities route owns tabs, global search, and curated ordering.
-`apps/web/src/components/capabilities/connection-services.ts` groups explicit
-provider identities without merging their independent authorization options.
-Northstar demonstrates the same SDK catalogue with its existing API proxy.
+Shared connection presentation and host boundaries: [embedding authority internals](embedding-authority-internals.md#connection-presentation).
 
 ### Public skill discovery
 

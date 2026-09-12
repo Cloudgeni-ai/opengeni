@@ -196,6 +196,8 @@ function runtimeLoader(file: string): RuntimeLoader | null {
 const billingPortalSurfaceFiles = new Set([
   "apps/api/src/routes/billing.ts",
   "packages/sdk/src/client.ts",
+  // Generated browser distribution of the canonical SDK client.
+  "packages/sdk/src/site-browser-runtime.gen.ts",
   "packages/sdk/test/client-coverage.test.ts",
 ]);
 
