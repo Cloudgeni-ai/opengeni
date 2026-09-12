@@ -267,6 +267,7 @@ function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
 
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
+    "api_keys",
     "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
@@ -772,6 +773,22 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("external membership operation seams require the live credential authority owner", () => {
+    const posture = safePosture();
+    posture.tables.find((table) => table.name === "api_keys")!.owner = "different_owner";
+    for (const name of [
+      "lookup_external_identity",
+      "prepare_external_workspace_membership_operation",
+      "record_external_workspace_membership_operation",
+    ]) {
+      expect(
+        evaluateRuntimeDatabasePosture(posture, options).some(
+          (message) => message.includes(name) && message.includes("owners do not match"),
+        ),
+      ).toBe(true);
+    }
   });
 
   test("external provisioner requires all authority tables owned by its definer", () => {

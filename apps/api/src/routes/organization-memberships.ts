@@ -1,4 +1,8 @@
 import {
+  lookupExternalIdentityForRequest,
+  cancelExternalWorkspaceMemberGrantForRequest,
+} from "@opengeni/core";
+import {
   AcceptOrganizationInvitationRequest,
   CreateAdditionalOrganizationRequest,
   CreateAdditionalOrganizationResponse,
@@ -165,6 +169,22 @@ function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): 
 }
 
 export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDeps): void {
+  // POST carries an opaque identity reference; this lookup never provisions.
+  app.post("/v1/organizations/:organizationId/external-identities/lookup", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    return context.json(
+      await lookupExternalIdentityForRequest(
+        context,
+        deps,
+        organizationId,
+        await context.req.json().catch(() => null),
+      ),
+    );
+  });
   app.patch("/v1/organizations/:organizationId/external-members/:membershipId", async (context) => {
     const organizationId = parseId(
       OrganizationId,
@@ -461,6 +481,19 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   app.post(
     "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId/revoke",
     async (context) => {
+      const input: unknown = await context.req.json().catch(() => null);
+      if (input && typeof input === "object" && "cancelGrantOperationId" in input) {
+        return context.json(
+          await cancelExternalWorkspaceMemberGrantForRequest(
+            context,
+            deps,
+            parseId(OrganizationId, context.req.param("organizationId"), "organization id"),
+            parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id"),
+            parseId(MembershipId, context.req.param("membershipId"), "membership id"),
+            input,
+          ),
+        );
+      }
       const { subjectId } = await requireManagedHuman(context, deps);
       const organizationId = parseId(
         OrganizationId,

@@ -525,6 +525,9 @@ async function grantAppRoleIfSchemaExists(
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "ensure_external_identity(uuid,text,text)",
+    "lookup_external_identity(uuid,text,text,text)",
+    "prepare_external_workspace_membership_operation(jsonb)",
+    "record_external_workspace_membership_operation(jsonb,jsonb)",
     "get_external_identity_link_reference(uuid,uuid,text)",
     "get_external_identity_link_inventory_references(uuid,uuid[])",
     "list_self_organization_memberships(text)",

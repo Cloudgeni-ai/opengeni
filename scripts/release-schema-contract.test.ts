@@ -212,6 +212,9 @@ describe("release schema contract", () => {
     const agentInstructionNonDestructiveEdits = completeSourceContract.migrations.some(
       (migration) => migration.path === "0462_agent_instruction_non_destructive_edits.sql",
     );
+    const externalWorkspaceMembershipOperations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0464_external_workspace_membership_operations.sql",
+    );
     const mcpOperations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0459_mcp_operations.sql",
     );
@@ -241,6 +244,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (externalWorkspaceMembershipOperations ? 1 : 0) +
         (agentInstructionNonDestructiveEdits ? 1 : 0) +
         (organizationScopedExternalWorkspaces ? 1 : 0) +
         (durableConnectAttempts ? 1 : 0) +
@@ -346,9 +350,12 @@ describe("release schema contract", () => {
       ...(agentInstructionNonDestructiveEdits
         ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
         : {}),
+      ...(externalWorkspaceMembershipOperations
+        ? { latestMigration: "0464_external_workspace_membership_operations.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0462_agent_instruction_non_destructive_edits.sql",
+      path: "0464_external_workspace_membership_operations.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1442,6 +1449,9 @@ describe("release schema contract", () => {
     const agentInstructionNonDestructiveEdits = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0462_agent_instruction_non_destructive_edits.sql",
     );
+    const externalWorkspaceMembershipOperations = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0464_external_workspace_membership_operations.sql",
+    );
     let completeSourceContract = await contractWithoutMigrations([
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -1887,6 +1897,7 @@ describe("release schema contract", () => {
       "0436_unobservable_command_idle_drain.sql",
       "0435_skill_chat_confirmation.sql",
       "0462_agent_instruction_non_destructive_edits.sql",
+      "0464_external_workspace_membership_operations.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2225,8 +2236,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0462_agent_instruction_non_destructive_edits.sql",
       };
+    if (externalWorkspaceMembershipOperations)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0464_external_workspace_membership_operations.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (externalWorkspaceMembershipOperations ? 1 : 0) +
         (agentInstructionNonDestructiveEdits ? 1 : 0) +
         (unifiedSkillLifecycle ? 1 : 0) +
         (scheduledTaskCreatorPolicy ? 1 : 0) +
@@ -2536,6 +2553,9 @@ describe("release schema contract", () => {
       ...(unifiedSkillLifecycle ? { latestMigration: "0433_unified_skill_lifecycle.sql" } : {}),
       ...(agentInstructionNonDestructiveEdits
         ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
+        : {}),
+      ...(externalWorkspaceMembershipOperations
+        ? { latestMigration: "0464_external_workspace_membership_operations.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

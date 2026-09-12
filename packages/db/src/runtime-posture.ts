@@ -106,6 +106,9 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_external_identity_link_reference(uuid, uuid, text)",
   "get_external_identity_link_inventory_references(uuid, uuid[])",
   "ensure_external_identity(uuid, text, text)",
+  "lookup_external_identity(uuid, text, text, text)",
+  "prepare_external_workspace_membership_operation(jsonb)",
+  "record_external_workspace_membership_operation(jsonb, jsonb)",
   "list_self_organization_memberships(text)",
   "list_self_organization_invitations(text)",
   "list_self_organization_invitations(text, uuid, integer)",
@@ -2341,6 +2344,28 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (
+      [
+        "lookup_external_identity(uuid, text, text, text)",
+        "prepare_external_workspace_membership_operation(jsonb)",
+        "record_external_workspace_membership_operation(jsonb, jsonb)",
+      ].includes(routine.name)
+    ) {
+      const names = [
+        "external_identities",
+        "organization_memberships",
+        "organization_workspace_operation_receipts",
+        "api_keys",
+      ];
+      if (
+        names.some(
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match`,
+        );
       }
     } else if (
       [

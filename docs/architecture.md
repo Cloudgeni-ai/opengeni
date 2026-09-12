@@ -1562,6 +1562,8 @@ Subsystem routing; complete topic map: [`README.md`](README.md).
 ### Contracts, access, and persistence
 
 External actors and Site viewer authority: [embedding authority internals](embedding-authority-internals.md).
+External membership lookup and opt-in grant/cancellation receipts reuse native
+organization-workspace lifecycle authority; see [external membership operation recovery](external-membership-operations.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
