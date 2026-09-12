@@ -376,6 +376,9 @@ export function useComputerFrameStream(
           throw new Error("desktop attachment does not match the requested resource");
         }
         controllerGeneration = attachment.controllerGeneration;
+        // A fresh attachment owns a new producer whose sequence can restart.
+        // Transport reconnects reuse the attachment and retain their sequence fence.
+        latestRef.current = { key: "", sequence: -1 };
         activeAttachment = attachment;
         activeStream = attachment.stream;
         attachmentExpiresAt = Date.parse(attachment.expiresAt);

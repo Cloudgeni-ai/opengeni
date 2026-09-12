@@ -1548,6 +1548,15 @@ export async function refreshOAuthConnectionCredential(
   const expiresAt = expiresAtFromTokenResponse(payload, cred.expiresAt);
   const scopeText = stringValue(payload.scope);
   const returnedScopes = scopeText?.split(/[\s,]+/).filter(Boolean) ?? [];
+  // A successful Microsoft refresh proves offline access, although Microsoft
+  // reports only access-token permissions in the response's scope field.
+  if (
+    scopeText &&
+    ref.providerDomain.toLowerCase() === "graph.microsoft.com" &&
+    !returnedScopes.some((scope) => scope.toLowerCase() === "offline_access")
+  ) {
+    returnedScopes.push("offline_access");
+  }
   const refreshTokenExpiresIn =
     typeof payload.refresh_token_expires_in === "number"
       ? payload.refresh_token_expires_in
@@ -1574,7 +1583,14 @@ export async function refreshOAuthConnectionCredential(
       "Bearer",
     ...(expiresAt ? { expires_at: expiresAt.toISOString() } : {}),
     ...(resource ? { resource } : {}),
-    ...(scopeText ? { scope: scopeText } : {}),
+    ...(scopeText
+      ? {
+          scope:
+            ref.providerDomain.toLowerCase() === "graph.microsoft.com"
+              ? returnedScopes.join(" ")
+              : scopeText,
+        }
+      : {}),
     ...(refreshTokenExpiresAt ? { refresh_token_expires_at: refreshTokenExpiresAt } : {}),
     ...(clientSecret && !personalGitHub
       ? { client_secret: clientSecret, token_endpoint_auth_method: authMethod }

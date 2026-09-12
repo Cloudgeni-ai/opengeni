@@ -60,6 +60,7 @@ export function visibleSessionToolSelection(
 
 /** Shared tools list body — used by the bar picker and the mobile “+” drill-in. */
 export function SessionToolsMenuBody(props: {
+  presentation?: "menu" | "dialog";
   servers: McpServerOption[];
   firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
   selection: SessionToolSelection;
@@ -144,6 +145,7 @@ export function SessionToolsMenuBody(props: {
             </DropdownMenuLabel>
             {connectedServers.map((server) => (
               <SessionToolPickerItem
+                presentation={props.presentation}
                 key={`mcp:${server.id}`}
                 id={server.id}
                 name={server.name}
@@ -153,6 +155,7 @@ export function SessionToolsMenuBody(props: {
             ))}
             {connectedAppGroups.map((group) => (
               <SessionCapabilityPickerItem
+                presentation={props.presentation}
                 key={`app:${group.id}`}
                 group={group}
                 state={capabilityGroupSelection(group, selectedFirstPartyIds)}
@@ -166,6 +169,7 @@ export function SessionToolsMenuBody(props: {
         </DropdownMenuLabel>
         {builtInServers.map(({ server, capability }) => (
           <SessionToolPickerItem
+            presentation={props.presentation}
             key={`mcp:${server.id}`}
             id={server.id}
             name={capability.name}
@@ -176,6 +180,7 @@ export function SessionToolsMenuBody(props: {
         ))}
         {openGeniGroups.map((group) => (
           <SessionCapabilityPickerItem
+            presentation={props.presentation}
             key={`opengeni:${group.id}`}
             group={group}
             state={capabilityGroupSelection(group, selectedFirstPartyIds)}
@@ -188,16 +193,16 @@ export function SessionToolsMenuBody(props: {
 }
 
 function SessionCapabilityPickerItem(props: {
+  presentation?: "menu" | "dialog";
   group: SessionCapabilityGroup;
   state: "all" | "some" | "none";
   onToggle: () => void;
 }) {
   return (
-    <DropdownMenuItem
-      onSelect={(event) => {
-        event.preventDefault();
-        props.onToggle();
-      }}
+    <ToolSelectionItem
+      presentation={props.presentation}
+      pressed={props.state === "some" ? "mixed" : props.state === "all"}
+      onToggle={props.onToggle}
       className="min-h-11 cursor-pointer rounded-md px-2 py-2 text-sm"
     >
       <span className="min-w-0 flex-1">
@@ -216,7 +221,7 @@ function SessionCapabilityPickerItem(props: {
         {props.state === "all" ? <CheckIcon className="size-3" /> : null}
         {props.state === "some" ? <MinusIcon className="size-3" /> : null}
       </span>
-    </DropdownMenuItem>
+    </ToolSelectionItem>
   );
 }
 
@@ -301,6 +306,7 @@ export function SessionToolPicker(props: {
 }
 
 function SessionToolPickerItem(props: {
+  presentation?: "menu" | "dialog";
   id: string;
   name: string;
   description?: string;
@@ -308,12 +314,11 @@ function SessionToolPickerItem(props: {
   onToggle: () => void;
 }) {
   return (
-    <DropdownMenuItem
+    <ToolSelectionItem
+      presentation={props.presentation}
+      pressed={props.selected}
       title={props.id}
-      onSelect={(event) => {
-        event.preventDefault();
-        props.onToggle();
-      }}
+      onToggle={props.onToggle}
       className="min-h-9 cursor-pointer rounded-md px-2 py-1.5 text-sm"
     >
       <span className="min-w-0 flex-1">
@@ -333,6 +338,44 @@ function SessionToolPickerItem(props: {
       >
         {props.selected ? <CheckIcon className="size-3" /> : null}
       </span>
+    </ToolSelectionItem>
+  );
+}
+
+function ToolSelectionItem(props: {
+  presentation?: "menu" | "dialog";
+  pressed: boolean | "mixed";
+  title?: string;
+  className: string;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  if (props.presentation === "dialog") {
+    return (
+      <button
+        type="button"
+        title={props.title}
+        aria-pressed={props.pressed}
+        onClick={props.onToggle}
+        className={cn(
+          "flex w-full items-center gap-2 text-left hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-ring",
+          props.className,
+        )}
+      >
+        {props.children}
+      </button>
+    );
+  }
+  return (
+    <DropdownMenuItem
+      title={props.title}
+      className={props.className}
+      onSelect={(event) => {
+        event.preventDefault();
+        props.onToggle();
+      }}
+    >
+      {props.children}
     </DropdownMenuItem>
   );
 }

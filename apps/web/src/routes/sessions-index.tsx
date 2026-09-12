@@ -1306,6 +1306,7 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
+                expandedPanelPresentation="dialog"
                 draftChatSettings={{
                   workspaceId,
                   scope:

@@ -820,7 +820,9 @@ describe("API Integration provider OAuth", () => {
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
     fixture.microsoftPlans.push({
-      scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
+      scopes: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes.filter(
+        (scope) => scope !== "offline_access",
+      ),
       refreshToken: "microsoft-refresh-token",
     });
     const firstStart = await start(fixture, workspace, {
@@ -842,16 +844,18 @@ describe("API Integration provider OAuth", () => {
         ...MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.authentication.scopes,
       ]),
     ];
-    fixture.microsoftPlans.push({ scopes: unionScopes });
+    fixture.microsoftPlans.push({
+      scopes: unionScopes.filter((scope) => scope !== "offline_access"),
+    });
     const reconnect = await start(fixture, workspace, {
       definitionId: MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.id,
       connectionId: firstConnection.id,
       ownership: "workspace",
     });
     expect(reconnect.response.status).toBe(200);
-    expect(new URL(reconnect.authorizationUrl).searchParams.get("scope")?.split(" ")).toEqual(
-      unionScopes,
-    );
+    expect(
+      new URL(reconnect.authorizationUrl).searchParams.get("scope")?.split(" ").sort(),
+    ).toEqual([...unionScopes].sort());
     const reconnectState = new URL(reconnect.authorizationUrl).searchParams.get("state")!;
     const reconnectCallback = await callback(fixture, reconnectState);
     expect(
@@ -862,7 +866,7 @@ describe("API Integration provider OAuth", () => {
     )[0]!;
     expect(reconnected.id).toBe(firstConnection.id);
     expect(reconnected.version).toBe(firstConnection.version + 1);
-    expect(reconnected.grantedScopes).toEqual(unionScopes);
+    expect([...reconnected.grantedScopes].sort()).toEqual([...unionScopes].sort());
     expect(reconnected.metadata.authorizedDefinitionIds).toEqual(
       [
         MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.id,
@@ -903,6 +907,34 @@ describe("API Integration provider OAuth", () => {
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
     )[0]!;
     expect(unchanged.version).toBe(reconnected.version);
+  }, 60_000);
+
+  test("Microsoft still requires mail permissions and a refresh token", async () => {
+    if (!available) return;
+    for (const missing of ["Mail.Send", "refresh_token"]) {
+      const workspace = await freshWorkspace();
+      const fixture = providerFixture();
+      fixture.microsoftPlans.push({
+        scopes: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes.filter(
+          (scope) => scope !== "offline_access" && scope !== missing,
+        ),
+        ...(missing === "refresh_token" ? {} : { refreshToken: "must-not-persist" }),
+      });
+      const started = await start(fixture, workspace, {
+        definitionId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      });
+      const result = await callback(
+        fixture,
+        new URL(started.authorizationUrl).searchParams.get("state")!,
+      );
+      expect(new URL(result.headers.get("location")!).searchParams.get("reason")).toBe(
+        missing === "refresh_token" ? "refresh_token_missing" : "scope_not_granted",
+      );
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
+    }
   }, 60_000);
 
   test("converges concurrent same-principal callbacks and rejects insufficient provider grants", async () => {
