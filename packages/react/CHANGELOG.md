@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 5.1.1
+
+### Patch Changes
+
+- 0507f91: Retry timed-out composer draft reads with backoff and clear their warning after a successful refresh, including when the draft revision is unchanged. Keep draft-read failures separate from Send, Steer, and control failures, and identify draft sync timeouts in the composer message.
+
 ## 5.1.0
 
 ### Minor Changes
