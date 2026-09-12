@@ -327,7 +327,11 @@ const workspaceCapabilitiesRoute = createRoute({
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
   validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
-    ...(search.section === "packs" ? { section: "packs" as const } : search.section === "skills" ? { section: "skills" as const } : {}),
+    ...(search.section === "packs"
+      ? { section: "packs" as const }
+      : search.section === "skills"
+        ? { section: "skills" as const }
+        : {}),
   }),
   component: Capabilities,
 });
@@ -335,7 +339,11 @@ const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
   validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
-    ...(search.section === "packs" ? { section: "packs" as const } : search.section === "skills" ? { section: "skills" as const } : {}),
+    ...(search.section === "packs"
+      ? { section: "packs" as const }
+      : search.section === "skills"
+        ? { section: "skills" as const }
+        : {}),
   }),
   component: CapabilitiesLegacyRedirect,
 });
@@ -710,7 +718,15 @@ function WorkspaceSettings() {
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
   const { view } = workspaceStateRoute.useSearch();
-  if (view === "skills") return <Navigate to="/workspaces/$workspaceId/plugins" params={{ workspaceId }} search={{ section: "skills" }} replace />;
+  if (view === "skills")
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/plugins"
+        params={{ workspaceId }}
+        search={{ section: "skills" }}
+        replace
+      />
+    );
   return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
 }
 

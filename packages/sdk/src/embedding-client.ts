@@ -12,6 +12,21 @@ import type {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
+  /** Rotate existing inline credentials only while no credential-consuming work
+   * is pending or active. Reuse the operation key and exact request to reconcile
+   * a lost response. This operation never schedules or retries model work. */
+  async rotateSessionMcpCredentials(
+    workspaceId: string,
+    sessionId: string,
+    request: import("./types").RotateSessionMcpCredentialsRequest,
+  ): Promise<import("./types").RotateSessionMcpCredentialsReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/mcp-credentials/rotate`,
+      request,
+    );
+  }
+
   /** Server-side organization-key client scoped to one host-authenticated user.
    * Does not mutate this client, provision workspace membership, or link native
    * identities. The API verifies key and membership authority on each request. */

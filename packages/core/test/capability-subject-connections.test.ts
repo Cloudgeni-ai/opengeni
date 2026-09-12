@@ -21,6 +21,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
 import {
   applyCapabilityEnablement,
   buildCapabilityCatalog,
@@ -262,18 +263,19 @@ describe("subject-owned capability connection references", () => {
     ]) {
       expect(ids.has(nativeId)).toBe(false);
     }
-    expect(catalog.items.find((item) => item.id === "skill:terraform-style-guide")).toMatchObject({
-      source: "library",
-      enabled: false,
-      lifecycle: { status: "available", readiness: "setup_required" },
-      actions: ["install", "inspect"],
-    });
-    expect(catalog.items.find((item) => item.id === "skill:social-media-marketing")).toMatchObject({
-      source: "library",
-      enabled: false,
-      lifecycle: { status: "available", readiness: "setup_required" },
-      actions: ["install", "inspect"],
-    });
+    // The workspace catalog projects installed Skills, not the available
+    // library. Discovery must retain these artifacts without implicitly
+    // installing or enabling them in a fresh workspace.
+    for (const libraryId of ["terraform-style-guide", "social-media-marketing"]) {
+      expect(ids.has(`skill:${libraryId}`)).toBe(false);
+      const entry = listSkillLibraryEntries().find((item) => item.id === libraryId);
+      expect(entry).toBeDefined();
+      const loaded = loadSkillLibrarySkill(libraryId, entry!.version);
+      expect(loaded.entry.contentSha256).toBe(entry!.contentSha256);
+      expect(
+        loaded.skill.files.some((file) => file.path === "SKILL.md" && file.content.length > 0),
+      ).toBe(true);
+    }
     expect(catalog.items.find((item) => item.id === "mcp:team-search")).toMatchObject({
       source: "configured",
       enabled: true,

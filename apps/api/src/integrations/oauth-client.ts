@@ -962,20 +962,35 @@ export function assertGoogleAuthorizationServer(as: AuthorizationServerMetadata)
 }
 
 /** Inspect without credentials, registration, or running tools. */
-export async function inspectMcpAuthentication(resource: string, settings: Settings): Promise<{
+export async function inspectMcpAuthentication(
+  resource: string,
+  settings: Settings,
+): Promise<{
   kind: "oauth2" | "none" | "unknown";
   message?: string;
 }> {
   const deadline = new OAuthStartDeadline(12_000);
   try {
-    const response = await deadline.run("mcp_challenge", (signal) => fetchOAuth(resource, settings, {
-      method: "POST",
-      headers: { accept: "application/json, text/event-stream", "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: "auth-discovery", method: "initialize", params: {
-        protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "OpenGeni", version: "1.0" },
-      } }),
-      signal,
-    }));
+    const response = await deadline.run("mcp_challenge", (signal) =>
+      fetchOAuth(resource, settings, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "auth-discovery",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "OpenGeni", version: "1.0" },
+          },
+        }),
+        signal,
+      }),
+    );
     const challenge = parseMcpOAuthChallenge(response.headers.get("www-authenticate"));
     let initialized = false;
     if (response.ok) {
@@ -993,15 +1008,30 @@ export async function inspectMcpAuthentication(resource: string, settings: Setti
             bytes += chunk.value.byteLength;
             if (bytes > 262144) return false;
             text += decoder.decode(chunk.value, { stream: true });
-            const messages = sse ? text.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()) : [text];
+            const messages = sse
+              ? text
+                  .split(/\r?\n/)
+                  .filter((line) => line.startsWith("data:"))
+                  .map((line) => line.slice(5).trim())
+              : [text];
             for (const message of messages) {
               try {
                 const value = JSON.parse(message);
-                if (value.id === "auth-discovery" && typeof value.result?.protocolVersion === "string" && value.result?.serverInfo && value.result?.capabilities) return true;
-              } catch { /* Wait for a complete JSON message. */ }
+                if (
+                  value.id === "auth-discovery" &&
+                  typeof value.result?.protocolVersion === "string" &&
+                  value.result?.serverInfo &&
+                  value.result?.capabilities
+                )
+                  return true;
+              } catch {
+                /* Wait for a complete JSON message. */
+              }
             }
           }
-        } finally { await reader.cancel().catch(() => undefined); }
+        } finally {
+          await reader.cancel().catch(() => undefined);
+        }
       });
     } else {
       await cancelResponseBody(response);
@@ -1014,11 +1044,16 @@ export async function inspectMcpAuthentication(resource: string, settings: Setti
         challenge,
         fetchMetadata: async ({ url }) => {
           try {
-            const result = await deadline.run("protected_resource_metadata", signal => fetchOAuthMetadata(url, settings, signal));
+            const result = await deadline.run("protected_resource_metadata", (signal) =>
+              fetchOAuthMetadata(url, settings, signal),
+            );
             metadataRead = true;
             if (result.status !== "absent") metadataAbsent = false;
             return result;
-          } catch (error) { metadataAbsent = false; throw error; }
+          } catch (error) {
+            metadataAbsent = false;
+            throw error;
+          }
         },
         validateEndpoint: (url, label) => oauthEndpointUrl(url, settings, label),
         canonicalizeResource: canonicalOAuthResource,
@@ -1027,12 +1062,28 @@ export async function inspectMcpAuthentication(resource: string, settings: Setti
     } catch {
       // Public initialization does not exclude optional or tool-level OAuth.
       // Only explicit absence of metadata permits the unauthenticated path.
-      if (initialized && !challenge.scheme && !challenge.resourceMetadata && metadataRead && metadataAbsent) return { kind: "none" };
-      return { kind: "unknown", message: "This server's sign-in requirements could not be determined. Check its setup instructions." };
+      if (
+        initialized &&
+        !challenge.scheme &&
+        !challenge.resourceMetadata &&
+        metadataRead &&
+        metadataAbsent
+      )
+        return { kind: "none" };
+      return {
+        kind: "unknown",
+        message:
+          "This server's sign-in requirements could not be determined. Check its setup instructions.",
+      };
     }
   } catch {
-    return { kind: "unknown", message: "Could not check this server. Retry or consult its setup instructions." };
-  } finally { deadline.dispose(); }
+    return {
+      kind: "unknown",
+      message: "Could not check this server. Retry or consult its setup instructions.",
+    };
+  } finally {
+    deadline.dispose();
+  }
 }
 
 async function discoverMcpOAuth(
@@ -1052,9 +1103,11 @@ async function discoverMcpOAuth(
     metadataSha256: string;
   };
 }> {
-  const challenge = knownChallenge ?? await deadline.run("mcp_challenge", (signal) =>
-    probeMcpChallenge(resource, settings, signal),
-  );
+  const challenge =
+    knownChallenge ??
+    (await deadline.run("mcp_challenge", (signal) =>
+      probeMcpChallenge(resource, settings, signal),
+    ));
   try {
     const discovery = await resolveMcpOAuthDiscovery({
       resourceUrl: resource,

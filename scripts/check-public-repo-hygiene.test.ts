@@ -6,6 +6,27 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
+  test("distinguishes nested public URL paths from private filesystem roots", () => {
+    const publicUrl = "https://example.com/repository/skills/home/SKILL.md";
+    expect(auditPublicText("catalog.json", JSON.stringify({ sourceUrl: publicUrl }))).toEqual([]);
+    const privatePath = ["/home/", "private-user/repo"].join("");
+    const normalizedPrefixTrap = ["/p/home/", "user-private"].join("");
+    for (const source of [
+      privatePath,
+      `file://${privatePath}`,
+      `${publicUrl} ${privatePath}`,
+      `https://example.com${privatePath}`,
+      `${publicUrl}?path=${privatePath}`,
+      `https://example.com/p/a/../home/user?path=${normalizedPrefixTrap}`,
+      `https://example.com/p/a/../home/user#path=${normalizedPrefixTrap}`,
+    ]) {
+      expect(
+        auditPublicText("fixture.txt", source).some(
+          (finding) => finding.reason === "non-generic home path",
+        ),
+      ).toBe(true);
+    }
+  });
   test("accepts portable public fixtures", () => {
     expect(
       auditPublicText(

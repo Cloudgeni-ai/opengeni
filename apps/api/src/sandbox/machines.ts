@@ -112,6 +112,7 @@ function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineVi
       browserBridge: capability("browserBridge"),
       operationResourcePolicy: capability("operationResourcePolicy"),
       operationCpuQuota: capability("operationCpuQuota"),
+      transactionalFsWrite: capability("transactionalFsWrite"),
     },
     update,
   };

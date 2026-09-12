@@ -4114,9 +4114,20 @@ describe("runtime event normalization", () => {
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
     "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Reusable conditional guidance belongs in Skills. Skill changes use the shared file lifecycle governed by Learning mode, not Knowledge evidence or confidence. Follow Skill management guidance only when it is present in the Skill index. Use remember lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
   ].join(" ");
+  const defaultSkillIndex = [
+    "## Skills",
+    "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
+    "Management tools are lazy and available through tool search.",
+    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
+    '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+  ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
-    return instructions;
+    // Pin the new default catalog independently while retaining the exact
+    // persona, CORE, memory, and session ordering assertions below.
+    const catalog = ` ${defaultSkillIndex}`;
+    expect(instructions.split(catalog)).toHaveLength(2);
+    return instructions.replace(catalog, "");
   };
   const withOperationalInstructions = (instructions: string) =>
     `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions}`;
@@ -4276,6 +4287,12 @@ describe("runtime event normalization", () => {
       sessionInstructions: "SESSION RULE: always answer in French.",
     });
 
+    expect(agent.instructions).toBe(
+      withOperationalInstructions(
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} ${defaultSkillIndex} SESSION RULE: always answer in French.`,
+      ),
+    );
+
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
         `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
@@ -4299,12 +4316,12 @@ describe("runtime event normalization", () => {
 
     const filter = oneShotGenesisTitleInputFilter();
     const first = await filter({
-      modelData: { input: [], instructions: staticInstructions(agent.instructions) },
+      modelData: { input: [], instructions: agent.instructions as string },
       agent,
       context: undefined,
     });
     const followUp = await filter({
-      modelData: { input: [], instructions: staticInstructions(agent.instructions) },
+      modelData: { input: [], instructions: agent.instructions as string },
       agent,
       context: undefined,
     });
@@ -8137,6 +8154,54 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("optional Gmail with no personal grant posts recovery and skips tools without provider traffic", async () => {
+    const events: unknown[] = [];
+    let fetched = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "gmail",
+            name: "Gmail",
+            url: "https://gmailmcp.googleapis.com/mcp/v1",
+            cacheToolsList: false,
+            connectionRef: {
+              providerDomain: "gmailmcp.googleapis.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "gmail", optional: true }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        credentialSubjectId: "subject-a",
+        resolveCredential: async () => ({
+          status: "auth_needed",
+          reason: "personal_authority_unavailable",
+          providerDomain: "gmailmcp.googleapis.com",
+        }),
+        onAuthNeeded: (payload) => {
+          events.push(payload);
+        },
+        mcpFetchImpl: async () => {
+          fetched++;
+          throw new Error("unauthorized provider traffic");
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(fetched).toBe(0);
+      expect(events).toEqual([
+        expect.objectContaining({ serverId: "gmail", reason: "personal_authority_unavailable" }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("routes every official-Gmail turn through the REST bridge, never the hosted preview MCP", async () => {
     const resolved: ResolveConnectionCredentialInput[] = [];
     const fetched: string[] = [];
@@ -11377,10 +11442,12 @@ describe("runtime Skill activation", () => {
     ],
   };
 
-  test("without explicit activation the domain Skill index is empty", () => {
+  test("without explicit activation only the default document guidance is indexed", () => {
     const composition = composeRuntimeSkills([]);
     const index = composition.index;
-    expect(index).toEqual([]);
+    expect(index.map((entry) => ({ id: entry.id, name: entry.name }))).toEqual([
+      { id: "native-tool:document-parsing", name: "document-parsing" },
+    ]);
   });
 
   test("artifact skills join the index when their canonical tool surface is available", () => {
@@ -11840,11 +11907,16 @@ describe("runtime Skill activation", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
       skillCatalog: [],
     });
-    expect(runtimeSkillIndexForAgent(agent)).toEqual([]);
+    expect(runtimeSkillIndexForAgent(agent).map((entry) => entry.name)).toEqual([
+      "document-parsing",
+    ]);
     expect(
       agent.tools.filter((tool) => tool.type === "function" && tool.name === "skill_read"),
     ).toHaveLength(0);
     expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain("opengeni-sites");
+    expect(persistentAgentInstructionInspectionFor(agent).composed).not.toContain(
+      "document-parsing",
+    );
     expect(() =>
       buildOpenGeniAgent(testSettings(), [], {
         skillCatalog: [],

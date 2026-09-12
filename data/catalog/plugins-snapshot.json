@@ -34,10 +34,7 @@
               "endpoint": "https://mcp.linear.app/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -87,11 +84,7 @@
               "endpoint": "https://mcp.atlassian.com/v1/mcp/authv2"
             }
           ],
-          "components": [
-            "mcp",
-            "apps",
-            "agents"
-          ],
+          "components": ["mcp", "apps", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -146,10 +139,7 @@
               "endpoint": "https://calendarmcp.googleapis.com/mcp/v1"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -201,10 +191,7 @@
               "endpoint": "https://gmailmcp.googleapis.com/mcp/v1"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -256,10 +243,7 @@
               "endpoint": "https://mcp.slack.com/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -306,9 +290,7 @@
           "sourceUrl": "https://github.com/openai/plugins/tree/d416fd5a43426019986b1e489506db3db66dee3d/plugins/teams",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "apps"
-          ],
+          "components": ["apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -354,9 +336,7 @@
           "sourceUrl": "https://github.com/openai/plugins/tree/d416fd5a43426019986b1e489506db3db66dee3d/plugins/sharepoint",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "apps"
-          ],
+          "components": ["apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -402,9 +382,7 @@
           "sourceUrl": "https://github.com/openai/plugins/tree/d416fd5a43426019986b1e489506db3db66dee3d/plugins/outlook-email",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "apps"
-          ],
+          "components": ["apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -455,9 +433,7 @@
           "sourceUrl": "https://github.com/openai/plugins/tree/d416fd5a43426019986b1e489506db3db66dee3d/plugins/outlook-calendar",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "apps"
-          ],
+          "components": ["apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -531,11 +507,7 @@
               "endpoint": "https://mcp.canva.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -637,13 +609,7 @@
               "endpoint": "https://mcp.figma.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "apps", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -713,11 +679,7 @@
               "endpoint": "https://mcp.stripe.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -991,13 +953,7 @@
               "endpoint": "https://mcp.vercel.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "apps", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1080,9 +1036,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1094,9 +1048,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -1187,9 +1139,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1201,9 +1151,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -1249,10 +1197,7 @@
               "endpoint": "https://api.githubcopilot.com/mcp/"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1274,11 +1219,7 @@
           "description": "Build, test, and deploy any application",
           "longDescription": "Bring testing, deployment, and CI best practices into Codex",
           "category": "Developer Tools",
-          "keywords": [
-            "circleci",
-            "ci/cd",
-            "ci"
-          ],
+          "keywords": ["circleci", "ci/cd", "ci"],
           "author": {
             "name": "CircleCI",
             "url": "https://circleci.com"
@@ -1308,9 +1249,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1387,11 +1326,7 @@
               "endpoint": "https://drivemcp.googleapis.com/mcp/v1"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1463,12 +1398,7 @@
               "endpoint": "https://mcp.notion.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "apps", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1558,11 +1488,7 @@
               "endpoint": "https://mcp.cloudflare.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1584,11 +1510,7 @@
           "description": "Inspect recent Sentry issues and events",
           "longDescription": "Use Sentry skills to inspect recent issues, review events, and summarize production errors with a read-only workflow.",
           "category": "Developer Tools",
-          "keywords": [
-            "sentry",
-            "observability",
-            "triage"
-          ],
+          "keywords": ["sentry", "observability", "triage"],
           "author": {
             "name": "OpenAI",
             "email": "support@openai.com",
@@ -1614,10 +1536,7 @@
               "endpoint": "https://mcp.sentry.dev/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1709,11 +1628,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1725,9 +1640,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -1809,11 +1722,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1825,9 +1734,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -1890,10 +1797,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -1905,9 +1809,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_USE",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2046,10 +1948,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2061,9 +1960,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_USE",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2110,10 +2007,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2125,9 +2019,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2369,9 +2261,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2421,9 +2311,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2435,9 +2323,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2527,11 +2413,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2543,9 +2425,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2556,12 +2436,7 @@
           "description": "Run AI-powered code review for your current changes",
           "longDescription": "Run CodeRabbit review workflows in Codex to inspect diffs, surface actionable findings, and turn review output into follow-up fixes.",
           "category": "Developer Tools",
-          "keywords": [
-            "code-review",
-            "ai",
-            "coderabbit",
-            "codex"
-          ],
+          "keywords": ["code-review", "ai", "coderabbit", "codex"],
           "author": {
             "name": "CodeRabbit AI",
             "email": "support@coderabbit.ai",
@@ -2580,9 +2455,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2594,9 +2467,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2680,9 +2551,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2694,9 +2563,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2707,14 +2574,7 @@
           "description": "Start from chat, then evaluate or benchmark locally",
           "longDescription": "Ask Codex to evaluate a plugin or skill, give you a full analysis of a named plugin such as game-studio, explain why it scored that way, show what to fix first, explain its token budget, measure real token usage, benchmark a plugin, or tell you what to run next. Plugin Eval keeps the path engineer-friendly: start with a natural chat request, then use the local `plugin-eval start` entrypoint or the routed workflow command it recommends.",
           "category": "Developer Tools",
-          "keywords": [
-            "codex",
-            "plugin",
-            "skill",
-            "evaluation",
-            "quality",
-            "budget"
-          ],
+          "keywords": ["codex", "plugin", "skill", "evaluation", "quality", "budget"],
           "author": {
             "name": "OpenAI Codex",
             "email": "support@openai.com",
@@ -2765,9 +2625,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2779,9 +2637,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -2812,10 +2668,7 @@
               "endpoint": "https://mcp.granola.ai/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2856,10 +2709,7 @@
               "endpoint": "https://mcp.monday.com/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2921,9 +2771,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -2991,9 +2839,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3005,9 +2851,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -3018,13 +2862,7 @@
           "description": "Manage and query databases",
           "longDescription": "Official Supabase plugin for Codex. Includes agent skills for Supabase development and Postgres best practices, plus MCP server integration for managing your Supabase projects directly from Codex.",
           "category": "Developer Tools",
-          "keywords": [
-            "supabase",
-            "postgres",
-            "database",
-            "backend",
-            "mcp"
-          ],
+          "keywords": ["supabase", "postgres", "database", "backend", "mcp"],
           "author": {
             "email": "support@supabase.io",
             "name": "Supabase",
@@ -3054,11 +2892,7 @@
               "endpoint": "https://mcp.supabase.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3080,13 +2914,7 @@
           "description": "Scan your codebase for risks",
           "longDescription": "Codex Security packages reusable workflows for security scans, analysis, validation, and investigation across code, diffs, and related artifacts.",
           "category": "Security",
-          "keywords": [
-            "security",
-            "code-review",
-            "diff-review",
-            "appsec",
-            "threat-modeling"
-          ],
+          "keywords": ["security", "code-review", "diff-review", "appsec", "threat-modeling"],
           "author": {
             "name": "OpenAI"
           },
@@ -3162,11 +2990,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3178,9 +3002,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_USE",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -3444,9 +3266,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3520,11 +3340,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3536,9 +3352,7 @@
             "policy": {
               "installation": "AVAILABLE",
               "authentication": "ON_INSTALL",
-              "products": [
-                "CODEX"
-              ]
+              "products": ["CODEX"]
             }
           }
         },
@@ -3568,10 +3382,7 @@
               "endpoint": "https://mcp.datadoghq.com/v1/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3840,13 +3651,7 @@
               "endpoint": "https://mcp.zoom.us/mcp/meeting/streamable"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "apps", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3908,9 +3713,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -3964,11 +3767,7 @@
               "endpoint": "https://mcp.airtable.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4066,9 +3865,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4127,11 +3924,7 @@
               "endpoint": "https://mcp.posthog.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4256,9 +4049,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4380,11 +4171,7 @@
               "endpoint": "https://setup.shopify.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4406,14 +4193,7 @@
           "description": "Find, install, and author MagicPath UI components from Codex",
           "longDescription": "Use MagicPath through the magicpath-ai CLI to search UI components, inspect source, install React and TypeScript components into applications, work with team projects and themes, and create or edit canvas components from local code.",
           "category": "Developer Tools",
-          "keywords": [
-            "magicpath",
-            "codex",
-            "ui-components",
-            "design",
-            "react",
-            "tailwind"
-          ],
+          "keywords": ["magicpath", "codex", "ui-components", "design", "react", "tailwind"],
           "author": {
             "name": "MagicPathAI",
             "url": "https://github.com/MagicPathAI"
@@ -4431,9 +4211,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4455,13 +4233,7 @@
           "description": "Set up OpenAI Ads Pixel and CAPI tracking",
           "longDescription": "Use OpenAI Ads Conversions to guide Codex through adding or extending Measurement Pixel and optional Conversions API instrumentation in a repository, with local verification helpers and guidance for safe secret handling, deduplication, attribution context, and setup reporting.",
           "category": "Developer Tools",
-          "keywords": [
-            "openai-ads",
-            "ads",
-            "conversions",
-            "measurement-pixel",
-            "capi"
-          ],
+          "keywords": ["openai-ads", "ads", "conversions", "measurement-pixel", "capi"],
           "author": {
             "name": "OpenAI",
             "email": "support@openai.com",
@@ -4480,9 +4252,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4564,9 +4334,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4632,11 +4400,7 @@
               "endpoint": "https://mcp.dropbox.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4729,10 +4493,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4875,11 +4636,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -4947,11 +4704,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5103,10 +4856,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "apps"
-          ],
+          "components": ["skills", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5165,10 +4915,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "apps"
-          ],
+          "components": ["skills", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5202,9 +4949,7 @@
           "sourceUrl": "https://github.com/openai/plugins/tree/d416fd5a43426019986b1e489506db3db66dee3d/plugins/lovable",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "apps"
-          ],
+          "components": ["apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5245,10 +4990,7 @@
               "endpoint": "https://mcp.clickup.com/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5289,10 +5031,7 @@
               "endpoint": "https://mcp.consensus.app/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "apps"
-          ],
+          "components": ["mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5343,10 +5082,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "apps"
-          ],
+          "components": ["skills", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5400,11 +5136,7 @@
               "endpoint": "https://mcp.higgsfield.ai/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5580,9 +5312,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5604,12 +5334,7 @@
           "description": "Brings together Adobe Creative Cloud tools for images, vectors, design, and video. Edit multiple assets at once, adapt for different platforms, and complete multi-step creative workflows for polished results.",
           "longDescription": "Brings together Adobe Creative Cloud tools for images, vectors, design, and video. Edit multiple assets at once, adapt for different platforms, and complete multi-step creative workflows for polished results.",
           "category": "design",
-          "keywords": [
-            "adobe",
-            "creative-cloud",
-            "image-editing",
-            "design"
-          ],
+          "keywords": ["adobe", "creative-cloud", "image-editing", "design"],
           "author": {
             "name": "Adobe"
           },
@@ -5661,10 +5386,7 @@
               "endpoint": "https://adobe-creativity.adobe.io/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5699,10 +5421,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/agent-sdk-dev",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "agents",
-            "commands"
-          ],
+          "components": ["agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -5718,12 +5437,7 @@
           "description": "Agentforce Agent Development Life Cycle — author, discover, scaffold, deploy, test, secure, and optimize .agent files",
           "longDescription": "Agentforce Agent Development Life Cycle — author, discover, scaffold, deploy, test, secure, and optimize .agent files",
           "category": "development",
-          "keywords": [
-            "agentforce",
-            "agent-script",
-            "salesforce",
-            "adlc"
-          ],
+          "keywords": ["agentforce", "agent-script", "salesforce", "adlc"],
           "author": {
             "name": "SalesforceAIResearch"
           },
@@ -5748,11 +5462,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6049,11 +5759,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6115,10 +5821,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6221,10 +5924,7 @@
               "endpoint": "https://mcp.airtable.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6303,10 +6003,7 @@
               "endpoint": "https://mcp.airwallex.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6381,10 +6078,7 @@
               "endpoint": "https://mcp.sandbox.airwallex.com/developer"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6444,10 +6138,7 @@
               "endpoint": "https://mcp.aiven.live/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6487,9 +6178,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6538,10 +6227,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6592,11 +6278,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "commands"
-          ],
+          "components": ["skills", "hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6654,10 +6336,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6724,9 +6403,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6914,10 +6591,7 @@
               "endpoint": "https://mcp.amplitude.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -6985,10 +6659,7 @@
               "endpoint": "https://mcp.apollo.io/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7101,11 +6772,7 @@
               "endpoint": "https://mcp.apollographql.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "lsp"
-          ],
+          "components": ["skills", "mcp", "lsp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7125,12 +6792,7 @@
           "description": "Appwrite tools for Claude Code, including SDK skills, the hosted Appwrite MCP server, and deployment commands.",
           "longDescription": "Appwrite tools for Claude Code, including SDK skills, the hosted Appwrite MCP server, and deployment commands.",
           "category": "development",
-          "keywords": [
-            "appwrite",
-            "claude-code",
-            "mcp",
-            "skills"
-          ],
+          "keywords": ["appwrite", "claude-code", "mcp", "skills"],
           "author": {
             "name": "Appwrite",
             "email": "team@appwrite.io"
@@ -7195,11 +6857,7 @@
               "endpoint": "https://mcp.appwrite.io/"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7231,9 +6889,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/external_plugins/asana",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "commands"
-          ],
+          "components": ["commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7400,9 +7056,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7453,9 +7107,7 @@
               "endpoint": "https://mcp.atlan.com/mcp"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7543,10 +7195,7 @@
               "endpoint": "https://mcp.atlassian.com/v2/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7603,9 +7252,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7667,10 +7314,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7709,9 +7353,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7828,10 +7470,7 @@
               "endpoint": "https://knowledge-mcp.global.api.aws"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -7962,11 +7601,7 @@
               "endpoint": "https://connect.aidevops.${DEVOPS_AGENT_REGION:-us-east-1}.api.aws/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -8021,10 +7656,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -8265,10 +7897,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -8388,10 +8017,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -8475,11 +8101,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -8640,12 +8262,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -8714,10 +8331,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9085,11 +8699,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9135,11 +8745,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9249,9 +8855,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9331,9 +8935,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9507,10 +9109,7 @@
               "endpoint": "https://mcp.bigdata.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9557,10 +9156,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9638,9 +9234,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9662,13 +9256,7 @@
           "description": "Box Plugin for Claude Code to help with Box Platform integrations including content workflows, shared links, webhooks, metadata, and Box AI retrieval.",
           "longDescription": "Box Plugin for Claude Code to help with Box Platform integrations including content workflows, shared links, webhooks, metadata, and Box AI retrieval.",
           "category": "productivity",
-          "keywords": [
-            "box",
-            "content",
-            "cloud-storage",
-            "file-management",
-            "collaboration"
-          ],
+          "keywords": ["box", "content", "cloud-storage", "file-management", "collaboration"],
           "author": {
             "name": "Box"
           },
@@ -9701,9 +9289,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9872,9 +9458,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9914,9 +9498,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -9975,9 +9557,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10068,10 +9648,7 @@
               "endpoint": "https://mcp.canva.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10111,9 +9688,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10133,13 +9708,7 @@
           "description": "Carta Cap Table plugin — skills and hooks for querying cap tables, grants, SAFEs, 409A valuations, waterfall scenarios, and more",
           "longDescription": "Carta Cap Table plugin — skills and hooks for querying cap tables, grants, SAFEs, 409A valuations, waterfall scenarios, and more",
           "category": "productivity",
-          "keywords": [
-            "cap_table",
-            "mcp",
-            "carta",
-            "equity",
-            "grants"
-          ],
+          "keywords": ["cap_table", "mcp", "carta", "equity", "grants"],
           "author": {
             "name": "Carta",
             "email": "engineering@carta.com"
@@ -10241,10 +9810,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10399,10 +9965,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10516,10 +10079,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10637,12 +10197,7 @@
               "endpoint": "https://catalyst.zohomcp.com/mcp/message"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10662,12 +10217,7 @@
           "description": "Model Context Protocol (MCP) server for AI-assisted development of CAP applications.",
           "longDescription": "Model Context Protocol (MCP) server for AI-assisted development of CAP applications.",
           "category": "development",
-          "keywords": [
-            "sap",
-            "cap",
-            "cds",
-            "mcp"
-          ],
+          "keywords": ["sap", "cap", "cds", "mcp"],
           "author": {
             "name": "SAP SE"
           },
@@ -10686,9 +10236,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10750,10 +10298,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10773,15 +10318,7 @@
           "description": "Ship stablecoin apps faster. Best-practice skills for USDC payments, cross-chain transfers, wallets, and smart contracts — plus Circle's MCP server for real-time SDK and documentation guidance.",
           "longDescription": "Ship stablecoin apps faster. Best-practice skills for USDC payments, cross-chain transfers, wallets, and smart contracts — plus Circle's MCP server for real-time SDK and documentation guidance.",
           "category": "development",
-          "keywords": [
-            "usdc",
-            "stablecoin",
-            "circle",
-            "cctp",
-            "wallets",
-            "web3",
-            "payments"
-          ],
+          "keywords": ["usdc", "stablecoin", "circle", "cctp", "wallets", "web3", "payments"],
           "author": {
             "name": "Circle Technology Services"
           },
@@ -10873,10 +10410,7 @@
               "endpoint": "https://api.circle.com/v1/codegen/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10917,9 +10451,7 @@
               "endpoint": "https://circleback.ai/api/mcp"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -10978,9 +10510,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11047,9 +10577,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11083,10 +10611,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "commands"
-          ],
+          "components": ["skills", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11129,11 +10654,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11149,13 +10670,7 @@
           "description": "ClickHouse Claude Code plugin: skills (ClickHouse best practices), rules and MCP.",
           "longDescription": "ClickHouse Claude Code plugin: skills (ClickHouse best practices), rules and MCP.",
           "category": "database",
-          "keywords": [
-            "database",
-            "clickhouse",
-            "skills",
-            "mcp",
-            "analytics"
-          ],
+          "keywords": ["database", "clickhouse", "skills", "mcp", "analytics"],
           "author": {
             "name": "ClickHouse",
             "email": "ai@clickhouse.com"
@@ -11184,10 +10699,7 @@
               "endpoint": "https://mcp.clickhouse.cloud/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11272,9 +10784,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11314,9 +10824,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11356,9 +10864,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11398,9 +10904,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11492,11 +10996,7 @@
               "endpoint": "https://mcp.cloudflare.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11551,10 +11051,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11753,12 +11250,7 @@
               "endpoint": "https://cockroachlabs.cloud/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11791,10 +11283,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/code-modernization",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "agents",
-            "commands"
-          ],
+          "components": ["agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11823,9 +11312,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/code-review",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "commands"
-          ],
+          "components": ["commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11854,9 +11341,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/code-simplifier",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "agents"
-          ],
+          "components": ["agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11872,12 +11357,7 @@
           "description": "AI-powered code review in Claude Code, powered by CodeRabbit",
           "longDescription": "AI-powered code review in Claude Code, powered by CodeRabbit",
           "category": "productivity",
-          "keywords": [
-            "code-review",
-            "ai",
-            "coderabbit",
-            "claude-code"
-          ],
+          "keywords": ["code-review", "ai", "coderabbit", "claude-code"],
           "author": {
             "name": "CodeRabbit AI",
             "email": "support@coderabbit.ai",
@@ -11900,11 +11380,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11924,13 +11400,7 @@
           "description": "CodSpeed plugin for Claude Code helping with performance measurement and optimization.",
           "longDescription": "CodSpeed plugin for Claude Code helping with performance measurement and optimization.",
           "category": "development",
-          "keywords": [
-            "codspeed",
-            "performance",
-            "profiling",
-            "optimization",
-            "benchmarking"
-          ],
+          "keywords": ["codspeed", "performance", "profiling", "optimization", "benchmarking"],
           "author": {
             "name": "CodSpeed"
           },
@@ -11958,10 +11428,7 @@
               "endpoint": "https://mcp.codspeed.io/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -11994,9 +11461,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/commit-commands",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "commands"
-          ],
+          "components": ["commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12012,13 +11477,7 @@
           "description": "Access Confidence feature flags, experiments, and migration tools directly from Claude Code.",
           "longDescription": "Access Confidence feature flags, experiments, and migration tools directly from Claude Code.",
           "category": "development",
-          "keywords": [
-            "feature-flags",
-            "experiments",
-            "a/b-testing",
-            "migration",
-            "openfeature"
-          ],
+          "keywords": ["feature-flags", "experiments", "a/b-testing", "migration", "openfeature"],
           "author": {
             "name": "Spotify Confidence",
             "url": "https://confidence.spotify.com"
@@ -12101,11 +11560,7 @@
               "endpoint": "https://mcp.confidence.dev/mcp/docs"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12144,9 +11599,7 @@
               "endpoint": "https://mcp.context7.com/mcp?client=claude-code-plugin"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12267,13 +11720,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12331,9 +11778,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12421,10 +11866,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12493,10 +11935,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12545,15 +11984,7 @@
           "description": "Seamless onboarding for the Code-with-Claude Makers Cardputer: one /maker-setup command clones the build-with-claude repo, flashes UIFlow firmware, and installs the Claude Buddy app bundle onto a freshly-plugged-in M5Stack Cardputer-Adv.",
           "longDescription": "Seamless onboarding for the Code-with-Claude Makers Cardputer: one /maker-setup command clones the build-with-claude repo, flashes UIFlow firmware, and installs the Claude Buddy app bundle onto a freshly-plugged-in M5Stack Cardputer-Adv.",
           "category": "productivity",
-          "keywords": [
-            "cardputer",
-            "m5stack",
-            "esp32",
-            "hardware",
-            "maker",
-            "onboarding",
-            "cwc"
-          ],
+          "keywords": ["cardputer", "m5stack", "esp32", "hardware", "maker", "onboarding", "cwc"],
           "author": {
             "name": "Anthropic",
             "email": "support@anthropic.com"
@@ -12575,10 +12006,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "commands"
-          ],
+          "components": ["skills", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12594,13 +12022,7 @@
           "description": "OpenTelemetry observability for Claude Code sessions. Captures tool calls, LLM invocations, token usage, and errors as OTel traces.",
           "longDescription": "OpenTelemetry observability for Claude Code sessions. Captures tool calls, LLM invocations, token usage, and errors as OTel traces.",
           "category": "monitoring",
-          "keywords": [
-            "observability",
-            "tracing",
-            "opentelemetry",
-            "dash0",
-            "otel"
-          ],
+          "keywords": ["observability", "tracing", "opentelemetry", "dash0", "otel"],
           "author": {
             "name": "Dash0"
           },
@@ -12633,9 +12055,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12806,9 +12226,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -12974,10 +12392,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13148,9 +12563,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13220,11 +12633,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13418,11 +12827,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "commands"
-          ],
+          "components": ["skills", "hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13444,13 +12849,7 @@
           "description": "Use Datadog directly in Claude Code through a preconfigured Datadog MCP server. Query logs, metrics, traces, dashboards, and more through natural conversation. This plugin is in preview.",
           "longDescription": "Use Datadog directly in Claude Code through a preconfigured Datadog MCP server. Query logs, metrics, traces, dashboards, and more through natural conversation. This plugin is in preview.",
           "category": "monitoring",
-          "keywords": [
-            "datadog",
-            "infrastructure",
-            "mcp",
-            "observability",
-            "productivity"
-          ],
+          "keywords": ["datadog", "infrastructure", "mcp", "observability", "productivity"],
           "author": {
             "name": "Datadog"
           },
@@ -13483,11 +12882,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13572,11 +12967,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13616,9 +13007,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13719,9 +13108,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13741,12 +13128,7 @@
           "description": "Microsoft Dataverse plugin for coding agents, covering record CRUD, bulk data operations, advanced queries, schema and metadata, administration, security, environment management, and solution lifecycle through MCP, CLI, and SDK workflows.",
           "longDescription": "Microsoft Dataverse plugin for coding agents, covering record CRUD, bulk data operations, advanced queries, schema and metadata, administration, security, environment management, and solution lifecycle through MCP, CLI, and SDK workflows.",
           "category": "database",
-          "keywords": [
-            "dataverse",
-            "mcp",
-            "power-platform",
-            "dynamics-365"
-          ],
+          "keywords": ["dataverse", "mcp", "power-platform", "dynamics-365"],
           "author": {
             "name": "Microsoft",
             "url": "https://www.microsoft.com"
@@ -13796,9 +13178,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13820,14 +13200,7 @@
           "description": "Skills for adding DeepEval evaluations, tracing, datasets, Confident AI reports, and iterative improvement loops to AI applications.",
           "longDescription": "Skills for adding DeepEval evaluations, tracing, datasets, Confident AI reports, and iterative improvement loops to AI applications.",
           "category": "development",
-          "keywords": [
-            "deepeval",
-            "llm",
-            "evaluation",
-            "tracing",
-            "datasets",
-            "confident-ai"
-          ],
+          "keywords": ["deepeval", "llm", "evaluation", "tracing", "datasets", "confident-ai"],
           "author": {
             "name": "Confident AI",
             "email": "open-source@confident-ai.com"
@@ -13853,9 +13226,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13929,11 +13300,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -13989,12 +13356,7 @@
           "description": "Discord channel for Claude Code — messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /discord:access.",
           "longDescription": "Discord channel for Claude Code — messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /discord:access.",
           "category": "productivity",
-          "keywords": [
-            "discord",
-            "messaging",
-            "channel",
-            "mcp"
-          ],
+          "keywords": ["discord", "messaging", "channel", "mcp"],
           "author": null,
           "version": "0.0.4",
           "license": null,
@@ -14020,10 +13382,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14163,13 +13522,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14258,10 +13611,7 @@
               "endpoint": "https://mcp.dropbox.com/claude_app_mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14351,9 +13701,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14483,10 +13831,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14535,10 +13880,7 @@
               "endpoint": "https://mcp.exa.ai/mcp?client=claude-code-plugin"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14571,9 +13913,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/explanatory-output-style",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "hooks"
-          ],
+          "components": ["hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14706,12 +14046,7 @@
               "endpoint": "https://mcp.expo.dev/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14733,14 +14068,7 @@
           "description": "Localhost iMessage-style web chat for Claude Code — test surface with file upload and edits. No tokens, no access control.",
           "longDescription": "Localhost iMessage-style web chat for Claude Code — test surface with file upload and edits. No tokens, no access control.",
           "category": "development",
-          "keywords": [
-            "fakechat",
-            "web",
-            "localhost",
-            "testing",
-            "channel",
-            "mcp"
-          ],
+          "keywords": ["fakechat", "web", "localhost", "testing", "channel", "mcp"],
           "author": null,
           "version": "0.0.1",
           "license": null,
@@ -14757,9 +14085,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14775,13 +14101,7 @@
           "description": "Fastly development tools and platform skills",
           "longDescription": "Fastly development tools and platform skills",
           "category": null,
-          "keywords": [
-            "fastly",
-            "edge",
-            "compute",
-            "vcl",
-            "cdn"
-          ],
+          "keywords": ["fastly", "edge", "compute", "vcl", "cdn"],
           "author": {
             "name": "Fastly"
           },
@@ -14834,9 +14154,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14869,10 +14187,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/feature-dev",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "agents",
-            "commands"
-          ],
+          "components": ["agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -14980,11 +14295,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15088,10 +14399,7 @@
               "endpoint": "https://mcp.figma.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15130,9 +14438,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15209,10 +14515,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "commands"
-          ],
+          "components": ["skills", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15252,9 +14555,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15324,10 +14625,7 @@
               "endpoint": "https://mcp.atlassian.com/v1/ads/public/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15365,9 +14663,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15420,11 +14716,7 @@
               "endpoint": "https://api.fullstory.com/mcp/fullstory"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15444,13 +14736,7 @@
           "description": "Work in your GC AI legal knowledge base from Claude: upload documents, run review playbooks, and ask questions grounded in your own files, all as you.",
           "longDescription": "Work in your GC AI legal knowledge base from Claude: upload documents, run review playbooks, and ask questions grounded in your own files, all as you.",
           "category": "productivity",
-          "keywords": [
-            "legal",
-            "contracts",
-            "document-review",
-            "playbooks",
-            "gc-ai"
-          ],
+          "keywords": ["legal", "contracts", "document-review", "playbooks", "gc-ai"],
           "author": {
             "name": "GC AI",
             "email": "support@gc.ai",
@@ -15484,11 +14770,7 @@
               "endpoint": "https://app.gc.ai/api/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15527,9 +14809,7 @@
               "endpoint": "https://api.githubcopilot.com/mcp/"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15557,9 +14837,7 @@
           "sourceUrl": "https://github.com/gitkraken/claude-plugin/tree/f7a53b2cd138c22eccb977b9d93494ea6d423d12/",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15598,9 +14876,7 @@
               "endpoint": "https://gitlab.com/api/v4/mcp"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15657,10 +14933,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15709,12 +14982,7 @@
           "description": "Skills and rules for developing and using the Grafana Assistant app and CLI.",
           "longDescription": "Skills and rules for developing and using the Grafana Assistant app and CLI.",
           "category": "monitoring",
-          "keywords": [
-            "grafana",
-            "assistant",
-            "a2a",
-            "cli"
-          ],
+          "keywords": ["grafana", "assistant", "a2a", "cli"],
           "author": {
             "name": "Grafana Labs",
             "email": "grafana-assistant@grafana.com"
@@ -15732,9 +15000,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15789,10 +15055,7 @@
               "endpoint": "https://mcp.grafana.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15814,14 +15077,7 @@
           "description": "MCP server for AI-assisted Grafana dashboard, datasource, alerting, and incident management.",
           "longDescription": "MCP server for AI-assisted Grafana dashboard, datasource, alerting, and incident management.",
           "category": "monitoring",
-          "keywords": [
-            "grafana",
-            "mcp",
-            "observability",
-            "dashboards",
-            "prometheus",
-            "loki"
-          ],
+          "keywords": ["grafana", "mcp", "observability", "dashboards", "prometheus", "loki"],
           "author": {
             "name": "Grafana Labs",
             "email": "grafana-assistant@grafana.com"
@@ -15846,10 +15102,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15871,14 +15124,7 @@
           "description": "AI code review agent for GitHub and GitLab. View and resolve Greptile's PR review comments, run reviews on your working branch, and search your organization's knowledge base and coding patterns, directly from Claude Code.",
           "longDescription": "AI code review agent for GitHub and GitLab. View and resolve Greptile's PR review comments, run reviews on your working branch, and search your organization's knowledge base and coding patterns, directly from Claude Code.",
           "category": "development",
-          "keywords": [
-            "code-review",
-            "pull-requests",
-            "github",
-            "gitlab",
-            "knowledge-base",
-            "ai"
-          ],
+          "keywords": ["code-review", "pull-requests", "github", "gitlab", "knowledge-base", "ai"],
           "author": {
             "name": "Greptile",
             "url": "https://greptile.com"
@@ -15898,10 +15144,7 @@
               "endpoint": "https://api.greptile.com/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "commands"
-          ],
+          "components": ["mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -15923,12 +15166,7 @@
           "description": "Domain skills for the full GrowthBook feature flag, experimentation, and product analytics lifecycle.",
           "longDescription": "Domain skills for the full GrowthBook feature flag, experimentation, and product analytics lifecycle.",
           "category": "testing",
-          "keywords": [
-            "growthbook",
-            "feature-flags",
-            "experimentation",
-            "ab-testing"
-          ],
+          "keywords": ["growthbook", "feature-flags", "experimentation", "ab-testing"],
           "author": {
             "name": "GrowthBook",
             "url": "https://growthbook.io"
@@ -15958,9 +15196,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16054,13 +15290,7 @@
               "endpoint": "https://mcp.honeycomb.io/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16100,12 +15330,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16170,10 +15395,7 @@
               "endpoint": "https://mcp.hostinger.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16193,15 +15415,7 @@
           "description": "Core Hugging Face Hub operations through the hf CLI, including skill installation, repo management, jobs, datasets, models, Spaces, and discovery.",
           "longDescription": "Core Hugging Face Hub operations through the hf CLI, including skill installation, repo management, jobs, datasets, models, Spaces, and discovery.",
           "category": "development",
-          "keywords": [
-            "huggingface",
-            "machine-learning",
-            "hub",
-            "cli",
-            "skills",
-            "jobs",
-            "llm"
-          ],
+          "keywords": ["huggingface", "machine-learning", "hub", "cli", "skills", "jobs", "llm"],
           "author": {
             "name": "Hugging Face"
           },
@@ -16325,10 +15539,7 @@
               "endpoint": "https://huggingface.co/mcp?login"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16433,10 +15644,7 @@
               "endpoint": "https://mcp.hunter.io/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16608,9 +15816,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16632,12 +15838,7 @@
           "description": "iMessage channel for Claude Code — reads chat.db directly, sends via AppleScript. Built-in access control; manage pairing, allowlists, and policy via /imessage:access.",
           "longDescription": "iMessage channel for Claude Code — reads chat.db directly, sends via AppleScript. Built-in access control; manage pairing, allowlists, and policy via /imessage:access.",
           "category": "productivity",
-          "keywords": [
-            "imessage",
-            "messaging",
-            "channel",
-            "mcp"
-          ],
+          "keywords": ["imessage", "messaging", "channel", "mcp"],
           "author": null,
           "version": "0.1.0",
           "license": null,
@@ -16663,10 +15864,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16727,10 +15925,7 @@
               "endpoint": "https://mcp.intercom.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16841,11 +16036,7 @@
               "endpoint": "${JFROG_URL}/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16885,9 +16076,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16948,9 +16137,7 @@
           "sourceUrl": "https://github.com/langfuse/claude-observability-plugin/tree/ece30fee77831df36503b9bbb6d11b78f64d698f/",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "hooks"
-          ],
+          "components": ["hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -16989,9 +16176,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17024,9 +16209,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17061,9 +16244,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/learning-output-style",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "hooks"
-          ],
+          "components": ["hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17104,11 +16285,7 @@
               "endpoint": "https://www.legalzoom.com/mcp/claude/v1"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17149,9 +16326,7 @@
               "endpoint": "https://mcp.linear.app/mcp"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17167,12 +16342,7 @@
           "description": "LSP integration for Shopify Liquid templates via the Shopify CLI theme language server",
           "longDescription": "LSP integration for Shopify Liquid templates via the Shopify CLI theme language server",
           "category": "development",
-          "keywords": [
-            "lsp",
-            "liquid",
-            "shopify",
-            "theme"
-          ],
+          "keywords": ["lsp", "liquid", "shopify", "theme"],
           "author": {
             "name": "James Meng"
           },
@@ -17184,9 +16354,7 @@
           "sourceUrl": "https://github.com/Shopify/liquid-skills/tree/ae3e4cc3f454923e388bbd841fd931f0c7bf5be4/plugins/liquid-lsp",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "lsp"
-          ],
+          "components": ["lsp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17208,14 +16376,7 @@
           "description": "Liquid language fundamentals, CSS/JS/HTML coding standards, and WCAG accessibility patterns for Shopify themes",
           "longDescription": "Liquid language fundamentals, CSS/JS/HTML coding standards, and WCAG accessibility patterns for Shopify themes",
           "category": "development",
-          "keywords": [
-            "liquid",
-            "shopify",
-            "theme",
-            "accessibility",
-            "css",
-            "javascript"
-          ],
+          "keywords": ["liquid", "shopify", "theme", "accessibility", "css", "javascript"],
           "author": {
             "name": "Shopify"
           },
@@ -17240,9 +16401,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17309,11 +16468,7 @@
               "endpoint": "${LOGFIRE_MCP_URL:-https://logfire-us.pydantic.dev/mcp}"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17335,13 +16490,7 @@
           "description": "Connect Claude Code to LogRocket to query session replays, metrics, issues, and user behavior using natural language.",
           "longDescription": "Connect Claude Code to LogRocket to query session replays, metrics, issues, and user behavior using natural language.",
           "category": "monitoring",
-          "keywords": [
-            "logrocket",
-            "session-replay",
-            "analytics",
-            "mcp",
-            "galileo"
-          ],
+          "keywords": ["logrocket", "session-replay", "analytics", "mcp", "galileo"],
           "author": {
             "name": "LogRocket",
             "email": "support@logrocket.com"
@@ -17366,10 +16515,7 @@
               "endpoint": "https://mcp.logrocket.com/mcp?toolsets=all"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17417,9 +16563,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17439,13 +16583,7 @@
           "description": "Build, iterate on, deploy, and manage Lovable apps from Claude Code. Bundles the official Lovable MCP server (remote, OAuth 2.1) and adds focused commands for the common build/iterate/database workflows, with credit- and publish-safety prompts.",
           "longDescription": "Build, iterate on, deploy, and manage Lovable apps from Claude Code. Bundles the official Lovable MCP server (remote, OAuth 2.1) and adds focused commands for the common build/iterate/database workflows, with credit- and publish-safety prompts.",
           "category": "development",
-          "keywords": [
-            "lovable",
-            "app-builder",
-            "deploy",
-            "full-stack",
-            "mcp"
-          ],
+          "keywords": ["lovable", "app-builder", "deploy", "full-stack", "mcp"],
           "author": {
             "name": "Lovable",
             "url": "https://lovable.dev"
@@ -17465,10 +16603,7 @@
               "endpoint": "https://mcp.lovable.dev/?src=cc-plugin"
             }
           ],
-          "components": [
-            "mcp",
-            "commands"
-          ],
+          "components": ["mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17517,14 +16652,7 @@
           "description": "Precise local semantic code search via MCP. Indexes your codebase with Go AST parsing, embeds with Ollama or LM Studio, and exposes vector search to Claude through an MCP server — no cloud, no npm.",
           "longDescription": "Precise local semantic code search via MCP. Indexes your codebase with Go AST parsing, embeds with Ollama or LM Studio, and exposes vector search to Claude through an MCP server — no cloud, no npm.",
           "category": "development",
-          "keywords": [
-            "semantic-search",
-            "code-index",
-            "mcp",
-            "embeddings",
-            "ollama",
-            "rag"
-          ],
+          "keywords": ["semantic-search", "code-index", "mcp", "embeddings", "ollama", "rag"],
           "author": {
             "name": "Ory Corp",
             "url": "https://github.com/ory"
@@ -17565,11 +16693,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17649,10 +16773,7 @@
               "endpoint": "https://mcp.lusha.com/mcp/claude"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17672,14 +16793,7 @@
           "description": "Mapbox skills and MCP servers for building location-aware applications with AI. Includes geospatial tools, style management, and patterns for web, iOS, Android, and AI agent frameworks.",
           "longDescription": "Mapbox skills and MCP servers for building location-aware applications with AI. Includes geospatial tools, style management, and patterns for web, iOS, Android, and AI agent frameworks.",
           "category": "location",
-          "keywords": [
-            "mapbox",
-            "maps",
-            "geospatial",
-            "location",
-            "mcp",
-            "gis"
-          ],
+          "keywords": ["mapbox", "maps", "geospatial", "location", "mcp", "gis"],
           "author": {
             "name": "Mapbox",
             "url": "https://mapbox.com"
@@ -17792,10 +16906,7 @@
               "endpoint": "https://mcp-docs.mapbox.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -17833,9 +16944,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18021,9 +17130,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18043,13 +17150,7 @@
           "description": "Claude Code skill for building MCP Apps with interactive UIs",
           "longDescription": "Claude Code skill for building MCP Apps with interactive UIs",
           "category": "development",
-          "keywords": [
-            "mcp",
-            "mcp-apps",
-            "model-context-protocol",
-            "ui",
-            "interactive"
-          ],
+          "keywords": ["mcp", "mcp-apps", "model-context-protocol", "ui", "interactive"],
           "author": {
             "name": "MCP Apps"
           },
@@ -18078,9 +17179,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18128,9 +17227,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18159,9 +17256,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/mcp-tunnels",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "commands"
-          ],
+          "components": ["commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18229,13 +17324,7 @@
               "endpoint": "https://mcp.mercadopago.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18311,9 +17400,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18381,10 +17468,7 @@
               "endpoint": "https://learn.microsoft.com/api/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18513,11 +17597,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18561,10 +17641,7 @@
               "endpoint": "https://mintlify.com/docs/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18670,10 +17747,7 @@
               "endpoint": "https://mcp.miro.com/"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18716,9 +17790,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18799,10 +17871,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18896,10 +17965,7 @@
               "endpoint": "https://mcp.monday.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -18921,12 +17987,7 @@
           "description": "Connect to any MongoDB deployment (Community, Enterprise Advanced, local dev container via Atlas CLI or Atlas clusters) through a self-managed MongoDB MCP Server using your connection string. Explore data, manage collections, optimize queries, and generate reliable code with MongoDB best practices.",
           "longDescription": "Connect to any MongoDB deployment (Community, Enterprise Advanced, local dev container via Atlas CLI or Atlas clusters) through a self-managed MongoDB MCP Server using your connection string. Explore data, manage collections, optimize queries, and generate reliable code with MongoDB best practices.",
           "category": "database",
-          "keywords": [
-            "mongodb",
-            "database",
-            "mcp",
-            "vector-search"
-          ],
+          "keywords": ["mongodb", "database", "mcp", "vector-search"],
           "author": {
             "name": "MongoDB",
             "email": "agent-plugins@mongodb.com",
@@ -18997,10 +18058,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19022,13 +18080,7 @@
           "description": "Connect to MongoDB Atlas clusters only through the Atlas Managed MCP Server. Sign in with your Atlas account to explore data, manage collections, optimize queries, generate reliable code with MongoDB best practices, and manage Atlas resources such as clusters, projects, database users, and network access.\n\nIf you are running a different MongoDB deployment or want to run a local MongoDB MCP Server, install the MongoDB (Self-Managed MCP) plugin instead.",
           "longDescription": "Connect to MongoDB Atlas clusters only through the Atlas Managed MCP Server. Sign in with your Atlas account to explore data, manage collections, optimize queries, generate reliable code with MongoDB best practices, and manage Atlas resources such as clusters, projects, database users, and network access.\n\nIf you are running a different MongoDB deployment or want to run a local MongoDB MCP Server, install the MongoDB (Self-Managed MCP) plugin instead.",
           "category": "database",
-          "keywords": [
-            "mongodb",
-            "atlas",
-            "database",
-            "mcp",
-            "vector-search"
-          ],
+          "keywords": ["mongodb", "atlas", "database", "mcp", "vector-search"],
           "author": {
             "name": "MongoDB",
             "email": "agent-plugins@mongodb.com",
@@ -19098,11 +18150,7 @@
               "endpoint": "https://mcp.mongodb.com/"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "apps"
-          ],
+          "components": ["skills", "mcp", "apps"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19124,14 +18172,7 @@
           "description": "Manage your Neon backend with the Neon agent skills and the Neon MCP Server: Lakebase Postgres, branching, Object Storage, Functions, and the AI Gateway",
           "longDescription": "Manage your Neon backend with the Neon agent skills and the Neon MCP Server: Lakebase Postgres, branching, Object Storage, Functions, and the AI Gateway",
           "category": "database",
-          "keywords": [
-            "neon",
-            "lakebase",
-            "postgres",
-            "serverless",
-            "database",
-            "mcp"
-          ],
+          "keywords": ["neon", "lakebase", "postgres", "serverless", "database", "mcp"],
           "author": {
             "name": "Neon",
             "url": "https://neon.com"
@@ -19173,10 +18214,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19402,10 +18440,7 @@
               "endpoint": "https://netlify-mcp.netlify.app/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19425,11 +18460,7 @@
           "description": "Guide AI assistants using NetSuite AI Connector.",
           "longDescription": "Guide AI assistants using NetSuite AI Connector.",
           "category": "productivity",
-          "keywords": [
-            "netsuite",
-            "aiconnector",
-            "mcp"
-          ],
+          "keywords": ["netsuite", "aiconnector", "mcp"],
           "author": {
             "name": "Oracle NetSuite",
             "url": "https://www.netsuite.com"
@@ -19447,9 +18478,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19471,11 +18500,7 @@
           "description": "Deliver Director-level finance analysis on live NetSuite data.",
           "longDescription": "Deliver Director-level finance analysis on live NetSuite data.",
           "category": "productivity",
-          "keywords": [
-            "netsuite",
-            "finance",
-            "mcp"
-          ],
+          "keywords": ["netsuite", "finance", "mcp"],
           "author": {
             "name": "Oracle NetSuite",
             "url": "https://www.netsuite.com"
@@ -19493,9 +18518,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19517,13 +18540,7 @@
           "description": "Develop NetSuite SuiteCloud solutions with SuiteScript, SDF, and best practices.",
           "longDescription": "Develop NetSuite SuiteCloud solutions with SuiteScript, SDF, and best practices.",
           "category": "development",
-          "keywords": [
-            "netsuite",
-            "suitecloud",
-            "suitescript",
-            "sdf",
-            "uif"
-          ],
+          "keywords": ["netsuite", "suitecloud", "suitescript", "sdf", "uif"],
           "author": {
             "name": "Oracle NetSuite",
             "url": "https://www.netsuite.com"
@@ -19569,9 +18586,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19626,10 +18641,7 @@
               "endpoint": "https://mcp.newrelic.com/mcp/"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19691,9 +18703,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19810,12 +18820,7 @@
               "endpoint": "https://mcp.nimbleway.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19877,9 +18882,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19938,11 +18941,7 @@
               "endpoint": "https://mcp.notion.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -19996,9 +18995,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20105,11 +19102,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20330,10 +19323,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20514,9 +19504,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20558,9 +19546,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20794,11 +19780,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20839,10 +19821,7 @@
               "endpoint": "https://mcp.pagerduty.com/mcp"
             }
           ],
-          "components": [
-            "mcp",
-            "commands"
-          ],
+          "components": ["mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -20900,12 +19879,7 @@
               "endpoint": "https://mcp.sandbox.paypal.com/sse"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21022,10 +19996,7 @@
               "endpoint": "https://pigment.app/api/mcp/public/{your-mcp-id}"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21117,12 +20088,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21160,12 +20126,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21281,10 +20242,7 @@
               "endpoint": "https://mcp.pscale.dev/mcp/planetscale"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21322,9 +20280,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21359,9 +20315,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -21419,11 +20373,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22126,13 +21076,7 @@
               "endpoint": "https://mcp.posthog.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22188,9 +21132,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22286,12 +21228,7 @@
               "endpoint": "https://mcp.postman.com/${POSTMAN_MCP_MODE:-mcp}"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22324,10 +21261,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/pr-review-toolkit",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "agents",
-            "commands"
-          ],
+          "components": ["agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22374,9 +21308,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22423,9 +21355,7 @@
               "endpoint": "https://mcp.prisma.io/mcp"
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22463,9 +21393,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22499,9 +21427,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22689,9 +21615,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22711,13 +21635,7 @@
           "description": "Qodo setup, code intelligence, and review workflows.",
           "longDescription": "Qodo setup, code intelligence, and review workflows.",
           "category": "development",
-          "keywords": [
-            "qodo",
-            "code-review",
-            "code-intelligence",
-            "standards",
-            "coding-agents"
-          ],
+          "keywords": ["qodo", "code-review", "code-intelligence", "standards", "coding-agents"],
           "author": {
             "name": "Qodo",
             "email": "support@qodo.ai",
@@ -22752,9 +21670,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22776,13 +21692,7 @@
           "description": "Optional Qodo rules discovery and standards administration workflows.",
           "longDescription": "Optional Qodo rules discovery and standards administration workflows.",
           "category": "development",
-          "keywords": [
-            "qodo",
-            "code-review",
-            "code-intelligence",
-            "standards",
-            "coding-agents"
-          ],
+          "keywords": ["qodo", "code-review", "code-intelligence", "standards", "coding-agents"],
           "author": {
             "name": "Qodo",
             "email": "support@qodo.ai",
@@ -22805,9 +21715,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22897,10 +21805,7 @@
               "endpoint": "https://qt-docs-mcp.qt.io/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22920,13 +21825,7 @@
           "description": "MCP server for AI coding agents to create, manage, and interact with Quarkus applications. Provides tools for project scaffolding, dev mode lifecycle, extension skills, Dev MCP proxy, and documentation search.",
           "longDescription": "MCP server for AI coding agents to create, manage, and interact with Quarkus applications. Provides tools for project scaffolding, dev mode lifecycle, extension skills, Dev MCP proxy, and documentation search.",
           "category": "development",
-          "keywords": [
-            "quarkus",
-            "java",
-            "mcp",
-            "dev-mode",
-            "scaffolding"
-          ],
+          "keywords": ["quarkus", "java", "mcp", "dev-mode", "scaffolding"],
           "author": {
             "name": "Quarkus",
             "url": "https://quarkus.io"
@@ -22946,9 +21845,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -22993,11 +21890,7 @@
               "endpoint": "https://mcp.railway.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23032,10 +21925,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/ralph-loop",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "hooks",
-            "commands"
-          ],
+          "components": ["hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23152,10 +22042,7 @@
               "endpoint": "https://mcp.revenuecat.ai/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23194,9 +22081,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23265,9 +22150,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23289,12 +22172,7 @@
           "description": "Continuous memory for Claude Code. Extracts, summarizes, and compresses conversations into tiered daily logs. Claude remembers what you did yesterday.",
           "longDescription": "Continuous memory for Claude Code. Extracts, summarizes, and compresses conversations into tiered daily logs. Claude remembers what you did yesterday.",
           "category": null,
-          "keywords": [
-            "memory",
-            "context",
-            "persistence",
-            "session"
-          ],
+          "keywords": ["memory", "context", "persistence", "session"],
           "author": {
             "name": "Digital Process Tools"
           },
@@ -23311,11 +22189,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "commands"
-          ],
+          "components": ["skills", "hooks", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23335,14 +22209,7 @@
           "description": "Deploy, debug, and monitor applications on Render. Includes skills, an agent, slash commands, a render.yaml validation hook, and the Render MCP server preconfigured over OAuth.",
           "longDescription": "Deploy, debug, and monitor applications on Render. Includes skills, an agent, slash commands, a render.yaml validation hook, and the Render MCP server preconfigured over OAuth.",
           "category": "deployment",
-          "keywords": [
-            "render",
-            "deploy",
-            "cloud",
-            "blueprint",
-            "monitoring",
-            "debugging"
-          ],
+          "keywords": ["render", "deploy", "cloud", "blueprint", "monitoring", "debugging"],
           "author": {
             "name": "Render",
             "email": "support@render.com",
@@ -23448,13 +22315,7 @@
               "endpoint": "https://mcp.render.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23474,13 +22335,7 @@
           "description": "Send and receive emails, build with React Email, follow deliverability best practices",
           "longDescription": "Send and receive emails, build with React Email, follow deliverability best practices",
           "category": "development",
-          "keywords": [
-            "email",
-            "resend",
-            "smtp",
-            "notifications",
-            "agent-inbox"
-          ],
+          "keywords": ["email", "resend", "smtp", "notifications", "agent-inbox"],
           "author": {
             "name": "Resend",
             "email": "support@resend.com",
@@ -23522,10 +22377,7 @@
               "endpoint": "https://mcp.resend.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23646,10 +22498,7 @@
               "endpoint": "https://mcp.revenuecat.ai/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23726,10 +22575,7 @@
               "endpoint": "http://localhost:9009/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23851,12 +22697,7 @@
               "endpoint": "https://mcp.rootly.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -23976,9 +22817,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24133,10 +22972,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24158,14 +22994,7 @@
           "description": "Build Salesforce apps and agents using these core building blocks: metadata, Apex, deploy/retrieve, security, reporting, and generated installed-versus-available capability discovery.",
           "longDescription": "Build Salesforce apps and agents using these core building blocks: metadata, Apex, deploy/retrieve, security, reporting, and generated installed-versus-available capability discovery.",
           "category": "development",
-          "keywords": [
-            "salesforce",
-            "apex",
-            "flow",
-            "soql",
-            "metadata",
-            "deploy"
-          ],
+          "keywords": ["salesforce", "apex", "flow", "soql", "metadata", "deploy"],
           "author": {
             "name": "Salesforce",
             "url": "https://github.com/forcedotcom/sf-skills"
@@ -24346,12 +23175,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24431,11 +23255,7 @@
               "endpoint": "https://mcp.sanity.io"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24455,12 +23275,7 @@
           "description": "Model Context Protocol (MCP) server for AI-assisted development of CAP applications.",
           "longDescription": "Model Context Protocol (MCP) server for AI-assisted development of CAP applications.",
           "category": "development",
-          "keywords": [
-            "sap",
-            "cap",
-            "cds",
-            "mcp"
-          ],
+          "keywords": ["sap", "cap", "cds", "mcp"],
           "author": {
             "name": "SAP SE"
           },
@@ -24479,9 +23294,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24501,14 +23314,7 @@
           "description": "MCP server for SAP Fiori development tools for Claude Code. Build and modify SAP Fiori applications with AI assistance.",
           "longDescription": "MCP server for SAP Fiori development tools for Claude Code. Build and modify SAP Fiori applications with AI assistance.",
           "category": "development",
-          "keywords": [
-            "sap",
-            "fiori",
-            "ui5",
-            "cap",
-            "mcp",
-            "fiori-elements"
-          ],
+          "keywords": ["sap", "fiori", "ui5", "cap", "mcp", "fiori-elements"],
           "author": {
             "name": "SAP SE",
             "email": "ospo@sap.com",
@@ -24558,10 +23364,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24616,9 +23419,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -24672,14 +23473,7 @@
           "description": "Create polished audio episodes with TTS narration, rich timelines, cover images, and save them to Spotify via the save-to-spotify CLI.",
           "longDescription": "Create polished audio episodes with TTS narration, rich timelines, cover images, and save them to Spotify via the save-to-spotify CLI.",
           "category": "productivity",
-          "keywords": [
-            "spotify",
-            "audio",
-            "podcast",
-            "tts",
-            "timeline",
-            "save-to-spotify"
-          ],
+          "keywords": ["spotify", "audio", "podcast", "tts", "timeline", "save-to-spotify"],
           "author": {
             "name": "Spotify",
             "url": "https://github.com/spotify"
@@ -24701,9 +23495,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25119,9 +23911,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25154,9 +23944,7 @@
           "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/3b600518a637492d37c9877aeb49c2a55d939c04/plugins/security-guidance",
           "skills": [],
           "mcpServers": [],
-          "components": [
-            "hooks"
-          ],
+          "components": ["hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25203,12 +23991,7 @@
           "description": "Sentry Plugin for Claude Code to help with debugging including MCP and skill capabilities.",
           "longDescription": "Sentry Plugin for Claude Code to help with debugging including MCP and skill capabilities.",
           "category": "monitoring",
-          "keywords": [
-            "sentry",
-            "debugging",
-            "monitoring",
-            "error-tracking"
-          ],
+          "keywords": ["sentry", "debugging", "monitoring", "error-tracking"],
           "author": {
             "name": "Sentry"
           },
@@ -25260,10 +24043,7 @@
               "endpoint": "https://mcp.sentry.dev/mcp?utm_source=plugin"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25300,9 +24080,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25343,9 +24121,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25361,12 +24137,7 @@
           "description": "Create, edit, and deploy ServiceNow applications with the Fluent SDK effortlessly through Claude AI",
           "longDescription": "Create, edit, and deploy ServiceNow applications with the Fluent SDK effortlessly through Claude AI",
           "category": "development",
-          "keywords": [
-            "servicenow",
-            "fluent",
-            "now-sdk",
-            "platform"
-          ],
+          "keywords": ["servicenow", "fluent", "now-sdk", "platform"],
           "author": {
             "name": "ServiceNow",
             "url": "https://www.servicenow.com"
@@ -25384,9 +24155,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25426,9 +24195,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25511,10 +24278,7 @@
               "endpoint": "https://mcp.shippo.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25536,14 +24300,7 @@
           "description": "Shopify developer tools for Claude Code — search Shopify docs, generate and validate GraphQL, Liquid, and UI extension code. Skill scripts send usage telemetry (queries, code, model/client identifiers) to shopify.dev by default; set OPT_OUT_INSTRUMENTATION=true, or create an empty file at ~/.config/shopify-ai-toolkit/opt-out, to disable.",
           "longDescription": "Shopify developer tools for Claude Code — search Shopify docs, generate and validate GraphQL, Liquid, and UI extension code. Skill scripts send usage telemetry (queries, code, model/client identifiers) to shopify.dev by default; set OPT_OUT_INSTRUMENTATION=true, or create an empty file at ~/.config/shopify-ai-toolkit/opt-out, to disable.",
           "category": "development",
-          "keywords": [
-            "shopify",
-            "mcp",
-            "graphql",
-            "liquid",
-            "storefront",
-            "admin-api"
-          ],
+          "keywords": ["shopify", "mcp", "graphql", "liquid", "storefront", "admin-api"],
           "author": {
             "name": "Shopify"
           },
@@ -25644,11 +24401,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks"
-          ],
+          "components": ["skills", "mcp", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25686,9 +24439,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25757,11 +24508,7 @@
               "endpoint": "https://mcp.slack.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25781,13 +24528,7 @@
           "description": "Automatically route Snowflake prompts from Claude Code to Cortex Code for execution.",
           "longDescription": "Automatically route Snowflake prompts from Claude Code to Cortex Code for execution.",
           "category": "development",
-          "keywords": [
-            "snowflake",
-            "cortex-code",
-            "auto-routing",
-            "sql",
-            "data"
-          ],
+          "keywords": ["snowflake", "cortex-code", "auto-routing", "sql", "data"],
           "author": {
             "name": "Snowflake"
           },
@@ -25812,10 +24553,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25837,13 +24575,7 @@
           "description": "SonarQube is the AI code quality and security verification platform used by millions of developers to catch bugs, vulnerabilities, and leaked secrets. This plugin enforces those standards in the agent coding loop: 7,500+ distinct issue types, secrets scanning, agentic analysis, and quality gates across 40+ languages.",
           "longDescription": "SonarQube is the AI code quality and security verification platform used by millions of developers to catch bugs, vulnerabilities, and leaked secrets. This plugin enforces those standards in the agent coding loop: 7,500+ distinct issue types, secrets scanning, agentic analysis, and quality gates across 40+ languages.",
           "category": "security",
-          "keywords": [
-            "sonarqube",
-            "code-quality",
-            "static-analysis",
-            "security",
-            "secrets"
-          ],
+          "keywords": ["sonarqube", "code-quality", "static-analysis", "security", "secrets"],
           "author": {
             "name": "Sonar",
             "url": "https://www.sonarsource.com/"
@@ -25893,10 +24625,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "agents"
-          ],
+          "components": ["skills", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25940,10 +24669,7 @@
               "endpoint": "https://mcp.guide.sonatype.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -25987,10 +24713,7 @@
               "endpoint": "${SOURCEGRAPH_ENDPOINT}/.api/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26030,9 +24753,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26052,15 +24773,7 @@
           "description": "Manage Spotify ad campaigns, audiences, measurement, account access, assets, and reporting with natural language and OAuth.",
           "longDescription": "Manage Spotify ad campaigns, audiences, measurement, account access, assets, and reporting with natural language and OAuth.",
           "category": "productivity",
-          "keywords": [
-            "spotify",
-            "ads",
-            "api",
-            "campaigns",
-            "advertising",
-            "oauth",
-            "reporting"
-          ],
+          "keywords": ["spotify", "ads", "api", "campaigns", "advertising", "oauth", "reporting"],
           "author": {
             "name": "Alex Murphy"
           },
@@ -26149,12 +24862,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26201,10 +24909,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26254,9 +24959,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26355,9 +25058,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26377,13 +25078,7 @@
           "description": "Stripe development plugin for Claude",
           "longDescription": "Stripe development plugin for Claude",
           "category": "development",
-          "keywords": [
-            "stripe",
-            "payments",
-            "webhooks",
-            "api",
-            "security"
-          ],
+          "keywords": ["stripe", "payments", "webhooks", "api", "security"],
           "author": {
             "name": "Stripe",
             "url": "https://stripe.com"
@@ -26436,12 +25131,7 @@
               "endpoint": "https://mcp.stripe.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26507,10 +25197,7 @@
               "endpoint": "https://mcp.sumup.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26571,11 +25258,7 @@
               "endpoint": "https://mcp.supabase.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26632,9 +25315,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26731,10 +25412,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26783,14 +25461,7 @@
           "description": "Connects Claude Code to the Synthflow AI voice-agent platform through its hosted MCP server, with skills for reviewing calls and auditing agent prompts, plus a docs-search connector.",
           "longDescription": "Connects Claude Code to the Synthflow AI voice-agent platform through its hosted MCP server, with skills for reviewing calls and auditing agent prompts, plus a docs-search connector.",
           "category": "automation",
-          "keywords": [
-            "synthflow",
-            "mcp",
-            "voice",
-            "ai-agents",
-            "telephony",
-            "integration"
-          ],
+          "keywords": ["synthflow", "mcp", "voice", "ai-agents", "telephony", "integration"],
           "author": {
             "name": "Synthflow",
             "email": "fionn@synthflow.ai"
@@ -26825,10 +25496,7 @@
               "endpoint": "https://docs.synthflow.ai/_mcp/server"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26906,9 +25574,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26949,9 +25615,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -26971,12 +25635,7 @@
           "description": "Telegram channel for Claude Code — messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /telegram:access.",
           "longDescription": "Telegram channel for Claude Code — messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /telegram:access.",
           "category": "productivity",
-          "keywords": [
-            "telegram",
-            "messaging",
-            "channel",
-            "mcp"
-          ],
+          "keywords": ["telegram", "messaging", "channel", "mcp"],
           "author": null,
           "version": "0.0.7",
           "license": null,
@@ -27002,10 +25661,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27040,9 +25696,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "mcp"
-          ],
+          "components": ["mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27137,9 +25791,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27407,10 +26059,7 @@
               "endpoint": "https://mcp.twilio.com/docs"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27480,9 +26129,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27558,10 +26205,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27681,10 +26325,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27725,10 +26366,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27893,9 +26531,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27941,10 +26577,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "hooks"
-          ],
+          "components": ["skills", "hooks"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -27964,12 +26597,7 @@
           "description": "Build and deploy on Val Town. Bundles the Val Town MCP server and platform skills (HTTP vals, cron/intervals, SQLite, email, OAuth, React UI, third-party integrations).",
           "longDescription": "Build and deploy on Val Town. Bundles the Val Town MCP server and platform skills (HTTP vals, cron/intervals, SQLite, email, OAuth, React UI, third-party integrations).",
           "category": "deployment",
-          "keywords": [
-            "val-town",
-            "deno",
-            "serverless",
-            "typescript"
-          ],
+          "keywords": ["val-town", "deno", "serverless", "typescript"],
           "author": {
             "name": "Val Town"
           },
@@ -28033,10 +26661,7 @@
               "endpoint": "https://api.val.town/v3/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28058,14 +26683,7 @@
           "description": "Vanta MCP server integration for Claude Code",
           "longDescription": "Vanta MCP server integration for Claude Code",
           "category": "security",
-          "keywords": [
-            "vanta",
-            "security",
-            "compliance",
-            "mcp",
-            "grc",
-            "risk"
-          ],
+          "keywords": ["vanta", "security", "compliance", "mcp", "grc", "risk"],
           "author": {
             "name": "Vanta",
             "url": "https://www.vanta.com"
@@ -28110,10 +26728,7 @@
               "endpoint": "https://mcp.aus.vanta.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28133,14 +26748,7 @@
           "description": "Vanta MCP server integration for Claude Code",
           "longDescription": "Vanta MCP server integration for Claude Code",
           "category": "security",
-          "keywords": [
-            "vanta",
-            "security",
-            "compliance",
-            "mcp",
-            "grc",
-            "risk"
-          ],
+          "keywords": ["vanta", "security", "compliance", "mcp", "grc", "risk"],
           "author": {
             "name": "Vanta",
             "url": "https://www.vanta.com"
@@ -28185,10 +26793,7 @@
               "endpoint": "https://mcp.aus.vanta.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28442,13 +27047,7 @@
               "endpoint": "https://mcp.vercel.com"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "hooks",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "hooks", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28495,10 +27094,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "commands"
-          ],
+          "components": ["skills", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28539,9 +27135,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28602,12 +27196,7 @@
               "endpoint": "https://mcp.windsor.ai"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28627,14 +27216,7 @@
           "description": "Build, manage, and deploy Wix sites and apps. Includes CLI development skills and Wix MCP server for site management, eCommerce, CMS, dashboard extensions, and more.",
           "longDescription": "Build, manage, and deploy Wix sites and apps. Includes CLI development skills and Wix MCP server for site management, eCommerce, CMS, dashboard extensions, and more.",
           "category": "development",
-          "keywords": [
-            "wix",
-            "wix-cli",
-            "wix-mcp",
-            "ecommerce",
-            "cms",
-            "wix-apps"
-          ],
+          "keywords": ["wix", "wix-cli", "wix-mcp", "ecommerce", "cms", "wix-apps"],
           "author": {
             "name": "Wix",
             "url": "https://dev.wix.com"
@@ -28843,10 +27425,7 @@
               "endpoint": "https://mcp.wix.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28883,10 +27462,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "commands"
-          ],
+          "components": ["skills", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -28928,9 +27504,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -29013,9 +27587,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -29084,11 +27656,7 @@
               "endpoint": "https://mcp.zapier.com/api/v1/connect"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -29110,13 +27678,7 @@
           "description": "Manage Zilliz Cloud clusters and Milvus vector databases from Claude Code using the zilliz-cli.",
           "longDescription": "Manage Zilliz Cloud clusters and Milvus vector databases from Claude Code using the zilliz-cli.",
           "category": "database",
-          "keywords": [
-            "zilliz",
-            "milvus",
-            "vector-database",
-            "semantic-search",
-            "rag"
-          ],
+          "keywords": ["zilliz", "milvus", "vector-database", "semantic-search", "rag"],
           "author": {
             "name": "Zilliz",
             "email": "support@zilliz.com"
@@ -29218,10 +27780,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills",
-            "commands"
-          ],
+          "components": ["skills", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -29558,10 +28117,7 @@
               "endpoint": "https://mcp.zoom.us/mcp/whiteboard/streamable"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -29808,10 +28364,7 @@
               "endpoint": "https://mcp.zoominfo.com/mcp"
             }
           ],
-          "components": [
-            "skills",
-            "mcp"
-          ],
+          "components": ["skills", "mcp"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -30019,11 +28572,7 @@
               "endpoint": null
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -30072,9 +28621,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -30167,9 +28714,7 @@
             }
           ],
           "mcpServers": [],
-          "components": [
-            "skills"
-          ],
+          "components": ["skills"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -30189,15 +28734,7 @@
           "description": "Marketing automation, CRM, and email marketing powered by ActiveCampaign. Manage contacts, campaigns, automations, deals, and get AI-powered marketing insights — all from Claude.",
           "longDescription": "Marketing automation, CRM, and email marketing powered by ActiveCampaign. Manage contacts, campaigns, automations, deals, and get AI-powered marketing insights — all from Claude.",
           "category": "productivity",
-          "keywords": [
-            "marketing",
-            "automation",
-            "crm",
-            "email",
-            "campaigns",
-            "deals",
-            "contacts"
-          ],
+          "keywords": ["marketing", "automation", "crm", "email", "campaigns", "deals", "contacts"],
           "author": {
             "name": "ActiveCampaign",
             "email": "amurrey@activecampaign.com",
@@ -30243,12 +28780,7 @@
               "endpoint": "${user_config.server_url}"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents",
-            "commands"
-          ],
+          "components": ["skills", "mcp", "agents", "commands"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",
@@ -30334,11 +28866,7 @@
               "endpoint": "https://mcp.hubspot.com/anthropic"
             }
           ],
-          "components": [
-            "skills",
-            "mcp",
-            "agents"
-          ],
+          "components": ["skills", "mcp", "agents"],
           "componentInspection": "repository",
           "inspectionError": null,
           "installation": "requires_adapter",

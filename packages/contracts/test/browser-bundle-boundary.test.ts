@@ -26,7 +26,7 @@ describe("contracts browser bundle boundary", () => {
     ]);
 
     for (const marker of [
-      "Skill artifact SKILL.md has invalid YAML frontmatter",
+      "This skill's SKILL.md header contains invalid YAML",
       "DUPLICATE_KEY",
       "MULTIPLE_DOCS",
     ]) {

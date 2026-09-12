@@ -56,6 +56,7 @@ mod service;
 mod supervisor;
 mod uninstall;
 mod update;
+mod uploads;
 
 use std::{path::Path, sync::Arc};
 

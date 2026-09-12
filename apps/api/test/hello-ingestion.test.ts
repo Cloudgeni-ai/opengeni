@@ -199,6 +199,7 @@ function helloPayload(
     opStream?: boolean;
     operationResourcePolicy?: boolean;
     operationCpuQuota?: boolean;
+    transactionalFsWrite?: boolean;
     desktopUnavailableReason?: string;
     display?: { id: string; width: number; height: number; virtual: boolean };
     capabilitiesAbsent?: boolean;
@@ -232,6 +233,7 @@ function helloPayload(
               opStream: opts.opStream ?? false,
               operationResourcePolicy: opts.operationResourcePolicy ?? false,
               operationCpuQuota: opts.operationCpuQuota ?? false,
+              transactionalFsWrite: opts.transactionalFsWrite ?? false,
               ...(opts.desktopUnavailableReason
                 ? { desktopUnavailableReason: opts.desktopUnavailableReason }
                 : {}),
@@ -509,6 +511,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
         opStream: true,
         operationResourcePolicy: true,
         operationCpuQuota: true,
+        transactionalFsWrite: true,
       }),
       helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
@@ -523,6 +526,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
       opStream: true,
       operationResourcePolicy: true,
       operationCpuQuota: true,
+      transactionalFsWrite: true,
     });
   });
 

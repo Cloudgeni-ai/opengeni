@@ -280,8 +280,13 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   if (item.authKind === "api_key" || item.authModel === "credential_ref") {
     return { mode: "api_key", providerDomain, fields: [GENERIC_API_KEY_FIELD] };
   }
-  if (item.metadata.authDiscovery === "unknown" || item.metadata.authDiscovery === "checking" ||
-      ((item.source === "public_registry" || item.source === "manual") && item.authKind == null && item.metadata.authDiscovery !== "none")) {
+  if (
+    item.metadata.authDiscovery === "unknown" ||
+    item.metadata.authDiscovery === "checking" ||
+    ((item.source === "public_registry" || item.source === "manual") &&
+      item.authKind == null &&
+      item.metadata.authDiscovery !== "none")
+  ) {
     return { mode: "setup_required" };
   }
   return { mode: "enable" };

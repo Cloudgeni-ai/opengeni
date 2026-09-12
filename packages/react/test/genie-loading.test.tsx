@@ -231,10 +231,10 @@ test("hosts can customize phrases and orb dimensions", async () => {
   const r = await renderComponent(
     <MessageTimeline
       items={[phase()]}
-      genieLoading={{ phrases: ["Custom wish"], orb: { size: 96 } }}
+      genieLoading={{ phrases: ["Custom wish"], orb: { size: 20 } }}
     />,
   );
   expect(r.container.textContent).toContain("Custom wish");
-  expect((r.container.querySelector(".og-genie-orb") as HTMLElement).style.width).toBe("96px");
+  expect((r.container.querySelector(".og-genie-orb") as HTMLElement).style.width).toBe("20px");
   await r.unmount();
 });

@@ -646,6 +646,23 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type RotateSessionMcpCredentialsRequest = {
+  operationKey: string;
+  updates: Array<{
+    id: string;
+    expectedCredentialVersion: number;
+    expectedServerUrl: string;
+    headers: Record<string, string>;
+  }>;
+};
+
+export type RotateSessionMcpCredentialsReceipt = {
+  operationKey: string;
+  sessionId: string;
+  servers: Array<{ id: string; credentialVersion: number }>;
+  appliedAt: string;
+};
+
 export type SessionMcpApprovalPolicy = boolean | string[];
 
 export type SessionMcpServerMetadata = {
@@ -7443,7 +7460,7 @@ export type PluginInstallationSummary = {
   description: string;
   category: string;
   tags: string[];
-  logoUrl?: string | null;
+  logoUrl?: string | null | undefined;
   sourceUrl: string | null;
   manifestDigest: string;
   installationVersion: number;
@@ -8033,6 +8050,7 @@ export type MachineRuntimeCapabilities = {
   browserBridge: boolean;
   operationResourcePolicy: boolean;
   operationCpuQuota: boolean;
+  transactionalFsWrite: boolean;
 };
 
 export type MachineUpdateStatus =

@@ -9,7 +9,6 @@ export function sessionAuthRecommendation(
 ): AuthNeededItem | undefined {
   if (
     item.authoritySource === "host" ||
-    item.reason === "personal_authority_unavailable" ||
     item.reason === "unsupported_auth" ||
     item.reason === "resource_scope_unavailable"
   )
@@ -24,6 +23,13 @@ export function sessionAuthRecommendation(
   );
   if (matches.length !== 1) return undefined;
   const entry = matches[0]!;
+  const personalAccess = item.reason === "personal_authority_unavailable";
+  if (
+    personalAccess &&
+    (entry.connectionRef?.subjectScope !== "subject" ||
+      entry.connectionRef.authoritySource === "host")
+  )
+    return undefined;
   return {
     ...item,
     capability: {
@@ -32,7 +38,9 @@ export function sessionAuthRecommendation(
       kind: entry.kind,
       source: entry.source,
       action: "connect",
-      rationale: "Reconnect this integration to use its tools in this conversation.",
+      rationale: personalAccess
+        ? "Review permission to use your personal account in this conversation."
+        : "Reconnect this integration to use its tools in this conversation.",
       requiredVariables: [],
     },
   };

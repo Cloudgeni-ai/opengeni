@@ -979,6 +979,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         operationResourcePolicySupported:
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+        transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection

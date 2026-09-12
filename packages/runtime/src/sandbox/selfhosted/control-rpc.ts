@@ -281,6 +281,9 @@ export function agentErrorToControlError(
  * redirect the output to a file and read it back in ranges/chunks.
  */
 export function payloadTooLargeMessage(detail: Record<string, string>): string {
+  if (detail.direction === "request") {
+    return "The request exceeds the machine link's per-message size limit and was not sent. The machine is not offline. Use a supported bounded transfer for large file content.";
+  }
   const encoded = detail.encoded_bytes;
   const max = detail.max_payload;
   const sizes =
@@ -502,6 +505,25 @@ export class NatsControlRpc implements ControlRpc {
     } catch (err) {
       const denied = natsAuthorizationFailure(err);
       if (denied) throw denied;
+      // The client rejects this before publishing. Keep the healthy connection;
+      // a request size fault is not evidence that the agent is offline.
+      if (
+        typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        err.code === "MAX_PAYLOAD_EXCEEDED"
+      ) {
+        return {
+          requestId: req.requestId,
+          error: {
+            code: ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
+            message: "outbound control request exceeds the transport payload limit",
+            retryable: false,
+            detail: { direction: "request", encoded_bytes: String(payload.byteLength) },
+          },
+          result: undefined,
+        };
+      }
       // Re-allow a future request to re-dial if the cached conn was torn down.
       if (isNoRespondersError(err)) {
         // No subscriber on the subject at all → the request reached no responder and

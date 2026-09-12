@@ -350,15 +350,29 @@ export function useSourcePackages({
     busyKey,
     reload: () => void load(),
     importSkill: (url?: string) => {
-      if (!url) { openNew("skill"); return; }
-      if (!sourceImport.directPreview && sourceImport.url.trim() && sourceImport.url.trim() !== url && !window.confirm("Replace the current import draft?")) return;
+      if (!url) {
+        openNew("skill");
+        return;
+      }
+      if (
+        !sourceImport.directPreview &&
+        sourceImport.url.trim() &&
+        sourceImport.url.trim() !== url &&
+        !window.confirm("Replace the current import draft?")
+      )
+        return;
       const operationId = crypto.randomUUID();
       dispatchSourceImport({ type: "new", kind: "skill", operationId, directPreview: true });
       dispatchSourceImport({ type: "url", url });
       dispatchSourceImport({ type: "phase", phase: "previewing", error: null });
       void client.previewSkillImport(workspaceId, { url }).then(
         (preview) => dispatchSourceImport({ type: "skill_preview", preview, operationId }),
-        (error) => dispatchSourceImport({ type: "error", message: error instanceof Error ? error.message : String(error), operationId }),
+        (error) =>
+          dispatchSourceImport({
+            type: "error",
+            message: error instanceof Error ? error.message : String(error),
+            operationId,
+          }),
       );
     },
     installPlugin: () => openNew("plugin"),
