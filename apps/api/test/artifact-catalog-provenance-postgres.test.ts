@@ -208,8 +208,9 @@ postgresTest(
         await tx`INSERT INTO workspace_artifact_versions(id,account_id,workspace_id,artifact_id,revision,content_key,content_sha256,size_bytes,operation_key,source_session_id,source_turn_id,source_attempt_id,source_execution_generation,created_by_subject_id)
           VALUES(${versionId},${accountId},${workspaceId},${siteId},1,'fixture',${"a".repeat(64)},10,'owner-agent-site',${privateSource.id},${crypto.randomUUID()},${crypto.randomUUID()},1,${ownerSubject})`;
         for (const [kind, id] of Object.entries(editableIds)) {
+          // Bind the frontier as JSON data, not a JSON-encoded string.
           await tx`INSERT INTO editable_artifacts(account_id,workspace_id,id,modality,title,authorization_revision,causal_frontier,state_hash,created_by_subject_id)
-            VALUES(${accountId},${workspaceId},${id},${kind},${`Owner ${kind}`},1,${kind === "spreadsheet" ? "[]" : null}::jsonb,${`sha256:${"a".repeat(64)}`},${ownerSubject})`;
+            VALUES(${accountId},${workspaceId},${id},${kind},${`Owner ${kind}`},1,${kind === "spreadsheet" ? tx.json([]) : null}::jsonb,${`sha256:${"a".repeat(64)}`},${ownerSubject})`;
           await tx`INSERT INTO editable_artifact_session_links(account_id,workspace_id,session_id,artifact_id)
             VALUES(${accountId},${workspaceId},${privateSource.id},${id})`;
         }
