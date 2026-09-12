@@ -436,8 +436,11 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   const startedAt = input.startedAt;
   const failedAt = input.failedAt;
   const reloadStartedAt = input.crossTabReloadStartedAt;
+  const isExactNeutralRaceAbort =
+    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) ||
+    (input.engine === "webkit" && input.failure.trim() === "Load request cancelled");
   const isExpectedNeutralRaceReloadCancellation =
-    /^(?:(?:net::)?ERR_ABORTED|NS_BINDING_ABORTED|NS_ERROR_ABORT)$/u.test(input.failure.trim()) &&
+    isExactNeutralRaceAbort &&
     input.method === "GET" &&
     pathname === "/v1/auth/session-set" &&
     input.actorEpoch === null &&
@@ -2854,6 +2857,20 @@ describe("provider-neutral browser account acceptance", () => {
       ],
     };
     expect(requestFailureProblem(input)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...input,
+        engine: "webkit",
+        failure: "Load request cancelled",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...input,
+        engine: "chromium",
+        failure: "Load request cancelled",
+      }),
+    ).not.toBeNull();
     for (const changed of [
       { failure: "NS_ERROR_NET_RESET" },
       { method: "POST" },
