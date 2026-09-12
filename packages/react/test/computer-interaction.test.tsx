@@ -336,6 +336,80 @@ describe("ComputerSession React resources", () => {
     await hook.unmount();
   });
 
+  test.each(["pending", "failed"])(
+    "allows switching targets while the initial observation is %s",
+    async (initialState) => {
+      const windowTarget = target();
+      const screenTarget = target("screen-1", "screen");
+      const inputRequests: unknown[] = [];
+      let settleInitial!: (value: ComputerObservation) => void;
+      const initial = new Promise<ComputerObservation>((resolve) => {
+        settleInitial = resolve;
+      });
+      const client = fakeClient({
+        getComputerSession: async () => ({ ...computerSession(), platform: "macos" }),
+        listComputerTargets: async () => ({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [windowTarget, screenTarget],
+        }),
+        observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+          if (targetId === screenTarget.id) return observation(screenTarget);
+          if (initialState === "failed") throw new Error("Observation timed out");
+          return await initial;
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, request) => {
+          inputRequests.push(request);
+          return { ...receipt(observation(windowTarget), request.operationId), observation: null };
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useComputerSession({
+            client,
+            workspaceId: WORKSPACE_ID,
+            computerSessionId: COMPUTER_SESSION_ID,
+            pollIntervalMs: 60_000,
+          }),
+        undefined,
+      );
+      try {
+        await flush(20);
+        expect(hook.result.current.targets).toHaveLength(2);
+        expect(hook.result.current.selectedTarget?.id).toBe(windowTarget.id);
+        expect(hook.result.current.observation).toBeNull();
+        await actRun(async () => {
+          await hook.result.current.act({ type: "keyboard", action: "type", value: "hello" });
+          await hook.result.current.act({ type: "clipboard", operation: "paste" });
+        });
+        expect(inputRequests).toHaveLength(2);
+        for (const request of inputRequests) {
+          expect(request).toMatchObject({
+            targetId: windowTarget.id,
+            expectedTargetGeneration: windowTarget.targetGeneration,
+            expectedObservationId: null,
+            expectedFrameId: null,
+          });
+        }
+        await actRun(async () => {
+          await hook.result.current.selectTarget(screenTarget.id);
+        });
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+        expect(hook.result.current.observation?.target.id).toBe(screenTarget.id);
+        await actRun(async () => {
+          settleInitial(observation(windowTarget));
+        });
+        await flush(5);
+        expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+        expect(hook.result.current.observation?.target.id).toBe(screenTarget.id);
+        expect(hook.result.current.error).toBeNull();
+      } finally {
+        settleInitial(observation(windowTarget));
+        await hook.unmount();
+      }
+    },
+  );
+
   test("keeps target selection local and fences semantic and pixel actions exactly", async () => {
     const windowTarget = target();
     const screenTarget = target("screen-1", "screen");
