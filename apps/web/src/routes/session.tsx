@@ -16,7 +16,6 @@ import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-b
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
-  HumanInputSurface,
   MessageTimeline,
   SessionChrome,
   KnowledgeActivityProvider,
@@ -77,7 +76,6 @@ import {
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
-import { SessionCommands } from "@/components/session/commands";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
 import {
@@ -159,6 +157,11 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
+const SessionCommands = lazy(() =>
+  import("@/components/session/commands").then((module) => ({ default: module.SessionCommands })),
+);
 
 const SessionCapabilityCard = lazy(async () => ({
   default: (await import("@/components/capabilities/session-capability-card"))
@@ -2287,15 +2290,17 @@ function SessionChatPane(props: {
                   props.humanInput.requests.length > 0 &&
                   props.session.status === "requires_action" ? (
                     <div className="pb-1" data-human-input-timeline-surface="">
-                      <HumanInputSurface
-                        loadSkillReview={loadSkillReview}
-                        requests={props.humanInput.requests}
-                        respondingRequestId={props.humanInput.respondingRequestId}
-                        error={props.humanInput.mutationError?.message}
-                        onSubmit={(requestId, response) =>
-                          props.humanInput.respond(requestId, response).then(() => undefined)
-                        }
-                      />
+                      <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                        <HumanInputSurface
+                          loadSkillReview={loadSkillReview}
+                          requests={props.humanInput.requests}
+                          respondingRequestId={props.humanInput.respondingRequestId}
+                          error={props.humanInput.mutationError?.message}
+                          onSubmit={(requestId, response) =>
+                            props.humanInput.respond(requestId, response).then(() => undefined)
+                          }
+                        />
+                      </Suspense>
                     </div>
                   ) : undefined
                 }
@@ -2429,11 +2434,13 @@ function SessionChatPane(props: {
             readOnly={terminal}
             commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
             commandsPanel={
-              <SessionCommands
-                key={props.session.id}
-                sessionId={props.session.id}
-                readOnly={terminal}
-              />
+              <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
+                <SessionCommands
+                  key={props.session.id}
+                  sessionId={props.session.id}
+                  readOnly={terminal}
+                />
+              </Suspense>
             }
             agentsSignal={agentsSignal}
             agentsPanel={

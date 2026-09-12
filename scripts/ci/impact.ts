@@ -331,6 +331,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/session-lazy-panels.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/opstream-runner.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
   "test/e2e/channel-a.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
   "test/e2e/rig-setup.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],

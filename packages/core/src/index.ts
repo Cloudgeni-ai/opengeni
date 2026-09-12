@@ -66,6 +66,7 @@ export * from "./access";
 export * from "./application/external-workspace-members";
 export * from "./application/external-identity-lifecycle";
 export * from "./application/external-continuation";
+export * from "./application/session-mcp-credential-rotation";
 export * from "./application/external-link-work-admission";
 export * from "./application/connect-authority";
 export * from "./application/host-mcp-owner";

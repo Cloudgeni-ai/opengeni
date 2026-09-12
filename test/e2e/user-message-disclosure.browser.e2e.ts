@@ -49,6 +49,61 @@ describe("long sent user-message browser acceptance", () => {
     { name: "mobile", width: 390, height: 844 },
     { name: "desktop", width: 1440, height: 960 },
   ] as const) {
+    for (const defaultRenderer of [false, true]) {
+      test(`localizes ${defaultRenderer ? "default" : "custom"} disclosure without resetting state on ${viewport.name}`, async () => {
+        const page = await openHarness(browser, baseUrl, viewport, defaultRenderer);
+        try {
+          await page.evaluate(() =>
+            window.userMessageHarness!.setDisclosureLabels({
+              showMore: "Afficher le message dans son intégralité",
+              showLess: "Réduire le message",
+            }),
+          );
+          const body = page.locator('[data-og-message-id="long-user-message"]');
+          const button = body.getByRole("button", {
+            name: "Afficher le message dans son intégralité",
+            exact: true,
+          });
+          await button.scrollIntoViewIfNeeded();
+          await button.focus();
+          const controls = await button.getAttribute("aria-controls");
+          if (evidenceDir)
+            await page.screenshot({
+              path: `${evidenceDir}/localized-${defaultRenderer ? "default" : "custom"}-${viewport.name}-collapsed.png`,
+            });
+          await button.press("Enter");
+          const expanded = body.getByRole("button", { name: "Réduire le message", exact: true });
+          expect(await expanded.getAttribute("aria-expanded")).toBe("true");
+          await page.evaluate(() =>
+            window.userMessageHarness!.setDisclosureLabels({
+              showMore: "Mehr anzeigen",
+              showLess: "Weniger anzeigen",
+            }),
+          );
+          const translated = body.getByRole("button", { name: "Weniger anzeigen", exact: true });
+          expect(await translated.getAttribute("aria-expanded")).toBe("true");
+          expect(await translated.getAttribute("aria-controls")).toBe(controls);
+          expect(await translated.evaluate((node) => node === document.activeElement)).toBe(true);
+          await translated.scrollIntoViewIfNeeded();
+          if (evidenceDir)
+            await page.screenshot({
+              path: `${evidenceDir}/localized-${defaultRenderer ? "default" : "custom"}-${viewport.name}-expanded.png`,
+            });
+          await translated.press("Space");
+          expect(
+            await body
+              .getByRole("button", { name: "Mehr anzeigen", exact: true })
+              .getAttribute("aria-expanded"),
+          ).toBe("false");
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+          ).toBeLessThanOrEqual(1);
+        } finally {
+          await page.context().close();
+        }
+      });
+    }
+
     test(`is lossless, bounded, keyboard accessible, and viewport-safe on ${viewport.name}`, async () => {
       const page = await openHarness(browser, baseUrl, viewport);
       try {
@@ -437,6 +492,7 @@ async function openHarness(
   browser: Browser,
   baseUrl: string,
   viewport: { width: number; height: number },
+  defaultRenderer = false,
 ): Promise<Page> {
   const context = await browser.newContext({
     viewport,
@@ -444,7 +500,9 @@ async function openHarness(
     isMobile: viewport.width <= 390,
   });
   const page = await context.newPage();
-  await page.goto(`${baseUrl}/user-message-test.html`);
+  await page.goto(
+    `${baseUrl}/user-message-test.html${defaultRenderer ? "?defaultRenderer=1" : ""}`,
+  );
   await page.waitForFunction(() => window.userMessageHarness !== undefined);
   await page.locator('[data-og-message-id="long-user-message"]').waitFor({ timeout: 15_000 });
   return page;

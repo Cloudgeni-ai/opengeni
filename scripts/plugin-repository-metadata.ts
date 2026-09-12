@@ -40,12 +40,12 @@ async function load(repository: string, revision: string) {
       const process = Bun.spawn(["tar", ...args], { stdout: "pipe", stderr: "pipe" });
       const timer = setTimeout(() => process.kill(), 15000);
       try {
-        const tarReader = process.stdout.getReader();
+        const outputReader = process.stdout.getReader();
         const parts: Uint8Array[] = [];
         let total = 0;
         try {
           while (true) {
-            const part = await tarReader.read();
+            const part = await outputReader.read();
             if (part.done) break;
             total += part.value.length;
             if (total > 8 * 1024 * 1024) {
@@ -55,7 +55,7 @@ async function load(repository: string, revision: string) {
             parts.push(part.value);
           }
         } finally {
-          await tarReader.cancel();
+          await outputReader.cancel();
         }
         const output = await new Blob(parts).text();
         if ((await process.exited) !== 0) throw Error("Could not read plugin archive");

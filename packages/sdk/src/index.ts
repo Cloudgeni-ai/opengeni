@@ -1,4 +1,9 @@
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
+export type {
+  PluginDiscoveryItem,
+  PluginDiscoveryPage,
+} from "@opengeni/contracts/plugin-discovery";
 export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
 export type {
   SiteToolBridge,
@@ -937,6 +942,8 @@ export type {
   SessionSummary,
   LineageNode,
   SessionMcpCredentialUpdateInput,
+  RotateSessionMcpCredentialsRequest,
+  RotateSessionMcpCredentialsReceipt,
   SessionMcpApprovalPolicy,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
@@ -1235,6 +1242,3 @@ export type {
   FeedbackSubmissionResponse,
 } from "./feedback";
 export type * from "./knowledge";
-
-export type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/contracts";
-export { pluginMcpUnavailableReason } from "@opengeni/contracts/mcp-endpoint";

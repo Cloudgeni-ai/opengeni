@@ -45,5 +45,6 @@ export default defineConfig({
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",
     "@opengeni/contracts/site-session-http",
+    "@opengeni/contracts/plugin-discovery",
   ],
 });

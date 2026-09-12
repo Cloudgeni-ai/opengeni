@@ -1407,12 +1407,25 @@ durable across that rollout. The explicit drain budget is independently
 rejected unless reaper dispatch, the full durable capture, and retry handoff fit
 inside the caller/DB transition wait ceiling. Process-local configuration is
 only the initial observational budget. Once an opted-in acquisition or mutation
-waiter sees the durable capture claim, it follows PostgreSQL's authoritative
-remaining `archive_capture_deadline_at` plus retry-handoff grace, still capped by
-the one-hour lifecycle ceiling. This keeps a timeout reduction and mixed-config
-rolling activation aligned with the older child's frozen input without turning
-the wait into capture-takeover authority or an unbounded request. Explicit
-zero-wait probes preserve their immediate fenced result.
+waiter first sees a valid durable capture deadline, it may extend its wait once
+using PostgreSQL's authoritative remaining `archive_capture_deadline_at` plus
+retry-handoff grace, capped by the one-hour lifecycle ceiling. Later expired or
+replacement capture claims cannot reset the wait or its grace. This honors an
+older child's frozen input during a rolling timeout reduction without letting
+repeated failed drain attempts starve a caller. Budget expiry returns the typed
+capture fence; it grants no takeover, teardown, or writer admission authority.
+Explicit zero-wait probes preserve their immediate fenced result.
+
+A rejected drain capture releases only its exact unpublished claim. This also
+applies when the provider promise rejects after the local timeout: that detached
+path cannot enter teardown, and release wakes waiters so they can re-arm the
+intact live instance. The timeout alone never releases ownership. Late success
+still publishes under the durable fence; publication or teardown failures retain
+ownership, and an older failed callback cannot clear a replacement claim. A
+provider-deadline/operator rotation is retained by the DB release operation.
+Every fresh claim gets a new provider request ID; replacement attempts of an
+uninterrupted claim retain its stored ID. A workflow retry after release and
+intervening writes therefore cannot adopt an older snapshot as a newer generation.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`

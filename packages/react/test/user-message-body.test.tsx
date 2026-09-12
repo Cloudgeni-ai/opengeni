@@ -6,7 +6,9 @@ import {
   UserMessageBody,
   type TimelineItem,
   type UserMessageItem,
+  type UserMessageDisclosureLabels,
 } from "../src";
+import type { UserMessageDisclosureLabels as SessionUiDisclosureLabels } from "../src/session-ui";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -78,6 +80,78 @@ function elementRect(top: number, bottom: number, left = 0, right = 240): DOMRec
 }
 
 describe("UserMessageBody", () => {
+  test("localizes direct disclosure labels with per-field English defaults", async () => {
+    const text = longMarkdown();
+    const labels: UserMessageDisclosureLabels = { showMore: "Afficher davantage" };
+    const sessionUiLabels: SessionUiDisclosureLabels = labels;
+    const r = await renderComponent(
+      <UserMessageBody messageId="localized-direct" text={text} disclosureLabels={sessionUiLabels}>
+        <Markdown>{text}</Markdown>
+      </UserMessageBody>,
+    );
+    const button = r.container.querySelector<HTMLButtonElement>(
+      "[data-og-user-message-disclosure]",
+    )!;
+    expect(button.textContent).toBe("Afficher davantage");
+    await actRun(() => button.click());
+    expect(button.textContent).toBe("Show less");
+    await r.unmount();
+  });
+
+  test("updates default timeline labels without resetting expansion or control identity", async () => {
+    const items = [user("localized-timeline", longMarkdown())];
+    const r = await renderComponent(
+      <MessageTimeline
+        items={items}
+        userMessageDisclosureLabels={{ showMore: "Afficher davantage", showLess: "Réduire" }}
+      />,
+    );
+    const button = r.container.querySelector<HTMLButtonElement>(
+      "[data-og-user-message-disclosure]",
+    )!;
+    expect(button.textContent).toBe("Afficher davantage");
+    const controls = button.getAttribute("aria-controls");
+    await actRun(() => button.click());
+    expect(button.textContent).toBe("Réduire");
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        userMessageDisclosureLabels={{ showMore: "Mehr anzeigen", showLess: "Weniger anzeigen" }}
+      />,
+    );
+    expect(button.textContent).toBe("Weniger anzeigen");
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    expect(button.getAttribute("aria-controls")).toBe(controls);
+    await actRun(() => button.click());
+    expect(button.textContent).toBe("Mehr anzeigen");
+    await r.unmount();
+  });
+
+  test("direct overrides retain unspecified timeline context labels", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[user("localized-custom", longMarkdown())]}
+        userMessageDisclosureLabels={{ showMore: "Context more", showLess: "Context less" }}
+        renderMessageText={(text, item) => (
+          <UserMessageBody
+            messageId={item.id}
+            text={text}
+            disclosureLabels={{ showMore: "Direct more" }}
+          >
+            <Markdown>{text}</Markdown>
+          </UserMessageBody>
+        )}
+      />,
+    );
+    const button = r.container.querySelector<HTMLButtonElement>(
+      "[data-og-user-message-disclosure]",
+    )!;
+    expect(button.textContent).toBe("Direct more");
+    await actRun(() => button.click());
+    expect(button.textContent).toBe("Context less");
+    await r.unmount();
+  });
+
   test("shares one observer and one resize listener across every message", async () => {
     let observerCount = 0;
     globalThis.ResizeObserver = class {

@@ -442,7 +442,7 @@ export function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationIni
   };
 }
 
-function normalizedSessionMcpCredentialHeaders(
+export function normalizedSessionMcpCredentialHeaders(
   headers: Record<string, string> | undefined,
 ): Record<string, string> {
   if (!headers) {

@@ -114,9 +114,9 @@ describe("Slack installation binding browser acceptance", () => {
 });
 
 async function openSlackSettings(page: Page, chip: string) {
-  const row = page.getByRole("button", { name: "View Slack details", exact: true });
+  const row = page.getByRole("button", { name: /^Slack\s/ }).filter({ hasText: chip });
   await row.waitFor({ state: "visible", timeout: 15_000 });
-  await expectText(row.locator(".."), chip);
+  expect(await row.locator(".og-connection-catalog-status").textContent()).toBe(chip);
   await row.click();
   const settings = page.getByRole("region", { name: "Slack settings" });
   await settings.waitFor({ state: "visible", timeout: 15_000 });

@@ -1,4 +1,3 @@
-const EMPTY_SKILLS: NonNullable<SkillDiscoveryProps["installedSkills"]> = [];
 import { useEffect, useState } from "react";
 
 export type SkillDiscoveryItem = {
@@ -48,13 +47,15 @@ export function SkillDiscovery(props: SkillDiscoveryProps) {
   );
 }
 
+const EMPTY_INSTALLED_SKILLS: NonNullable<SkillDiscoveryProps["installedSkills"]> = [];
+
 function DiscoveryResults({
   client,
   workspaceId,
   query,
   canManage,
   onImport,
-  installedSkills = EMPTY_SKILLS,
+  installedSkills = EMPTY_INSTALLED_SKILLS,
 }: SkillDiscoveryProps) {
   const [result, setResult] = useState<SkillDiscoveryPage | null>(null);
   const [loading, setLoading] = useState(query.length >= 2);

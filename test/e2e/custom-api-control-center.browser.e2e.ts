@@ -207,7 +207,7 @@ describe("custom API control center browser acceptance", () => {
       const dialog = page.getByRole("dialog");
       await expectVisible(dialog);
       await dialog.getByLabel("API URL or domain").fill("linear.example.test/graphql");
-      await dialog.getByRole("button", { name: "Find tools" }).click();
+      await dialog.getByRole("button", { name: "Find tools", exact: true }).click();
 
       await expectText(dialog, "GraphQL introspection requires authentication");
       await expectText(dialog, "Create a new Connection");
@@ -234,7 +234,7 @@ describe("custom API control center browser acceptance", () => {
       const finance = page.locator('[data-custom-api-instance="finance"]');
       await finance.getByRole("button", { name: "Check for updates" }).click();
       const dialog = page.getByRole("dialog");
-      await dialog.getByRole("button", { name: "Find tools" }).click();
+      await dialog.getByRole("button", { name: "Find tools", exact: true }).click();
 
       await expectText(dialog, "Immutable preview ready");
       await expectText(dialog, "1 added, 0 removed, 2 unchanged tools");
@@ -429,8 +429,11 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "dark");
 
-      const row = page.getByRole("button", { name: "View Outlook Mail details", exact: true });
+      const row = page
+        .getByRole("button", { name: /^Outlook Mail\s/ })
+        .filter({ hasText: "Connected" });
       await expectVisible(row);
+      expect(await row.locator(".og-connection-catalog-status").textContent()).toBe("Connected");
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -528,7 +531,9 @@ async function openCapabilities(page: Page): Promise<void> {
 
 /** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
-  const row = page.getByRole("button", { name: "View Outlook Mail details", exact: true });
+  const row = page
+    .locator(".og-connection-catalog-row")
+    .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
   await expectVisible(row);
   await row.click();
   const sheet = page.locator('[data-integration-sheet="outlook-mail"]');

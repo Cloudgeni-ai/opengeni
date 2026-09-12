@@ -33,14 +33,14 @@ const SupportAgentPanel = lazy(async () => {
 });
 
 const ConnectionsDialog = lazy(async () => {
-  const [{ ConnectionsDialog: LoadedConnectionsDialog }, { OpenGeniClient }] = await Promise.all([
+  const [{ ConnectionsDialog: ConnectionsDialogView }, { OpenGeniClient }] = await Promise.all([
     import("./connections-dialog"),
     import("@opengeni/sdk"),
   ]);
   const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
   return {
     default: (props: { workspaceId: string; open: boolean; onClose: () => void }) => (
-      <LoadedConnectionsDialog {...props} client={client} />
+      <ConnectionsDialogView {...props} client={client} />
     ),
   };
 });

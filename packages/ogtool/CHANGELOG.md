@@ -1,5 +1,12 @@
 # @opengeni/ogtool
 
+## 0.3.39
+
+### Patch Changes
+
+- Updated dependencies [e41027c]
+  - @opengeni/codemode@0.5.7
+
 ## 0.3.38
 
 ### Patch Changes

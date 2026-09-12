@@ -242,6 +242,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireFreshAccessGrant,
+  rotateSessionMcpCredentialsForRequest,
   hasVerifiedOwningUserAuthorization,
   requirePermission,
   requireSessionAuthorization,
@@ -2883,6 +2884,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-credentials/rotate", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:control",
+    );
+    const payload = await c.req.json().catch(() => null);
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      await rotateSessionMcpCredentialsForRequest(
+        deps,
+        authorization,
+        c.req.param("sessionId"),
+        payload,
+        (tx) => requireFreshAccessGrant(c, { ...deps, db: tx }, workspaceId, "sessions:control"),
+      ),
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/queue", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -4536,6 +4558,8 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/mcp-credentials/rotate" && verb === "POST")
+    return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
     return "session.mcp.approval_policy.write";
   }

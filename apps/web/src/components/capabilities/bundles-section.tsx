@@ -204,14 +204,6 @@ export function BundlesSection({
     canManage,
   ]);
 
-  function openImportedPlugin(plugin: { pluginKey: string }): boolean {
-    if (plugin.pluginKey.startsWith("marketplace/")) return false;
-    const row = rows.find((entry) => entry.id === `plugin:${plugin.pluginKey}`);
-    if (!row) return false;
-    open(row, document.activeElement);
-    return true;
-  }
-
   const visible = useMemo(
     () =>
       filterBundleRows(
@@ -451,7 +443,10 @@ export function BundlesSection({
           ) : null}
           <PluginDiscovery
             installedPlugins={source.plugins}
-            onOpenInstalled={openImportedPlugin}
+            onManageInstalled={(plugin, element) => {
+              const row = rows.find((candidate) => candidate.id === `plugin:${plugin.pluginKey}`);
+              if (row) open(row, element);
+            }}
             onOpenConnection={onOpenCatalogItem}
             client={client}
             workspaceId={workspaceId}
@@ -503,7 +498,6 @@ export function BundlesSection({
       ) : section === "all" ? (
         <PluginDiscovery
           installedPlugins={source.plugins}
-          onOpenInstalled={openImportedPlugin}
           onOpenConnection={onOpenCatalogItem}
           client={client}
           workspaceId={workspaceId}

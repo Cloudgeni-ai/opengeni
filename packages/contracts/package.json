@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -21,6 +21,10 @@
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",
       "default": "./src/mcp-endpoint.ts"
+    },
+    "./plugin-discovery": {
+      "types": "./src/plugin-discovery.ts",
+      "default": "./src/plugin-discovery.ts"
     },
     "./host-mcp-bindings": {
       "types": "./src/host-mcp-bindings.ts",

@@ -241,10 +241,9 @@ async function installApi(
     if (path.endsWith("/packs")) return json({ packs: [], installations: [] });
     if (path.endsWith("/skills")) return json({ skills: [] });
     if (path.endsWith("/skills/content")) return json({ skills: [], nextCursor: null });
-    if (path.endsWith("/plugins") && !path.endsWith("/discovery/plugins"))
-      return json({ plugins: [] });
     if (path.endsWith("/capabilities/discovery/plugins"))
       return json({ items: [], total: 0, nextOffset: null });
+    if (path.endsWith("/plugins")) return json({ plugins: [] });
     if (path.endsWith("/integrations/definitions")) return json({ definitions: [] });
     if (path.endsWith("/integrations")) return json({ integrations: [] });
     if (path.endsWith("/sessions"))

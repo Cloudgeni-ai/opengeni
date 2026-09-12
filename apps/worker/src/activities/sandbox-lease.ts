@@ -26,6 +26,7 @@ import {
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
+  releaseWorkspaceArchiveCapture,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
@@ -249,6 +250,7 @@ export type TerminateBoxFn = (
   captureDisposition?: DrainCaptureDisposition,
   capturePolicy?: ProviderWorkspaceCapturePolicy | null,
   diskBackedArchives?: boolean,
+  releaseFailedCapture?: () => Promise<void>,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -350,12 +352,13 @@ export class SandboxProviderCaptureTimeoutError extends Error {
   }
 }
 
-async function awaitProviderCaptureWithLatePublication<T>(input: {
+export async function awaitProviderCaptureWithLatePublication<T>(input: {
   capture: Promise<T>;
   timeoutMs: number;
   timeoutError: SandboxProviderCaptureTimeoutError;
   publishLate: (value: T) => Promise<void>;
   observeLateFailure: (error: unknown) => void;
+  observeLatePublicationFailure: (error: unknown) => void;
 }): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutError = input.timeoutError;
@@ -373,7 +376,9 @@ async function awaitProviderCaptureWithLatePublication<T>(input: {
     // durable archive publication: never provider teardown or a cold commit from
     // an activity Temporal has already rejected. A replaced claim fences this
     // callback; Modal candidates then flow to artifact-ledger GC.
-    void input.capture.then(input.publishLate).catch(input.observeLateFailure);
+    void input.capture
+      .then(input.publishLate, input.observeLateFailure)
+      .catch(input.observeLatePublicationFailure);
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);
@@ -482,6 +487,7 @@ export function createSandboxLeaseActivities(
       captureDisposition,
       capturePolicy,
       diskBackedArchives,
+      releaseFailedCapture,
     ) =>
       await terminateProviderBox(
         settings,
@@ -494,6 +500,7 @@ export function createSandboxLeaseActivities(
         captureDisposition,
         capturePolicy,
         diskBackedArchives,
+        releaseFailedCapture,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -2803,6 +2810,17 @@ async function terminateDrainableBox(
         captureDisposition,
         capturePolicy,
         Boolean(objectStorage),
+        async () => {
+          if (!captureClaim || !lease.instanceId) return;
+          await releaseWorkspaceArchiveCapture(db, {
+            accountId,
+            workspaceId: row.workspaceId,
+            sandboxGroupId: row.sandboxGroupId,
+            captureId: captureClaim.id,
+            expectedEpoch: row.leaseEpoch,
+            expectedInstanceId: lease.instanceId,
+          });
+        },
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
@@ -2936,10 +2954,21 @@ export async function terminateProviderBox(
   captureDisposition: DrainCaptureDisposition = "capture_required",
   claimedCapturePolicy?: ProviderWorkspaceCapturePolicy | null,
   diskBackedArchives = false,
+  releaseFailedCapture?: () => Promise<void>,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
   const logIdentity = providerDrainLogIdentity(lease, backend);
+  const releaseAfterCaptureFailure = async (): Promise<void> => {
+    try {
+      await releaseFailedCapture?.();
+    } catch (error) {
+      observability.warn("sandbox reaper: failed capture claim release failed", {
+        ...logIdentity,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
   // 'none' / no backend -> nothing to terminate.
   if (!backend || backend === "none") {
     return { terminated: true, providerMissingBeforeCapture: false };
@@ -3187,7 +3216,17 @@ export async function terminateProviderBox(
             await disposeWorkspaceArchive(archive);
           }
         },
+        observeLatePublicationFailure: (error) => {
+          observability.warn("sandbox reaper: late capture publication cleanup failed", {
+            ...logIdentity,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
         observeLateFailure: (error) => {
+          // Capture has now rejected and this timed-out path can never reach
+          // provider teardown. Release only our unpublished claim so a waiting
+          // turn can re-arm the intact live box; stale callbacks are DB-fenced.
+          void releaseAfterCaptureFailure();
           observability.warn("sandbox reaper: timed-out provider capture later failed", {
             ...logIdentity,
             error: error instanceof Error ? error.message : String(error),
@@ -3209,6 +3248,12 @@ export async function terminateProviderBox(
         error: error instanceof Error ? error.message : String(error),
       },
     );
+    // An unresolved timeout is not proof of capture failure: retain the fence
+    // until its provider promise settles. A settled failure cannot enter the
+    // teardown path below, so its unpublished claim may safely be released.
+    if (!(error instanceof SandboxProviderCaptureTimeoutError)) {
+      await releaseAfterCaptureFailure();
+    }
     // NEVER terminate a box whose snapshot we could not capture.
     throw error;
   }

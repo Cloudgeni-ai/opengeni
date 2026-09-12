@@ -4114,19 +4114,23 @@ describe("runtime event normalization", () => {
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save when useful for future work, whether requested explicitly or learned during ordinary work. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files and automatically prepare source text when authoring is enabled. Use knowledge_retain_file for a newly fetched file or failed preparation. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
   ].join(" ");
-  const staticInstructions = (instructions: unknown): string => {
-    if (typeof instructions !== "string") throw new Error("Expected static instructions");
-    return instructions;
-  };
-  const DEFAULT_SKILL_CATALOG = [
+  const defaultSkillIndex = [
     "## Skills",
     "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
     "Management tools are lazy and available through tool search.",
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
   ].join("\n");
-  const withOperationalInstructions = (instructions: string, sessionInstructions?: string) =>
-    `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions} ${DEFAULT_SKILL_CATALOG}${sessionInstructions ? ` ${sessionInstructions}` : ""}`;
+  const staticInstructions = (instructions: unknown): string => {
+    if (typeof instructions !== "string") throw new Error("Expected static instructions");
+    // Pin the new default catalog independently while retaining the exact
+    // persona, CORE, memory, and session ordering assertions below.
+    const catalog = ` ${defaultSkillIndex}`;
+    expect(instructions.split(catalog)).toHaveLength(2);
+    return instructions.replace(catalog, "");
+  };
+  const withOperationalInstructions = (instructions: string) =>
+    `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions}`;
   const EXPECTED_DEFAULT_INSTRUCTIONS = withOperationalInstructions(
     HISTORICAL_DEFAULT_INSTRUCTIONS,
   );
@@ -4222,8 +4226,7 @@ describe("runtime event normalization", () => {
     // Exact ordering: workspace persona + CORE first, session instructions last.
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")}`,
-        "SESSION RULE: always answer in French.",
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`,
       ),
     );
     // And it rides the same application-owned instructions string, never a message.
@@ -4284,10 +4287,15 @@ describe("runtime event normalization", () => {
       sessionInstructions: "SESSION RULE: always answer in French.",
     });
 
+    expect(agent.instructions).toBe(
+      withOperationalInstructions(
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} ${defaultSkillIndex} SESSION RULE: always answer in French.`,
+      ),
+    );
+
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory}`,
-        "SESSION RULE: always answer in French.",
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
       ),
     );
     expect(staticInstructions(agent.instructions).indexOf(workspaceMemory)).toBeLessThan(
@@ -4308,12 +4316,12 @@ describe("runtime event normalization", () => {
 
     const filter = oneShotGenesisTitleInputFilter();
     const first = await filter({
-      modelData: { input: [], instructions: staticInstructions(agent.instructions) },
+      modelData: { input: [], instructions: agent.instructions as string },
       agent,
       context: undefined,
     });
     const followUp = await filter({
-      modelData: { input: [], instructions: staticInstructions(agent.instructions) },
+      modelData: { input: [], instructions: agent.instructions as string },
       agent,
       context: undefined,
     });
@@ -4500,8 +4508,7 @@ describe("runtime event normalization", () => {
     // then the session slice last (host/session specificity wins).
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE}`,
-        "SESSION RULE: always answer in French.",
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
       ),
     );
     expect(
@@ -4522,8 +4529,7 @@ describe("runtime event normalization", () => {
 
     expect(staticInstructions(agent.instructions)).toBe(
       withOperationalInstructions(
-        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory}`,
-        "SESSION RULE: always answer in French.",
+        `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
       ),
     );
     expect(
@@ -8148,6 +8154,54 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("optional Gmail with no personal grant posts recovery and skips tools without provider traffic", async () => {
+    const events: unknown[] = [];
+    let fetched = 0;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "gmail",
+            name: "Gmail",
+            url: "https://gmailmcp.googleapis.com/mcp/v1",
+            cacheToolsList: false,
+            connectionRef: {
+              providerDomain: "gmailmcp.googleapis.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "gmail", optional: true }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        credentialSubjectId: "subject-a",
+        resolveCredential: async () => ({
+          status: "auth_needed",
+          reason: "personal_authority_unavailable",
+          providerDomain: "gmailmcp.googleapis.com",
+        }),
+        onAuthNeeded: (payload) => {
+          events.push(payload);
+        },
+        mcpFetchImpl: async () => {
+          fetched++;
+          throw new Error("unauthorized provider traffic");
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(fetched).toBe(0);
+      expect(events).toEqual([
+        expect.objectContaining({ serverId: "gmail", reason: "personal_authority_unavailable" }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("routes every official-Gmail turn through the REST bridge, never the hosted preview MCP", async () => {
     const resolved: ResolveConnectionCredentialInput[] = [];
     const fetched: string[] = [];
@@ -11388,10 +11442,13 @@ describe("runtime Skill activation", () => {
     ],
   };
 
-  test("without explicit activation only default document parsing is indexed", () => {
+  test("without explicit activation only the default document guidance is indexed", () => {
     const composition = composeRuntimeSkills([]);
     expect(composition.configuredNames).toEqual([]);
-    expect(composition.index.map((entry) => entry.name)).toEqual(["document-parsing"]);
+    const index = composition.index;
+    expect(index.map((entry) => ({ id: entry.id, name: entry.name }))).toEqual([
+      { id: "native-tool:document-parsing", name: "document-parsing" },
+    ]);
   });
 
   test("artifact skills join the index when their canonical tool surface is available", () => {

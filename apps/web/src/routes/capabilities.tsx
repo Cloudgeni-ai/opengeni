@@ -5,8 +5,9 @@ import { ConnectionLogo } from "@opengeni/react/connect";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
+  partitionConnectionServices,
 } from "@/components/capabilities/connection-services";
-import { capabilityStateChip, capabilityCuration } from "@/lib/capabilities";
+import { capabilityStateChip } from "@/lib/capabilities";
 import { InstalledStrip } from "@/components/capabilities/installed-strip";
 import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
@@ -30,7 +31,7 @@ import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
 import { usePacks, useVariableSets } from "@opengeni/react";
-import { PlugIcon, PlusIcon, Loader2Icon } from "lucide-react";
+import { PlugIcon, PlusIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
@@ -47,6 +48,7 @@ import {
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
+import { PluginDiscovery } from "@/components/capabilities/plugin-discovery";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { SkillsPanel } from "./skills-panel";
@@ -73,10 +75,6 @@ import {
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { featuredConnectors } from "@/components/capabilities/featured-connectors";
 import { IntegrationSheet } from "@/components/capabilities/integration-sheet";
-import {
-  QuickConnectDialog,
-  type QuickConnectRequest,
-} from "@/components/capabilities/quick-connect-dialog";
 import { useApiIntegrationOAuthCallback } from "@/components/capabilities/use-api-integration-accounts";
 import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
@@ -287,11 +285,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     removesDefinition: boolean;
   } | null>(null);
 
-  // The one shared quick-connect dialog: only `api_key` and unreviewed
-  // `oauth2` connectors ever need it. `none` and reviewed `oauth2` connect
-  // directly from the row/tile icon with no screen of ours.
-  const [quickConnectRequest, setQuickConnectRequest] = useState<QuickConnectRequest | null>(null);
-
   // Public MCP registry search (only offered when the catalog has no matches).
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
@@ -478,29 +471,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       ],
     })),
   ]);
-  const featuredServiceIds = showFeatured
-    ? [
-        ...new Set([
-          ...featured.map(
-            (item) => catalogServiceIdentity(item.id, item.name, item.providerDomain).id,
-          ),
-          ...integrations.map(({ model }) => model.id),
-          ...connectorItems
-            .filter(
-              (item) =>
-                capabilityCuration(item).curated ||
-                item.id === "api:fiken" ||
-                ["dropbox.com", "front.com"].includes(item.providerDomain ?? ""),
-            )
-            .map((item) => catalogServiceIdentity(item.id, item.name, item.providerDomain).id),
-        ]),
-      ]
-    : [];
-  const featuredServices = featuredServiceIds.flatMap(
-    (id) => connectionServices.find((service) => service.id === id) ?? [],
-  );
-  const remainingServices = connectionServices.filter(
-    (service) => !featuredServiceIds.includes(service.id),
+  const { featuredServices, remainingServices } = partitionConnectionServices(
+    connectionServices,
+    showFeatured,
+    featured,
+    integrations.map(({ model }) => model.id),
+    connectorItems,
   );
   const openIntegrationModel =
     integrations.find((adapter) => adapter.model.id === openIntegration)?.model ?? null;
@@ -518,15 +494,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     [selected, items],
   );
   const inspectUrl = rawSelectedItem?.mcpUrl ?? rawSelectedItem?.endpointUrl;
+  const selectedItemId = rawSelectedItem?.id;
   const needsAuthInspection =
     rawSelectedItem?.kind === "mcp" &&
     !rawSelectedItem.enabled &&
     capabilityConnectPlan(rawSelectedItem).mode === "setup_required" &&
     Boolean(inspectUrl);
   useEffect(() => {
-    if (!needsAuthInspection || !rawSelectedItem || !inspectUrl) return;
+    if (!needsAuthInspection || !selectedItemId || !inspectUrl) return;
     let active = true;
-    const id = rawSelectedItem.id;
+    const id = selectedItemId;
     setAuthInspection(null);
     void client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
       (result) => {
@@ -539,7 +516,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     return () => {
       active = false;
     };
-  }, [client, workspaceId, rawSelectedItem, inspectUrl, needsAuthInspection]);
+  }, [client, workspaceId, selectedItemId, inspectUrl, needsAuthInspection]);
   const inspection =
     authInspection?.id === rawSelectedItem?.id && authInspection?.url === inspectUrl
       ? authInspection
@@ -885,16 +862,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
   }
 
-  // --- Connectors quick-connect fast path --------------------------------------
-  // The row/tile icon click: `none` and reviewed `oauth2` act immediately with
-  // no screen of ours; `api_key` and unreviewed `oauth2` open the one shared
-  // quick-connect dialog. Reuses the exact same connect mutations `handleAction`
-  // uses for the full sheet, just without requiring the sheet to be open first.
-
   // --- Connect flows ---------------------------------------------------------
-
-  // Registry items aren't persisted; create the catalog row before connecting so
-  // enable/OAuth have a real capability id to reference.
 
   async function handleAction(action: ConnectAction) {
     if (!selected || !selectedItem || busyId !== null) return;
@@ -1466,12 +1434,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                   </Button>
                 </div>
               ) : null}
-              {loading ? (
-                <p role="status" className="my-4 flex items-center gap-2 text-sm text-fg-muted">
-                  <Loader2Icon aria-hidden="true" className="size-4 animate-spin" />
-                  Loading connections…
-                </p>
-              ) : null}
+
               <InstalledStrip
                 title="Connected"
                 items={
@@ -1522,13 +1485,19 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 <h2 className="mb-2 text-sm font-semibold">
                   {hasQuery ? "Connections" : "Browse"}
                 </h2>
-                <ConnectionCatalog
-                  services={remainingServices.slice(
-                    0,
-                    hasQuery ? remainingServices.length : visibleCount,
-                  )}
-                  query={query}
-                />
+                {loading && items.length === 0 ? (
+                  <p role="status" className="py-4 text-sm text-fg-muted">
+                    Loading connections…
+                  </p>
+                ) : (
+                  <ConnectionCatalog
+                    services={remainingServices.slice(
+                      0,
+                      hasQuery ? remainingServices.length : visibleCount,
+                    )}
+                    query={query}
+                  />
+                )}
                 {hasQuery && !remainingServices.length && !featuredServices.length ? (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {!searchingAll ? (
@@ -1574,13 +1543,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
               {integrations.map((adapter) => (
                 <Fragment key={adapter.model.id}>{adapter.dialogs}</Fragment>
               ))}
-
-              <QuickConnectDialog
-                request={quickConnectRequest}
-                onOpenChange={(open) => {
-                  if (!open) setQuickConnectRequest(null);
-                }}
-              />
 
               {/*
           One <section> per top-level surface. Featured, the discovery controls,
@@ -1652,6 +1614,21 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 </p>
               ) : null}
             </div>
+            {searchingAll ? (
+              <div className="capability-search-section">
+                <PluginDiscovery
+                  onOpenConnection={(item) => openItem(item, false, true)}
+                  client={client}
+                  workspaceId={workspaceId}
+                  query={query}
+                  canManage={canManageSkills}
+                  onChanged={() => {
+                    void refresh();
+                    onRuntimeChanged();
+                  }}
+                />
+              </div>
+            ) : null}
             <div
               className={searchingAll ? "capability-search-section" : undefined}
               hidden={!searchingAll && activeTab !== "skills"}

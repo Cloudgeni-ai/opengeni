@@ -1,4 +1,3 @@
-const EMPTY_CONNECTIONS: Record<string, boolean> = {};
 import { useState } from "react";
 import { pluginMcpUnavailableReason, type PluginDiscoveryItem } from "@opengeni/sdk";
 import { Markdown } from "./components/markdown";
@@ -12,6 +11,8 @@ const componentLabels: Record<string, string> = {
   commands: "Commands",
   lsp: "Language servers",
 };
+
+const EMPTY_CONNECTIONS: Record<string, boolean> = {};
 
 /** Embeddable plugin overview. Hosts own the dialog and installation actions. */
 export function PluginDetails({

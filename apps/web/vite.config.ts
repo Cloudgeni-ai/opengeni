@@ -34,6 +34,15 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Questions and command controls mount only when their session
+              // surface is active. Keep their implementations behind those
+              // lazy imports instead of recursively merging them into chat.
+              name: "session-conditional-panels",
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:components[\\/](?:human-input-(?:form|surface)|session-commands-panel)\.tsx|hooks[\\/]use-session-background-commands\.ts)$|apps[\\/]web[\\/]src[\\/]components[\\/]session[\\/]commands\.tsx$)/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Account setup is interaction-driven. Do not let shared icons
               // co-locate these forms/controllers with the eager session graph.
               name: "connect-setup",

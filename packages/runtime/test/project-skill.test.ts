@@ -11,16 +11,22 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   const markdown = await Bun.file(
     new URL("../src/bundled_project_skills/opengeni-projects/SKILL.md", import.meta.url),
   ).text();
-  const artifact = loadNativeToolSkillArtifacts({
+  const artifacts = loadNativeToolSkillArtifacts({
     projects: true,
     editableArtifacts: false,
     videoGeneration: false,
-  }).find((entry) => entry.name === "opengeni-projects");
+  });
+  expect(artifacts.map((artifact) => artifact.name)).toEqual([
+    "document-parsing",
+    "opengeni-projects",
+  ]);
+  const artifact = artifacts.find((entry) => entry.name === "opengeni-projects");
   expect(artifact?.name).toBe("opengeni-projects");
   expect(artifact?.files).toEqual([{ path: "SKILL.md", content: markdown }]);
   const composition = composeRuntimeSkills([]);
   expect(composition.nativeToolNames).not.toContain("opengeni-projects");
   expect(composition.configuredNames).toEqual([]);
+  expect(composition.selections.map((selection) => selection.name)).toEqual(["document-parsing"]);
   expect(composition.index.map((entry) => entry.name)).toEqual(["document-parsing"]);
 });
 

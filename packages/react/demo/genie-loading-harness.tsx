@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { buildTimeline } from "@opengeni/react";
 import {
   MessageTimeline,
-  buildTimeline,
   StartupTimings,
   setStartupDetails,
   useStartupDetails,
-} from "@opengeni/react";
+} from "@opengeni/react/session-ui";
 import type { SessionEvent } from "@opengeni/sdk";
 import "./styles.css";
 

@@ -6,6 +6,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { BundlesSection } from "./bundles-section";
+import { PluginDiscovery } from "./plugin-discovery";
 import type {
   CapabilityCatalogItem,
   CapabilityPack,
@@ -166,7 +167,7 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("the source import and manifest registration entry points stay reachable", async () => {
+  test("plugin import and manifest registration entry points stay reachable", async () => {
     const rendered = await renderSection({ section: "plugins" });
     try {
       const labels = [...rendered.container.querySelectorAll("button")].map(
@@ -174,6 +175,47 @@ describe("BundlesSection", () => {
       );
       expect(labels.some((label) => label.includes("Import plugin"))).toBe(true);
       expect(labels.some((label) => label.includes("Add workflow template"))).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an installed plugin card loads its exact installed identity before management", async () => {
+    const getInstalledPluginDetails = mock(async (_workspaceId: string, _pluginKey: string) => ({
+      id: "example:research",
+      name: "research",
+      displayName: "Research suite",
+      description: "Research tools",
+      longDescription: "Research tools",
+      provider: "custom",
+      category: null,
+      logoUrl: null,
+      darkLogoUrl: null,
+      sourceUrl: installedPlugin().sourceUrl,
+      author: null,
+      version: "2.0.0",
+      skills: [],
+      mcpServers: [],
+      components: [],
+      installation: "installed",
+    }));
+    const rendered = await render(
+      <PluginDiscovery
+        client={Object.assign(stubClient(false), { getInstalledPluginDetails })}
+        workspaceId="00000000-0000-4000-8000-000000000001"
+        query=""
+        installedPlugins={[installedPlugin()]}
+      />,
+    );
+    try {
+      const card = rendered.container.querySelector<HTMLButtonElement>(".og-plugin-discovery-row");
+      expect(card?.textContent).toContain("Research suite");
+      await act(async () => card!.click());
+      expect(getInstalledPluginDetails).toHaveBeenCalledTimes(1);
+      expect(getInstalledPluginDetails).toHaveBeenCalledWith(
+        "00000000-0000-4000-8000-000000000001",
+        "example/research",
+      );
     } finally {
       await rendered.unmount();
     }
@@ -277,7 +319,7 @@ async function render(element: ReactNode) {
 function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   if (failed) {
     return {
-      listCapabilities: async () => ({ items: [] }),
+      listCapabilities: async () => ({ items: [], installations: [] }),
       searchPublicSkills: async () => ({ items: [] }),
       discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
       listInstalledSkills: async () => {
@@ -289,8 +331,8 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
     } as unknown as OpenGeniBrowserClient;
   }
   return {
-    listCapabilities: async () => ({ items: [] }),
     searchPublicSkills: async () => ({ items: [] }),
+    listCapabilities: async () => ({ items: empty ? [] : catalogItems(), installations: [] }),
     discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),

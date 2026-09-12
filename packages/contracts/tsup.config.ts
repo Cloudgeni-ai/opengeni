@@ -7,6 +7,7 @@ export default defineConfig({
     "src/mcp-endpoint.ts",
     "src/index.ts",
     "src/connect.ts",
+    "src/plugin-discovery.ts",
     "src/external-identities.ts",
     "src/host-mcp-bindings.ts",
     "src/atlassian.ts",

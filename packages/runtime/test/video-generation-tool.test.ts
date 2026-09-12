@@ -47,6 +47,7 @@ describe("video generation runtime surface", () => {
       ((agent as unknown as { tools: Array<{ name: string }> }).tools ?? []).map(
         (tool) => tool.name,
       );
+    // Default document-parsing guidance remains readable without video tools.
     expect(names(disabled)).toEqual(["skill_read"]);
     expect(names(enabled)).toEqual([
       "get_video_generation_capabilities",

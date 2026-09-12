@@ -1,4 +1,5 @@
 import {
+  getAttemptToolCatalog,
   createChannel,
   listChannels,
   getChannel,
@@ -5718,6 +5719,33 @@ function registerCapabilityDiscoveryTools(
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
 
+  // Installation is workspace metadata; an enabled personal MCP is usable only
+  // when its tools actually made it into this caller's immutable attempt catalog.
+  // This is a readiness projection, never credential resolution or a new grant.
+  const setupProjections = async (items: CapabilityCatalogItem[]) => {
+    const availableServerIds = new Set<string>();
+    if (items.some((item) => item.enabled && item.connectionRef?.subjectScope === "subject")) {
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const attemptCatalog = await getAttemptToolCatalog(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        attemptId: claims.callerAttemptId,
+      });
+      if (
+        attemptCatalog?.sessionId === sessionId &&
+        attemptCatalog.turnId === claims.callerTurnId &&
+        attemptCatalog.executionGeneration === claims.callerExecutionGeneration
+      ) {
+        for (const entry of attemptCatalog.entries) availableServerIds.add(entry.identity.serverId);
+      }
+    }
+    return await Promise.all(
+      items.map((item) =>
+        capabilitySetupProjection(deps, grant.workspaceId, item, availableServerIds),
+      ),
+    );
+  };
+
   server.registerTool(
     "capability_catalog_search",
     {
@@ -5736,25 +5764,24 @@ function registerCapabilityDiscoveryTools(
         query,
         limit ?? 8,
       );
-      const matches = await Promise.all(
-        ranked.map(async ({ item, matchedOn }) => ({
-          capabilityId: item.id,
-          name: item.name,
-          description: item.description,
-          kind: item.kind,
-          source: item.source,
-          category: item.category,
-          tags: item.tags.slice(0, 16),
-          providerDomain: item.providerDomain,
-          authKind: item.authKind,
-          tier: item.tier,
-          matchedOn,
-          setup: {
-            ...(await capabilitySetupProjection(deps, grant.workspaceId, item)),
-            requiredVariables: capabilityRequiredVariables(item),
-          },
-        })),
-      );
+      const setups = await setupProjections(ranked.map(({ item }) => item));
+      const matches = ranked.map(({ item, matchedOn }, index) => ({
+        capabilityId: item.id,
+        name: item.name,
+        description: item.description,
+        kind: item.kind,
+        source: item.source,
+        category: item.category,
+        tags: item.tags.slice(0, 16),
+        providerDomain: item.providerDomain,
+        authKind: item.authKind,
+        tier: item.tier,
+        matchedOn,
+        setup: {
+          ...setups[index]!,
+          requiredVariables: capabilityRequiredVariables(item),
+        },
+      }));
       return json({ query, matches });
     },
   );
@@ -5778,7 +5805,8 @@ function registerCapabilityDiscoveryTools(
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
-      const setup = await capabilitySetupProjection(deps, grant.workspaceId, item);
+      const [setup] = await setupProjections([item]);
+      if (!setup) throw new Error("Capability setup projection is unavailable.");
       if (setup.status === "ready") {
         return json({
           capabilityId: item.id,
@@ -5840,6 +5868,7 @@ async function capabilitySetupProjection(
   deps: ApiRouteDeps,
   workspaceId: string,
   item: CapabilityCatalogItem,
+  availableServerIds: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
@@ -5879,6 +5908,21 @@ async function capabilitySetupProjection(
           action: "connect",
           detail: "A workspace admin must designate an authorized Codex Apps subscription.",
         };
+  }
+  if (item.enabled && item.connectionRef?.subjectScope === "subject") {
+    if (item.runtime.mcpServerId && availableServerIds.has(item.runtime.mcpServerId)) {
+      return {
+        status: "ready",
+        action: null,
+        detail: "This capability has tools available in this turn.",
+      };
+    }
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail:
+        "This capability is enabled, but its personal account is not available in this turn. The account owner must review access using Use in this conversation, then send a new message. Shared conversations require acknowledgement that results are visible to workspace members.",
+    };
   }
   if (item.enabled) {
     return {
