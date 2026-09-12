@@ -46,13 +46,17 @@ postgresTest(
       // Owner-only fixture setup supplies a valid ownership graph. The boundary
       // under test is runtime read RLS, not membership/session-create protocols.
       await owned.admin.begin(async (tx) => {
-        await tx`SET LOCAL session_replication_role = replica`;
         await tx`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Catalog provenance')`;
         // Workspace kind is derived from organization membership's Personal
         // pointer; there is intentionally no physical workspaces.kind column.
         await tx`INSERT INTO workspaces(id,account_id,name,settings) VALUES(${workspaceId},${accountId},'Shared catalog','{}'),(${personalWorkspaceId},${accountId},'Owner Personal','{}')`;
+        // Keep workspace bootstrap triggers active (including the canonical
+        // session-activity counter). Only protected membership seeding bypasses
+        // lifecycle writer triggers in this administrator-owned fixture.
+        await tx`SET LOCAL session_replication_role = replica`;
         await tx`INSERT INTO organization_memberships(id,account_id,subject_id,role,status,personal_workspace_id) VALUES(${membershipId},${accountId},${ownerSubject},'owner','active',${personalWorkspaceId})`;
         await tx`INSERT INTO workspace_memberships(account_id,workspace_id,subject_id,role,permissions) VALUES(${accountId},${workspaceId},${ownerSubject},'member','["files:read","sessions:read"]'),(${accountId},${workspaceId},${viewerSubject},'member','["files:read","sessions:read"]')`;
+        await tx`SET LOCAL session_replication_role = origin`;
         await tx`INSERT INTO workspace_inference_controls(workspace_id,account_id) VALUES(${workspaceId},${accountId}),(${personalWorkspaceId},${accountId})`;
       });
       for (const [id, kind] of [
