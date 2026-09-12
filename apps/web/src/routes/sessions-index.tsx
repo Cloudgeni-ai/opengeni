@@ -832,9 +832,12 @@ function SessionsIndexRouteContent({
     onApplyRemote: applyRemoteDraft,
     restoreReadyFiles: attachments.restoreReadyFiles,
     hydrateResources,
-    // Tool policy needs the MCP catalog. GitHub is optional: an unreadied
-    // catalog must not keep the create composer disabled / unsendable.
-    resourceHydrationReady: context.workspaceMcpCatalogReady,
+    // Establish the passive baseline only after effective visibility settles.
+    // Otherwise a late Personal-workspace capability response turns hydration
+    // into an autosave, racing navigation and sibling drafts without a user edit.
+    // Failed capability reads settle to the existing unavailable fallback too.
+    // GitHub remains optional and must not keep the composer unsendable.
+    resourceHydrationReady: context.workspaceMcpCatalogReady && tenancyCapabilities !== null,
   });
   const busy = context.busy || submitting;
   const privateCreateUnavailable =
