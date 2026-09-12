@@ -2178,6 +2178,37 @@ describe("buildConnectionTokenResolver", () => {
     }
   });
 
+  test("Microsoft refresh preserves offline access without restoring missing API scopes", async () => {
+    const refreshed = await refreshOAuthConnectionCredential(
+      brokerCredential({
+        kind: "oauth2",
+        credential: {
+          access_token: "AC",
+          refresh_token: "RF",
+          token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+          client_id: "microsoft-client",
+          scope: "offline_access User.Read Mail.Send",
+        },
+      }),
+      { providerDomain: "graph.microsoft.com", kind: "oauth2" },
+      settings,
+      {
+        fetchImpl: (async () =>
+          Response.json({
+            access_token: "AC2",
+            scope: "User.Read",
+            expires_in: 3600,
+          })) as typeof fetch,
+        dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+      },
+    );
+    expect(refreshed.grantedScopes).toEqual(["User.Read", "offline_access"]);
+    expect(refreshed.credential).toMatchObject({
+      refresh_token: "RF",
+      scope: "User.Read offline_access",
+    });
+  });
+
   test("provider credentials may request a JSON OAuth refresh body", async () => {
     const originalFetch = globalThis.fetch;
     let capturedBody: Record<string, unknown> | null = null;
