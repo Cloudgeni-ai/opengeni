@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 5.2.0
+
+### Minor Changes
+
+- c1ad490: Allow hosts to localize user-message disclosure actions through direct component props and the default timeline composition. Each label falls back independently to English, while message expansion, accessible controls, and scroll anchoring retain their existing behavior.
+
 ## 5.1.1
 
 ### Patch Changes
