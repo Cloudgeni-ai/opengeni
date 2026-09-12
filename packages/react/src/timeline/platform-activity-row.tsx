@@ -10,7 +10,6 @@ export default function PlatformActivityRow({
   t: displayName,
   b: BotIcon,
   m: Markdown,
-  r: truncate,
   j,
   s,
 }: {

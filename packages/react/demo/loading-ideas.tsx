@@ -106,7 +106,10 @@ function App() {
                 </span>
                 <span className="command">
                   {Array.from(text).map((char, n) => (
-                    <span key={n} style={{ "--letter": n } as React.CSSProperties}>
+                    <span
+                      key={text.slice(0, n + 1)}
+                      style={{ "--letter": n } as React.CSSProperties}
+                    >
                       {char}
                     </span>
                   ))}

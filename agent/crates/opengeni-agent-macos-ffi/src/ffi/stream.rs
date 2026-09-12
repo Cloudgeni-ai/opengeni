@@ -5,6 +5,7 @@
 //! publishes only the newest tightly-packed RGBA frame into a bounded slot.
 //! Consumers therefore cannot build an unbounded decode/copy queue.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -118,13 +119,15 @@ define_class!(
             sample_buffer: &CMSampleBuffer,
             output_type: SCStreamOutputType,
         ) {
-            if output_type == SCStreamOutputType::Screen {
-                match sample_to_rgba(sample_buffer) {
-                    Ok(Some(frame)) => self.ivars().slot.publish(Ok(frame)),
-                    Ok(None) => {}
-                    Err(error) => self.ivars().slot.fail(error),
+            crate::with_autorelease_pool(|| {
+                if output_type == SCStreamOutputType::Screen {
+                    match sample_to_rgba(sample_buffer) {
+                        Ok(Some(frame)) => self.ivars().slot.publish(Ok(frame)),
+                        Ok(None) => {}
+                        Err(error) => self.ivars().slot.fail(error),
+                    }
                 }
-            }
+            });
         }
     }
 
@@ -132,9 +135,11 @@ define_class!(
     unsafe impl SCStreamDelegate for CaptureOutput {
         #[unsafe(method(stream:didStopWithError:))]
         fn did_stop(&self, _stream: &SCStream, error: &NSError) {
-            self.ivars()
-                .slot
-                .fail(format!("ScreenCaptureKit stream stopped: {error}"));
+            crate::with_autorelease_pool(|| {
+                self.ivars()
+                    .slot
+                    .fail(format!("ScreenCaptureKit stream stopped: {error}"));
+            });
         }
     }
 );
@@ -150,13 +155,85 @@ impl CaptureOutput {
 struct StreamRuntime {
     stream: Retained<SCStream>,
     output: Retained<CaptureOutput>,
-    _queue: DispatchRetained<DispatchQueue>,
+    queue: DispatchRetained<DispatchQueue>,
+    start_requested: bool,
+    start_completion: Arc<StartCompletion>,
+}
+
+/// The second event owns teardown: completion after abandonment, or normal
+/// abandonment after completion. Stopping a still-pending start is insufficient
+/// because the OS may start producing frames after that stop returned an error.
+#[derive(Default)]
+struct StartCompletion(AtomicU8);
+
+impl StartCompletion {
+    fn complete(&self) -> bool {
+        self.0.fetch_or(1, Ordering::AcqRel) & 2 != 0
+    }
+
+    fn abandon(&self) -> bool {
+        self.0.fetch_or(2, Ordering::AcqRel) & 1 != 0
+    }
+}
+
+impl Drop for StreamRuntime {
+    fn drop(&mut self) {
+        // Keep the native resources in the completion block until a pending
+        // start finishes. That callback then owns the final stop and detach.
+        if self.start_requested && !self.start_completion.abandon() {
+            return;
+        }
+        if self.start_requested {
+            let (stopped_tx, stopped_rx) = mpsc::channel();
+            let stopped = block2::RcBlock::new(move |error: *mut NSError| {
+                let _ = stopped_tx.send(error_message(error));
+            });
+            // SAFETY: only this owner calls start/stop after construction.
+            unsafe {
+                self.stream
+                    .stopCaptureWithCompletionHandler(Some(&*stopped));
+            }
+            let _ = stopped_rx.recv_timeout(STOP_TIMEOUT);
+        }
+        let output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*self.output);
+        // SAFETY: remove the exact output registered during construction. If
+        // discovery completed after its receiver expired, capture never started.
+        let _ = unsafe {
+            self.stream
+                .removeStreamOutput_type_error(output, SCStreamOutputType::Screen)
+        };
+    }
+}
+
+fn stop_abandoned_start(
+    stream: &Retained<SCStream>,
+    output: Retained<CaptureOutput>,
+    queue: DispatchRetained<DispatchQueue>,
+) {
+    let stopped_stream = stream.clone();
+    let stopped = block2::RcBlock::new(move |_error: *mut NSError| {
+        crate::with_autorelease_pool(|| {
+            let _keep_queue_alive = &queue;
+            let output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
+            // SAFETY: the worker relinquished this exact stream while startup
+            // was pending; only this late-completion path now owns teardown.
+            let _ = unsafe {
+                stopped_stream.removeStreamOutput_type_error(output, SCStreamOutputType::Screen)
+            };
+        });
+    });
+    // Do not block ScreenCaptureKit's completion queue waiting on itself.
+    // The copied stop block retains the stream, output and queue until stopped.
+    unsafe {
+        stream.stopCaptureWithCompletionHandler(Some(&*stopped));
+    }
 }
 
 /// ARC-backed ScreenCaptureKit objects are created on its discovery callback
 /// and transferred exactly once to the dedicated owner thread. No stream method
-/// is called before that transfer; every later start/stop/remove call happens on
-/// the owner thread. Output callbacks touch only the synchronized `FrameSlot`.
+/// is called before that transfer. If the owner abandons a pending start, the
+/// completion callback retains the resources and takes exclusive teardown
+/// ownership. Output callbacks touch only the synchronized `FrameSlot`.
 struct OwnedRuntime(StreamRuntime);
 
 // SAFETY: see `OwnedRuntime`'s ownership invariant above. This is the only
@@ -199,7 +276,11 @@ impl CaptureStream {
         let (stop_tx, stop_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("opengeni-sck-stream".to_string())
-            .spawn(move || run_stream(source, max_size, &worker_slot, &ready_tx, &stop_rx))
+            .spawn(move || {
+                crate::with_autorelease_pool(|| {
+                    run_stream(source, max_size, &worker_slot, &ready_tx, &stop_rx);
+                });
+            })
             .map_err(|error| MacFfiError::Ffi(format!("start capture worker: {error}")))?;
 
         match ready_rx.recv_timeout(DISCOVERY_TIMEOUT) {
@@ -279,7 +360,7 @@ fn run_stream(
     ready: &mpsc::Sender<Result<(), String>>,
     stop: &mpsc::Receiver<()>,
 ) {
-    let runtime = match discover_runtime(source, max_size, Arc::clone(slot)) {
+    let mut runtime = match discover_runtime(source, max_size, Arc::clone(slot)) {
         Ok(runtime) => runtime.0,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -289,11 +370,21 @@ fn run_stream(
     };
 
     let (started_tx, started_rx) = mpsc::channel();
+    let start_completion = Arc::clone(&runtime.start_completion);
+    let late_stream = runtime.stream.clone();
+    let late_output = runtime.output.clone();
+    let late_queue = runtime.queue.clone();
     let started = block2::RcBlock::new(move |error: *mut NSError| {
+        if start_completion.complete() {
+            crate::with_autorelease_pool(|| {
+                stop_abandoned_start(&late_stream, late_output.clone(), late_queue.clone());
+            });
+        }
         let _ = started_tx.send(error_message(error));
     });
     // SAFETY: runtime owns the stream for this thread and the copied block stays
     // alive until ScreenCaptureKit invokes it.
+    runtime.start_requested = true;
     unsafe {
         runtime
             .stream
@@ -316,25 +407,7 @@ fn run_stream(
     }
 
     let _ = stop.recv();
-    let (stopped_tx, stopped_rx) = mpsc::channel();
-    let stopped = block2::RcBlock::new(move |error: *mut NSError| {
-        let _ = stopped_tx.send(error_message(error));
-    });
-    // SAFETY: serialized owner-thread shutdown; the callback is bounded below.
-    unsafe {
-        runtime
-            .stream
-            .stopCaptureWithCompletionHandler(Some(&*stopped));
-    }
-    let _ = stopped_rx.recv_timeout(STOP_TIMEOUT);
-    let output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*runtime.output);
-    // SAFETY: the exact output registered during construction is removed after
-    // capture has stopped; failure only means SCK already detached it.
-    let _ = unsafe {
-        runtime
-            .stream
-            .removeStreamOutput_type_error(output, SCStreamOutputType::Screen)
-    };
+    drop(runtime);
     slot.stop();
 }
 
@@ -504,7 +577,9 @@ fn build_runtime(
     Ok(StreamRuntime {
         stream,
         output,
-        _queue: queue,
+        queue,
+        start_requested: false,
+        start_completion: Arc::default(),
     })
 }
 
@@ -576,5 +651,57 @@ fn classify_start_error(error: String) -> MacFfiError {
         MacFfiError::TargetStale(error)
     } else {
         MacFfiError::Ffi(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StartCompletion;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn completed_start_is_stopped_by_its_owner() {
+        let completion = StartCompletion::default();
+        assert!(
+            !completion.complete(),
+            "a live owner still needs the stream"
+        );
+        assert!(
+            completion.abandon(),
+            "owner must stop before detaching output"
+        );
+    }
+
+    #[test]
+    fn timed_out_start_is_stopped_only_after_late_completion() {
+        let completion = StartCompletion::default();
+        assert!(
+            !completion.abandon(),
+            "cannot cancel a pending OS start with stop"
+        );
+        // Both success and error callbacks finish the outstanding OS operation;
+        // only then can the abandoned stream be stopped and its output detached.
+        assert!(
+            completion.complete(),
+            "late callback must own final cleanup"
+        );
+    }
+
+    #[test]
+    fn start_completion_racing_timeout_has_exactly_one_cleanup_owner() {
+        for _ in 0..100 {
+            let completion = Arc::new(StartCompletion::default());
+            let gate = Arc::new(Barrier::new(2));
+            let callback_completion = Arc::clone(&completion);
+            let callback_gate = Arc::clone(&gate);
+            let callback = std::thread::spawn(move || {
+                callback_gate.wait();
+                callback_completion.complete()
+            });
+            gate.wait();
+            let owner_stops = completion.abandon();
+            let callback_stops = callback.join().expect("start callback");
+            assert_ne!(owner_stops, callback_stops);
+        }
     }
 }

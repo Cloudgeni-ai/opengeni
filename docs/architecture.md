@@ -1278,6 +1278,10 @@ its durable `ComputerSession` binding before forwarding the exact bytes, and the
 SDK retains its independent verification. The browser extension is an attachment
 client, not an authorization service.
 
+Native macOS operations drain thread-local Cocoa pools; capture owners stop
+pending starts during teardown. Desktop discovery publishes independently of
+semantic observation so stalled inspection does not block target selection.
+
 New capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do

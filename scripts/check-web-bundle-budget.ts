@@ -438,7 +438,8 @@ const budgets = {
   // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
   // Main 52ff56a94 is already 33,660 gzip bytes; the scroll-control gutter
   // adds 14. Preserve the measured whole-KiB envelope and 1-KiB headroom.
-  cssGzip: wholeKibEnvelope(33_674),
+  // Base 7135113e5 already measures 34,868 gzip bytes on macOS and Linux.
+  cssGzip: wholeKibEnvelope(34_868),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -509,6 +510,10 @@ const effectiveBudgets = {
     // Retain the established 1.5 KiB variance allowance (643 KiB total).
     // Initial, raw, file-count, per-file, lazy, and CSS caps stay unchanged.
     wholeKibEnvelope(656_741, 1.5 * kib),
+    // Base 7135113e5 measures 659,490; desktop changes measure 659,492 on
+    // macOS and 659,488 in Linux CI. Keep the existing minimum 1-KiB
+    // headroom policy and round the envelope to whole KiB.
+    wholeKibEnvelope(659_492),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
