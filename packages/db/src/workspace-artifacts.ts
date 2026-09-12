@@ -376,6 +376,7 @@ export async function getWorkspaceArtifactContentRef(
   versionId?: string,
 ): Promise<{
   artifactId: string;
+  status: WorkspaceArtifact["status"];
   version: WorkspaceArtifactVersion;
   contentKey: string;
   sourceKey: string | null;
@@ -399,6 +400,7 @@ export async function getWorkspaceArtifactContentRef(
     if (!version) throw new WorkspaceArtifactNotFoundError("Artifact version not found");
     return {
       artifactId,
+      status: artifact.status,
       version: versionFromRow(version),
       contentKey: version.contentKey,
       sourceKey: version.sourceKey,

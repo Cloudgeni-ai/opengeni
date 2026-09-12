@@ -228,3 +228,44 @@ test("Site list keeps navigation in the host and clears inventory on actor chang
     await view.unmount();
   }
 });
+
+test("an inline Site version keeps its own tool declarations", async () => {
+  const old = {
+    ...version,
+    id: "old",
+    requestedTools: [{ serverId: "old-server", toolName: "read" }],
+  };
+  const snapshot = await loadSiteSnapshot(
+    {
+      getWorkspaceArtifact: async () => ({ ...detail, versions: [version, old] }),
+      getWorkspaceArtifactHtml: async (_workspace, _site, options) => {
+        expect(options.versionId).toBe("old");
+        return "<p>Old version</p>";
+      },
+    },
+    "space",
+    "site",
+    { versionId: "old" },
+  );
+  expect(snapshot.content?.versionId).toBe("old");
+  expect(snapshot.content?.requestedTools).toEqual(old.requestedTools);
+});
+
+test("saved embeds can load versions beyond the bounded history list", async () => {
+  const snapshot = await loadSiteSnapshot(
+    {
+      getWorkspaceArtifact: async () => ({ ...detail, versionsTruncated: true }),
+      getWorkspaceArtifactHtml: async () => {
+        throw new Error("Wrong path");
+      },
+      getWorkspaceArtifactContent: async (_workspace, _site, options) => {
+        expect(options).toEqual({ versionId: "ancient" });
+        return { ...content, versionId: "ancient" };
+      },
+    },
+    "space",
+    "site",
+    { versionId: "ancient" },
+  );
+  expect(snapshot.content?.versionId).toBe("ancient");
+});

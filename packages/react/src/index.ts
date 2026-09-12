@@ -1,3 +1,4 @@
+export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
 /// <reference path="./types/external.d.ts" />
 
@@ -520,7 +521,11 @@ export {
   sandboxFileLocationFromHref,
   sandboxFilePathFromHref,
 } from "./components/markdown";
-export type { MarkdownProps, SandboxFileLocation } from "./components/markdown";
+export type {
+  MarkdownProps,
+  MarkdownInteractiveBlock,
+  SandboxFileLocation,
+} from "./components/markdown";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";

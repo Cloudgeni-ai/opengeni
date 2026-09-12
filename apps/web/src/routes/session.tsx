@@ -1,3 +1,4 @@
+import { retainedImageId } from "@opengeni/react";
 import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
@@ -157,6 +158,17 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const InlineChatImage = lazy(() =>
+  import("@/components/artifacts/inline-chat-image").then((module) => ({
+    default: module.InlineChatImage,
+  })),
+);
+const ChatInteractiveBlock = lazy(() =>
+  import("@/components/artifacts/chat-interactive-block").then((module) => ({
+    default: module.ChatInteractiveBlock,
+  })),
+);
 
 const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
 const SessionCommands = lazy(() =>
@@ -2150,6 +2162,31 @@ function SessionChatPane(props: {
     ],
   );
 
+  const renderImage = useCallback(
+    (image: { src: string; alt: string }) => {
+      const artifactId = retainedImageId(image.src);
+      return artifactId ? (
+        <Suspense fallback={<span role="status">Loading image…</span>}>
+          <InlineChatImage
+            key={props.session.workspaceId + ":" + artifactId}
+            workspaceId={props.session.workspaceId}
+            artifactId={artifactId}
+            alt={image.alt}
+          />
+        </Suspense>
+      ) : null;
+    },
+    [props.session.workspaceId],
+  );
+  const renderInteractiveBlock = useCallback(
+    (block: { kind: "html" | "site"; content: string }) => (
+      <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <ChatInteractiveBlock workspaceId={props.session.workspaceId} {...block} />
+      </Suspense>
+    ),
+    [props.session.workspaceId],
+  );
+
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
@@ -2161,11 +2198,13 @@ function SessionChatPane(props: {
             text={text}
             streaming={item.streaming}
             onSandboxFile={props.onOpenSandboxFile}
+            renderInteractiveBlock={renderInteractiveBlock}
+            renderImage={renderImage}
           />
         </div>
       );
     },
-    [props.onOpenSandboxFile, props.session.workspaceId],
+    [props.onOpenSandboxFile, props.session.workspaceId, renderInteractiveBlock, renderImage],
   );
 
   return createElement(

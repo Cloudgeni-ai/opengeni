@@ -34,6 +34,10 @@
       "types": "./src/browser.ts",
       "default": "./src/browser.ts"
     },
+    "./site-document": {
+      "types": "./src/site-document.ts",
+      "default": "./src/site-document.ts"
+    },
     "./site": {
       "types": "./src/site.ts",
       "default": "./src/site.ts"
@@ -117,7 +121,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun ../../scripts/build-typescript-package.ts",
+    "build": "bun ../../scripts/generate-site-browser-runtime.ts && bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

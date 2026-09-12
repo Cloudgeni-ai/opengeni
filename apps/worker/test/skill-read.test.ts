@@ -130,57 +130,55 @@ describe("skill_read gateway definition", () => {
     ).toBe(false);
   });
 
-  test("selected Projects reads exact packaged guidance without sandbox access; host [] excludes it", async () => {
-    const markdown = await Bun.file(
-      new URL(
-        "../../../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md",
-        import.meta.url,
-      ),
-    ).text();
-    for (const bundledSkillIds of [
-      undefined,
-      ["builtin:opengeni-projects"] as const,
-      [],
-    ] as const) {
-      const selected = loadConfiguredBundledSkills({
-        firstPartyTools: [],
-        videoGenerationEnabled: false,
-        bundledSkillIds,
-        get sandboxBackend(): never {
-          throw new Error("must not access sandbox");
-        },
-      } as Parameters<typeof loadConfiguredBundledSkills>[0]);
-      const environment = createAttemptToolEnvironment({
-        scope,
-        generation: 1,
-        definitions: [
-          createSkillReadAttemptToolDefinition({
-            authorize: async () => {},
-            load: async (skill) => {
-              const entry = selected.find(
-                (item) => item.id === skill || item.artifact.name === skill,
-              );
-              if (!entry) throw new Error("Skill is excluded by source selection");
-              return entry.artifact.files;
-            },
-          }),
-        ],
-      });
-      for (const skill of ["builtin:opengeni-projects", "opengeni-projects"]) {
-        const output = environment.callModel({
-          modelName: "skill_read",
-          arguments: { skill },
-          subjectId: "agent:test",
+  for (const [name, directory] of [
+    ["opengeni-projects", "bundled_project_skills"],
+    ["opengeni-visualize", "bundled_default_skills"],
+    ["document-parsing", "bundled_default_skills"],
+  ] as const)
+    test(`selected ${name} reads exact packaged guidance without sandbox access; host [] excludes it`, async () => {
+      const markdown = await Bun.file(
+        new URL(`../../../packages/runtime/src/${directory}/${name}/SKILL.md`, import.meta.url),
+      ).text();
+      for (const bundledSkillIds of [undefined, [`builtin:${name}`] as const, []] as const) {
+        const selected = loadConfiguredBundledSkills({
+          firstPartyTools: [],
+          videoGenerationEnabled: false,
+          bundledSkillIds,
+          get sandboxBackend(): never {
+            throw new Error("must not access sandbox");
+          },
+        } as Parameters<typeof loadConfiguredBundledSkills>[0]);
+        const environment = createAttemptToolEnvironment({
+          scope,
+          generation: 1,
+          definitions: [
+            createSkillReadAttemptToolDefinition({
+              authorize: async () => {},
+              load: async (skill) => {
+                const entry = selected.find(
+                  (item) => item.id === skill || item.artifact.name === skill,
+                );
+                if (!entry) throw new Error("Skill is excluded by source selection");
+                return entry.artifact.files;
+              },
+            }),
+          ],
         });
-        if (bundledSkillIds?.length === 0)
-          await expect(output).rejects.toThrow("excluded by source selection");
-        else
-          expect((await output).structuredContent).toEqual({
-            files: [{ path: "SKILL.md", content: markdown }],
+        for (const skill of [`builtin:${name}`, name]) {
+          const output = environment.callModel({
+            modelName: "skill_read",
+            arguments: { skill },
+            subjectId: "agent:test",
           });
+          if (bundledSkillIds?.length === 0)
+            await expect(output).rejects.toThrow("excluded by source selection");
+          else
+            expect((await output).structuredContent).toEqual({
+              files: [{ path: "SKILL.md", content: markdown }],
+            });
+        }
       }
-    }
-  });
+    });
 
   const files = [
     { path: "SKILL.md", content: "main" },

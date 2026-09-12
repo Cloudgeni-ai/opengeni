@@ -350,6 +350,7 @@
       "version": "0.5.6",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
         "@opengeni/tool-gateway": "workspace:*",
       },
       "devDependencies": {

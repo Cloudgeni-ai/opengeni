@@ -1,5 +1,6 @@
 import {
   CODEX_PROVIDER_ID,
+  CODEX_IMAGE_MODEL,
   generateCodexSubscriptionImage,
   type CodexRequestContext,
 } from "@opengeni/codex";
@@ -12,8 +13,6 @@ import {
   imageProviderBindingHash,
 } from "./image-generation-operation";
 import type { ResolvedImageGenerationReference } from "./image-generation-references";
-
-const CODEX_IMAGE_MODEL = "gpt-image-2";
 
 /** Execute the same standalone subscription image path used by Codex clients. */
 export async function executeCodexImageGeneration(input: {

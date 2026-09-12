@@ -118,7 +118,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun run build:css && bun ../../scripts/build-typescript-package.ts",
+    "build": "bun run build:css && bun ../../scripts/generate-visualization-assets.ts && bun ../../scripts/build-typescript-package.ts",
     "build:css": "bun scripts/build-compiled-css.ts",
     "check:css": "bun scripts/build-compiled-css.ts --check",
     "demo": "vite dev demo --port 3100",
