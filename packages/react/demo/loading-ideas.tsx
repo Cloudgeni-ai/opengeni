@@ -33,11 +33,6 @@ function App() {
     [speed, setSpeed] = useState("2.4s"),
     [text, setText] = useState("bun run typecheck"),
     [chosen, setChosen] = useState("ink-sweep");
-  const animatedText = Array.from(text).map((char, position, characters) => ({
-    char,
-    key: characters.slice(0, position + 1).join(""),
-    position,
-  }));
   return (
     <main
       className={`ideas ${dark ? "dark" : "light"} ${paused ? "paused" : ""}`}
@@ -110,8 +105,11 @@ function App() {
                   </span>
                 </span>
                 <span className="command">
-                  {animatedText.map(({ char, key, position }) => (
-                    <span key={key} style={{ "--letter": position } as React.CSSProperties}>
+                  {Array.from(text).map((char, n) => (
+                    <span
+                      key={text.slice(0, n + 1)}
+                      style={{ "--letter": n } as React.CSSProperties}
+                    >
                       {char}
                     </span>
                   ))}
