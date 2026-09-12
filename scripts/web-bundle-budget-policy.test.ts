@@ -72,7 +72,7 @@ describe("web bundle budget policy", () => {
       "directSessionFiles: 31",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      "cssGzip: wholeKibEnvelope(34_868)",
+      "cssGzip: wholeKibEnvelope(35_411)",
     ])
       expect(source).toContain(limit);
   });

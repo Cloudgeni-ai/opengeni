@@ -56,6 +56,7 @@ export async function applySkillLifecycle(
       content = main?.content;
     } else if (
       request.operation === "approve" ||
+      request.operation === "reject" ||
       request.operation === "restore" ||
       request.operation === "confirm_response"
     ) {
@@ -216,6 +217,9 @@ export async function listSkillRecords(
           FROM skill_write_receipts pending WHERE pending.account_id=h.account_id
             AND pending.workspace_id=${context.workspaceId}::uuid AND pending.receipt->>'skillId'=h.id::text
             AND pending.receipt->>'outcome'='pending'
+            AND coalesce(pending.receipt->>'pendingReason','approval')='approval'
+            AND (pending.receipt->>'revisionId')::uuid=(SELECT newest.id FROM preference_registry_revisions newest
+              WHERE newest.account_id=h.account_id AND newest.preference_id=h.id ORDER BY newest.revision DESC LIMIT 1)
             AND NOT EXISTS(SELECT 1 FROM preference_registry_events e WHERE e.preference_id=h.id
               AND e.new_revision_id=(pending.receipt->>'revisionId')::uuid
               AND e.type IN ('activated','corrected','rejected'))),'[]'::jsonb),

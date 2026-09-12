@@ -1,6 +1,7 @@
+import { acquirePreKnowledgeTestDatabase } from "./pre-knowledge-database";
 // opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
@@ -12,7 +13,7 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0393-memory-learning-defaults");
+  shared = await acquirePreKnowledgeTestDatabase("migration-0393-memory-learning-defaults");
   if (!shared && requireRealDatabase) {
     throw new Error("migration 0393 requires real PostgreSQL");
   }

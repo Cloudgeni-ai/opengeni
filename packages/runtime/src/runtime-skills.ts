@@ -57,6 +57,8 @@ export type RuntimeSkillActivation =
   | SessionSkillActivation;
 
 export type NativeToolSkillSet = Readonly<{
+  /** False when an embedding host owns the complete Skill catalog and reader. */
+  defaults?: boolean;
   editableArtifacts: boolean;
   sites?: boolean;
   videoGeneration: boolean;
@@ -128,7 +130,7 @@ const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
 export function loadNativeToolSkillArtifacts(
   nativeTools: NativeToolSkillSet & Readonly<{ projects?: boolean }>,
 ): readonly RuntimeSkillArtifact[] {
-  const directories: string[] = ["bundled_default_skills"];
+  const directories: string[] = nativeTools.defaults === false ? [] : ["bundled_default_skills"];
   if (nativeTools.projects) directories.push("bundled_project_skills");
   if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
   if (nativeTools.sites) directories.push("bundled_site_skills");
@@ -384,12 +386,13 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
   names: string[];
   reason: string;
 }> {
-  const sources: Array<{ names: string[]; reason: string }> = [
-    {
+  const sources: Array<{ names: string[]; reason: string }> = [];
+  if (nativeTools.defaults !== false) {
+    sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_default_skills")),
       reason: "included by default",
-    },
-  ];
+    });
+  }
   if (nativeTools.editableArtifacts) {
     sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_artifact_skills")),

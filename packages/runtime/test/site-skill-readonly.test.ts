@@ -26,6 +26,8 @@ test("Site skill composition needs no writable application directory", () => {
         sites: true, editableArtifacts: true, videoGeneration: true,
       });
       if (native.length !== 7) throw new Error("missing native Skill artifacts");
+      if (loadNativeToolSkillArtifacts({ defaults: false, editableArtifacts: false, videoGeneration: false }).length !== 0)
+        throw new Error("disabled native Skills leaked");
       const defaults = loadNativeToolSkillArtifacts({ sites: false, editableArtifacts: false, videoGeneration: false }).map(skill => skill.name).sort();
       if (JSON.stringify(defaults) !== JSON.stringify(["document-parsing", "opengeni-visualize"]))
         throw new Error("incorrect default Skills");

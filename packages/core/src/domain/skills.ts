@@ -77,6 +77,14 @@ export async function approveSkill(db: Database, input: SkillRevisionInput) {
     { ...request, operation: "approve" },
   );
 }
+export async function rejectSkill(db: Database, input: SkillRevisionInput) {
+  const { accountId, workspaceId, actor, ...request } = input;
+  return applySkillLifecycle(
+    db,
+    { accountId, workspaceId, actor },
+    { ...request, operation: "reject" },
+  );
+}
 export async function restoreSkill(db: Database, input: SkillRevisionInput) {
   const { accountId, workspaceId, actor, ...request } = input;
   return applySkillLifecycle(

@@ -8,8 +8,11 @@ import {
   PaperclipIcon,
   PlugIcon,
   PlusIcon,
+  SettingsIcon,
 } from "lucide-react";
 import {
+  lazy,
+  Suspense,
   cloneElement,
   isValidElement,
   useState,
@@ -25,6 +28,23 @@ import {
   type SessionToolSelection,
 } from "@/components/pickers";
 import { Button } from "@/components/ui/button";
+const AgentLearningSettingsEditor = lazy(() =>
+  import("@/components/knowledge/agent-learning-settings").then((module) => ({
+    default: module.AgentLearningSettingsEditor,
+  })),
+);
+const AgentLearningDraftEditor = lazy(() =>
+  import("@/components/knowledge/agent-learning-settings").then((module) => ({
+    default: module.AgentLearningDraftEditor,
+  })),
+);
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,6 +60,18 @@ type Panel = "root" | "tools" | "repos" | "voice" | "variables";
  * Shared composer actions at every width; model and voice stay in the bar.
  */
 export function ComposerMobilePlus(props: {
+  draftChatSettings?: {
+    workspaceId: string;
+    scope: "workspace" | "personal";
+    value: import("@opengeni/sdk").AgentLearningOverrides;
+    onChange: (value: import("@opengeni/sdk").AgentLearningOverrides) => void;
+  };
+  chatSettings?: {
+    workspaceId: string;
+    sessionId: string;
+    scope: "workspace" | "personal";
+    canEdit: boolean;
+  };
   disabled?: boolean;
   fileUploadsEnabled: boolean;
   servers: McpServerOption[];
@@ -69,6 +101,7 @@ export function ComposerMobilePlus(props: {
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
   const toolSummary = sessionToolSelectionSummary(props);
   const toolsAvailable = toolSummary.total > 0;
@@ -90,152 +123,196 @@ export function ComposerMobilePlus(props: {
   );
 
   return (
-    <DropdownMenu
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) setPanel("root");
-      }}
-    >
-      <DropdownMenuTrigger asChild>
-        <Button
-          ref={triggerRef}
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          disabled={props.disabled}
-          aria-label="More composer actions"
-          className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
-        >
-          <PlusIcon className="size-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        side="top"
-        sideOffset={8}
-        collisionPadding={12}
-        className={
-          panel === "tools"
-            ? SESSION_TOOLS_PANEL_CLASS
-            : panel === "variables"
-              ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
-              : panel === "voice"
-                ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
-                : panel === "repos"
-                  ? REPOSITORY_PANEL_CLASS
-                  : "min-w-52 rounded-xl"
-        }
+    <>
+      <DropdownMenu
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) setPanel("root");
+        }}
       >
-        {panel === "root" ? (
-          <>
-            {props.fileUploadsEnabled ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setOpen(false);
-                  const root = triggerRef.current?.closest<HTMLElement>("[data-og-composer-id]");
-                  root?.querySelector<HTMLInputElement>("[data-og-composer-attach]")?.click();
-                }}
-              >
-                <PaperclipIcon className="size-4" />
-                Add photos & files
-              </DropdownMenuItem>
-            ) : null}
-            {toolsAvailable ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled || props.toolsDisabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("tools");
-                }}
-              >
-                <PlugIcon className="size-4" />
-                Tools
-                <span className="ml-auto text-2xs text-fg-subtle">
-                  {props.toolsSaving ? "Saving…" : toolSummary.label}
-                </span>
-              </DropdownMenuItem>
-            ) : null}
-            {repositories ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled || repositories.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("repos");
-                }}
-              >
-                <GitBranchIcon className="size-4" />
-                Repositories
-                <span className="ml-auto text-2xs text-fg-subtle">
-                  {repositories.selectedCount > 0
-                    ? repoCountLabel(repositories.selectedCount)
-                    : "Optional"}
-                </span>
-              </DropdownMenuItem>
-            ) : null}
-            {props.variableSets ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("variables");
-                }}
-              >
-                <BoxIcon className="size-4" />
-                Variable sets
-                {props.variableSets.selectedCount > 0 ? (
+        <DropdownMenuTrigger asChild>
+          <Button
+            ref={triggerRef}
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            disabled={props.disabled}
+            aria-label="More composer actions"
+            className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
+          >
+            <PlusIcon className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          side="top"
+          sideOffset={8}
+          collisionPadding={12}
+          className={
+            panel === "tools"
+              ? SESSION_TOOLS_PANEL_CLASS
+              : panel === "variables"
+                ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
+                : panel === "voice"
+                  ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
+                  : panel === "repos"
+                    ? REPOSITORY_PANEL_CLASS
+                    : "min-w-52 rounded-xl"
+          }
+        >
+          {panel === "root" ? (
+            <>
+              {props.fileUploadsEnabled ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setOpen(false);
+                    const root = triggerRef.current?.closest<HTMLElement>("[data-og-composer-id]");
+                    root?.querySelector<HTMLInputElement>("[data-og-composer-attach]")?.click();
+                  }}
+                >
+                  <PaperclipIcon className="size-4" />
+                  Add photos & files
+                </DropdownMenuItem>
+              ) : null}
+              {toolsAvailable ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled || props.toolsDisabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("tools");
+                  }}
+                >
+                  <PlugIcon className="size-4" />
+                  Tools
                   <span className="ml-auto text-2xs text-fg-subtle">
-                    {props.variableSets.selectedCount}
+                    {props.toolsSaving ? "Saving…" : toolSummary.label}
                   </span>
-                ) : null}
-              </DropdownMenuItem>
-            ) : null}
-            {voiceModel ? (
-              <DropdownMenuItem
-                className="pointer-coarse:min-h-11"
-                disabled={props.disabled || voiceModel.disabled}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  setPanel("voice");
-                }}
-              >
-                <AudioLinesIcon className="size-4" />
-                Voice model
-                <span className="ml-auto max-w-[7rem] truncate text-2xs text-fg-subtle">
-                  {voiceModel.selectedLabel}
-                </span>
-              </DropdownMenuItem>
-            ) : null}
-          </>
-        ) : panel === "tools" ? (
-          <SessionToolsMenuBody
-            servers={props.servers}
-            firstPartyTools={props.firstPartyTools}
-            selection={props.selection}
-            onChange={props.onToolSelectionChange}
-            leading={backButton}
-          />
-        ) : panel === "repos" && repositories ? (
-          withLeading(repositories.panel, backButton)
-        ) : panel === "variables" && props.variableSets ? (
-          cloneElement(props.variableSets.panel, {
-            leading: backButton,
-            onClose: () => {
-              setOpen(false);
-              setPanel("root");
-            },
-          })
-        ) : panel === "voice" && voiceModel ? (
-          withLeading(voiceModel.panel, backButton)
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+                </DropdownMenuItem>
+              ) : null}
+              {repositories ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled || repositories.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("repos");
+                  }}
+                >
+                  <GitBranchIcon className="size-4" />
+                  Repositories
+                  <span className="ml-auto text-2xs text-fg-subtle">
+                    {repositories.selectedCount > 0
+                      ? repoCountLabel(repositories.selectedCount)
+                      : "Optional"}
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
+              {props.variableSets ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("variables");
+                  }}
+                >
+                  <BoxIcon className="size-4" />
+                  Variable sets
+                  {props.variableSets.selectedCount > 0 ? (
+                    <span className="ml-auto text-2xs text-fg-subtle">
+                      {props.variableSets.selectedCount}
+                    </span>
+                  ) : null}
+                </DropdownMenuItem>
+              ) : null}
+              {voiceModel ? (
+                <DropdownMenuItem
+                  className="pointer-coarse:min-h-11"
+                  disabled={props.disabled || voiceModel.disabled}
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    setPanel("voice");
+                  }}
+                >
+                  <AudioLinesIcon className="size-4" />
+                  Voice model
+                  <span className="ml-auto max-w-[7rem] truncate text-2xs text-fg-subtle">
+                    {voiceModel.selectedLabel}
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
+              {props.chatSettings || props.draftChatSettings ? (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    setOpen(false);
+                    setSettingsOpen(true);
+                  }}
+                >
+                  <SettingsIcon className="size-4" />
+                  Chat settings
+                </DropdownMenuItem>
+              ) : null}
+            </>
+          ) : panel === "tools" ? (
+            <SessionToolsMenuBody
+              servers={props.servers}
+              firstPartyTools={props.firstPartyTools}
+              selection={props.selection}
+              onChange={props.onToolSelectionChange}
+              leading={backButton}
+            />
+          ) : panel === "repos" && repositories ? (
+            withLeading(repositories.panel, backButton)
+          ) : panel === "variables" && props.variableSets ? (
+            cloneElement(props.variableSets.panel, {
+              leading: backButton,
+              onClose: () => {
+                setOpen(false);
+                setPanel("root");
+              },
+            })
+          ) : panel === "voice" && voiceModel ? (
+            withLeading(voiceModel.panel, backButton)
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {props.chatSettings || props.draftChatSettings ? (
+        <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Chat settings</DialogTitle>
+              <DialogDescription>
+                Agent learning for this chat. Unchanged choices follow your defaults.
+              </DialogDescription>
+            </DialogHeader>
+            <Suspense
+              fallback={
+                <p role="status" className="text-sm text-fg-muted">
+                  Loading settings…
+                </p>
+              }
+            >
+              {props.chatSettings ? (
+                <AgentLearningSettingsEditor
+                  key={props.chatSettings.sessionId}
+                  workspaceId={props.chatSettings.workspaceId}
+                  scope={props.chatSettings.scope}
+                  source={{ kind: "chat", id: props.chatSettings.sessionId }}
+                  canEdit={props.chatSettings.canEdit}
+                />
+              ) : props.draftChatSettings ? (
+                <AgentLearningDraftEditor {...props.draftChatSettings} disabled={props.disabled} />
+              ) : null}
+            </Suspense>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+    </>
   );
 }
 

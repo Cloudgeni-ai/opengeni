@@ -1,56 +1,42 @@
-import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
-import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, BrainCircuitIcon } from "lucide-react";
-
-import { PageHeader } from "@/components/common";
-import { MemoryPane } from "@/components/knowledge/memory-pane";
-import { ContentPage } from "@/components/ui/content-layout";
+import { AgentKnowledgePage } from "@/components/knowledge/agent-knowledge-page";
+import { KnowledgeBrowser } from "@/components/knowledge/knowledge-browser";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 
-/** First-class workspace memory: presentation only; hierarchy stays an API concern. */
-export function MemoryRoute({
-  workspaceId,
-  focusMemoryId,
-  returnToBrain = false,
-}: {
+type KnowledgePanelProps = {
   workspaceId: string;
   focusMemoryId?: string | undefined;
+  fileId?: string;
+  review?: boolean;
   returnToBrain?: boolean;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const memoryEnabled = workspace ? resolveWorkspaceMemoryEnabled(workspace.settings) : false;
-  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+};
 
+/** The historical Memory URL remains a link-compatible entry into Knowledge. */
+export function MemoryRoute(props: KnowledgePanelProps) {
   return (
-    <ContentPage width="standard">
-      <PageHeader
-        icon={<BrainCircuitIcon className="size-4" />}
-        title={personalWorkspace ? "Your Memory" : "Memory"}
-        description={
-          personalWorkspace
-            ? "Review the private facts, incidents, decisions, and outcomes agents remember inside your personal workspace."
-            : "Review and curate durable facts, incidents, decisions, and outcomes agents carry across sessions."
-        }
-      />
-      {returnToBrain ? (
-        <Link
-          to="/workspaces/$workspaceId/state"
-          params={{ workspaceId }}
-          search={{}}
-          className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-        >
-          <ArrowLeftIcon className="size-3" />
-          Back to Agent Knowledge
-        </Link>
-      ) : null}
-      <MemoryPane
-        workspaceId={workspaceId}
-        memoryEnabled={memoryEnabled}
-        personalWorkspace={personalWorkspace}
-        focusMemoryId={focusMemoryId}
-      />
-    </ContentPage>
+    <AgentKnowledgePage workspaceId={props.workspaceId} section="knowledge">
+      <KnowledgePanel {...props} />
+    </AgentKnowledgePage>
+  );
+}
+
+export function KnowledgePanel({
+  workspaceId,
+  focusMemoryId,
+  fileId,
+  review,
+}: KnowledgePanelProps) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((item) => item.id === workspaceId) ?? null;
+  const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
+  return (
+    <KnowledgeBrowser
+      key={`${workspaceId}:${fileId ?? "all"}:${review ?? false}`}
+      initialReview={review}
+      workspaceId={workspaceId}
+      personal={personal}
+      {...(fileId ? { fileId } : {})}
+      {...(focusMemoryId ? { focusEntryId: focusMemoryId } : {})}
+    />
   );
 }

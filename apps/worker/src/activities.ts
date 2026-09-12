@@ -92,6 +92,7 @@ export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
+export const indexKnowledge = defaultControlActivities.indexKnowledge;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const persistSessionAttemptQuiescence =

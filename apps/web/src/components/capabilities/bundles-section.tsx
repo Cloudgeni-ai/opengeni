@@ -207,10 +207,12 @@ export function BundlesSection({
   const visible = useMemo(
     () =>
       filterBundleRows(
-        rows.filter(
-          (row) =>
-            section === "all" ||
-            (section === "skills" ? row.kind === "skill" : row.kind !== "skill"),
+        rows.filter((row) =>
+          section === "all"
+            ? row.kind !== "plugin"
+            : section === "skills"
+              ? row.kind === "skill"
+              : row.kind !== "skill",
         ),
         query,
       ),
@@ -467,10 +469,14 @@ export function BundlesSection({
                   <button
                     type="button"
                     key={row.id}
+                    data-workflow-template={row.id}
                     className="min-w-0 rounded-lg px-2 py-3 text-left hover:bg-surface-2"
                     onClick={(event) => open(row, event.currentTarget)}
                   >
-                    <span className="block text-sm font-medium">{row.name}</span>
+                    <span className="flex items-center justify-between gap-2 text-sm font-medium">
+                      {row.name}
+                      <span className="text-xs font-normal text-fg-muted">{row.chip.label}</span>
+                    </span>
                     <span className="mt-1 block line-clamp-2 text-xs leading-5 text-fg-muted">
                       {row.description}
                     </span>

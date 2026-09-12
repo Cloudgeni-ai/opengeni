@@ -22,6 +22,8 @@ import {
 import {
   areGitHubRepositoriesAllowedForWorkspace,
   requireFileForSubject,
+  withSessionRlsActorContext,
+  type SessionRlsActorContext,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -444,33 +446,42 @@ export async function validateFileResources(
   db: Database,
   accountId: string,
   workspaceId: string,
-  subjectId: string,
+  subjectId: string | null,
   resources: ResourceRef[],
+  privateFileContext?: SessionRlsActorContext,
 ): Promise<void> {
-  const fileIds = new Set<string>();
-  for (const resource of resources) {
-    if (resource.kind !== "file") {
-      continue;
-    }
-    if (fileIds.has(resource.fileId)) {
-      throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
-    }
-    fileIds.add(resource.fileId);
-    const file = await requireFileForSubject(db, {
-      accountId,
-      workspaceId,
-      subjectId,
-      fileId: resource.fileId,
-    }).catch(() => null);
-    if (!file) {
-      throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
-    }
-    if (file.status !== "ready") {
-      throw new HTTPException(422, {
-        message: `file resource ${resource.fileId} is ${file.status}`,
-      });
-    }
-  }
+  return withSessionRlsActorContext(
+    privateFileContext ?? {
+      subjectId: subjectId ?? "service:file-resource-validation",
+      privateFileOwnerSubjectId: null,
+    },
+    async () => {
+      const fileIds = new Set<string>();
+      for (const resource of resources) {
+        if (resource.kind !== "file") {
+          continue;
+        }
+        if (fileIds.has(resource.fileId)) {
+          throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
+        }
+        fileIds.add(resource.fileId);
+        const file = await requireFileForSubject(db, {
+          accountId,
+          workspaceId,
+          subjectId: privateFileContext?.initiatingHumanSubjectId ?? subjectId,
+          fileId: resource.fileId,
+        }).catch(() => null);
+        if (!file) {
+          throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
+        }
+        if (file.status !== "ready") {
+          throw new HTTPException(422, {
+            message: `file resource ${resource.fileId} is ${file.status}`,
+          });
+        }
+      }
+    },
+  );
 }
 
 function normalizeMountPath(path: string): string {

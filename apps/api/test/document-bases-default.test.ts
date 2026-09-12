@@ -24,7 +24,8 @@ const defaultBase = {
   updatedAt: "2026-08-02T12:00:00.000Z",
 };
 
-const realDocuments = await import("@opengeni/documents");
+// Freeze references before Bun replaces the live module namespace.
+const realDocuments = { ...(await import("@opengeni/documents")) };
 const realListDocumentBasesEnsuringDefault = realDocuments.listDocumentBasesEnsuringDefault;
 const authorityReceipt = {
   operationId: "55555555-5555-4555-8555-555555555555",
@@ -119,7 +120,7 @@ mock.module("@opengeni/documents", () => ({
     if (db === fakeDb) reclassificationListInputs.push(input);
     return db === fakeDb
       ? { receipts: [authorityReceipt], hasMore: false, nextCursor: null }
-      : { receipts: [], hasMore: false, nextCursor: null };
+      : await realDocuments.listDocumentAuthorityReclassifications(db as never, input as never);
   }),
   runDocumentDefaultCollectionBackfill: mock(async (db: unknown, input: unknown) => {
     if (db !== fakeDb) {

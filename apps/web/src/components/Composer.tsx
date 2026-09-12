@@ -13,8 +13,11 @@ import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { useAppContext } from "@/context";
 
-export function useDraftAttachments(workspaceId: string): UseFileAttachmentsResult {
-  return useFileAttachments({ workspaceId });
+export function useDraftAttachments(
+  workspaceId: string,
+  scope: "workspace" | "personal" = "workspace",
+): UseFileAttachmentsResult {
+  return useFileAttachments({ workspaceId, scope });
 }
 
 export function ConsoleComposer(props: {

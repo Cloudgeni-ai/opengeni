@@ -26,6 +26,7 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   expect(artifact?.files).toEqual([{ path: "SKILL.md", content: markdown }]);
   const composition = composeRuntimeSkills([]);
   expect(composition.nativeToolNames).not.toContain("opengeni-projects");
+  expect(composition.configuredNames).toEqual([]);
   expect(composition.selections.map((selection) => selection.name)).toEqual([
     "document-parsing",
     "opengeni-visualize",

@@ -30,7 +30,7 @@ Read the references selectively:
 
 - Keep organization API keys and provider credentials on trusted servers. Never put them in browser or mobile bundles, prompts, Skill files, model context, logs, or ordinary tool results.
 - The customer backend authenticates its own user and derives the allowed OpenGeni workspace and session. A browser-provided OpenGeni workspace or session ID is never authorization.
-- Choose a workspace for the smallest group that is allowed to share workspace-scoped agent authority and resources. Turning workspace Memory off does not isolate conversations.
+- Choose a workspace for the smallest group that is allowed to share workspace-scoped agent authority and resources. Turning Knowledge authoring off does not isolate conversations.
 - Organization-key-created top-level sessions are workspace-visible. Do not present managed-human Only-me session visibility as a service-backend privacy mechanism.
 - Same-workspace agent isolation based on removing cross-session tools is defense in depth, not a hard tenant boundary. Use separate workspaces when the requirement is a hard boundary.
 - For a headless customer-facing agent, set an explicit minimal tool policy. Omitting the first-party tool selection inherits defaults, which can include cross-session and workspace-wide capabilities.

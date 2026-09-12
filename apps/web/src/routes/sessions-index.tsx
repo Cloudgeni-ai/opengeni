@@ -227,7 +227,6 @@ function SessionsIndexRouteContent({
   );
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const attachments = useDraftAttachments(workspaceId);
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
   const launchChannelId = launch.channelId === "default" ? null : launch.channelId;
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
@@ -256,6 +255,10 @@ function SessionsIndexRouteContent({
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const attachments = useDraftAttachments(
+    workspaceId,
+    personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
+  );
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
   const canAttachVariableSets = hasWorkspacePermission(
     context.accessContext,
@@ -992,6 +995,7 @@ function SessionsIndexRouteContent({
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
+                  agentLearning: draft.agentLearning,
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
@@ -1047,6 +1051,7 @@ function SessionsIndexRouteContent({
                   : undefined,
                 expectedNewSessionDraftRevision: flushed.revision,
                 newSessionDraftToolPolicy: persistedToolPolicy,
+                agentLearning: draft.agentLearning,
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",
@@ -1301,6 +1306,14 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
+                draftChatSettings={{
+                  workspaceId,
+                  scope:
+                    createVisibility === "private" || personalWorkspace ? "personal" : "workspace",
+                  value: draft.agentLearning ?? {},
+                  onChange: (agentLearning) =>
+                    setDraft((current) => ({ ...current, agentLearning })),
+                }}
                 disabled={busy || newSessionDraft.loading}
                 fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                 servers={context.toolMcpServers}

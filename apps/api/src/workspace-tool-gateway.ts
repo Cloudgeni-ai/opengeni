@@ -1,3 +1,4 @@
+import { knowledgeContextForGateway } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -53,7 +54,6 @@ import {
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
-  resolveSessionMemoryAgentScope,
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
@@ -288,7 +288,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     ...(gatewayServerIds.has("files")
       ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]
       : []),
-    ...(gatewayServerIds.has("docs")
+    ...(gatewayServerIds.has("docs") && hasPermission(grant.permissions, "documents:search")
       ? [
           inMemoryMcpRegistration(
             "docs",
@@ -298,19 +298,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               grant.workspaceId,
               routeDeps.getDocumentServices(),
               {
-                initiatingSubjectId: grant.subjectId,
-                // A session-bound gateway caller reads Memory through that
-                // session's frozen selector; a sessionless caller keeps the
-                // workspace layer.
-                memory:
-                  typeof grant.metadata?.["sessionId"] === "string"
-                    ? ((await resolveSessionMemoryAgentScope(
-                        routeDeps.db,
-                        grant.workspaceId,
-                        grant.metadata["sessionId"],
-                        grant.metadata,
-                      )) ?? { mode: "off" as const, userSubjectId: null, rootSessionId: null })
-                    : null,
+                knowledge: await knowledgeContextForGateway(routeDeps, grant),
               },
             ),
           ),

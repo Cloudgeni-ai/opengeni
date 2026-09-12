@@ -34,9 +34,21 @@ const workspaceRouteContracts = {
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
   workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceDocumentsRoute: { kind: "page", source: "routes/documents.tsx" },
-  workspaceMemoryRoute: { kind: "page", source: "routes/memory.tsx" },
-  workspaceStateRoute: { kind: "page", source: "routes/workspace-state.tsx" },
+  workspaceDocumentsRoute: {
+    kind: "page",
+    source: "routes/documents.tsx",
+    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+  },
+  workspaceMemoryRoute: {
+    kind: "page",
+    source: "routes/memory.tsx",
+    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+  },
+  workspaceStateRoute: {
+    kind: "page",
+    source: "routes/workspace-state.tsx",
+    scrollSource: "components/knowledge/agent-knowledge-page.tsx",
+  },
   workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
   workspaceArtifactDetailRoute: {
     kind: "page",

@@ -34,7 +34,6 @@ import {
   stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
-  MemorySlackPublicationDistribution,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
   VariableSetVariableName,
@@ -116,13 +115,8 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
-  MEMORY_CORRECT_TOOL_DESCRIPTION,
-  MEMORY_SAVE_TOOL_DESCRIPTION,
-  MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
-  searchWorkspaceMemories,
-  memoryWriteScopeForAgentScope,
   type MemoryAgentScope,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
@@ -150,11 +144,7 @@ import {
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
 } from "@opengeni/db";
-import {
-  appendAndPublishEvents,
-  appendAndPublishTurnEventsFenced,
-  publishDurableSessionEvents,
-} from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
@@ -170,6 +160,7 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
   type FirstPartyToolAuthorization,
@@ -180,7 +171,6 @@ import {
   authorizedSocialConnectionsForGrant,
   authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
-  correctWorkspaceMemoryWithSlackPublication,
   nativeConnectionCapabilityRecommendations,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
@@ -188,7 +178,6 @@ import {
   resolveWorkspaceCatalogSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
-  saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -318,9 +307,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
-import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
-import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
@@ -671,22 +658,10 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
-  // A session frozen with memoryScope "off" receives no Memory tools at all,
-  // independent of the workspace-level Memory setting.
-  if (
-    sessionId !== null &&
-    options.workspaceMemoryEnabled === true &&
-    options.sessionMemory?.mode !== "off"
-  ) {
-    registerMemoryTools(
-      server,
-      deps,
-      grant,
-      sessionId,
-      json,
-      options.workspaceMemoryPromptMode ?? "retrieval_only",
-      options.sessionMemory ?? null,
-    );
+  // Agent learning controls authoring at the accepted-attempt write boundary.
+  // Reading existing Knowledge and Skills remains available when authoring is Off.
+  if (sessionId !== null) {
+    registerKnowledgeEntryTools(server, deps, grant, sessionId);
   }
   server.registerTool(
     "artifacts_list",
@@ -713,19 +688,7 @@ export function buildOpenGeniMcpServer(
       registerWorkClaimTools(server, deps, grant, sessionId, json);
     }
     const attempt = exactAgentAttemptClaims(grant)!;
-    registerCompanyBrainGovernedWriteTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
-      },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
+
     registerCompanyProfileAgentAdminTools({
       server,
       db: deps.db,
@@ -734,19 +697,6 @@ export function buildOpenGeniMcpServer(
         workspaceId: grant.workspaceId,
         ...attempt,
         agentSubjectId: grant.subjectId,
-      },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
-    registerRememberTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
       },
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
@@ -3544,9 +3494,6 @@ function registerPreferenceRegistryTools(
   );
 }
 
-const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
-const MemoryWriteKindSchema = z4.enum(["semantic", "decision", "episodic"]);
-
 function scheduledTaskReceipt(
   operation: string,
   task: ScheduledTask,
@@ -3637,307 +3584,6 @@ export function memorySlackPublicationActor(
   };
 }
 
-function memoryPreview(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
-}
-
-function registerMemoryTools(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  sessionId: string,
-  json: JsonResult,
-  promptMode: WorkspaceMemoryPromptMode,
-  sessionMemory: MemoryAgentScope | null,
-): void {
-  // Read layers: workspace plus the session's private layer. Write layer: the
-  // session's narrowest layer. A null scope is the pre-0426 workspace path.
-  const agentScope: MemoryAgentScope = sessionMemory ?? {
-    mode: "workspace",
-    userSubjectId: null,
-    rootSessionId: null,
-  };
-  const writeScope = memoryWriteScopeForAgentScope(agentScope);
-  if (!writeScope) return;
-  const publicationInputSchema = z4.object({
-    importance: z4.enum(["major", "normal", "minor"]),
-    audience: z4.literal("workspace"),
-    slackMode: z4.enum(["auto", "review", "never"]),
-    shareSummary: z4.string().trim().min(1).max(4_096),
-  });
-
-  server.registerTool(
-    "memory_search",
-    {
-      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} All existing Memory kinds are searchable. Legacy preference and procedure records are historical context, not active instructions; Skills and workspace instructions remain the behavioral authorities. When workspace Memory is enabled, use memory_save autonomously for durable facts, decisions, incidents, fixes, and outcomes, and memory_correct when an existing record is wrong or outdated.`,
-      inputSchema: {
-        query: z4.string().min(1),
-        kind: MemoryKindSchema.optional(),
-        limit: z4.number().int().positive().max(20).optional(),
-      },
-    },
-    async ({ query, kind, limit }) =>
-      json({
-        results: await searchWorkspaceMemories(
-          deps.db,
-          grant.workspaceId,
-          {
-            query,
-            ...(kind ? { kind } : {}),
-            ...(limit ? { limit } : {}),
-            agentPromptMode: promptMode,
-            agentScope,
-          },
-          deps.getDocumentServices().embedder,
-        ),
-      }),
-  );
-
-  // Memory writes are agent-only. Human creation and curation use the REST/UI
-  // surface; a non-attempt MCP principal may search but cannot mutate Memory.
-  if (exactAgentAttemptClaims(grant) === null) return;
-
-  server.registerTool(
-    "memory_save",
-    {
-      description: MEMORY_SAVE_TOOL_DESCRIPTION,
-      inputSchema: {
-        text: z4.string().min(1),
-        kind: MemoryWriteKindSchema,
-        confidence: z4.number().min(0).max(1).optional(),
-        replaces_id: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ text, kind, confidence, replaces_id, slack_publication }) => {
-      const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-      const result = await saveWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          text,
-          kind,
-          ...(confidence !== undefined ? { confidence } : {}),
-          ...(replaces_id ? { replacesId: replaces_id } : {}),
-          origin: "agent",
-          scope: writeScope,
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null)
-                .actor,
-              ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      let timelineWarning: string | null = null;
-      try {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "memory.saved",
-            payload: {
-              memoryId: result.memory.id,
-              kind: result.memory.kind,
-              preview: memoryPreview(result.memory.text),
-              deduped: result.deduped,
-              ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
-            },
-          },
-        ]);
-      } catch {
-        timelineWarning = "Memory committed, but its session timeline event could not be recorded.";
-        console.warn("workspace memory save: committed without session timeline event", {
-          errorClass: "MemoryTimelineOperationError",
-          errorCode: "memory_save_timeline_append_failed",
-          origin: "api",
-          workspaceId: grant.workspaceId,
-          sessionId,
-          memoryId: result.memory.id,
-        });
-      }
-      const changed = !result.deduped || result.updated || result.superseded !== null;
-      const outcome =
-        result.updated || result.superseded !== null
-          ? "updated"
-          : result.deduped
-            ? "unchanged"
-            : "created";
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_save",
-          committed: true,
-          outcome,
-          changed,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.superseded
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.superseded.id,
-                  state: result.superseded.status,
-                },
-              ]
-            : undefined,
-          timestamp: result.memory.updatedAt,
-          idempotency: { status: "not_supported" },
-          warnings: [
-            ...(!result.embedded
-              ? ["Memory committed without a vector embedding; keyword search remains available."]
-              : []),
-            ...(timelineWarning ? [timelineWarning] : []),
-          ],
-          facts: {
-            deduped: result.deduped,
-            dedupeReason: result.dedupeReason,
-            updatedInPlace: result.updated,
-            embedded: result.embedded,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
-
-  server.registerTool(
-    "memory_correct",
-    {
-      description: MEMORY_CORRECT_TOOL_DESCRIPTION,
-      inputSchema: {
-        id: z4.string().min(1),
-        reason: z4.string().min(1).optional(),
-        replacement_text: z4.string().min(1).optional(),
-        slack_publication: publicationInputSchema.optional(),
-      },
-    },
-    async ({ id, reason, replacement_text, slack_publication }) => {
-      const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-      const result = await correctWorkspaceMemoryWithSlackPublication(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          id,
-          ...(reason ? { reason } : {}),
-          ...(replacement_text ? { replacementText: replacement_text } : {}),
-          origin: "agent",
-          agentScope,
-        },
-        slack_publication
-          ? {
-              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
-              actor: memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null)
-                .actor,
-              ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
-            }
-          : null,
-        deps.getDocumentServices().embedder,
-      );
-      let timelineWarning: string | null = null;
-      try {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "memory.corrected",
-            payload: {
-              memoryId: result.memory.id,
-              kind: result.memory.kind,
-              preview: memoryPreview(result.memory.text),
-              action: result.action,
-              ...(reason ? { reason: memoryPreview(reason) } : {}),
-              ...(result.replacement
-                ? {
-                    replacementMemoryId: result.replacement.id,
-                    replacementPreview: memoryPreview(result.replacement.text),
-                  }
-                : {}),
-            },
-          },
-        ]);
-      } catch {
-        timelineWarning =
-          "Memory correction committed, but its session timeline event could not be recorded.";
-        console.warn("workspace memory correction: committed without session timeline event", {
-          errorClass: "MemoryTimelineOperationError",
-          errorCode: "memory_correct_timeline_append_failed",
-          origin: "api",
-          workspaceId: grant.workspaceId,
-          sessionId,
-          memoryId: result.memory.id,
-        });
-      }
-      return json(
-        mcpMutationReceipt({
-          operation: "memory_correct",
-          committed: true,
-          outcome: "updated",
-          changed: true,
-          resource: {
-            type: "knowledge_memory",
-            id: result.memory.id,
-            state: result.memory.status,
-          },
-          relatedResources: result.replacement
-            ? [
-                {
-                  type: "knowledge_memory",
-                  id: result.replacement.id,
-                  state: result.replacement.status,
-                },
-              ]
-            : undefined,
-          timestamp: (result.replacement ?? result.memory).updatedAt,
-          idempotency: { status: "not_supported" },
-          warnings: timelineWarning ? [timelineWarning] : [],
-          facts: {
-            correctionAction: result.action,
-            slackPublicationDecision: result.slackPublication.decision?.eligible
-              ? "eligible"
-              : (result.slackPublication.decision?.reason ?? "not_requested"),
-            slackPublicationId:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.id
-                : null,
-            slackPublicationState:
-              result.slackPublication.enqueue?.kind === "enqueued" ||
-              result.slackPublication.enqueue?.kind === "replayed"
-                ? result.slackPublication.enqueue.publication.state
-                : null,
-          },
-        }),
-      );
-    },
-  );
-}
-
-// Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
-// session's active-sandbox pointer + reach the workspace's enrolled machines),
-// registered only with the worker-signed sessionId claim + the selfhosted flag.
-// The agent uses these to list the fleet (its Modal box + enrolled machines),
-// attach/swap the active sandbox mid-conversation (heterogeneous, single-active,
-// epoch-fenced), run a one-off op on a specific machine without swapping, and
-// surface provisioning (enroll-a-machine) instructions to a human.
 function registerFleetTools(
   server: McpServer,
   deps: ApiRouteDeps,

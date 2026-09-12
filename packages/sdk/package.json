@@ -46,6 +46,10 @@
       "types": "./src/github-repositories.ts",
       "default": "./src/github-repositories.ts"
     },
+    "./knowledge": {
+      "types": "./src/knowledge.ts",
+      "default": "./src/knowledge.ts"
+    },
     "./document-authority": {
       "types": "./src/document-authority.ts",
       "default": "./src/document-authority.ts"

@@ -116,7 +116,7 @@ afterAll(async () => {
 });
 
 describe("knowledge-source schedule dispatch", () => {
-  test("creates deterministic sync work without a session or agent-run usage", async () => {
+  test("rejects a retired native source action without creating work", async () => {
     if (!available) return;
     const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('knowledge dispatch') returning id`;
@@ -216,99 +216,30 @@ describe("knowledge-source schedule dispatch", () => {
       triggerType: "scheduled",
       producerKey: "knowledge-dispatch-1",
     });
-    expect(result).toMatchObject({
-      action: "knowledge_source_sync",
-      sourceId: source.id,
-      overlapPolicy: "buffer_one",
+    expect(result).toEqual({
+      action: "blocked",
+      reason: "legacy_source_schedule_requires_migration",
     });
-    if (result.action !== "knowledge_source_sync") {
-      throw new Error("knowledge source dispatch was not created");
-    }
-    const [facts] = await admin<
-      Array<{ sessions: number; agentUsage: number; syncUsage: number; syncStates: number }>
-    >`
-      select
-        (select count(*)::int from sessions where workspace_id = ${workspace!.id}) as sessions,
-        (select count(*)::int from usage_events where workspace_id = ${workspace!.id}
-          and event_type = 'agent_run.created') as "agentUsage",
-        (select count(*)::int from usage_events where workspace_id = ${workspace!.id}
-          and event_type = 'knowledge_source_sync.fired') as "syncUsage",
-        (select count(*)::int from knowledge_source_sync_states
-          where workspace_id = ${workspace!.id}) as "syncStates"`;
-    expect(facts).toEqual({ sessions: 0, agentUsage: 0, syncUsage: 1, syncStates: 1 });
-
-    const firstLease = await claimKnowledgeSourceSyncLease(client.db, {
-      accountId: account!.id,
-      workspaceId: workspace!.id,
-      sourceId: source.id,
-      scheduledTaskRunId: result.scheduledTaskRunId,
-      overlapPolicy: "buffer_one",
-    });
-    expect(firstLease.action).toBe("claimed");
-    const bufferedDispatch = await activities.dispatchScheduledTaskRun({
-      workspaceId: workspace!.id,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: "knowledge-dispatch-buffered",
-    });
-    if (bufferedDispatch.action !== "knowledge_source_sync") {
-      throw new Error("buffered knowledge source dispatch was not created");
-    }
-    const bufferedLease = await claimKnowledgeSourceSyncLease(client.db, {
-      accountId: account!.id,
-      workspaceId: workspace!.id,
-      sourceId: source.id,
-      scheduledTaskRunId: bufferedDispatch.scheduledTaskRunId,
-      overlapPolicy: "buffer_one",
-    });
-    expect(bufferedLease.action).toBe("buffered");
-    await admin`
-      update knowledge_source_sync_states
-      set lease_until = now() - interval '1 second'
-      where source_id = ${source.id}`;
-    const reclaimedLease = await claimKnowledgeSourceSyncLease(client.db, {
-      accountId: account!.id,
-      workspaceId: workspace!.id,
-      sourceId: source.id,
-      scheduledTaskRunId: bufferedDispatch.scheduledTaskRunId,
-      overlapPolicy: "buffer_one",
-    });
-    expect(reclaimedLease).toMatchObject({
-      action: "claimed",
-      state: {
-        bufferedWake: false,
-        bufferedScheduledTaskRunId: null,
+    const [facts] = await admin`SELECT
+      (SELECT count(*)::int FROM sessions WHERE workspace_id=${workspace!.id}) AS sessions,
+      (SELECT count(*)::int FROM scheduled_task_runs WHERE task_id=${task.id}) AS runs`;
+    expect(facts).toEqual({ sessions: 0, runs: 0 });
+    if (task.action.kind !== "knowledge_source_sync")
+      throw new Error("Expected legacy selection fixture");
+    await ensureKnowledgeSourceSyncState(client.db, task);
+    await ensureKnowledgeSourceSyncState(client.db, {
+      ...task,
+      action: {
+        ...task.action,
+        sourceConfigGeneration: 2,
+        connection: { ...task.action.connection, connectionVersion: 2 },
       },
     });
-    await settleKnowledgeSourceSyncLease(client.db, {
-      accountId: account!.id,
-      workspaceId: workspace!.id,
-      sourceId: source.id,
-      scheduledTaskRunId: bufferedDispatch.scheduledTaskRunId,
-      status: "failed",
-      summary: {
-        phase: "failed",
-        scanned: 0,
-        imported: 0,
-        unchanged: 0,
-        skipped: 0,
-        failed: 1,
-        bytes: 0,
-        providerRequests: 0,
-        elapsedMs: 1,
-        indexed: 0,
-        aclPending: 0,
-        retryable: false,
-        limitReached: null,
-        checkpointed: false,
-        reconnectRequired: false,
-        failures: [],
-      },
-      error: "test_cleanup",
-      sourceConfigGeneration: 1,
-      sourceLifecycleGeneration: source.lifecycleGeneration,
-      sourceSyncGeneration: source.syncGeneration,
-    });
+    await expect(ensureKnowledgeSourceSyncState(client.db, task)).rejects.toThrow();
+    const [state] =
+      await admin`SELECT source_config_generation::int AS config,connection_version::int AS connection
+      FROM knowledge_source_sync_states WHERE source_id=${source.id}`;
+    expect(state).toEqual({ config: 2, connection: 2 });
   }, 60_000);
 
   test("discovers every connection task beyond 500 rows on a stable created_at/id keyset", async () => {

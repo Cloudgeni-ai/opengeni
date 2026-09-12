@@ -108,7 +108,7 @@ on the first message; afterwards OpenGeni owns the history.
 | Support desk: agent confined to its chat tree | `"session"` (default) | `false` (default) |
 | Agents restricted to their canonical user's chats | `"user"` with `asUser()` | `"user"` |
 | A team collaborating across chats | `"workspace"` | `"workspace"` |
-| Any of the above without Memory tools | any | `false` |
+| Any of the above with Knowledge authoring initially Off | any | `false` |
 
 `agentAccess` is enforced in the server-side session-authorization seam for
 agents as outbound task scope: own tree, same canonical user, or workspace.
@@ -210,12 +210,14 @@ excluded and must never be selected through a default-workspace fallback.
 
 Choose the workspace from who shares documents, workspace instructions,
 Connections, and integrations: normally one workspace per customer. Chat
-human visibility is controlled by `visibility`, not by `agentAccess` or Memory.
+human visibility is controlled by `visibility`, not by `agentAccess` or Knowledge.
 Use `asUser(externalId)` for the authenticated product user. The server derives
 the canonical user; never supply an `endUser` label as authority. Separately,
 `agentAccess: "session" | "user" | "workspace"` controls cross-session agent
-reach. `memoryScope: "workspace" | "user" | "off"` controls Memory tools, not
-transcript visibility. User Memory belongs to the verified user of the active
+reach. Compatibility `memoryScope: "workspace" | "user" | "off"` selects Knowledge
+authoring scope, not transcript visibility. Off initializes authoring to Off;
+existing authorized Knowledge remains retrievable. Personal Knowledge belongs
+to the verified user of the active
 turn, including when different users collaborate in one shared session. Use
 existing task notes for temporary session-tree coordination; there is no active
 session Memory scope. Use a separate workspace when groups need different
@@ -297,7 +299,7 @@ agent instruction prefix.
 - Organization workspaces have wire `kind: "shared"`; Personal workspaces are
   outside the external product mapping.
 - Use one workspace per customer and private/shared visibility for human
-  access. Memory settings and prompt instructions do not create a tenant boundary.
+  access. Knowledge settings and prompt instructions do not create a tenant boundary.
   `agentAccess` optionally restricts agent reach further; tool removal is
   defense in depth, not a replacement for authorization.
 - Use separate workspaces only when groups must not share documents,

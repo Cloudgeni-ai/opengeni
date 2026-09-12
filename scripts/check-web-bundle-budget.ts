@@ -439,7 +439,9 @@ const budgets = {
   // Main 52ff56a94 is already 33,660 gzip bytes; the scroll-control gutter
   // adds 14. Preserve the measured whole-KiB envelope and 1-KiB headroom.
   // Base 7135113e5 already measures 34,868 gzip bytes on macOS and Linux.
-  cssGzip: wholeKibEnvelope(34_868),
+  // Clean main d08dbb6029 measures 35,388 gzip CSS bytes; merged Knowledge
+  // measures 35,411 with the same Bun 1.4/macOS production configuration.
+  cssGzip: wholeKibEnvelope(35_411),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -464,15 +466,30 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Main d08dbb6029: 2,374,813 raw / 666,576 gzip, 34 files. The merged
+    // Knowledge graph adds receipts, review navigation and learning controls:
+    // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
+    // Preserve the established platform/configuration variance allowance.
+    wholeKibEnvelope(2_439_754, 1.5 * kib),
     wholeKibEnvelope(2_354_899),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),
     // Current main d1a2824fe measures 2,335,755 raw bytes in Linux/x64 CI.
     // Restore the existing whole-KiB headroom; all other caps stay unchanged.
     wholeKibEnvelope(2_335_755),
+    // Unified Knowledge receipts, file ownership, and chat learning controls:
+    // Bun 1.4 macOS/arm64, base e1a50bae5b is 2,348,286 raw / 655,699 gzip;
+    // candidate is 2,368,385 / 663,198 with lazy settings and Knowledge pages.
+    // Bound the measured +20,099 raw / +7,499 gzip delta only.
+    // The actual merge with main 5ef34cf500 is 2,370,837 raw / 664,028
+    // gzip (32 files); preserve the measured integrated raw envelope too.
+    wholeKibEnvelope(2_370_837),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    wholeKibEnvelope(684_860, 1.5 * kib),
+    // Same unified Knowledge measurement documented in the raw bound above.
+    wholeKibEnvelope(663_198, 1.5 * kib),
     wholeKibEnvelope(661_228, 1.5 * kib),
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
     // Untouched main 0f3dc9a02 measures 640,863 gzip bytes on macOS/arm64;
@@ -523,7 +540,8 @@ const effectiveBudgets = {
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
-    33,
+    // Measured merged graph described above; unrelated file caps stay fixed.
+    39,
   ),
 } as const;
 

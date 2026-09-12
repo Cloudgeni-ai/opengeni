@@ -378,7 +378,7 @@ describe("AgentKnowledgePrompt", () => {
     container.remove();
   });
 
-  test("keeps the personal Skill draft honest about the manual save boundary", async () => {
+  test("explains that personal Skills follow Agent learning policy", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -390,7 +390,7 @@ describe("AgentKnowledgePrompt", () => {
     await settle();
 
     expect(container.textContent).toContain("Describe a personal skill");
-    expect(container.textContent).toContain("use the personal manual editor below to save it");
+    expect(container.textContent).toContain("Uses your Agent learning settings.");
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     await setValue(textarea, "Lead with the outcome.");
     await act(async () => {
@@ -401,8 +401,10 @@ describe("AgentKnowledgePrompt", () => {
     await settle();
 
     const options = startSession.mock.calls[0]?.[2] as { instructions: string };
-    expect(options.instructions).toContain("cannot safely activate a user-scoped Skill");
-    expect(options.instructions).toContain("do not call remember or claim that you saved it");
+    expect(options.instructions).toContain(
+      "Use skill_read and skill_save in this personal workspace",
+    );
+    expect(options.instructions).toContain("Report the actual saved or pending receipt");
 
     await act(async () => root.unmount());
     container.remove();

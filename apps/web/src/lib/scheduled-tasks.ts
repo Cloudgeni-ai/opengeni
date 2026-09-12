@@ -58,6 +58,12 @@ export function normalizeCalendarDays(
 }
 
 export type ScheduledTaskFormState = {
+  agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  agentLearningVersion?: number;
+  agentLearningBaselineScope?: "workspace" | "personal";
+  agentLearningDestinationKey?: string;
+  agentLearningDirty?: boolean;
+  knowledgeSource?: ScheduledTaskAgentConfig["knowledgeSource"];
   name: string;
   description: string;
   prompt: string;
@@ -99,7 +105,7 @@ export function scheduledTaskStateLabel(task: ScheduledTask): {
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
   }
-  if (task.action?.kind === "knowledge_source_sync") {
+  if (task.agentConfig?.knowledgeSource || task.action?.kind === "knowledge_source_sync") {
     const value = task.metadata?.knowledgeSourceSync;
     if (value && typeof value === "object") {
       const control = value as Record<string, unknown>;
@@ -219,6 +225,7 @@ export function formStateFromScheduledTask(
   return {
     ...base,
     name: task.name,
+    knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
     prompt: task.agentConfig.prompt,
     model: task.agentConfig.model ?? defaults.model ?? "",
@@ -345,6 +352,9 @@ export function agentConfigFromFormState(
   }
   return {
     prompt: form.prompt.trim(),
+    ...(existingTask?.agentConfig.knowledgeSource
+      ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
+      : {}),
     resources: form.resources,
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
@@ -737,4 +747,13 @@ export async function loadSessionSchedules(
     if (page.length < limit) return [...tasks.values()];
     offset += page.length;
   }
+}
+
+/** Identity of the execution destination being edited, excluding unrelated form fields. */
+export function scheduledLearningDestinationKey(form: ScheduledTaskFormState): string {
+  return JSON.stringify([
+    form.runMode,
+    form.targetSessionId,
+    form.knowledgeSource?.destination ?? null,
+  ]);
 }

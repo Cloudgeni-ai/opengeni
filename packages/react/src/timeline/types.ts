@@ -228,6 +228,18 @@ export type StartupPhaseItem = {
  * `onMemoryClick` handler the row also deep-links to the record in its memory
  * pane; without one it is non-interactive rich content.
  */
+export type KnowledgeItem = {
+  kind: "knowledge";
+  id: string;
+  turnId: string | null;
+  status: "complete" | "failed";
+  outcome: "published" | "pending" | "rejected" | "archived" | "failed";
+  fileId?: string | undefined;
+  filename?: string | undefined;
+  entryId?: string | undefined;
+  occurredAt: string;
+};
+
 export type MemoryItem = {
   kind: "memory";
   id: string;
@@ -478,6 +490,7 @@ export type TimelineItem =
   | MachineInputBatchItem
   | AuthNeededItem
   | MemoryItem
+  | KnowledgeItem
   | FleetDecisionItem
   | TurnEndItem;
 
@@ -489,6 +502,7 @@ export type ActivityItem =
   | SandboxItem
   | StartupPhaseItem
   | MemoryItem
+  | KnowledgeItem
   | FleetDecisionItem;
 
 export type TimelineGroup =

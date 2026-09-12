@@ -2,11 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { createHash } from "node:crypto";
 import {
-  activateWorkspaceLearningPolicyRevision,
   bootstrapWorkspace,
   createDb,
   createSession,
-  createWorkspaceLearningPolicyRevision,
+  getAgentLearningSettings,
+  saveAgentLearningSettings,
   withSessionRlsActorContext,
   type DbClient,
   installPortableSkill,
@@ -255,21 +255,23 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
     actor: { kind: "human", subjectId, principalKind: "human_session" } as const,
   };
   if (mode !== null) {
-    const policy = await createWorkspaceLearningPolicyRevision(client!.db, {
-      ...context,
-      workspaceMode: mode,
-      actorSubjectId: subjectId,
-      principalKind: "human_session",
-    });
-    await activateWorkspaceLearningPolicyRevision(client!.db, {
-      ...context,
-      revisionId: policy.id,
-      expectedCurrentRevisionId: null,
-      expectedActivationVersion: 0,
-      actorSubjectId: subjectId,
-      principalKind: "human_session",
-      reason: "Skill lifecycle test policy",
-    });
+    await saveAgentLearningSettings(
+      client!.db,
+      {
+        ...human,
+        actor: { ...human.actor, settingsScopes: ["workspace"] },
+      },
+      {
+        scope: "workspace",
+        operationId: crypto.randomUUID(),
+        expectedVersion: 0,
+        settings: {
+          knowledge: "automatic",
+          instructions: "review_first",
+          skills: mode === "suggest" ? "review_first" : mode,
+        },
+      },
+    );
   }
   const session = await withSessionRlsActorContext({ subjectId }, () =>
     createSession(client!.db, {
@@ -466,22 +468,16 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
             files: [{ path: "SKILL.md", content: skillMarkdown("Human customization wins") }],
           });
         } else if (scenario === "policy_off") {
-          const [policyHead] = await shared!
-            .admin`SELECT revision_id,activation_version FROM workspace_learning_policy_heads WHERE workspace_id=${f.context.workspaceId}`;
-          const policy = await createWorkspaceLearningPolicyRevision(client.db, {
-            ...f.context,
-            workspaceMode: "off",
-            actorSubjectId: scope.subjectId,
-            principalKind: "human_session",
-          });
-          await activateWorkspaceLearningPolicyRevision(client.db, {
-            ...f.context,
-            revisionId: policy.id,
-            expectedCurrentRevisionId: policyHead!.revision_id,
-            expectedActivationVersion: Number(policyHead!.activation_version),
-            actorSubjectId: scope.subjectId,
-            principalKind: "human_session",
-            reason: "Downgrade Learning before source finalization",
+          const authority = {
+            ...f.human,
+            actor: { ...f.human.actor, settingsScopes: ["workspace" as const] },
+          };
+          const policy = await getAgentLearningSettings(client.db, authority, "workspace");
+          await saveAgentLearningSettings(client.db, authority, {
+            scope: "workspace",
+            operationId: crypto.randomUUID(),
+            expectedVersion: policy.version,
+            settings: { ...policy.settings, skills: "off" },
           });
         } else if (scenario === "attempt_ended") {
           await shared!
@@ -540,13 +536,14 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
             outcome:
               scenario === "customized" || scenario === "superseded"
                 ? "preserved"
-                : scenario === "policy_off" || scenario === "attempt_ended"
+                : scenario === "attempt_ended"
                   ? "pending"
                   : "applied",
             revisionId: child.skillReceipt.revisionId,
           });
         expect(await listSkillDescriptors(client.db, f.context)).toHaveLength(
           scenario === "automatic" ||
+            scenario === "policy_off" ||
             scenario === "customized" ||
             scenario === "superseded" ||
             scenario === "human_off"
@@ -585,7 +582,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
           expect(childReplay.skillReceipt.outcome).toBe("pending");
           expect(childReplay.skillReceipt).not.toHaveProperty("deferredPublication");
         }
-        if (mode === "suggest" || scenario === "policy_off" || scenario === "attempt_ended") {
+        if (mode === "suggest" || scenario === "attempt_ended") {
           const approved = await approveSkill(client.db, {
             ...f.human,
             operationId: crypto.randomUUID(),

@@ -118,6 +118,8 @@ export {
 // no-op — so the Schedule is registered EXACTLY ONCE per deployment regardless
 // of replica count.
 const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
+export const KNOWLEDGE_INDEXING_SCHEDULE_ID = "opengeni-knowledge-indexing";
+export const KNOWLEDGE_INDEXING_PERIOD_MS = 15_000;
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
 export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
@@ -615,6 +617,46 @@ export async function registerSandboxReaperSchedule(
   }
 }
 
+/** Register the deployment-wide worker for rebuildable Knowledge search projections. */
+export async function registerKnowledgeIndexingSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
+      spec: { intervals: [{ every: KNOWLEDGE_INDEXING_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "knowledgeIndexingWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the global Knowledge indexer Schedule", {
+      scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
+      indexingPeriodMs: KNOWLEDGE_INDEXING_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Global Knowledge indexer Schedule already registered", {
+        scheduleId: KNOWLEDGE_INDEXING_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 /**
  * Register the one provider-neutral expired direct-upload cleanup Schedule.
  * Unlike sandbox GC this is always registered: file uploads can be enabled in
@@ -910,6 +952,13 @@ export async function createOpenGeniWorkerService(
         await retryStartupDependency(
           "Temporal schedule (sandbox reaper)",
           () => registerSandboxReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (Knowledge indexing)",
+          () => registerKnowledgeIndexingSchedule(settings, observability),
           { ...retryOptions, onRetry },
         ),
       );

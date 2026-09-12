@@ -17,6 +17,7 @@ import {
   markVideoGenerationTerminalUpdate,
   markVideoGenerationTerminalUpdateInTransaction,
   mediaGenerationResultForStoredOperation,
+  withSessionRlsActorContext,
   rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
   settleVideoGenerationReady,
@@ -497,7 +498,13 @@ async function terminalPayload(
   service: TurnActivityServices,
   operation: VideoGenerationOperationWithReferences,
 ): Promise<MediaGenerationResult> {
-  return await mediaGenerationResultForStoredOperation(service.db, operation);
+  return withSessionRlsActorContext(
+    {
+      subjectId: "service:video-generation-reconciliation",
+      privateFileOwnerSubjectId: operation.privateFileOwnerSubjectId ?? null,
+    },
+    () => mediaGenerationResultForStoredOperation(service.db, operation),
+  );
 }
 
 async function requireOperation(

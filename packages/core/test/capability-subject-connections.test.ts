@@ -230,7 +230,7 @@ describe("subject-owned capability connection references", () => {
     });
   });
 
-  test("keeps native runtime surfaces out of the catalog and marks external config as managed", async () => {
+  test("keeps native and uninstalled library Skills out of the catalog and marks external config as managed", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const catalog = await buildCapabilityCatalog({

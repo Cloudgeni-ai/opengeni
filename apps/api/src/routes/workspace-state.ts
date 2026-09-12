@@ -1,21 +1,24 @@
+import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import {
-  WORKSPACE_STATE_MAX_BASES,
-  WORKSPACE_STATE_MAX_TOPICS,
-  WORKSPACE_STATE_TOPIC_MAX_CHARS,
+  WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT,
   WorkspaceStateQuery,
   WorkspaceStateResponse,
-  type AccessGrant,
   type WorkspaceStateQuery as WorkspaceStateQueryType,
 } from "@opengeni/contracts";
-import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrantAuthorization,
+  knowledgeContextForAccess,
+  type AccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   getWorkspace,
   getCurrentPreferenceRegistryGovernanceMetadata,
   getWorkspaceStateAcceptedAttemptGovernance,
-  listWorkspaceStateMemoryRecords,
+  listKnowledgeEntries,
   listWorkspaceInstructionPolicyRevisions,
 } from "@opengeni/db";
-import { getDocumentInventory } from "@opengeni/documents";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
@@ -24,9 +27,10 @@ import { projectWorkspaceState } from "../workspace-state-projection";
 
 async function readWorkspaceState(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; query: WorkspaceStateQueryType; grant: AccessGrant },
+  input: { workspaceId: string; query: WorkspaceStateQueryType; access: AccessGrantAuthorization },
 ) {
-  const { workspaceId, query, grant } = input;
+  const { workspaceId, query, access } = input;
+  const { grant } = access;
   const generatedAt = new Date().toISOString();
   const canInspectKnowledge = hasPermission(grant.permissions, "documents:search");
 
@@ -34,18 +38,13 @@ async function readWorkspaceState(
     getWorkspace(deps.db, workspaceId),
     listWorkspaceInstructionPolicyRevisions(deps.db, workspaceId, { limit: 1 }),
     canInspectKnowledge
-      ? (async () => {
-          const [documents, memories] = await Promise.all([
-            getDocumentInventory(deps.db, workspaceId, {
-              baseLimit: WORKSPACE_STATE_MAX_BASES,
-              topicLimit: WORKSPACE_STATE_MAX_TOPICS,
-              topicMaxChars: WORKSPACE_STATE_TOPIC_MAX_CHARS,
-              access: { viewerSubjectId: grant.subjectId },
-            }),
-            listWorkspaceStateMemoryRecords(deps.db, workspaceId),
-          ]);
-          return { documents, memories };
-        })()
+      ? withAccessGrantSessionRlsContext(deps, grant, async () =>
+          listKnowledgeEntries(
+            deps.db,
+            await knowledgeContextForAccess(deps, access, "documents:search"),
+            { limit: WORKSPACE_STATE_KNOWLEDGE_SAMPLE_LIMIT, view: "published" },
+          ),
+        )
       : Promise.resolve(null),
     getCurrentPreferenceRegistryGovernanceMetadata(deps.db, {
       workspaceId,
@@ -109,8 +108,13 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const query = WorkspaceStateQuery.parse(context.req.query());
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const state = await readWorkspaceState(deps, { workspaceId, query, grant });
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const state = await readWorkspaceState(deps, { workspaceId, query, access });
     context.header("cache-control", "private, no-store");
     return context.json(state);
   });
@@ -118,8 +122,13 @@ export function registerWorkspaceStateRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get(`${base}/export`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const query = WorkspaceStateQuery.parse(context.req.query());
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const state = await readWorkspaceState(deps, { workspaceId, query, grant });
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    const state = await readWorkspaceState(deps, { workspaceId, query, access });
     context.header("cache-control", "private, no-store");
     context.header("content-type", "application/json; charset=utf-8");
     context.header(

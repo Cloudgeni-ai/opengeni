@@ -19,7 +19,6 @@ export default function PlatformActivityRow({
   t: (name: string) => string;
   b: typeof import("lucide-react").BotIcon;
   m: typeof import("../components/markdown").Markdown;
-  r: typeof import("../lib/format").truncate;
   j: RowJsx;
   s: RowJsxs;
 }) {

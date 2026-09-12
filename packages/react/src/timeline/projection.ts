@@ -1175,6 +1175,45 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "instruction.confirmation.recovered": {
+        const receipt = asRecord(payload.receipt);
+        if (receipt.outcome !== "published") break;
+        closeStreamingTail();
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "input",
+          text: "Your previously approved workspace instruction was saved.",
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+      case "knowledge.confirmation.recovered":
+      case "knowledge.source.prepared":
+      case "knowledge.source.failed": {
+        const receipt = asRecord(payload.receipt);
+        const outcome = event.type === "knowledge.source.failed" ? "failed" : receipt.outcome;
+        if (
+          (event.type !== "knowledge.confirmation.recovered" &&
+            typeof payload.fileId !== "string") ||
+          !["published", "pending", "rejected", "archived", "failed"].includes(String(outcome))
+        )
+          break;
+        closeStreamingTail();
+        items.push({
+          kind: "knowledge",
+          id: event.id,
+          turnId,
+          fileId: typeof payload.fileId === "string" ? payload.fileId : undefined,
+          filename: typeof payload.filename === "string" ? payload.filename : undefined,
+          entryId: typeof receipt.entryId === "string" ? receipt.entryId : undefined,
+          status: outcome === "failed" ? "failed" : "complete",
+          outcome: outcome as "published" | "pending" | "rejected" | "archived" | "failed",
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "memory.saved":
       case "memory.corrected": {
         // A first-party memory write is a discrete step, not streamed text, so it
@@ -1517,6 +1556,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "sandbox":
     case "startup-phase":
     case "memory":
+    case "knowledge":
     case "fleet-decision":
       return true;
     default:

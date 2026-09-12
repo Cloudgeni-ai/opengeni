@@ -48,6 +48,7 @@ type SettingsItem = {
 
 const SETTINGS_ITEMS: readonly SettingsItem[] = [
   { id: "general", label: "General", icon: Settings2Icon },
+  { id: "learning", label: "Agent learning", icon: BotIcon },
   { id: "members", label: "Members", icon: UsersIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "tools", label: "Agent tools", icon: ShieldCheckIcon },
@@ -60,6 +61,10 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   general: {
     title: "General",
     description: "Workspace identity and defaults for new sessions.",
+  },
+  learning: {
+    title: "Agent learning",
+    description: "Defaults and exceptions for Knowledge, workspace instructions, and Skills.",
   },
   members: {
     title: "Members",
@@ -108,7 +113,7 @@ const WORKSPACE_PAGE_GROUPS = [
     items: [
       {
         to: "/workspaces/$workspaceId/memory" as const,
-        label: "Memory",
+        label: "Agent Knowledge",
         icon: DatabaseIcon,
       },
     ],

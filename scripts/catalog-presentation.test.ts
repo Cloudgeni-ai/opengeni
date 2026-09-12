@@ -9,7 +9,10 @@ import {
   opaqueCatalogName,
   sortConnectorsForPresentation,
 } from "../apps/web/src/components/capabilities/catalog-presentation";
-import { capabilityLogoSource } from "../apps/web/src/components/capabilities/capability-logo-source";
+import {
+  capabilityLogoSource,
+  FIRST_PARTY_CAPABILITY_LOGOS,
+} from "../apps/web/src/components/capabilities/capability-logo-source";
 import {
   catalogServiceIdentity,
   mergeConnectionServices,
@@ -22,6 +25,8 @@ import {
   normalizeCatalogSnapshot,
   readSnapshotFile,
 } from "./import-integrations-catalog";
+
+const FIRST_PARTY_LOGO_IDS = new Set(Object.keys(FIRST_PARTY_CAPABILITY_LOGOS));
 
 const snapshotPath = new URL("../data/catalog/integrations-snapshot.json", import.meta.url)
   .pathname;
@@ -95,13 +100,14 @@ describe("default catalog presentation", () => {
         metadata:
           row.curated || row.featured || row.official
             ? {
+                originalLogoUrl: row.logoSourceUrl,
                 curation: {
                   ...(row.curated ? { curated: true } : {}),
                   ...(row.featured ? { featured: true } : {}),
                   ...(row.official ? { official: true } : {}),
                 },
               }
-            : {},
+            : { originalLogoUrl: row.logoSourceUrl },
       });
     });
     const firstParty: PresentationItem[] = [
@@ -171,17 +177,23 @@ describe("default catalog presentation", () => {
       logoBacked: items.filter(
         (item) =>
           item.logoAssetPath ||
-          (includeFirstPartyMarks && capabilityLogoSource(item, (path) => path)),
+          (includeFirstPartyMarks &&
+            (FIRST_PARTY_LOGO_IDS.has(item.id) || capabilityLogoSource(item, (path) => path))),
       ).length,
       curated: items.filter((item) => capabilityCuration(item).curated).length,
       opaque: items.filter((item) => opaqueCatalogName(item.name)).length,
     });
-    // The baseline models the prior UI: first-party rows had no bundled mark.
+    // The baseline models the prior UI: no bundled first-party marks or upstream logo fallback.
     const beforeQuality = quality(before, false);
     const afterQuality = quality(after, true);
     expect(afterQuality.logoBacked).toBeGreaterThanOrEqual(18);
     expect(afterQuality.logoBacked).toBeGreaterThanOrEqual(beforeQuality.logoBacked);
-    expect(afterQuality.curated).toBeGreaterThanOrEqual(16);
+    expect(afterQuality.curated).toBe(
+      Math.min(
+        browse.filter((item) => capabilityCuration(item).curated && !isFirstParty(item)).length,
+        48 - firstPartyCount,
+      ),
+    );
     expect(afterQuality.curated).toBeGreaterThanOrEqual(beforeQuality.curated);
     expect(afterQuality.opaque).toBeLessThanOrEqual(5);
     expect(afterQuality.opaque).toBeLessThanOrEqual(beforeQuality.opaque);

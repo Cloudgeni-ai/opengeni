@@ -1,6 +1,6 @@
+import { requireScheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   type FileAsset,
-  KnowledgeSourceSyncAction,
   KnowledgeSourceSyncRunSummary,
   type ScheduledTask,
 } from "@opengeni/contracts";
@@ -108,7 +108,7 @@ export async function ensureKnowledgeSourceSyncState(
   db: Database,
   task: ScheduledTask,
 ): Promise<KnowledgeSourceSyncState> {
-  const action = KnowledgeSourceSyncAction.parse(task.action);
+  const action = requireScheduledTaskKnowledgeSource(task);
   return await withRlsContext(
     db,
     { accountId: task.accountId, workspaceId: task.workspaceId },
@@ -151,6 +151,12 @@ export async function ensureKnowledgeSourceSyncState(
             destination: action.destination,
             updatedAt: new Date(),
           },
+          // A frozen older run must never rewind a newer connector selection.
+          setWhere: sql`${schema.knowledgeSourceSyncStates.sourceLifecycleGeneration} <= ${action.sourceLifecycleGeneration}
+            AND (${schema.knowledgeSourceSyncStates.sourceConfigGeneration} < ${action.sourceConfigGeneration}
+              OR (${schema.knowledgeSourceSyncStates.sourceConfigGeneration} = ${action.sourceConfigGeneration}
+                AND ${schema.knowledgeSourceSyncStates.connectionId} = ${action.connection.connectionId}::uuid
+                AND ${schema.knowledgeSourceSyncStates.connectionVersion} <= ${action.connection.connectionVersion}))`,
         })
         .returning();
       if (!row) throw new Error("Failed to persist knowledge source sync state");
@@ -303,7 +309,12 @@ export async function claimKnowledgeSourceSyncLease(
           await tx
             .update(schema.scheduledTaskRuns)
             .set({ status: "skipped", completedAt: new Date(), updatedAt: new Date() })
-            .where(eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId));
+            .where(
+              and(
+                eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId),
+                eq(schema.scheduledTaskRuns.actionKind, "knowledge_source_sync"),
+              ),
+            );
           const [state] = await tx
             .select()
             .from(schema.knowledgeSourceSyncStates)
@@ -325,7 +336,12 @@ export async function claimKnowledgeSourceSyncLease(
             await tx
               .update(schema.scheduledTaskRuns)
               .set({ status: "skipped", completedAt: new Date(), updatedAt: new Date() })
-              .where(eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId));
+              .where(
+                and(
+                  eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId),
+                  eq(schema.scheduledTaskRuns.actionKind, "knowledge_source_sync"),
+                ),
+              );
             await tx
               .update(schema.knowledgeSourceSyncWakes)
               .set({ coalesced: true, claimedAt: new Date(), completedAt: new Date() })
@@ -344,7 +360,12 @@ export async function claimKnowledgeSourceSyncLease(
             await tx
               .update(schema.scheduledTaskRuns)
               .set({ status: "skipped", completedAt: new Date(), updatedAt: new Date() })
-              .where(eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId));
+              .where(
+                and(
+                  eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId),
+                  eq(schema.scheduledTaskRuns.actionKind, "knowledge_source_sync"),
+                ),
+              );
             await tx
               .update(schema.knowledgeSourceSyncWakes)
               .set({ coalesced: true, claimedAt: new Date(), completedAt: new Date() })
@@ -611,6 +632,19 @@ export async function settleKnowledgeSourceSyncLease(
         await tx
           .update(schema.scheduledTaskRuns)
           .set({
+            knowledgeSyncRunId: input.knowledgeSyncRunId ?? null,
+            knowledgeSummary: summary,
+            updatedAt: completedAt,
+          })
+          .where(
+            and(
+              eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId),
+              eq(schema.scheduledTaskRuns.actionKind, "agent_turn"),
+            ),
+          );
+        await tx
+          .update(schema.scheduledTaskRuns)
+          .set({
             status: input.status,
             knowledgeSyncRunId: input.knowledgeSyncRunId ?? null,
             knowledgeSummary: summary,
@@ -618,7 +652,12 @@ export async function settleKnowledgeSourceSyncLease(
             error: input.error ?? null,
             updatedAt: completedAt,
           })
-          .where(eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId));
+          .where(
+            and(
+              eq(schema.scheduledTaskRuns.id, input.scheduledTaskRunId),
+              eq(schema.scheduledTaskRuns.actionKind, "knowledge_source_sync"),
+            ),
+          );
         await tx
           .update(schema.knowledgeSourceSyncStates)
           .set({
@@ -673,7 +712,7 @@ export async function settleKnowledgeSourceSyncLease(
             .update(schema.scheduledTaskRuns)
             .set({ status: "skipped", completedAt, updatedAt: completedAt })
             .where(
-              sql`${schema.scheduledTaskRuns.id} in (${sql.join(
+              sql`${schema.scheduledTaskRuns.actionKind} = 'knowledge_source_sync' AND ${schema.scheduledTaskRuns.id} in (${sql.join(
                 supersededWakes.map((wake) => sql`${wake.scheduledTaskRunId}::uuid`),
                 sql`, `,
               )})`,

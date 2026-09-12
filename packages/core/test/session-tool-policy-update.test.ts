@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
-  FIRST_PARTY_MCP_TOOL_NAMES,
+  FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   type AccessGrant,
   type SessionToolPolicy,
   type ToolRef,
@@ -123,7 +123,9 @@ function explicitTools(tools: ToolRef[], expectedVersion: number): UpdateSession
   return {
     mode: "explicit",
     tools,
-    firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
+    firstPartyMcpTools: [
+      ...new Set([...DEFAULT_FIRST_PARTY_MCP_TOOLS, ...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES]),
+    ],
     expectedVersion,
   };
 }

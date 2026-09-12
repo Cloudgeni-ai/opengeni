@@ -146,6 +146,7 @@ describe("organization API keys section", () => {
     );
     expect(container.textContent).toContain("22222222-2222-4222-8222-222222222222");
     expect(container.textContent).toContain("client.ensureWorkspace");
+    expect(container.textContent).not.toContain("memoryEnabled");
     expect(container.textContent).toContain("No organization API keys yet");
     await act(async () => button(container, "Create Organization API Key").click());
     const dialog = document.body.querySelector('[data-testid="create-api-key-dialog"]');

@@ -1,3 +1,4 @@
+import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
 import { useStartupDetails } from "./startup-preference";
@@ -241,7 +242,6 @@ export function renderActivity(
             t={toolDisplayName}
             b={BotIcon}
             m={Markdown}
-            r={truncate}
             j={rowJsx}
             s={rowJsxs}
           />
@@ -261,6 +261,16 @@ export function renderActivity(
     }
     case "worker":
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;
+    case "knowledge":
+      return (
+        <KnowledgeReceiptRow
+          outcome={item.outcome}
+          entryId={item.entryId}
+          fileId={item.fileId}
+          title={item.filename}
+          source={Boolean(item.fileId)}
+        />
+      );
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     case "fleet-decision":

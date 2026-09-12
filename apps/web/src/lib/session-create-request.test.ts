@@ -142,6 +142,29 @@ describe("buildCreateSessionRequest", () => {
     ).toBe("fast");
   });
 
+  test("retains chat review overrides through draft recovery and initial submission", () => {
+    const agentLearning = { knowledge: "review_first" as const, skills: "off" as const };
+    for (const compute of [
+      { kind: "sandbox" as const, backend: "" as const },
+      {
+        kind: "machine" as const,
+        sandboxId: fileA,
+        folder: { kind: "path" as const, path: "/workspace" },
+      },
+    ]) {
+      const saved = newSessionDraftOptionsFromSessionDraft({
+        ...emptySessionDraft(),
+        compute,
+        agentLearning,
+      });
+      const recovered = sessionDraftFromNewSessionDraftOptions(saved);
+      expect(build([], [], { agentLearning: recovered.agentLearning }).agentLearning).toEqual(
+        agentLearning,
+      );
+    }
+    expect(build([], [], { agentLearning: {} })).not.toHaveProperty("agentLearning");
+  });
+
   test("threads the selected session visibility and defaults to workspace access", () => {
     expect(build([], []).visibility).toBe("workspace");
     expect(build([], [], { visibility: "private" }).visibility).toBe("private");

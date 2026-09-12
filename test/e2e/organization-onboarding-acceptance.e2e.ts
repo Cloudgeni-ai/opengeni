@@ -196,6 +196,12 @@ function observeBrowser(page: Page): BrowserProblems {
 }
 
 function isExpectedNavigationReadCancellation(problem: string): boolean {
+  // Knowledge search is a read-only POST; navigation can cancel it just like GET.
+  const knowledgeSearch =
+    /^POST (https?:\/\/[^/]+)\/v1\/workspaces\/[0-9a-f-]+\/knowledge\/entries\/search: net::ERR_ABORTED$/u.exec(
+      problem,
+    );
+  if (knowledgeSearch?.[1] === publicOrigin) return true;
   const match = /^GET (https?:\/\/[^/]+)(\/[^:]*): net::ERR_ABORTED$/u.exec(problem);
   if (!match || match[1] !== publicOrigin) return false;
   const pathname = new URL(`${match[1]}${match[2]}`).pathname;

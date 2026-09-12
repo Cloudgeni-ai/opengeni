@@ -1,3 +1,8 @@
+import {
+  scheduledTaskKnowledgeSource,
+  requireScheduledTaskKnowledgeSource,
+  knowledgeSourceAgentConfig,
+} from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
@@ -840,10 +845,10 @@ export async function preflightAtlassianScheduleAuthorization(
   input: { task: ScheduledTask; subjectId: string },
 ): Promise<void> {
   const { task } = input;
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (
-    task.action.initiatingSubjectId !== input.subjectId ||
-    task.action.connection.ownerSubjectId !== input.subjectId
+    requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
+    requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId
   ) {
     throw new HTTPException(403, {
       message: "knowledge source schedule requires the exact initiating subject",
@@ -862,10 +867,10 @@ export async function revokeAtlassianScheduleAuthorization(
   input: { task: ScheduledTask; subjectId: string },
 ): Promise<void> {
   const { task } = input;
-  if (task.action.kind !== "knowledge_source_sync") return;
+  if (!scheduledTaskKnowledgeSource(task)) return;
   if (
-    task.action.initiatingSubjectId !== input.subjectId ||
-    task.action.connection.ownerSubjectId !== input.subjectId
+    requireScheduledTaskKnowledgeSource(task).initiatingSubjectId !== input.subjectId ||
+    requireScheduledTaskKnowledgeSource(task).connection.ownerSubjectId !== input.subjectId
   ) {
     throw new HTTPException(403, {
       message: "knowledge source schedule requires the exact initiating subject",
@@ -879,11 +884,11 @@ export async function revokeAtlassianScheduleAuthorization(
     taskId: task.id,
     accountId: task.accountId,
     workspaceId: task.workspaceId,
-    connectionId: task.action.connection.connectionId,
-    connectionVersion: task.action.connection.connectionVersion,
-    sourceId: task.action.sourceId,
-    sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
-    sourceConfigGeneration: task.action.sourceConfigGeneration,
+    connectionId: requireScheduledTaskKnowledgeSource(task).connection.connectionId,
+    connectionVersion: requireScheduledTaskKnowledgeSource(task).connection.connectionVersion,
+    sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
+    sourceLifecycleGeneration: requireScheduledTaskKnowledgeSource(task).sourceLifecycleGeneration,
+    sourceConfigGeneration: requireScheduledTaskKnowledgeSource(task).sourceConfigGeneration,
     externalSourceId,
     subjectId: input.subjectId,
   });
@@ -1014,11 +1019,11 @@ async function materializeSchedules(
     let source = null as Awaited<ReturnType<typeof upsertKnowledgeSource>> | null;
     let existingTask: (typeof tasks)[number] | null = null;
     for (const task of tasks) {
-      if (task.action.kind !== "knowledge_source_sync") continue;
+      if (!scheduledTaskKnowledgeSource(task)) continue;
       const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        sourceId: task.action.sourceId,
+        sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
         initiatingSubjectId: input.subjectId,
       });
       if (resolved?.source.externalSourceId !== identity.externalSourceId) continue;
@@ -1125,7 +1130,10 @@ async function materializeSchedules(
         name: `Sync ${selectedSource.kind === "jira_project" ? "Jira" : "Confluence"}: ${selectedSource.name}`,
         schedule: atlassianSchedule(selectedSource.syncCadence),
         overlapPolicy: "buffer_one",
-        action,
+        action: { kind: "agent_turn" },
+        agentConfig: knowledgeSourceAgentConfig(action, existingTask.agentConfig),
+        refreshPersonalResourceAuthority: true,
+        authorityUpdatedBy: { kind: "subject", subjectId: input.subjectId },
         metadata: {
           ...existingTask.metadata,
           connectorKind: "atlassian",
@@ -1153,16 +1161,11 @@ async function materializeSchedules(
           status: "active",
           schedule: atlassianSchedule(selectedSource.syncCadence),
           overlapPolicy: "buffer_one",
-          action,
+          action: { kind: "agent_turn" },
           runMode: "new_session_per_run",
           targetSessionId: null,
           connectionAuthorities: [],
-          agentConfig: {
-            prompt: "Knowledge source synchronization",
-            resources: [],
-            tools: [],
-            metadata: {},
-          },
+          agentConfig: knowledgeSourceAgentConfig(action),
           variableSetId: null,
           environmentId: null,
           rigId: null,
@@ -1187,11 +1190,11 @@ async function materializeSchedules(
   }
 
   for (const task of tasks) {
-    if (task.action.kind !== "knowledge_source_sync") continue;
+    if (!scheduledTaskKnowledgeSource(task)) continue;
     const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      sourceId: task.action.sourceId,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
       initiatingSubjectId: input.subjectId,
     });
     if (!resolved || enabledIds.has(resolved.source.externalSourceId)) continue;
@@ -1510,20 +1513,20 @@ async function deauthorizeConnectionSources(
     connection.id,
   );
   for (const task of tasks) {
-    if (task.action.kind !== "knowledge_source_sync") continue;
+    if (!scheduledTaskKnowledgeSource(task)) continue;
     const resolved = await getKnowledgeSourceForSyncAuthority(deps.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
-      sourceId: task.action.sourceId,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
       initiatingSubjectId: subjectId,
     });
     if (!resolved || resolved.source.lifecycleState !== "active") continue;
     await deauthorizeKnowledgeSourceRetrieval(deps.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
-      sourceId: task.action.sourceId,
-      audience: task.action.destination,
-      operationId: `atlassian-deauthorize:${connection.id}:${connection.version + 1}:${task.action.sourceId}:${reasonCode}`,
+      sourceId: requireScheduledTaskKnowledgeSource(task).sourceId,
+      audience: requireScheduledTaskKnowledgeSource(task).destination,
+      operationId: `atlassian-deauthorize:${connection.id}:${connection.version + 1}:${requireScheduledTaskKnowledgeSource(task).sourceId}:${reasonCode}`,
       reasonCode,
       actor: { kind: "human", subjectId, initiatingHumanSubjectId: subjectId },
     });

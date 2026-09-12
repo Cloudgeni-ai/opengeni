@@ -8,8 +8,22 @@ import {
   type AccessGrant,
   type Session,
 } from "@opengeni/contracts";
-import { recordWorkspaceUsage, requireLimit, type ApiRouteDeps } from "@opengeni/core";
-import { completeFileUpload, getFile, prepareGeneratedWorkspaceFile } from "@opengeni/db";
+import {
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  recordWorkspaceUsage,
+  requireLimit,
+  type ApiRouteDeps,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
+import {
+  completeFileUpload,
+  getFile,
+  prepareGeneratedWorkspaceFile,
+  getSessionAuthorityProjection,
+  requireWorkspace,
+  withSessionRlsActorContext,
+} from "@opengeni/db";
 import { retryWhileMissing, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
 import { HTTPException } from "hono/http-exception";
 
@@ -21,10 +35,48 @@ const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 const SANDBOX_ARTIFACT_ABSOLUTE_PATH_MAX_CHARS = 4_096;
 const SANDBOX_ARTIFACT_SAFE_FILENAME_MAX_CHARS = 200;
 
+/** Original bytes inherit the already-authorized source session's ownership. */
 export async function publishSandboxFileArtifact(
+  deps: ApiRouteDeps,
+  input: Parameters<typeof publishSandboxFileArtifactInScope>[1],
+): Promise<SandboxFileArtifactReceipt> {
+  const actor = input.authorization
+    ? await fileOwnerContextForAccess(deps, input.authorization, "files:upload")
+    : input.grant.principalKind === "agent_attempt"
+      ? await fileOwnerContextForAgent(deps, input.grant, "files:upload")
+      : { subjectId: input.grant.subjectId, privateFileOwnerSubjectId: null };
+  return withSessionRlsActorContext(actor, async () => {
+    const [authority, workspace] = await Promise.all([
+      getSessionAuthorityProjection(deps.db, input.grant.workspaceId, input.session.id),
+      requireWorkspace(deps.db, input.grant.workspaceId),
+    ]);
+    if (!authority) throw new HTTPException(404, { message: "Source session is unavailable" });
+    const personal =
+      authority.visibility === "user_private" ||
+      authority.memoryScope === "user" ||
+      workspace.kind === "personal";
+    const expectedOwner =
+      authority.visibility === "user_private"
+        ? authority.ownerSubjectId
+        : authority.memoryScope === "user"
+          ? authority.scopeSubjectId
+          : actor.privateFileOwnerSubjectId;
+    if (personal && (!expectedOwner || actor.privateFileOwnerSubjectId !== expectedOwner))
+      throw new HTTPException(403, {
+        message: "Personal file publication requires the session owner's authority",
+      });
+    return withSessionRlsActorContext(
+      { ...actor, privateFileOwnerSubjectId: personal ? (expectedOwner ?? null) : null },
+      () => publishSandboxFileArtifactInScope(deps, input),
+    );
+  });
+}
+
+async function publishSandboxFileArtifactInScope(
   deps: ApiRouteDeps,
   input: {
     grant: AccessGrant;
+    authorization?: AccessGrantAuthorization;
     session: Session;
     path: string;
     signal?: AbortSignal | undefined;

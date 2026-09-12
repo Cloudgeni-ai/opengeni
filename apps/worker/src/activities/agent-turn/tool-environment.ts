@@ -1,3 +1,4 @@
+import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
   beginConnectorActionExecution,
@@ -119,6 +120,11 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  fetchKnowledgeSource?:
+    | ((
+        input: import("../types").RunKnowledgeSourceSyncBatchInput,
+      ) => Promise<import("../types").RunKnowledgeSourceSyncBatchResult>)
+    | undefined;
   selectedSkillActivations: readonly RuntimeSkillActivation[];
   input: RunAgentTurnInput;
   catalogSourceSettings: Settings;
@@ -673,6 +679,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       });
     },
   });
+  const sourceTools = deps.fetchKnowledgeSource
+    ? await createKnowledgeSourceAttemptTools({
+        db,
+        context: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          actor: {
+            kind: "agent",
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
+          },
+        },
+        fetch: deps.fetchKnowledgeSource,
+      })
+    : [];
   const operationRecoveryEnabled = githubRestMcp.settings.mcpServers.some(
     (server) =>
       server.operationRecovery &&
@@ -734,6 +757,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : []),
     ...skillTools,
+    ...sourceTools,
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
       load: async () => {
