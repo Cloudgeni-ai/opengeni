@@ -1,5 +1,38 @@
 # @opengeni/api-router
 
+## 3.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Patch Changes
+
+- 50ac837: Add explicit accepted-turn host binding selection for shared conversations. Capture each participant's exact owner delegation without changing the configured destination or borrowing creator credentials, preserve fixed bindings and scheduled/child live authority checks, and apply session-local server configuration to follow-up selection. Document the supported empty-session then first-text admission flow.
+- 71fd840: Accept Microsoft's token responses that omit offline_access from access-token scopes. Require a refresh token as proof of offline access, preserve that capability after refresh, and continue rejecting missing resource permissions.
+- 123cf57: Make agent-authored workspace instruction changes non-destructive: append new rules by default, require one exact anchor for edits or removals, and reserve complete replacement for an explicit mode while preserving baseline conflict checks and instruction budgets.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [71fd840]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/config@1.2.1
+  - @opengeni/core@3.0.0
+  - @opengeni/db@5.0.0
+  - @opengeni/runtime@3.0.0
+  - @opengeni/codemode@0.5.8
+  - @opengeni/codex@0.2.23
+  - @opengeni/artifact-tool@0.3.28
+  - @opengeni/documents@0.8.29
+  - @opengeni/events@0.4.27
+  - @opengeni/github@0.7.12
+  - @opengeni/observability@0.8.28
+  - @opengeni/storage@0.2.129
+  - @opengeni/tool-gateway@0.1.9
+
 ## 2.13.0
 
 ### Minor Changes

@@ -18,6 +18,7 @@ import {
 } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
   capabilityPresentation,
   presentationPermissions,
@@ -29,12 +30,11 @@ import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog as Sheet,
+  DialogDescription as SheetDescription,
+  DialogHeader as SheetHeader,
+  DialogTitle as SheetTitle,
+} from "@/components/ui/dialog";
 import {
   capabilityCategoryLabel,
   capabilityConnectPlan,
@@ -173,8 +173,7 @@ export function CapabilityDetailSheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        className="w-full gap-0 border-border bg-bg p-0 sm:max-w-[30rem]"
+      <CapabilityDialogContent
         onCloseAutoFocus={(event) => {
           const opener = focusRef.current;
           focusRef.current = null;
@@ -215,7 +214,7 @@ export function CapabilityDetailSheet({
             onAction={onAction}
           />
         ) : null}
-      </SheetContent>
+      </CapabilityDialogContent>
     </Sheet>
   );
 }
@@ -276,7 +275,7 @@ export function DetailBody({
 
   return (
     <div
-      className={cn("flex min-h-0 flex-col", inline ? "session-capability-card__form" : "h-full")}
+      className={cn("flex min-h-0 flex-col", inline ? "session-capability-card__form" : "flex-1")}
     >
       {inline && !showIdentity ? null : inline ? (
         <div className="flex items-start gap-3">
@@ -294,7 +293,7 @@ export function DetailBody({
           <MetaChip>{capabilityItemKindLabel(item)}</MetaChip>
         </div>
       ) : (
-        <SheetHeader className="gap-3 border-b border-border p-5 pr-12">
+        <SheetHeader className="gap-3 border-b border-border p-6 pr-12 text-left sm:p-8 sm:pr-14">
           <div className="flex items-start gap-3">
             <CapabilityLogo
               src={logoSrc}
@@ -303,7 +302,7 @@ export function DetailBody({
               fallback={item.kind === "skill" ? <SparklesIcon className="size-5" /> : undefined}
             />
             <div className="min-w-0 flex-1">
-              <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
+              <SheetTitle className="text-xl font-semibold tracking-tight">{item.name}</SheetTitle>
               <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
                 {capabilityItemKindLabel(item)}
                 {capabilityCategoryLabel(item.category)
@@ -319,7 +318,7 @@ export function DetailBody({
       <div
         className={cn(
           "min-h-0 flex-1",
-          inline ? "space-y-3 text-xs" : "space-y-5 overflow-y-auto p-5",
+          inline ? "space-y-3 text-xs" : "space-y-6 overflow-y-auto p-6 sm:p-8",
           inline && showIdentity && "mt-3",
         )}
       >

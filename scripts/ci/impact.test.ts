@@ -100,6 +100,7 @@ describe("fail-closed change impact", () => {
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
+      "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
@@ -390,6 +391,21 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("capability details browser coverage follows web and catalog dependencies", () => {
+    const browserTest = "test/e2e/capability-details.browser.e2e.ts";
+    for (const path of [
+      "apps/web/src/components/capabilities/detail-dialog.tsx",
+      "apps/web/test/capability-details-fixture.tsx",
+      "packages/react/src/connection-catalog.tsx",
+      browserTest,
+    ]) {
+      expect(createImpactPlan([path]).e2eTests).toContain(browserTest);
+    }
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      expect(createImpactPlan([path]).e2eTests).not.toContain(browserTest);
+    }
+  });
+
   test("root test mappings and tier ownership are complete", () => {
     expect(() => assertRootTestDependencyMapComplete()).not.toThrow();
     expect(() => assertTestTierMapComplete()).not.toThrow();
@@ -399,6 +415,7 @@ describe("fail-closed change impact", () => {
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
+      "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",

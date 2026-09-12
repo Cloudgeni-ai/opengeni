@@ -1,5 +1,20 @@
 # @opengeni/codemode
 
+## 0.5.8
+
+### Patch Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/sdk@6.0.0
+  - @opengeni/tool-gateway@0.1.9
+
 ## 0.5.7
 
 ### Patch Changes
