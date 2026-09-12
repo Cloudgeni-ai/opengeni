@@ -11,6 +11,7 @@ import {
 } from "../src/artifact-catalog";
 import { createSession } from "../src";
 import { ArtifactCatalogListQuery } from "@opengeni/contracts";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 const migration = new URL("../drizzle/0465_sandbox_file_publications.sql", import.meta.url);
 
@@ -133,7 +134,11 @@ postgresTest(
       expect(privileges[0]).toMatchObject({ read: false, write: false });
       const raw = postgres(appUrl.toString(), {
         max: 1,
-        connection: { statement_timeout: 30_000 },
+        connection: {
+          // Match createDb's current-image receipt for restrictive sessions RLS.
+          application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+          statement_timeout: 30_000,
+        },
       });
       try {
         // Bun's rejection matcher does not start postgres-js's lazy Query.
