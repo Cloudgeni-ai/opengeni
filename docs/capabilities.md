@@ -757,13 +757,23 @@ Ordinary new sessions include two first-party OpenGeni tools:
   and the signed-in human must confirm the provider domain and complete setup.
 
 The recommendation card resolves the catalog again at click time. A removed or
-changed item is never authorized from stale event data. OAuth-backed MCPs can
-start the normal connection flow directly from the session for a workspace
-admin, return to the same session, and enable the capability against the exact
-new connection. API-key, required-variable, and admin-review paths open the
-existing protected Capabilities/variable-set setup surfaces; credential values
-never enter the event or model-visible tool result. Existing explicit session
-tool policies remain exact and do not silently gain the two discovery tools.
+changed item is never authorized from stale event data. Compact cards keep the
+provider identity visible while supported credential forms and reviewed Skill
+setup expand in the conversation. Reassurance and the action share the bottom
+row on desktop and stack on mobile; verified completion uses the application's
+neutral theme tokens. OAuth-backed MCPs use the normal provider redirect and
+return to the same session, enabling the capability against the exact new
+connection. API-key values go only to the protected connection API, never into
+the event or model-visible tool result. Provider-specific prerequisites retain
+their existing protected setup paths and permission checks.
+
+Reviewed library Skills install for the workspace. Their source/version review
+is available in the expanded card; personal and conversation-only library
+installation are not supported by this path. Completing setup makes the
+capability available to subsequent authorized work, but does not automatically
+replay an earlier tool call or submit a new agent message. Existing explicit
+session tool policies remain exact and do not silently gain the two discovery
+tools.
 
 GitHub is the first fully specialized adapter. Search prefers the built-in
   native GitHub connection recommendation, checks the live workspace binding,
