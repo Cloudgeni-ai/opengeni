@@ -4113,6 +4113,40 @@ describe("provider-neutral browser account acceptance", () => {
     }
   });
 
+  test("repeated finite review reads finish without native transport cancellation", async () => {
+    const reviewAccount = await createActualUser({
+      displayName: "Review Reader",
+      email: `review-reader-${RUN_ID}@example.test`,
+      organizationName: "Review Reader Organization",
+    });
+    const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    try {
+      const page = await browser.newPage();
+      const problems = observeBrowser(page);
+      setBrowserPhase(problems, "primary-set-sign-in");
+      await signIn(page, reviewAccount);
+      await waitForFiniteReadQuiescence(problems);
+      setBrowserPhase(problems, "stable-finite-review-reads");
+      // Exercise repeated real SDK reads in a stable document. Each iteration
+      // must reach a native terminal before another poll; no routing, fetch
+      // replacement, navigation, or cancellation exemption is involved.
+      for (let i = 0; i < 100; i++) {
+        const pending = page.waitForResponse((response) =>
+          response.url().endsWith("/knowledge/entries/search"),
+        );
+        await page.evaluate(() =>
+          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
+        );
+        const response = await pending;
+        expect(response.status()).toBe(200);
+        await waitForFiniteReadQuiescence(problems);
+      }
+      await expectNoBrowserProblems(problems);
+    } finally {
+      await browser.close();
+    }
+  }, 180_000);
+
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;

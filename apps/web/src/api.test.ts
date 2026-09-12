@@ -688,11 +688,12 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("drains finite JSON before exposing it and releases the native source lock", async () => {
+  test("fully consumes finite JSON before exposing detached bytes", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     let source!: ReadableStream<Uint8Array>;
+    let nativeResponse!: Response;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
       source = new ReadableStream<Uint8Array>({
@@ -700,9 +701,10 @@ describe("web API auth helpers", () => {
           bodyController = controller;
         },
       });
-      return new Response(source, {
+      nativeResponse = new Response(source, {
         headers: { "content-type": "application/json" },
       });
+      return nativeResponse;
     }) as unknown as typeof fetch;
 
     try {
@@ -722,7 +724,7 @@ describe("web API auth helpers", () => {
       bodyController.close();
       const response = await pending;
       expect(observed.signal?.aborted).toBe(false);
-      expect(source.locked).toBe(false);
+      expect(nativeResponse.bodyUsed).toBe(true);
       await expect(response.json()).resolves.toEqual({ ok: true });
     } finally {
       configureManagedActorEpoch(null);
@@ -868,38 +870,49 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("aborts a finite JSON drain when the accepted actor changes", async () => {
-    const originalFetch = globalThis.fetch;
-    const observed: { signal?: AbortSignal | null } = {};
-    let source!: ReadableStream<Uint8Array>;
-    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      observed.signal = init?.signal ?? null;
-      source = new ReadableStream<Uint8Array>({
-        start(controller) {
-          init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
-            once: true,
-          });
-          controller.enqueue(new TextEncoder().encode('{"partial":'));
-        },
-      });
-      return new Response(source, {
-        headers: { "content-type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
+  test.each(["actor", "caller", "document"] as const)(
+    "aborts a partial finite JSON drain on %s retirement",
+    async (retirement) => {
+      const originalFetch = globalThis.fetch;
+      const observed: { signal?: AbortSignal | null } = {};
+      const caller = new AbortController();
+      let source!: ReadableStream<Uint8Array>;
+      globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        observed.signal = init?.signal ?? null;
+        source = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+              once: true,
+            });
+            controller.enqueue(new TextEncoder().encode('{"partial":'));
+          },
+        });
+        return new Response(source, {
+          headers: { "content-type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
 
-    try {
-      configureManagedActorEpoch("14");
-      const pending = managedActorFetch("https://api.example.test/v1/workspaces");
-      await Promise.resolve();
-      configureManagedActorEpoch("15");
-      expect(observed.signal?.aborted).toBe(true);
-      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-      expect(source.locked).toBe(false);
-    } finally {
-      configureManagedActorEpoch(null);
-      globalThis.fetch = originalFetch;
-    }
-  });
+      try {
+        configureManagedActorEpoch("14");
+        const pending = managedActorFetch("https://api.example.test/v1/workspaces", {
+          method: "PUT",
+          signal: caller.signal,
+        });
+        await Promise.resolve();
+        expect(managedActorMutationBusySnapshot()).toBe(true);
+        if (retirement === "actor") configureManagedActorEpoch("15");
+        else if (retirement === "caller")
+          caller.abort(new DOMException("caller stopped", "AbortError"));
+        else handleManagedActorPageHide(false);
+        expect(observed.signal?.aborted).toBe(true);
+        await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        expect(managedActorMutationBusySnapshot()).toBe(false);
+      } finally {
+        configureManagedActorEpoch(null);
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
 
   test("keeps detached JSON actor-bound and retargets caller aborts after the native drain", async () => {
     const originalFetch = globalThis.fetch;
