@@ -112,6 +112,11 @@ On macOS, runner restart waits for the previous launchd label to disappear befor
 accepting a replacement. A matching program path on a retiring job is not proof
 that the replacement started.
 
+If a desktop producer ends after delivering frames, the viewer exposes its
+connection error and Reconnect action instead of leaving the last image over
+them. Refresh desktops also retries a failed stream; terminal placement changes
+still require the existing replacement-session recovery path.
+
 The Chrome Native Messaging bridge accepts two exact extension origins: the
 development manifest key (`imdmcebcclhibdfolbokjbiibpcnpbel`) and the Chrome Web
 Store item (`phpmmcbeelfkcinjfbbggegjdcdmnnch`). Both the installed native-host
