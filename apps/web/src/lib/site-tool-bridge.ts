@@ -6,12 +6,14 @@ import {
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
 import { ApiError, request, requestResponse } from "@/api";
 
+type NativeOptions<T = CreateSiteToolBridgeOptions> = T extends CreateSiteToolBridgeOptions
+  ? Omit<T, "callTool" | "isCatalogStale" | "fetchResponse"> & {
+      callTool?: CreateSiteToolBridgeOptions["callTool"];
+    }
+  : never;
+
 /** Native authentication only; Site routing, origin, filtering and version pinning are shared. */
-export function createSiteToolBridge(
-  input: Omit<CreateSiteToolBridgeOptions, "callTool" | "isCatalogStale" | "fetchResponse"> & {
-    callTool?: CreateSiteToolBridgeOptions["callTool"];
-  },
-): PublishedHtmlArtifactToolBridge {
+export function createSiteToolBridge(input: NativeOptions): PublishedHtmlArtifactToolBridge {
   return createSharedSiteToolBridge({
     ...input,
     isCatalogStale: isCatalogStaleApiError,

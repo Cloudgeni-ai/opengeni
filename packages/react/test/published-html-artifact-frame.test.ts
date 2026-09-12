@@ -3,7 +3,22 @@ import {
   SiteBridgeDocumentLease,
   SiteBridgeRequestRegistry,
   siteBridgeError,
+  publishedHtmlArtifactDocument,
 } from "../src/components/artifacts/published-html-artifact-frame";
+
+test("the published frame supplies the SDK only for the optional client tag", () => {
+  const ordinary = "<!doctype html><main>Normal bundled Site</main>";
+  expect(publishedHtmlArtifactDocument(ordinary, true)).not.toContain("createOpenGeniSiteClient");
+  const optedIn =
+    '<!doctype html><script src="/__opengeni/site-tools/client.js"></script><main>HTML Site</main>';
+  const document = publishedHtmlArtifactDocument(optedIn, true);
+  expect(document).toContain("createOpenGeniSiteClient");
+  expect(document).not.toContain('src="/__opengeni/site-tools/client.js"');
+  expect(document.indexOf("opengeni.site")).toBeLessThan(
+    document.indexOf("createOpenGeniSiteClient"),
+  );
+  expect(publishedHtmlArtifactDocument(optedIn, false)).toBe(optedIn);
+});
 
 function port(): MessagePort & { closeCount: number } {
   return {

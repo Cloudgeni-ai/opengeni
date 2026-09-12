@@ -1,3 +1,5 @@
+export { inlineHtmlDocument } from "./components/artifacts/inline-html-document";
+export { useRetainedImageObjectUrl } from "./timeline/retained-image";
 /** Public artifact surfaces. Import from `@opengeni/react/artifacts`. */
 export {
   ArtifactSurface,

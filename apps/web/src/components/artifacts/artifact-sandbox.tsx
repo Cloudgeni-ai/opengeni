@@ -12,7 +12,7 @@ import {
   publishedHtmlArtifactDocument,
   type PublishedHtmlArtifactToolBridge,
 } from "@opengeni/react/artifacts";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,10 @@ export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument }
 
 export function ArtifactSandbox(props: {
   html: string;
+  height?: number;
+  autoHeight?: boolean;
+  theme?: "light" | "dark";
+  headerControls?: ReactNode;
   title: string;
   versionLabel?: string;
   className?: string;
@@ -65,6 +69,7 @@ export function ArtifactSandbox(props: {
             </span>
           ) : null}
           <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
+          {props.headerControls}
           {props.versionLabel ? (
             <Badge
               variant="outline"
@@ -133,6 +138,9 @@ export function ArtifactSandbox(props: {
         key={reloadKey}
         title={props.title}
         html={props.html}
+        autoHeight={props.autoHeight && !focused}
+        theme={props.theme}
+        style={!focused && props.height ? { height: props.height } : undefined}
         toolBridge={props.toolBridge}
         className={cn(
           "h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",

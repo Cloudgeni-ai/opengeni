@@ -10,7 +10,8 @@ export type SiteToolCallRequest = ToolGatewayCallRequest & {
 };
 export type SiteToolCaller = (input: {
   workspaceId: string;
-  request: SiteToolCallRequest;
+  request: ToolGatewayCallRequest &
+    Partial<Pick<SiteToolCallRequest, "siteArtifactId" | "siteVersionId">>;
   signal: AbortSignal;
 }) => Promise<ToolGatewayCallResponse>;
 export type SiteToolBridge = {
@@ -24,21 +25,22 @@ export type SiteToolBridge = {
 export type CreateSiteToolBridgeOptions = {
   workspaceTools: Pick<OpenGeniWorkspaceTools, "$catalog">;
   workspaceId: string;
-  artifactId: string;
-  siteVersionId: string;
-  requestedTools: readonly ToolGatewayIdentity[];
+
   callTool: SiteToolCaller;
   isCatalogStale?: (error: unknown) => boolean;
   /** Optional authenticated host transport for the host-bound workspace API.
    * Omit to expose tools only. Site-provided authorization headers are never forwarded. */
   fetchResponse?: (path: string, init: RequestInit) => Promise<Response>;
-};
+} & (
+  | { artifactId: string; siteVersionId: string; requestedTools: readonly ToolGatewayIdentity[] }
+  | { artifactId?: never; siteVersionId?: never; requestedTools?: never }
+);
 
 /** Host-side bridge for the opaque Site frame. Supply an authenticated transport;
  * the server independently checks live viewer access and the exact Site version.
  * Recreate on actor/version change. Never take these pinned fields from HTML. */
 export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteToolBridge {
-  const allowed = new Set(input.requestedTools.map(identityKey));
+  const allowed = input.requestedTools ? new Set(input.requestedTools.map(identityKey)) : null;
   let projectedCatalog: OpenGeniSiteToolCatalog | null = null;
   const loadCatalog = async ({
     signal,
@@ -61,7 +63,9 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       generation: current.generation,
       digest: current.digest,
       createdAt: current.createdAt,
-      entries: current.entries.filter((entry) => allowed.has(identityKey(entry.identity))),
+      entries: current.entries.filter(
+        (entry) => !allowed || allowed.has(identityKey(entry.identity)),
+      ),
     };
     return projectedCatalog;
   };
@@ -76,8 +80,10 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
               input.artifactId,
             );
             const headers = new Headers();
-            headers.set("x-opengeni-site-id", input.artifactId);
-            headers.set("x-opengeni-site-version", input.siteVersionId);
+            if (input.artifactId) {
+              headers.set("x-opengeni-site-id", input.artifactId);
+              headers.set("x-opengeni-site-version", input.siteVersionId);
+            }
             for (const [name, value] of message.headers) {
               if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
                 headers.set(name, value);
@@ -93,7 +99,7 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
       : {}),
     catalog: loadCatalog,
     call: async (request, { signal }) => {
-      if (!allowed.has(identityKey(request.identity)))
+      if (allowed && !allowed.has(identityKey(request.identity)))
         throw new Error("This tool is not available to the Site");
       const call = async (refresh = false) => {
         const catalog = await loadCatalog({ signal, refresh });
@@ -111,8 +117,9 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
             catalogDigest: catalog.digest,
             identity: request.identity,
             arguments: request.arguments,
-            siteArtifactId: input.artifactId,
-            siteVersionId: input.siteVersionId,
+            ...(input.artifactId
+              ? { siteArtifactId: input.artifactId, siteVersionId: input.siteVersionId }
+              : {}),
           },
         });
       };

@@ -156,3 +156,30 @@ test("base SDK sends pinned Site calls through the actor-scoped gateway", async 
   expect(observed?.actor).not.toBeNull();
   expect(observed?.body).toEqual(request);
 });
+
+test("inline HTML reuses the bridge without inventing a saved Site identity", async () => {
+  const calls: unknown[] = [];
+  const bridge = createSiteToolBridge({
+    workspaceId: "workspace",
+    workspaceTools: { $catalog: async () => catalog },
+    callTool: async ({ request }) => {
+      calls.push(request);
+      return {} as ToolGatewayCallResponse;
+    },
+  });
+  const signal = new AbortController().signal;
+  expect((await bridge.catalog({ signal })).entries).toHaveLength(1);
+  await bridge.call({ catalogDigest: catalog.digest, identity, arguments: {} }, { signal });
+  expect(calls).toEqual([{ catalogDigest: catalog.digest, identity, arguments: {} }]);
+  await expect(
+    bridge.call(
+      {
+        catalogDigest: catalog.digest,
+        identity: { serverId: "other", toolName: "bad" },
+        arguments: {},
+      },
+      { signal },
+    ),
+  ).rejects.toThrow("not enabled");
+  expect(calls).toHaveLength(1);
+});

@@ -874,8 +874,12 @@ Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
 Repository `.agents/skills` contains only maintainer (`opengeni`) and external
-integration (`opengeni-client`) guidance. Runtime skills live in
-`packages/runtime/src/bundled_*_skills`, shipped without repository-agent copies.
+integration (`opengeni-client`) guidance. Runtime skills are authored directly in
+`packages/runtime/src/bundled_*_skills`; these directories are authoritative and
+shipped as runtime assets, without repository-agent copies or a synchronization step.
+The worker's bundled selection includes `opengeni-visualize` and `document-parsing`
+by default, independently of sandbox or editable-artifact tools. Both remain
+subject to an explicit host selection, including an empty selection.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
@@ -1196,6 +1200,38 @@ identity present in its exact attempt catalog. The host
 injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on document navigation or replacement.
+
+HTML-only Sites can explicitly include
+`<script src="/__opengeni/site-tools/client.js"></script>` before author scripts.
+The existing Codemode Site request handler serves the installed SDK's generated
+browser runtime at that path. Published frames resolve that optional tag using
+the viewer's deployed SDK; ordinary bundled React Sites are unchanged. This
+is the same SDK and bridge, not another protocol. SDK builds regenerate the
+browser entry with `scripts/generate-site-browser-runtime.ts`. Published HTML
+and sandbox previews use their respective host SDK versions, with the existing
+bridge/API compatibility checks. No package-image delivery or Bun build change
+is required for existing Sites.
+Assistant messages opt into `opengeni-html` and `opengeni-site` fences through
+the shared Markdown host callback. Only source-complete fences mount previews;
+user messages and ordinary HTML fences remain inert Markdown. The web host's
+`ChatInteractiveBlock` uses the existing `ArtifactSandbox` and published frame
+for both. Saved Site embeds load through `loadSiteSnapshot`, optionally selecting
+a saved version and its exact tool declarations. Inline HTML uses the same
+bridge without a fabricated Site identity; API calls retain ordinary current
+viewer authorization and tool approval. No sandbox download is needed to render
+message-owned HTML.
+Inline visualizations receive the shared visualization stylesheet and helper scripts,
+with frame-scoped resize messages and theme updates; ordinary Sites are unchanged.
+The CSS/helpers under packages/react are canonical. generate-visualization-assets.ts
+generates both the renderer constants and the visualization skill’s preview/export
+assets from them. The default opengeni-visualize skill owns detailed inline design
+guidance; the main operational prompt only routes to it and to opengeni-sites.
+Markdown image references use artifact:<uuid>. The native chat resolves metadata
+through the current workspace API and reuses the retained-artifact image loader
+(object URL cleanup, unavailable states, and current viewer authentication).
+Neither sandbox paths nor storage credentials are embedded in message image URLs.
+
+
 Multiple SDK clients in the same document retain independent ports; connecting
 one must not cancel another. Workspace SDK requests have no endpoint allowlist:
 the host binds routing; API handlers authorize. Published calls use viewer auth;
@@ -1245,8 +1281,10 @@ The attempt-frozen connector Allow/Ask/Block policy and
 `connector_action_requests` ledger apply to model and Codemode execution only.
 Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
 use the ordinary `requireApproval` classification and preserve a caller-generated
-operation id only for provider-specific handling. Sites bypass that per-call
-approval after active-version allowlist revalidation. These direct surfaces do
+operation id only for provider-specific handling. Sites retain ordinary per-call
+approval after active-Site and selected-version allowlist revalidation. Older
+published versions remain callable using their own declared tools and the
+viewer’s current permissions. These direct surfaces do
 not synthesize attempt-owned connector rows or a second generalized exactly-once
 journal.
 

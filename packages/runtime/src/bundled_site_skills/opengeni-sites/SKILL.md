@@ -15,6 +15,13 @@ provider-specific API wrapper, or OpenGeni-only build CLI.
 
 ## Start from the durable Site
 
+- For an existing page the user wants to view and share, consider Sites before
+  choosing a temporary tunnel or another server. Inspect whether it can be
+  packaged as self-contained HTML, preserve its design and behavior, and retain
+  editable source when available. A local preview alone is still appropriate
+  when that is all the user requests. Explain workspace access for the published
+  link; do not imply it is public to anyone. If the app requires a backend that
+  Sites cannot host, explain that constraint instead of dropping functionality.
 - For a new Site, create a normal project directory with `package.json`,
   `index.html`, TypeScript/React source, styles, tests, and any ordinary build
   configuration the app needs.
@@ -111,6 +118,41 @@ During development, open the sandbox-local URL with the available Browser tools.
 Exercise the real interactions at desktop and mobile widths, inspect console
 errors, and take a screenshot when visual quality matters. Do not declare the
 Site complete from compilation alone.
+
+## Plain HTML without a browser build
+
+For a small HTML-only Site, use ordinary HTML, CSS, and JavaScript. If it calls
+OpenGeni tools or SDK methods, place this exact optional tag before your own
+scripts (without async, defer, or type="module"):
+
+```html
+<script src="/__opengeni/site-tools/client.js"></script>
+<script>
+  const site = createOpenGeniSiteClient();
+  // Use the actual tool paths discovered with ogtool on site.tools.
+  // site.client is the same ordinary SDK client as in a React Site.
+</script>
+```
+
+The existing preview handler above serves this script. Serve the raw HTML with
+`new Response(Bun.file("./index.html"))` alongside its tool route; no browser
+build is needed. In the published viewer, the host resolves the tag to its
+browser client. Both use the same SDK implementation and existing tool bridge.
+Opening the file directly supplies no tool host. There are no credentials in
+the tag or HTML. Declare requested tools and handle errors as for any Site.
+
+Use the exact package pins above for the preview host. The preview runtime comes
+from that installed SDK; the published runtime comes from the viewer's deployed
+SDK. The tag does not install dependencies, replace React imports, or change Bun.
+For TypeScript checking, React components, or imported browser dependencies,
+use the normal typed SDK and build workflow above. Do not use both client-loading
+paths in one document.
+
+Publish the original HTML containing the tag, not the served client script or
+transformed viewer document. For this path, upload `index.html` wherever the
+publishing instructions below use `dist/index.html`. Inline ordinary styles,
+scripts, and assets as usual; the OpenGeni client tag is resolved by the host.
+An HTML-only Site can be a small widget; it does not require a full-page layout.
 
 ## Prefer OpenGeni's UI and typed client
 
@@ -259,12 +301,37 @@ access limitation. Missing publishing access itself still blocks publication.
    SDK operations, with no direct `site.tools` calls, should publish
    `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
-   no tool authority and requires no separate tool approval. Site calls do not open
-   per-call approval dialogs.
+   no tool authority and requires no separate tool approval. Execution still follows
+   normal tool approval rules; handle approval-required responses in the UI.
 5. The host intersects that set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal
    user-visible error states.
+
+## Show a visualization or Site inside chat
+
+For an inline visualization stored directly in a chat response, read
+`opengeni-visualize`. That path does not require publishing a Site.
+
+To embed a published Site, use a fenced `opengeni-site` block containing JSON:
+
+```opengeni-site
+{"siteId":"<artifact.id>","versionId":"<published version.id>"}
+```
+
+Use the actual returned ids. `versionId` is optional; omitting it loads the
+current version when the embed opens. Including it preserves the intended
+version. The viewer can choose another version within the embed without
+publishing or rolling back the Site. The embed uses the same Site renderer,
+reload/full-screen controls, tool declarations and viewer permissions as the
+Site page. Embeds resolve in the chat's workspace. Keep a normal Site link when
+it helps the user reopen or share it. Archived or inaccessible Sites display
+an unavailable state.
+
+Use inline HTML for a visualization that belongs in this response. Use a Site
+for a reusable app or durable page, and embed it when useful. Both can be small;
+neither requires a dashboard or full-page layout. React Sites still use the
+normal build and publish workflow.
 
 ## Publish one immutable version
 

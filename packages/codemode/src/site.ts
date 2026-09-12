@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { generateToolDeclarations } from "@opengeni/tool-gateway";
+import { SITE_BROWSER_RUNTIME, SITE_CLIENT_SCRIPT_PATH } from "@opengeni/sdk/site-document";
 
 import { CodemodeClient, CodemodeTransportError } from "./index";
 import { environmentCodemodeClient, type CodemodeClientProvider } from "./environment";
@@ -18,8 +19,21 @@ export function createCodemodeSiteRequestHandler(
   const provide = typeof client === "function" ? client : () => client;
   return async (request) => {
     try {
-      const active = await provide();
       const pathname = new URL(request.url).pathname;
+      if (pathname === SITE_CLIENT_SCRIPT_PATH) {
+        if (request.method !== "GET" && request.method !== "HEAD")
+          return new Response("Method not allowed", {
+            status: 405,
+            headers: { allow: "GET, HEAD" },
+          });
+        return new Response(request.method === "HEAD" ? null : SITE_BROWSER_RUNTIME, {
+          headers: {
+            "content-type": "text/javascript; charset=utf-8",
+            "cache-control": "no-cache",
+          },
+        });
+      }
+      const active = await provide();
       if (pathname.startsWith(`${CODEMODE_SITE_LOCAL_PATH}/sdk/`)) {
         const path =
           pathname.slice(`${CODEMODE_SITE_LOCAL_PATH}/sdk`.length) + new URL(request.url).search;

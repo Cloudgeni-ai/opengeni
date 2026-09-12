@@ -1,3 +1,6 @@
+import { InlineChatImage } from "@/components/artifacts/inline-chat-image";
+import { retainedImageId } from "@opengeni/react";
+import { ChatInteractiveBlock } from "@/components/artifacts/chat-interactive-block";
 import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
@@ -2139,6 +2142,27 @@ function SessionChatPane(props: {
     ],
   );
 
+  const renderImage = useCallback(
+    (image: { src: string; alt: string }) => {
+      const artifactId = retainedImageId(image.src);
+      return artifactId ? (
+        <InlineChatImage
+          key={props.session.workspaceId + ":" + artifactId}
+          workspaceId={props.session.workspaceId}
+          artifactId={artifactId}
+          alt={image.alt}
+        />
+      ) : null;
+    },
+    [props.session.workspaceId],
+  );
+  const renderInteractiveBlock = useCallback(
+    (block: { kind: "html" | "site"; content: string }) => (
+      <ChatInteractiveBlock workspaceId={props.session.workspaceId} {...block} />
+    ),
+    [props.session.workspaceId],
+  );
+
   const renderMessageText = useCallback(
     (text: string, item: AgentMessageItem | UserMessageItem) => {
       if (item.kind === "user-message") {
@@ -2150,11 +2174,13 @@ function SessionChatPane(props: {
             text={text}
             streaming={item.streaming}
             onSandboxFile={props.onOpenSandboxFile}
+            renderInteractiveBlock={renderInteractiveBlock}
+            renderImage={renderImage}
           />
         </div>
       );
     },
-    [props.onOpenSandboxFile, props.session.workspaceId],
+    [props.onOpenSandboxFile, props.session.workspaceId, renderInteractiveBlock, renderImage],
   );
 
   return createElement(
