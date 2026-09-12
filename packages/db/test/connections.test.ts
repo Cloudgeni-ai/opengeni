@@ -2193,12 +2193,12 @@ describe("buildConnectionTokenResolver", () => {
       { providerDomain: "graph.microsoft.com", kind: "oauth2" },
       settings,
       {
-        fetchImpl: (async () =>
+        fetchImpl: async () =>
           Response.json({
             access_token: "AC2",
             scope: "User.Read",
             expires_in: 3600,
-          })) as typeof fetch,
+          }),
         dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
       },
     );
