@@ -76,6 +76,13 @@ Garage is the local S3-compatible object storage default for Docker Compose and 
 
 ## Architecture Notes
 
+Host MCP `hostBinding: {selection: "accepted_turn"}` is an explicit configuration
+constraint, never execution permission. Resolve it only from immutable accepted
+turn/task authority, preserve fixed-binding exact matches and all live checks,
+and never fall back to a creator or registry owner. Empty realtime session
+creation captures no authority; first text Send selects normally. See
+`docs/remote-mcp-credentials.md`.
+
 For a map of every app, package, and how the parts fit together, start at [`docs/architecture.md`](docs/architecture.md) and follow its links to the focused topic docs.
 
 Skill descriptors enter the agent instructions during turn-attempt preparation;

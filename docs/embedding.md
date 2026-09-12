@@ -13,6 +13,19 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+### Durable participant-owned host tools
+
+For shared conversations, configure the explicit native
+`connectionRef.hostBinding: {selection: "accepted_turn"}` descriptor with
+`authoritySource: "host"`, `subjectScope: "subject"`, no `connectionId`, and the
+exact provider/scope/resource constraints. Each authenticated `asUser()` caller
+selects its own durable delegation on each accepted Send/Steer; configuration
+alone never grants use. Fixed binding references retain their exact-match rule.
+An empty `startMode: "realtime"` create has no turn and takes no selection;
+the first text `sendMessage` captures its own explicit selection normally.
+See [remote host MCP credentials](remote-mcp-credentials.md) for registration,
+selection, replay, scheduled/child inheritance and physical-use checks.
+
 ### Skill reading in direct runtime hosts
 
 For direct `buildOpenGeniAgent` use, pass `skillActivations` to provide immutable

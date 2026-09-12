@@ -4172,10 +4172,15 @@ export const McpServerConnectionRef = z
     connectionId: z.string().min(1).optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
-    /** Opt-in durable reference. A live execution validator is mandatory. */
+    /** Durable fixed reference, or an explicit configuration-only selector.
+     * accepted_turn resolves only from immutable accepted-work authority. */
     hostBinding: z
-      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
-      .strict()
+      .union([
+        z
+          .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+          .strict(),
+        z.object({ selection: z.literal("accepted_turn") }).strict(),
+      ])
       .optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
@@ -4191,7 +4196,19 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
-    if (reference.authoritySource === "host" && !reference.connectionId) {
+    const acceptedTurn = reference.hostBinding && "selection" in reference.hostBinding;
+    if (
+      acceptedTurn &&
+      (reference.connectionId !== undefined || reference.subjectScope !== "subject")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message:
+          "Accepted-turn selection requires subject scope and forbids a configured connectionId",
+      });
+    }
+    if (reference.authoritySource === "host" && !reference.connectionId && !acceptedTurn) {
       context.addIssue({
         code: "custom",
         message: "host authority requires connectionId",
@@ -4205,7 +4222,7 @@ export const McpServerConnectionRef = z
         message: "Durable binding requires host authority",
       });
     if (!reference.selectedResources) return;
-    if (!reference.connectionId) {
+    if (!reference.connectionId && !acceptedTurn) {
       context.addIssue({
         code: "custom",
         message: "selectedResources requires connectionId",

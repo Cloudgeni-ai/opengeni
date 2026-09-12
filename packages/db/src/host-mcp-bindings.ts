@@ -10,6 +10,7 @@ import {
   IssueHostMcpDelegationRequest,
   HostMcpAcceptedAuthority,
   HostMcpOwnerSubject,
+  hostMcpBindingMatchesSelection,
 } from "@opengeni/contracts/host-mcp-bindings";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
@@ -732,10 +733,14 @@ async function resolveDirectHostMcpUseAuthority(
       (delegation.grant.mode === "session" &&
         (delegation.grant.sessionId !== request.sessionId ||
           delegation.grant.expectedAuthorityEpoch !== a.targetSessionAuthorityEpoch)) ||
+      binding.status !== "active" ||
+      binding.revokedAt !== null ||
       binding.authorizationRevision !== a.ownerMembershipAuthorizationRevision ||
       binding.generation !== a.bindingGeneration ||
       stableJson(binding.definition) !== stableJson(a.definition) ||
-      !hostMcpBindingMatchesRequest(binding, request)
+      !(request.connectionRef.hostBinding && "selection" in request.connectionRef.hostBinding
+        ? request.credentialTarget === "mcp" && hostMcpBindingMatchesSelection(binding, request)
+        : hostMcpBindingMatchesRequest(binding, request))
     )
       return false;
     const live = await getHostMcpLiveAttempt(
@@ -751,4 +756,22 @@ async function resolveDirectHostMcpUseAuthority(
       a
     );
   });
+}
+
+/** Resolve a configuration selector from the exact live accepted turn, never
+ * registry inventory or session creator metadata. The broker still revalidates
+ * the resulting concrete reference around resolution and every physical use. */
+export async function resolveAcceptedHostMcpBinding(
+  db: Database,
+  request: McpCredentialsRequest,
+): Promise<McpCredentialsRequest["connectionRef"] | null> {
+  if (!request.connectionRef.hostBinding || !("selection" in request.connectionRef.hostBinding))
+    return null;
+  const authority = await resolveDirectHostMcpUseAuthority(db, request);
+  return authority
+    ? {
+        ...authority.definition.connectionRef,
+        hostBinding: { bindingId: authority.bindingId, generation: authority.bindingGeneration },
+      }
+    : null;
 }

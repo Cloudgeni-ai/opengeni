@@ -713,7 +713,11 @@ export type McpConnectionAuthoritySelection = {
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
   authoritySource?: "host" | undefined;
-  hostBinding?: { bindingId: string; generation: number } | undefined;
+  /** accepted_turn is configuration-only; each accepted owner must select a grant. */
+  hostBinding?:
+    | { bindingId: string; generation: number }
+    | { selection: "accepted_turn" }
+    | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;

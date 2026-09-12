@@ -5,7 +5,7 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
 import {
-  HostMcpBindingDefinition,
+  hostMcpBindingMatchesSelection,
   HostMcpCreateSelections,
   type HostMcpCreateSelection,
 } from "@opengeni/contracts/host-mcp-bindings";
@@ -3331,22 +3331,17 @@ function prepareSelectedHostTurnAuthority(
       const delegation = await getHostMcpDelegation(tx, owner, selection.delegationId);
       const binding = delegation ? await getHostMcpBinding(tx, owner, delegation.bindingId) : null;
       const configured = configs.get(selection.serverId)!;
-      const { hostBinding, ...connectionRef } = configured.connectionRef!;
-      const definition = HostMcpBindingDefinition.safeParse({
-        serverId: selection.serverId,
-        destinationUrl: configured.url,
-        connectionRef,
-      });
       if (
         !delegation ||
         !binding ||
         delegation.status !== "active" ||
         binding.status !== "active" ||
-        !definition.success ||
         delegation.generation !== selection.generation ||
-        binding.id !== hostBinding!.bindingId ||
-        binding.generation !== hostBinding!.generation ||
-        stableJson(definition.data) !== stableJson(binding.definition)
+        !hostMcpBindingMatchesSelection(binding, {
+          serverId: selection.serverId,
+          destinationUrl: configured.url!,
+          connectionRef: configured.connectionRef!,
+        })
       )
         throw new HTTPException(403, { message: "Host delegation selection changed" });
       try {
@@ -3711,7 +3706,7 @@ async function acceptSessionUserMessageInFileScope(
       ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
     });
     const captureSelectedHostAuthority = prepareSelectedHostTurnAuthority(
-      runtimeSettings,
+      settingsWithSessionMcpServerMetadata(runtimeSettings, existingSession.mcpServers),
       existingSession.tools,
       grant,
       workspaceId,

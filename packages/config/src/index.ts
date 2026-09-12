@@ -8,6 +8,7 @@ import {
   KnowledgeSourceSyncLimits,
   LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
+  McpServerConnectionRef as PublicMcpServerConnectionRef,
   ProductAccessMode,
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
@@ -209,79 +210,8 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
 ].join(" ");
 
-export const McpServerConnectionRefSchema = z
-  .object({
-    // Standalone ids are UUIDs; embedded hosts may use any stable opaque id.
-    connectionId: z.string().min(1).optional(),
-    provider: z.string().min(1).max(128).optional(),
-    providerDomain: z.string().min(1),
-    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    scopes: z.array(z.string().min(1)).optional(),
-    resource: z.string().min(1).optional(),
-    selectedResources: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1).max(512),
-            kind: z.literal("repository"),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(256)
-      .superRefine((resources, context) => {
-        const seen = new Set<string>();
-        for (const [index, resource] of resources.entries()) {
-          const key = `${resource.kind}\0${resource.id}`;
-          if (seen.has(key)) {
-            context.addIssue({
-              code: "custom",
-              message: "selectedResources must not contain duplicates",
-              path: [index],
-            });
-          }
-          seen.add(key);
-        }
-      })
-      .optional(),
-    authoritySource: z.literal("host").optional(),
-    hostBinding: z
-      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
-      .strict()
-      .optional(),
-    subjectScope: z.enum(["workspace", "subject"]).optional(),
-  })
-  .strict()
-  .superRefine((reference, context) => {
-    if (reference.authoritySource === "host" && !reference.connectionId) {
-      context.addIssue({
-        code: "custom",
-        message: "host authority requires connectionId",
-        path: ["connectionId"],
-      });
-    }
-    if (reference.hostBinding && reference.authoritySource !== "host")
-      context.addIssue({
-        code: "custom",
-        path: ["hostBinding"],
-        message: "Durable binding requires host authority",
-      });
-    if (!reference.selectedResources) return;
-    if (!reference.connectionId) {
-      context.addIssue({
-        code: "custom",
-        message: "selectedResources requires connectionId",
-        path: ["connectionId"],
-      });
-    }
-    if (!reference.provider) {
-      context.addIssue({
-        code: "custom",
-        message: "selectedResources requires provider",
-        path: ["provider"],
-      });
-    }
-  });
+// Configuration and public session attachments share one authority contract.
+export const McpServerConnectionRefSchema = PublicMcpServerConnectionRef;
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
 /** Operator-owned protocol binding. Tool annotations cannot establish recovery. */

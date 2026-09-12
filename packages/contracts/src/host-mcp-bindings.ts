@@ -1,6 +1,6 @@
 import { z } from "zod";
 export { HostMcpCreateSelections, type HostMcpCreateSelection } from "./index";
-import { McpServerConnectionRef, SessionTenancyVisibility } from "./index";
+import { McpServerConnectionRef, SessionTenancyVisibility, stableJson } from "./index";
 import {
   ConnectionUseAuthoritySnapshot,
   IssueConnectionUseGrantRequest,
@@ -47,6 +47,46 @@ export const HostMcpBindingDefinition = z
       context.addIssue({ code: "custom", message: "Host binding definition exceeds 64 KiB" });
   });
 export type HostMcpBindingDefinition = z.infer<typeof HostMcpBindingDefinition>;
+
+/** Configuration ceiling, never execution authority. The complete destination
+ * and provider/scope/resource selection stay exact; only the account identifier
+ * is chosen by a captured owner grant in explicit accepted-turn mode. */
+export type HostMcpBindingSelection = {
+  serverId: string;
+  destinationUrl: string;
+  connectionRef: McpServerConnectionRef;
+};
+
+export function hostMcpBindingMatchesSelection(
+  binding: { id: string; generation: number; definition: HostMcpBindingDefinition },
+  selection: HostMcpBindingSelection,
+): boolean {
+  const parsed = McpServerConnectionRef.safeParse(selection.connectionRef);
+  if (!parsed.success || !parsed.data.hostBinding) return false;
+  const { hostBinding, ...configuredRef } = parsed.data;
+  const definition = HostMcpBindingDefinition.safeParse(binding.definition);
+  if (!definition.success) return false;
+  let destinationUrl: string;
+  try {
+    destinationUrl = new URL(selection.destinationUrl).toString();
+  } catch {
+    return false;
+  }
+  if (
+    selection.serverId !== definition.data.serverId ||
+    destinationUrl !== definition.data.destinationUrl
+  )
+    return false;
+  if ("selection" in hostBinding) {
+    const { connectionId: _connectionId, ...selectedRef } = definition.data.connectionRef;
+    return stableJson(configuredRef) === stableJson(selectedRef);
+  }
+  return (
+    binding.id === hostBinding.bindingId &&
+    binding.generation === hostBinding.generation &&
+    stableJson(configuredRef) === stableJson(definition.data.connectionRef)
+  );
+}
 
 export const HostMcpBinding = z
   .object({

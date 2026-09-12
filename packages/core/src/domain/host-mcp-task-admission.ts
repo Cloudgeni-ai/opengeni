@@ -2,11 +2,13 @@ import { HTTPException } from "hono/http-exception";
 import type { Settings } from "@opengeni/config";
 import type { ToolRef, ScheduledTask, AccessGrant } from "@opengeni/contracts";
 import {
-  HostMcpBindingDefinition,
+  hostMcpBindingMatchesSelection,
   HostMcpCreateSelections,
 } from "@opengeni/contracts/host-mcp-bindings";
 import {
   captureHostMcpTaskAuthorities,
+  getHostMcpBinding,
+  getHostMcpDelegation,
   HostMcpDelegationAuthorityError,
   inheritHostMcpTaskAuthoritiesFromAttempt,
   type Database,
@@ -55,23 +57,36 @@ export function prepareHostMcpTaskAdmission(input: {
         message: "Host task selection must match a selected configured server",
       });
     assertHostMcpAuthoritySourceAdmissionEnabled(input.settings, server.connectionRef);
-    const { hostBinding, ...connectionRef } = server.connectionRef;
     return {
       delegationId: selection.delegationId,
       generation: selection.generation,
-      bindingId: hostBinding.bindingId,
-      bindingGeneration: hostBinding.generation,
-      definition: HostMcpBindingDefinition.parse({
+      configured: structuredClone({
         serverId: selection.serverId,
         destinationUrl: server.url,
-        connectionRef,
+        connectionRef: server.connectionRef,
       }),
     };
   });
   return async (tx, task) => {
     const owner = await reauthorize(tx);
     try {
-      if (prepared.length) await captureHostMcpTaskAuthorities(tx, owner, task, prepared);
+      const selected = [];
+      for (const selection of prepared) {
+        const delegation = await getHostMcpDelegation(tx, owner, selection.delegationId);
+        const binding = delegation
+          ? await getHostMcpBinding(tx, owner, delegation.bindingId)
+          : null;
+        if (!binding || !hostMcpBindingMatchesSelection(binding, selection.configured))
+          throw new HostMcpDelegationAuthorityError("Host task selection changed");
+        selected.push({
+          delegationId: selection.delegationId,
+          generation: selection.generation,
+          bindingId: binding.id,
+          bindingGeneration: binding.generation,
+          definition: binding.definition,
+        });
+      }
+      if (selected.length) await captureHostMcpTaskAuthorities(tx, owner, task, selected);
     } catch (error) {
       if (error instanceof HostMcpDelegationAuthorityError)
         throw new HTTPException(403, { message: error.message });
@@ -94,17 +109,12 @@ export function prepareInheritedHostMcpTaskAdmission(
     )
       return [];
     assertHostMcpAuthoritySourceAdmissionEnabled(settings, server.connectionRef);
-    const { hostBinding, ...connectionRef } = server.connectionRef;
     return [
-      {
-        bindingId: hostBinding.bindingId,
-        bindingGeneration: hostBinding.generation,
-        definition: HostMcpBindingDefinition.parse({
-          serverId: server.id,
-          destinationUrl: server.url,
-          connectionRef,
-        }),
-      },
+      structuredClone({
+        serverId: server.id,
+        destinationUrl: server.url,
+        connectionRef: server.connectionRef,
+      }),
     ];
   });
   return (tx, task) => inheritHostMcpTaskAuthoritiesFromAttempt(tx, task, source, configured);

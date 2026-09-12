@@ -48,6 +48,7 @@ import type {
   AcceptedConnectionUseResolution,
 } from "./connection-authority";
 import { connectionScopeKey } from "./connection-scopes";
+import { hostMcpBindingMatchesSelection } from "@opengeni/contracts/host-mcp-bindings";
 
 const MAX_CREDENTIAL_PLACEMENTS = 32;
 const MAX_CREDENTIAL_NAME_BYTES = 256;
@@ -193,6 +194,10 @@ export type HostMcpCredentialResolverContext = {
   /** Backend-owned live validator. Never populate from caller JSON or a host
    * credential response. Omission denies every explicit durable reference. */
   authorizeDurableBinding?: (request: McpCredentialsRequest) => Promise<boolean>;
+  /** Backend-only accepted-work lookup, not a host response or registry fallback. */
+  resolveAcceptedBinding?: (
+    request: McpCredentialsRequest,
+  ) => Promise<McpServerConnectionRef | null>;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -325,8 +330,8 @@ export function buildHostConnectionTokenResolver(
       ...(toolName ? { toolName } : {}),
       ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
     };
-    const snapshot = structuredClone(request);
-    const requestedRef = structuredClone(input.connectionRef);
+    // Freeze configuration before any asynchronous authority lookup.
+    let requestedRef = structuredClone(request.connectionRef);
     const credentialTarget = input.credentialTarget ?? "mcp";
     const durableDenial = (
       reason: McpCredentialAuthNeededReason,
@@ -337,6 +342,32 @@ export function buildHostConnectionTokenResolver(
       authoritySource: "host",
       ...(requestedRef.connectionId ? { connectionId: requestedRef.connectionId } : {}),
     });
+    if (requestedRef.hostBinding && "selection" in requestedRef.hostBinding) {
+      if (!context.resolveAcceptedBinding || !context.authorizeDurableBinding)
+        return durableDenial("unsupported_auth");
+      try {
+        const concrete = await context.resolveAcceptedBinding(structuredClone(request));
+        if (!concrete?.hostBinding || "selection" in concrete.hostBinding)
+          return durableDenial("personal_authority_unavailable");
+        const { hostBinding, ...connectionRef } = concrete;
+        if (
+          !hostMcpBindingMatchesSelection(
+            {
+              id: hostBinding.bindingId,
+              generation: hostBinding.generation,
+              definition: { serverId: request.serverId, destinationUrl, connectionRef },
+            },
+            request,
+          )
+        )
+          return durableDenial("personal_authority_unavailable");
+        request.connectionRef = structuredClone(concrete);
+        requestedRef = structuredClone(concrete);
+      } catch {
+        return durableDenial("refresh_failed");
+      }
+    }
+    const snapshot = structuredClone(request);
     const authorized = async () => {
       try {
         if (
