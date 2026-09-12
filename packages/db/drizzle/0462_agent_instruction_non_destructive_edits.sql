@@ -77,7 +77,7 @@ BEGIN
   IF operation='save' THEN
     -- Calls from pre-0462 application instances carry complete replacement
     -- content and omit editMode. Preserve that rolling-deployment contract.
-    edit_mode:=coalesce(p_request->>'editMode','replace');
+    edit_mode:=CASE WHEN p_request ? 'editMode' THEN p_request->>'editMode' ELSE 'replace' END;
     IF edit_mode NOT IN ('append','edit','replace') THEN
       RAISE EXCEPTION 'Invalid instruction edit mode' USING ERRCODE='22023';
     END IF;
