@@ -46,7 +46,7 @@ export default defineConfig({
               // Account setup is interaction-driven. Do not let shared icons
               // co-locate these forms/controllers with the eager session graph.
               name: "connect-setup",
-              test: /(?:packages[\\/]react[\\/]src[\\/]connect\.css$|packages[\\/]react[\\/]src[\\/](?:connect(?:-accounts|-chooser|-panel|-setup)?|device-authorization|identity-link-accounts|identity-link-consent)\.tsx?$|packages[\\/]connect[\\/]src[\\/](?:index|device|authorization|poll|browser-navigation)\.ts$|apps[\\/]web[\\/]src[\\/](?:components[\\/]capabilities[\\/]native-connect-setup|routes[\\/]identity-link)\.tsx$)/,
+              test: /(?:packages[\\/]react[\\/]styles[\\/]connect\.css$|packages[\\/]react[\\/]src[\\/](?:connect(?:-accounts|-chooser|-panel|-setup)?|device-authorization|identity-link-accounts|identity-link-consent)\.tsx?$|packages[\\/]connect[\\/]src[\\/](?:index|device|authorization|poll|browser-navigation)\.ts$|apps[\\/]web[\\/]src[\\/](?:components[\\/]capabilities[\\/]native-connect-setup|routes[\\/]identity-link)\.tsx$)/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
