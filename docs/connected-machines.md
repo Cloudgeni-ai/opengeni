@@ -108,6 +108,10 @@ to another window or screen. `macos_autorelease` exercises the actual helper wit
 Objective-C missing-pool diagnostics enabled; run this ignored test explicitly
 in an unlocked local GUI session.
 
+On macOS, runner restart waits for the previous launchd label to disappear before
+accepting a replacement. A matching program path on a retiring job is not proof
+that the replacement started.
+
 The Chrome Native Messaging bridge accepts two exact extension origins: the
 development manifest key (`imdmcebcclhibdfolbokjbiibpcnpbel`) and the Chrome Web
 Store item (`phpmmcbeelfkcinjfbbggegjdcdmnnch`). Both the installed native-host
