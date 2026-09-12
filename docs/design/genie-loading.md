@@ -44,3 +44,17 @@ For an entirely different visual, supply `genieLoading.render`:
 The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optionally
 keep the diagnostics affordance. The SDK still owns loading visibility and exit
 transitions. Returning `null` hides the visual.
+
+## Rolling live Steps experiment
+
+`turnSummary={{ rolling: true }}` starts live activity groups collapsed and shows
+the newest activity in a fixed-height rolling header. Opening it restores
+the existing Steps view and preserves the reader's expansion choice. Completed
+turns keep the normal summary. Tool labels reuse `ActivityDisclosure` through its
+compact presentation context; reasoning keeps a stable Thinking label with a live text preview. A single activity
+stays ungrouped until a second arrives. The header shows earlier-step and running
+counts. Step changes roll together over 400ms; a focused light beam sweeps across
+running text every 3.6 seconds. Reduced motion disables both animations.
+
+The web app enables the experiment. `/rolling-steps.html` in the React demo loops
+through sample commands and supports light/dark comparison without model calls.
