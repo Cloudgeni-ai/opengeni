@@ -1,6 +1,8 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
 export type BundledSkillId =
+  | "builtin:opengeni-visualize"
+  | "builtin:document-parsing"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
   | "builtin:opengeni-documents"
