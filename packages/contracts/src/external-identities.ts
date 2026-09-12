@@ -44,9 +44,53 @@ export const AddExternalWorkspaceMemberRequest = z
   .object({
     identity: ExternalIdentityReference,
     permissions: z.array(Permission).min(1).max(Permission.options.length),
+    /** Opt-in durable operation identity; unkeyed legacy requests are not cancellable. */
+    operationId: z.string().uuid().optional(),
   })
   .strict();
 export type AddExternalWorkspaceMemberRequest = z.infer<typeof AddExternalWorkspaceMemberRequest>;
+
+/** Content-free service lookup, including identities which can no longer act. */
+export const ExternalIdentityLookup = z.discriminatedUnion("found", [
+  z.object({ found: z.literal(false) }).strict(),
+  z
+    .object({
+      found: z.literal(true),
+      subjectId: externalSubject,
+      organizationMembershipId: z.string().uuid(),
+      identityStatus: z.enum(["active", "disabled", "revoked"]),
+      identityAuthorizationRevision: z.number().int().positive().safe(),
+      membershipStatus: z.enum(["provisioning", "active", "suspended", "revoked"]),
+      membershipAuthorizationRevision: z.number().int().positive().safe(),
+    })
+    .strict(),
+]);
+export type ExternalIdentityLookup = z.infer<typeof ExternalIdentityLookup>;
+
+/** Terminal withdrawal of this external member's workspace access, also fencing
+ * an exact earlier onboarding operation whether or not it has reached the API. */
+export const CancelExternalWorkspaceMemberGrantRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    cancelGrantOperationId: z.string().uuid(),
+  })
+  .strict()
+  .refine((value) => value.operationId !== value.cancelGrantOperationId, {
+    message: "Revocation and grant must use different operation identities",
+  });
+export type CancelExternalWorkspaceMemberGrantRequest = z.infer<
+  typeof CancelExternalWorkspaceMemberGrantRequest
+>;
+export const CancelExternalWorkspaceMemberGrantResponse = z
+  .object({
+    removed: z.boolean(),
+    replay: z.boolean(),
+    fencedGrantOperationId: z.string().uuid(),
+  })
+  .strict();
+export type CancelExternalWorkspaceMemberGrantResponse = z.infer<
+  typeof CancelExternalWorkspaceMemberGrantResponse
+>;
 
 /** Uses the organization membership ID returned by lazy identity admission.
  * Reactivation restores admission only, not revoked work or workspace grants. */

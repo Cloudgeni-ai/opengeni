@@ -5,6 +5,7 @@ import {
   ExternalIdentityReference,
 } from "@opengeni/contracts/external-identities";
 import { rawRows, withAccountRls, type Database } from "./database";
+export * from "./external-membership-operations";
 
 /** Pass an open transaction to retain the key lock through the protected write. */
 export async function lockActiveExternalOrganizationKey(

@@ -1,3 +1,5 @@
+import { grantWorkspaceAccess } from "./workspace-membership-access";
+export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 export { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
 import {
@@ -225,11 +227,11 @@ import type {
   ReasoningEffort,
   UsageEvent,
   Workspace,
+  WorkspaceMember,
   WorkspaceControlEvent,
   VariableSet,
   VariableSetSecret,
   VariableSetVariableMetadata,
-  WorkspaceMember,
   WorkspaceMemoryPromptMode,
   WorkspaceRegisteredPack,
   Channel,
@@ -2681,38 +2683,6 @@ export async function createOrganizationSharedWorkspace(
   });
 }
 
-export async function grantWorkspaceAccess(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    subjectLabel?: string;
-    role?: string;
-    permissions: Permission[];
-  },
-): Promise<void> {
-  await db
-    .insert(schema.workspaceMemberships)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      subjectLabel: input.subjectLabel ?? null,
-      role: input.role ?? "member",
-      permissions: input.permissions,
-    })
-    .onConflictDoUpdate({
-      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
-      set: {
-        subjectLabel: input.subjectLabel ?? null,
-        role: input.role ?? "member",
-        permissions: input.permissions,
-        updatedAt: new Date(),
-      },
-    });
-}
-
 export class WorkspaceMemberManagementError extends Error {
   constructor(
     readonly code:
@@ -3126,20 +3096,6 @@ export async function getWorkspaceGrant(
         ...(provenance?.principalKind ? { principalKind: provenance.principalKind } : {}),
       }
     : null;
-}
-
-export async function listWorkspaceMembers(
-  db: Database,
-  workspaceId: string,
-): Promise<WorkspaceMember[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspaceMemberships)
-      .where(eq(schema.workspaceMemberships.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceMemberships.createdAt));
-    return rows.map(mapWorkspaceMember);
-  });
 }
 
 // removeWorkspaceMember moved to ./organization-membership-lifecycle: removal is
@@ -78118,16 +78074,6 @@ function mapWorkspace(
     defaultRigId: row.defaultRigId ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
-function mapWorkspaceMember(row: typeof schema.workspaceMemberships.$inferSelect): WorkspaceMember {
-  return {
-    subjectId: row.subjectId,
-    subjectLabel: row.subjectLabel,
-    role: row.role,
-    permissions: normalizeWorkspaceMembershipPermissions(row.permissions),
-    createdAt: row.createdAt.toISOString(),
   };
 }
 

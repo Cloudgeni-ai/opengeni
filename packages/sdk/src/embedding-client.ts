@@ -212,6 +212,35 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
+  /** Non-provisioning, content-free service lookup, including inactive identities. */
+  async lookupExternalIdentity(
+    organizationId: string,
+    identity: import("@opengeni/contracts/external-identities").ExternalIdentityReference,
+  ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentityLookup> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/external-identities/lookup`,
+      identity,
+    );
+  }
+
+  /** Withdraw an external member's shared-workspace access and fence an exact
+   * pending keyed grant. Reuse the exact cancellation body after response loss. */
+  async cancelExternalWorkspaceMemberGrant(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: import("@opengeni/contracts/external-identities").CancelExternalWorkspaceMemberGrantRequest,
+  ): Promise<
+    import("@opengeni/contracts/external-identities").CancelExternalWorkspaceMemberGrantResponse
+  > {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(membershipId)}/revoke`,
+      request,
+    );
+  }
+
   async listConnectProviders(
     workspaceId: string,
   ): Promise<import("@opengeni/contracts/connect").ConnectProvider[]> {
@@ -364,6 +393,7 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     request: {
       identity: { externalId: string; source?: string };
       permissions: AddWorkspaceMemberRequest["permissions"];
+      operationId?: string;
     },
   ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentity> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/external-members`, request);
