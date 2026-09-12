@@ -602,6 +602,46 @@ describe("ComputerSession frame stream", () => {
     await hook.unmount();
   });
 
+  test("exposes an error after sockets exhaust the bounded reconnect attempts", async () => {
+    const sockets: FakeComputerSocket[] = [];
+    const client = fakeClient({
+      attachComputerSession: async () => ({
+        ...relayAttachment("window-1"),
+        expiresAt: new Date(Date.now() + 2_000).toISOString(),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "window-1",
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          },
+        }),
+      undefined,
+    );
+    try {
+      await flush(10);
+      for (const [index, delay] of [300, 550, 10].entries()) {
+        await dispatch(sockets[index]!, "open");
+        await dispatch(sockets[index]!, "close");
+        await flush(delay);
+      }
+      expect(sockets).toHaveLength(3);
+      expect(hook.result.current.state).toBe("error");
+      expect(hook.result.current.error?.message).toBe("Desktop view lost connection.");
+      await flush(550);
+      expect(sockets).toHaveLength(3);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   test("uses the distinct Computer relay stream kind", async () => {
     let socket: FakeComputerSocket | null = null;
     const client = fakeClient({
@@ -1127,7 +1167,10 @@ describe("ComputerViewer", () => {
         observeComputerTarget: async () => observation(currentTarget),
         attachComputerSession: async () => {
           attachmentCalls += 1;
-          return relayAttachment(currentTarget.id);
+          return {
+            ...relayAttachment(currentTarget.id),
+            expiresAt: new Date(Date.now() + 2_000).toISOString(),
+          };
         },
       });
       const rendered = await renderComponent(
@@ -1149,7 +1192,11 @@ describe("ComputerViewer", () => {
           await dispatch(socket, "message", {
             data: relayMessage(
               2,
-              StreamOpenAck.encode({ accepted: true, error: undefined, resumeFromSeq: "0" }).finish(),
+              StreamOpenAck.encode({
+                accepted: true,
+                error: undefined,
+                resumeFromSeq: "0",
+              }).finish(),
             ),
           });
           await dispatch(socket, "message", {
@@ -1187,11 +1234,15 @@ describe("ComputerViewer", () => {
         expect(rendered.container.textContent).toContain("Live view disconnected");
         expect(canvas.classList.contains("invisible")).toBe(true);
         expect(keyboard.disabled).toBe(true);
+        // The old grant renewal must not revive a terminal producer behind
+        // the error panel without either recovery action below.
+        await flush(1_100);
         expect(attachmentCalls).toBe(1);
 
         const retry = [...rendered.container.querySelectorAll("button")].find(
           (button) =>
-            button.textContent?.trim() === recovery || button.getAttribute("aria-label") === recovery,
+            button.textContent?.trim() === recovery ||
+            button.getAttribute("aria-label") === recovery,
         );
         expect(retry).toBeDefined();
         await actRun(() => retry!.click());

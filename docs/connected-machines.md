@@ -114,8 +114,9 @@ that the replacement started.
 
 If a desktop producer ends after delivering frames, the viewer exposes its
 connection error and Reconnect action instead of leaving the last image over
-them. Refresh desktops also retries a failed stream; terminal placement changes
-still require the existing replacement-session recovery path.
+them. Exhausted socket retries become an explicit connection error. Refresh
+desktops also retries a failed stream; terminal placement changes still require
+the existing replacement-session recovery path.
 
 The Chrome Native Messaging bridge accepts two exact extension origins: the
 development manifest key (`imdmcebcclhibdfolbokjbiibpcnpbel`) and the Chrome Web
