@@ -646,6 +646,23 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type RotateSessionMcpCredentialsRequest = {
+  operationKey: string;
+  updates: Array<{
+    id: string;
+    expectedCredentialVersion: number;
+    expectedServerUrl: string;
+    headers: Record<string, string>;
+  }>;
+};
+
+export type RotateSessionMcpCredentialsReceipt = {
+  operationKey: string;
+  sessionId: string;
+  servers: Array<{ id: string; credentialVersion: number }>;
+  appliedAt: string;
+};
+
 export type SessionMcpApprovalPolicy = boolean | string[];
 
 export type SessionMcpServerMetadata = {

@@ -955,6 +955,8 @@ export type {
   SessionSummary,
   LineageNode,
   SessionMcpCredentialUpdateInput,
+  RotateSessionMcpCredentialsRequest,
+  RotateSessionMcpCredentialsReceipt,
   SessionMcpApprovalPolicy,
   SessionMcpServerInput,
   SessionMcpServerMetadata,

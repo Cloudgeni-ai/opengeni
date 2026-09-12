@@ -5748,6 +5748,47 @@ export const SessionMcpCredentialUpdateInput = z.object({
 });
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
 
+/** Standalone credential maintenance; never admits or retries model work. */
+export const RotateSessionMcpCredentialsRequest = z
+  .object({
+    operationKey: z.string().uuid(),
+    updates: z
+      .array(
+        z
+          .object({
+            id: SessionMcpServerId,
+            expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
+            expectedServerUrl: httpsUrl,
+            headers: z.record(z.string(), z.string()),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(64),
+  })
+  .strict();
+export type RotateSessionMcpCredentialsRequest = z.infer<typeof RotateSessionMcpCredentialsRequest>;
+
+export const RotateSessionMcpCredentialsReceipt = z
+  .object({
+    operationKey: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    servers: z
+      .array(
+        z
+          .object({
+            id: SessionMcpServerId,
+            credentialVersion: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(64),
+    appliedAt: z.string().datetime(),
+  })
+  .strict();
+export type RotateSessionMcpCredentialsReceipt = z.infer<typeof RotateSessionMcpCredentialsReceipt>;
+
 export const SessionMcpServerMetadata = z
   .object({
     id: SessionMcpServerId,
@@ -6778,6 +6819,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.channel.write",
   "session.variable_sets.write",
   "session.mcp.approval_policy.write",
+  "session.mcp.credentials.rotate",
   "session.tool_policy.write",
   "session.goal.read",
   "session.goal.write",
