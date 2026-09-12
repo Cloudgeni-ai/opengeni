@@ -72,8 +72,6 @@ describe("Company Brain first-party MCP policy", () => {
       expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
         "knowledge_browse",
         "knowledge_get",
-        "knowledge_retain_file",
-        "knowledge_retain_message",
         "knowledge_save",
         "knowledge_search",
       ]);
@@ -102,8 +100,6 @@ describe("Company Brain first-party MCP policy", () => {
       expect(names).toEqual([
         "knowledge_browse",
         "knowledge_get",
-        "knowledge_retain_file",
-        "knowledge_retain_message",
         "knowledge_save",
         "knowledge_search",
       ]);

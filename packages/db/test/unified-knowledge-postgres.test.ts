@@ -321,6 +321,97 @@ describe("unified Knowledge storage", () => {
     });
   }
 
+  test("a child's first turn can narrow workspace learning to its personal owner", async () => {
+    const f = await fixture();
+    const parent = await attempt(f, "automatic");
+    const parentPolicy = await freezeAgentLearningPolicy(client.db, parent.agent);
+    expect(parentPolicy.ownerKey).toBe(`workspace:${f.workspaceId}`);
+
+    const child = await withSessionRlsActorContext({ subjectId: f.subjectId }, () =>
+      createSession(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        parentSessionId: parent.session.id,
+        createdByActor: {
+          type: "agent_attempt",
+          sessionId: parent.session.id,
+          turnId: parent.agent.actor.turnId,
+          attemptId: parent.agent.actor.attemptId,
+          executionGeneration: 1,
+        },
+        initialMessage: "Research this privately",
+        memoryScope: "user",
+        scopeSubjectId: f.subjectId,
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: f.subjectId },
+        createdByContext: {},
+      }),
+    );
+    const turnId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    await shared!.admin.begin(async (tx) => {
+      await tx`SELECT set_config('opengeni.session_inference_claim','1',true)`;
+      await tx`INSERT INTO session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
+        status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
+        initiator_kind,initiator_subject_id,initiator_context,initiating_human_subject_id)
+        VALUES(${turnId},${f.accountId},${f.workspaceId},${child.id},${crypto.randomUUID()},${`knowledge-child-${turnId}`},
+          'running','user',1,'Research this privately','test-model','medium','none',1,'subject',${f.subjectId},'{}',${f.subjectId})`;
+      await tx`UPDATE sessions SET active_turn_id=${turnId},status='running' WHERE id=${child.id}`;
+      await tx`UPDATE session_turns SET active_attempt_id=${attemptId} WHERE id=${turnId}`;
+      await tx`INSERT INTO session_turn_attempts(id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
+        temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,verified_control_revision,mcp_approval_policies)
+        VALUES(${attemptId},${f.accountId},${f.workspaceId},${child.id},${turnId},1,'running',${`knowledge-child-${turnId}`},
+          ${`run-${attemptId}`},${`activity-${attemptId}`},0,'{}')`;
+    });
+    const childPolicy = await freezeAgentLearningPolicy(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      actor: {
+        kind: "agent",
+        sessionId: child.id,
+        turnId,
+        attemptId,
+        executionGeneration: 1,
+      },
+    });
+    expect(childPolicy).toMatchObject({
+      ownerKey: `personal:${f.subjectId}`,
+      defaultScope: "personal",
+      subjectId: f.subjectId,
+      producerTurnId: parent.agent.actor.turnId,
+      effective: parentPolicy.effective,
+    });
+  });
+
+  test("instruction publication keeps the workspace identity lock compatible with document preparation", async () => {
+    const [row] = await shared!.admin<{ definition: string }[]>`
+      SELECT pg_get_functiondef(oid) AS definition
+      FROM pg_proc
+      WHERE proname='agent_instruction_apply'`;
+    const definition = row?.definition ?? "";
+    const workspaceLock = definition.indexOf(
+      "PERFORM 1 FROM workspaces WHERE id=p_workspace AND account_id=p_account FOR KEY SHARE",
+    );
+    const publicationLock = definition.indexOf(
+      "PERFORM pg_advisory_xact_lock(hashtextextended('knowledge-publication:'||p_account,0))",
+    );
+    const headLock = definition.indexOf(
+      "SELECT * INTO head FROM workspace_instruction_policy_heads",
+      publicationLock,
+    );
+    expect(workspaceLock).toBeGreaterThan(-1);
+    expect(publicationLock).toBeGreaterThan(workspaceLock);
+    expect(headLock).toBeGreaterThan(publicationLock);
+    expect(definition).not.toMatch(
+      /FROM workspaces WHERE id=p_workspace AND account_id=p_account FOR UPDATE/iu,
+    );
+  });
+
   test("review reliability: an edited source can be explicitly reconciled before approving its finding", async () => {
     const f = await fixture();
     const { agent } = await attempt(f, "review_first");

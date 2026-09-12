@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { currentAgentLearningToolSelection, DEFAULT_FIRST_PARTY_MCP_TOOLS } from "../src";
 
 describe("current Agent learning tool selection", () => {
-  test("replaces the full legacy writer and retrieval bundle", () => {
+  test("maps legacy text retrieval and writing without widening to source retention", () => {
     expect(
       currentAgentLearningToolSelection([
         "memory_search",
@@ -15,8 +15,6 @@ describe("current Agent learning tool selection", () => {
       "knowledge_get",
       "knowledge_browse",
       "knowledge_save",
-      "knowledge_retain_file",
-      "knowledge_retain_message",
       "instruction_policy_save",
       "instruction_policy_get",
     ]);

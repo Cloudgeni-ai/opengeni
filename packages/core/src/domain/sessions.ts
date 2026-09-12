@@ -2472,7 +2472,7 @@ async function createSessionForRequestInFileScope(
     db,
     grant.accountId,
     workspaceId,
-    personalResourceSubjectId,
+    personalResourceSubjectId ?? grant.subjectId,
     resources,
     (authorization || grant.principalKind === "agent_attempt") &&
       (effectiveVisibility === "user_private" ||

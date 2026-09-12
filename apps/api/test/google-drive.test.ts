@@ -600,7 +600,7 @@ describe("Google Drive local source preview", () => {
     }
   });
 
-  test("browses metadata server-side and materializes schedules without documents", async () => {
+  test("browses metadata and materializes source schedules on self-hosted deployments", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const google = googleFixture();
@@ -639,7 +639,10 @@ describe("Google Drive local source preview", () => {
       googleDriveSyncMaxElapsedSeconds: 240,
       googleDriveSyncMaxFailureDetails: 17,
     };
-    const save = await app(google.fetch, releaseReadinessLimits).request(
+    const save = await app(google.fetch, {
+      ...releaseReadinessLimits,
+      sandboxBackend: "selfhosted",
+    }).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
       {
         method: "POST",
@@ -767,6 +770,77 @@ describe("Google Drive local source preview", () => {
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("renames and resumes a source task without reauthorizing its frozen connection", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+      "scheduled_tasks:manage",
+      "workspace:admin",
+    ]);
+    const sourceResponse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
+      {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+          ],
+          destination: { authorityKind: "workspace", collectionId: null },
+          syncCadence: "hourly",
+          syncEnabled: true,
+          readPolicy: "allow",
+        }),
+      },
+    );
+    expect(sourceResponse.status).toBe(200);
+    const [task] = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    if (!task) throw new Error("knowledge source schedule was not created");
+
+    await shared!.admin`
+      update connections
+      set status = 'needs_reauth', version = version + 1, updated_at = now()
+      where id = ${connected.connection.id}
+    `;
+    const base = `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${task.id}`;
+    const renamed = await app(google.fetch).request(base, {
+      method: "PATCH",
+      headers: {
+        authorization,
+        "content-type": "application/json",
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+      body: JSON.stringify({ name: "Renamed source" }),
+    });
+    expect(renamed.status, await renamed.clone().text()).toBe(200);
+    expect(await renamed.json()).toMatchObject({ name: "Renamed source" });
+
+    const paused = await app(google.fetch).request(`${base}/pause`, {
+      method: "POST",
+      headers: { authorization, [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
+    });
+    expect(paused.status).toBe(200);
+    const resumed = await app(google.fetch).request(`${base}/resume`, {
+      method: "POST",
+      headers: { authorization, [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION },
+    });
+    expect(resumed.status, await resumed.clone().text()).toBe(200);
+    expect(await resumed.json()).toMatchObject({ status: "active", name: "Renamed source" });
   });
 
   test("keeps Workspace Events default-off and emits deterministic wake-only provider events", async () => {

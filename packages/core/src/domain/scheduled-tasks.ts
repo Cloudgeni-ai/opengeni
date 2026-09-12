@@ -256,7 +256,7 @@ export async function createValidatedScheduledTask(input: {
         message: `This task saves Knowledge in the ${destination} scope. Set its Agent learning override for that scope.`,
       });
   }
-  {
+  if (!knowledgeAction) {
     await validateScheduledTaskMachineTarget({
       settings: input.settings,
       db: input.db,
@@ -835,6 +835,8 @@ export async function validatedScheduledTaskUpdate(input: {
       });
   }
   const update: UpdateScheduledTaskInput = {};
+  const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
+  const existingKnowledgeSource = scheduledTaskKnowledgeSource(input.existing);
   // Editing an ordinary source task's prompt/settings must not orphan its
   // connector binding. Deleting the task is the explicit source-disable path.
   if (
@@ -858,15 +860,22 @@ export async function validatedScheduledTaskUpdate(input: {
   }
   const knowledgeSource =
     input.payload.agentConfig?.knowledgeSource ?? scheduledTaskKnowledgeSource(input.existing);
-  if (knowledgeSource) {
+  if (
+    knowledgeSource &&
+    requestedKnowledgeSource &&
+    !isDeepStrictEqual(requestedKnowledgeSource, existingKnowledgeSource)
+  ) {
     await validateKnowledgeSourceSyncAction({
       db: input.db,
       grant: input.grant,
       action: knowledgeSource,
     });
-    if ((input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent")
-      throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   }
+  if (
+    knowledgeSource &&
+    (input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent"
+  )
+    throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   if (
     knowledgeSource?.destination.kind === "personal" &&
     (input.payload.runMode ?? input.existing.runMode) !== "new_session_per_run"
@@ -1180,13 +1189,15 @@ export async function validatedScheduledTaskUpdate(input: {
     rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
     agentConfig: update.agentConfig ?? input.existing.agentConfig,
   });
-  await validateScheduledTaskMachineTarget({
-    settings: input.settings,
-    db: input.db,
-    grant: input.grant,
-    runMode: nextRunMode,
-    agentConfig: update.agentConfig ?? input.existing.agentConfig,
-  });
+  if (!knowledgeSource) {
+    await validateScheduledTaskMachineTarget({
+      settings: input.settings,
+      db: input.db,
+      grant: input.grant,
+      runMode: nextRunMode,
+      agentConfig: update.agentConfig ?? input.existing.agentConfig,
+    });
+  }
   if (
     input.payload.targetSessionId !== undefined ||
     input.existing.runMode === "existing_session" ||

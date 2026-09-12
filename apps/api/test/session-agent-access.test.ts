@@ -11,6 +11,9 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createSession as createDbSession,
+  getSession,
+  initializeSessionStartAtomically,
   resolveSessionMemoryAgentScope,
   type DbClient,
 } from "@opengeni/db";
@@ -102,7 +105,9 @@ function dependencies(): ApiRouteDeps {
       deleteScheduledTaskSchedule: noop,
       triggerScheduledTask: noop,
     } as unknown as SessionWorkflowClient,
-    objectStorage: null,
+    // Session admission only needs the dependency to be configured before it
+    // validates an existing file reference; these tests never read file bytes.
+    objectStorage: {} as never,
     githubStateSecret: "session-agent-access-state",
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({ embedder: undefined }) as never,
@@ -558,6 +563,51 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
       memoryScope: "workspace",
     });
     expect(widenedMemory.isError).toBe(true);
+  });
+
+  test("a service-initiated attempt can attach a workspace file to its child", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const parent = await createDbSession(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      initialMessage: "Run scheduled service work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "service", subjectId: "scheduler:test" },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: parent.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attempt = await liveAttempt(f, parent.id);
+    const fileId = crypto.randomUUID();
+    await shared!.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, bucket, object_key
+      ) values (
+        ${fileId}, ${f.accountId}, ${f.workspaceId}, 'ready', 'service-note.txt',
+        'service-note.txt', 'text/plain', 4, 'test', ${fileId}
+      )
+    `;
+    const server = await agentServer(f, attempt);
+    const created = (await expectAllowed(
+      callTool(server, "session_create", {
+        initialMessage: "Read the attached service note",
+        resources: [{ kind: "file", fileId }],
+      }),
+    )) as { resource: { id: string } };
+    const child = await getSession(client.db, f.workspaceId, created.resource.id);
+    expect(child?.resources).toEqual([expect.objectContaining({ kind: "file", fileId })]);
   });
 
   test("Knowledge follows personal/shared scope while Off blocks only authoring", async () => {

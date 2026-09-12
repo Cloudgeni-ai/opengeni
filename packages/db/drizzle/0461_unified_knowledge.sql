@@ -847,11 +847,10 @@ BEGIN
   END IF;
   IF producer IS NOT NULL THEN
     inherited:=knowledge_learning_for_turn(p_account,p_workspace,producer);
-    IF inherited->>'ownerKey' IS DISTINCT FROM current_policy->>'ownerKey' THEN
-      RAISE EXCEPTION 'Learning producer ownership changed' USING ERRCODE='42501';
-    END IF;
-    -- An explicit child/chat override wins. Otherwise keep the producer's
-    -- effective policy, including its scheduled-task override and review batch.
+    -- A child may deliberately narrow workspace learning to personal or Off.
+    -- Keep its independently resolved owner and destination while inheriting
+    -- only accepted policy modes and scheduled-run provenance. An explicit
+    -- child/chat override still wins.
     result:=current_policy||jsonb_build_object('effective',(inherited->'effective')||(current_policy->'overrides'),
       'producerTurnId',producer,'scheduledTaskRunId',inherited->'scheduledTaskRunId');
   ELSE
@@ -1919,12 +1918,11 @@ BEGIN
     OR p_workspace IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id',true),'')::uuid THEN
     RAISE EXCEPTION 'Instruction changes require exact tenant scope' USING ERRCODE='42501';
   END IF;
-  -- Native instruction activation serializes on this workspace row.
-  IF operation IN ('get','list') THEN
-    PERFORM 1 FROM workspaces WHERE id=p_workspace AND account_id=p_account FOR KEY SHARE;
-  ELSE
-    PERFORM 1 FROM workspaces WHERE id=p_workspace AND account_id=p_account FOR UPDATE;
-  END IF;
+  -- Keep the workspace identity stable without excluding unrelated FK readers.
+  -- Publication serializes on the account advisory lock below before the
+  -- instruction head, matching other Knowledge writers without an advisory /
+  -- workspace-row lock inversion.
+  PERFORM 1 FROM workspaces WHERE id=p_workspace AND account_id=p_account FOR KEY SHARE;
   actor:=knowledge_resolve_actor(p_account,p_workspace,p_actor);
   IF operation='get' THEN
     SELECT * INTO head FROM workspace_instruction_policy_heads h WHERE h.account_id=p_account AND h.workspace_id=p_workspace
@@ -2006,6 +2004,9 @@ BEGIN
     context:=jsonb_build_object('actor',p_actor,'policy',actor->'policy','evidence',p_request->'evidence','reason',p_request->'reason',
       'expectedCurrentRevisionId',expected_revision,'expectedActivationVersion',expected_version,'reviewBatchId',batch);
   END IF;
+  IF operation<>'reject' THEN
+    PERFORM pg_advisory_xact_lock(hashtextextended('knowledge-publication:'||p_account,0));
+  END IF;
   SELECT * INTO head FROM workspace_instruction_policy_heads h WHERE h.account_id=p_account AND h.workspace_id=p_workspace
     AND h.kind=target->>'kind' AND h.scope=target->>'scope' AND h.role_key IS NOT DISTINCT FROM target->>'roleKey' FOR UPDATE;
   version:=coalesce(head.activation_version,(SELECT max(d.activation_version) FROM workspace_instruction_policy_deactivation_events d
@@ -2014,7 +2015,6 @@ BEGIN
   IF operation<>'reject' AND (head.revision_id IS DISTINCT FROM expected_revision OR version IS DISTINCT FROM expected_version) THEN
     RAISE EXCEPTION 'Instruction head changed; read its current baseline' USING ERRCODE='40001'; END IF;
   IF operation<>'reject' THEN
-    PERFORM pg_advisory_xact_lock(hashtextextended('knowledge-publication:'||p_account,0));
     FOR link IN SELECT * FROM jsonb_array_elements(context->'evidence') LOOP
       IF NOT EXISTS(SELECT 1 FROM knowledge_entries e WHERE e.account_id=p_account AND e.id=(link.value->>'entryId')::uuid
         AND NOT e.archived AND e.scope IN ('workspace','organization') AND knowledge_scope_visible(e)

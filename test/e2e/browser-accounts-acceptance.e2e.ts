@@ -254,6 +254,14 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
 // cancel only the exact paged session-list GET dispatched by that same phase.
 const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES = DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
 
+// The rail's review badge issues one bounded, read-only POST search when a
+// workspace document mounts. A deliberate whole-document replacement can
+// cancel only that exact same-phase read before headers, just like the catalog
+// and paged-session hooks above. Resets and cross-phase actor transitions stay
+// governed by the stricter ledgers below.
+const DOCUMENT_KNOWLEDGE_REVIEW_CANCELLATION_PHASES =
+  DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
+
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
   ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
@@ -507,6 +515,16 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/sessions$/u.test(pathname) &&
     requestUrl.searchParams.get("view") === "page";
+  const isExpectedDocumentKnowledgeReviewCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "POST" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_KNOWLEDGE_REVIEW_CANCELLATION_PHASES.has(input.responsePhase) &&
+    /^\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/knowledge\/entries\/search$/iu.test(
+      pathname,
+    );
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -531,6 +549,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentSessionPageCancellation ||
+    isExpectedDocumentKnowledgeReviewCancellation ||
     isExpectedDocumentBootstrapCancellation ||
     isExpectedWebKitReauthenticationChunkCancellation
   ) {
@@ -3154,6 +3173,37 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=array`,
       }),
     ).toContain("/sessions");
+    const documentKnowledgeReviewRead = {
+      ...oldActorRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "primary-set-sign-in",
+      method: "POST",
+      responsePhase: "primary-set-sign-in",
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/knowledge/entries/search`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(documentKnowledgeReviewRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...documentKnowledgeReviewRead,
+        dispatchPhase: "second-tab-bootstrap",
+        responsePhase: "second-tab-bootstrap",
+      }),
+    ).toBeNull();
+    for (const changed of [
+      { failure: "net::ERR_CONNECTION_RESET" },
+      { method: "GET" },
+      { actorEpoch: null },
+      { responsePhase: "second-tab-bootstrap" },
+      {
+        dispatchPhase: "responsive-accessibility-evidence",
+        responsePhase: "responsive-accessibility-evidence",
+      },
+      {
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/knowledge/entries/review`,
+      },
+    ]) {
+      expect(requestFailureProblem({ ...documentKnowledgeReviewRead, ...changed })).not.toBeNull();
+    }
     const crossTabBootstrapRead = {
       ...oldActorRead,
       actorEpoch: null,

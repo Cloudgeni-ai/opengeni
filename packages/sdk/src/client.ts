@@ -6506,7 +6506,10 @@ export class OpenGeniClient {
       view?: "published" | "needs_review" | "archived" | "rejected";
     } = {},
   ): Promise<KnowledgeEntryRecord> {
-    const query = new URLSearchParams(options).toString();
+    const search = new URLSearchParams();
+    if (options.revisionId !== undefined) search.set("revisionId", options.revisionId);
+    if (options.view !== undefined) search.set("view", options.view);
+    const query = search.toString();
     return this.requestJson(
       "GET",
       `/v1/workspaces/${workspaceId}/knowledge/entries/${entryId}${query ? `?${query}` : ""}`,

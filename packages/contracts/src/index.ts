@@ -1037,8 +1037,6 @@ export function currentAgentLearningToolSelection(
   // correct-only allowlist does not implicitly gain the other capability.
   if (selected.has("memory_save") && selected.has("memory_correct")) {
     selected.add("knowledge_save");
-    selected.add("knowledge_retain_file");
-    selected.add("knowledge_retain_message");
   }
   if (
     selected.has("instruction_policy_propose") ||

@@ -1670,6 +1670,20 @@ describe("OpenGeniClient files", () => {
 });
 
 describe("OpenGeniClient documents", () => {
+  test("omits undefined Knowledge entry query values", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: DOCUMENT_ID }));
+    // JavaScript callers can still pass explicit undefined values even though
+    // exactOptionalPropertyTypes keeps TypeScript callers from doing so.
+    await client.getKnowledgeEntry(WORKSPACE_ID, DOCUMENT_ID, {
+      revisionId: undefined,
+      view: undefined,
+    } as never);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/knowledge/entries/${DOCUMENT_ID}`,
+    );
+  });
+
   test("bases, documents, reindex, and search", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.endsWith("/search")

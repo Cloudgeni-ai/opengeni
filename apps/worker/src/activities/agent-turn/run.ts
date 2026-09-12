@@ -1040,7 +1040,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               attemptId: input.attemptId,
               executionGeneration: attempt.executionGeneration,
             },
-            resources: claimedTurnResources,
+            // Only attachments on this accepted turn are new source inputs.
+            // Session-level file receipts remain historical context and must
+            // never trigger metadata reads, downloads, or re-preparation.
+            resources: turn.resources,
             selectedTools: session.firstPartyMcpTools,
             permissions: session.firstPartyMcpPermissions,
             learningMode: learning.effective.knowledge,
