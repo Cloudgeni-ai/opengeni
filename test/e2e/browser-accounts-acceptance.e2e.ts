@@ -4127,6 +4127,13 @@ describe("provider-neutral browser account acceptance", () => {
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
+    const draftRequests: Array<{ method: string; pathname: string }> = [];
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (pathname.endsWith("/new-session-draft")) {
+        draftRequests.push({ method: request.method(), pathname });
+      }
+    });
     const secondTabProblems = observeBrowser(secondTab);
     const otherProblems = observeBrowser(otherPage);
 
@@ -4368,8 +4375,48 @@ describe("provider-neutral browser account acceptance", () => {
       expect(secondTab.url()).not.toContain(alpha.workspaceId);
 
       setBrowserPhase(pageProblems, "cross-slot-deep-link");
-      await selectAccount(page, beta, alpha);
+      const draftRequestStart = draftRequests.length;
+      const capabilityUrl = `**/v1/workspaces/${alpha.workspaceId}/session-tenancy/capabilities`;
+      let releaseCapabilities!: () => void;
+      const capabilitiesReleased = new Promise<void>((resolve) => {
+        releaseCapabilities = resolve;
+      });
+      let capabilitiesIntercepted!: () => void;
+      const capabilitiesPending = new Promise<void>((resolve) => {
+        capabilitiesIntercepted = resolve;
+      });
+      const holdCapabilities = async (route: Route) => {
+        capabilitiesIntercepted();
+        await capabilitiesReleased;
+        await route.continue();
+      };
+      await page.route(capabilityUrl, holdCapabilities);
+      try {
+        await selectAccount(page, beta, alpha);
+        await capabilitiesPending;
+        // Deliberately outlast the autosave debounce while visibility is unknown.
+        // Hydrating early would acknowledge a temporary workspace-visible value,
+        // then autosave the passive Personal projection as a user edit.
+        await page.waitForTimeout(600);
+        expect(draftRequests.slice(draftRequestStart)).toEqual([]);
+        const hydrated = page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname ===
+              `/v1/workspaces/${alpha.workspaceId}/new-session-draft` &&
+            response.request().method() === "GET" &&
+            response.status() === 200,
+        );
+        releaseCapabilities();
+        await hydrated;
+      } finally {
+        releaseCapabilities();
+        await page.unroute(capabilityUrl, holdCapabilities);
+      }
       await waitForFiniteReadQuiescence(pageProblems);
+      await page.waitForTimeout(600);
+      expect(
+        draftRequests.slice(draftRequestStart).filter(({ method }) => method !== "GET"),
+      ).toEqual([]);
       await page.goto(`${publicOrigin}/sessions/${beta.sessionId}`, {
         waitUntil: "domcontentloaded",
       });
