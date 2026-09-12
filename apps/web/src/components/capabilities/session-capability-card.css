@@ -19,9 +19,9 @@
 .session-capability-card__open { display:flex; justify-content:flex-end; }
 .session-capability-card__open [data-slot="button"] { height:35px; border-radius:7px; padding-left:13px; padding-right:13px; font-size:12px; }
 .session-capability-card__setup { padding-bottom:17px; }
-.session-capability-card__setup form { display:flex; flex-direction:column; }
-.session-capability-card__setup form > button { margin-left:auto; width:auto; }
-.session-capability-card__setup [data-slot="button"] { font-size:12px; }
+.session-capability-card__form form { display:flex; flex-direction:column; }
+.session-capability-card__form form > button { margin-left:auto; width:auto; }
+.session-capability-card__form [data-slot="button"] { font-size:12px; }
 .session-capability-card__note { margin-top:10px; font-size:10px; line-height:1.6; }
 .session-capability-card__subtitle,
 .session-capability-card__status p,
@@ -49,6 +49,6 @@
 }
 @media (pointer:coarse) {
   .session-capability-card__open [data-slot="button"],
-  .session-capability-card__setup [data-slot="button"],
+  .session-capability-card__form [data-slot="button"],
   .session-capability-card__choice-label { min-height:44px; }
 }

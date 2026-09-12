@@ -276,7 +276,7 @@ export function DetailBody({
 
   return (
     <div
-      className={cn("flex min-h-0 flex-col", inline ? "session-capability-card__setup" : "h-full")}
+      className={cn("flex min-h-0 flex-col", inline ? "session-capability-card__form" : "h-full")}
     >
       {inline && !showIdentity ? null : inline ? (
         <div className="flex items-start gap-3">
@@ -569,7 +569,7 @@ export function DetailBody({
               <p
                 className={cn(
                   inline
-                    ? "session-capability-card__copy text-fg-subtle"
+                    ? "session-capability-card__lede text-fg-subtle"
                     : "text-xs text-center text-fg-subtle",
                 )}
               >
