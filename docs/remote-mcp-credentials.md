@@ -15,6 +15,93 @@ policy. The bearer authenticates OpenGeni to the resolver, not to the tool.
 Store this configuration in the deployment's secret manager, never browser
 configuration, session data, or a Skill.
 
+## Native instance registration
+
+Independent embedding instances can instead register one resolver per stable
+workspace `externalSource`. Use a server-side organization API key with literal
+`account:admin`; `asUser`, `asLinkedUser`, workspace keys, delegated tokens, and
+browser cookies cannot administer these routes. Registration configures transport,
+not a tool permission, binding, grant, membership, or accepted initiator.
+
+```ts
+const resolver = await service.putHostMcpResolver(organizationId, "instance:example", {
+  operationId: registrationOperationId, // retain and reuse for exact retries
+  expectedGeneration: 0, // create; updates require the current generation
+  url: "https://backend.example/opengeni/mcp-credentials",
+  bearerToken: resolverSecret, // server-side secret, never browser configuration
+});
+const { workspace } = await service.ensureWorkspace({
+  accountId: organizationId,
+  externalSource: "instance:example",
+  externalId: customerId,
+  name: customerName,
+});
+```
+
+The HTTP contract is `PUT`/`GET
+/v1/organizations/:organizationId/mcp-credential-resolvers/:externalSource` and
+`POST .../:externalSource/revoke`. Encode the source as a path segment; the SDK
+does this automatically. `PUT` requires `operationId`, `expectedGeneration`,
+`url`, and `bearerToken`; optional `timeoutMs` retains the remote adapter's
+100–30,000 ms range and 10,000 ms default. `GET` and mutation responses contain
+metadata only. `revokeHostMcpResolver` requires an operation ID and current
+generation. Schemas live in `@opengeni/contracts/host-mcp-resolvers`.
+
+Source matching uses the authoritative workspace row and exact organization;
+sources are trimmed, case-sensitive routing labels, not external-user identity
+sources or access grants. Register before or after creating workspaces. Every
+future `ensureWorkspace` with that source uses the registration automatically.
+No per-workspace resolver configuration, per-instance runtime restart, or custom
+dispatcher is needed once the native-support release is deployed.
+
+The **first registration opts the whole organization into namespace routing**.
+When a static account resolver exists, that first PUT must explicitly set
+`acknowledgeLegacyRoutingReplacement: true`, otherwise it returns 409 without
+writing. Organizations with no registration rows retain static routing. Once
+any row exists, including a revoked row, an absent workspace source, unregistered
+source, inactive registration, or database failure denies resolution; there is
+no fallback to the static account endpoint or another instance. Existing
+workspaces without a matching source must be considered before opting in.
+API/worker static configuration must be consistent during legacy migration.
+There is no delete or return-to-legacy operation.
+
+PUT also rotates the endpoint/secret or reactivates the same stable registration.
+Every update requires the current generation and a complete explicit bearer;
+changing a URL never forwards the previous bearer automatically. Updates and
+revocation increment generation. Concurrent stale updates return 409. Reusing
+an operation ID with the exact normalized request and actor returns its original
+metadata receipt, **without restoring its old endpoint, secret, or status**.
+Different input under that ID conflicts. Authentication and the exact live admin
+key are rechecked on replay. Use GET for current state; receipts are historical.
+
+An administrator is trusted to update transport for the same instance. Existing
+still-authorized turns, schedules, and children may resolve at the new endpoint
+without regranting; their immutable initiator and accepted binding/grant snapshots
+never change. Credentials resolved under a superseded generation are denied at
+physical use. Revocation blocks resolution/use; explicit reactivation restores
+transport eligibility only, not revoked membership, binding, grant, or attempt
+authority. Already-dispatched remote requests cannot be recalled.
+
+The native adapter reuses the same callback envelope, pinned outbound HTTP rules,
+redirect refusal, response/timeout bounds, and exact credential scope validation.
+HTTPS is required except loopback HTTP in local/test; private-network destinations
+remain governed by the existing network policy. Secrets use native AES-GCM
+encryption under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, with registration,
+organization, source, endpoint and generation verified inside the encrypted
+bundle. Idempotency stores a domain-separated keyed digest and metadata receipt,
+not plaintext secrets. Provider credentials are not persisted or cached.
+
+### Native registration rollout
+
+Migration `0463_host_mcp_resolver_registration.sql` is maintenance-only because
+it changes the exact runtime table/role contract. Stop old API/control/turn
+workers, supply the complete application role list, migrate and provision roles,
+then start the matching binaries. Do not restart pre-0463 binaries afterward.
+In-process hosts that explicitly supply their own credential port retain
+precedence; opting into native routing uses `createNativeRemoteMcpCredentialsPort`.
+
+## Accepted tool authority
+
 New host references require the existing fleet admission flag
 `OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED` and explicit
 `connectionRef.authoritySource: "host"`. This remote adapter does not capture

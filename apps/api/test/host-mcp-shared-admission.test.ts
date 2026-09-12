@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { OpenGeniClient } from "@opengeni/sdk";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type McpCredentialsRequest } from "@opengeni/contracts";
+import { createNativeRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
@@ -24,6 +25,7 @@ import { connectionTokenResolverForTurn } from "../../worker/src/activities/mcp-
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerHostMcpBindingRoutes } from "../src/routes/host-mcp-bindings";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
+import { registerHostMcpResolverRoutes } from "../src/routes/host-mcp-resolvers";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -38,13 +40,18 @@ afterAll(async () => {
   await shared?.release();
 });
 
-test.each(["configured", "session-local"] as const)(
+test.each(["configured", "session-local", "native"] as const)(
   "public asUser shared %s turns capture each owner and first text after an empty realtime create",
   async (configuration) => {
     const [account] =
       await shared.admin`insert into managed_accounts (name) values ('Shared host admission') returning id`;
     const accountId = account!.id as string;
-    const workspace = await createWorkspace(db.db, { accountId, name: "Shared host admission" });
+    const workspace = await createWorkspace(db.db, {
+      accountId,
+      name: "Shared host admission",
+      externalSource: "instance:shared",
+      externalId: "customer",
+    });
     const permissions = [
       "workspace:read",
       "sessions:read",
@@ -54,6 +61,7 @@ test.each(["configured", "session-local"] as const)(
       "connections:write",
       "mcp_servers:attach",
       "scheduled_tasks:manage",
+      "account:admin",
     ] as const;
     const token = crypto.randomUUID();
     await createOrganizationApiKey(db.db, {
@@ -90,6 +98,7 @@ test.each(["configured", "session-local"] as const)(
       productAccessMode: "configured",
       hostMcpAuthoritySourceAdmissionEnabled: true,
       delegationSecret: "host-admission-test-secret",
+      environmentsEncryptionKey: Buffer.alloc(32, 3).toString("base64"),
       mcpServers: [{ id: "host-tools", url: "https://tools.example/mcp", connectionRef }],
     });
     const noop = async () => undefined;
@@ -117,12 +126,20 @@ test.each(["configured", "session-local"] as const)(
     registerSessionRoutes(app, deps);
     registerHostMcpBindingRoutes(app, deps);
     registerScheduledTaskRoutes(app, deps);
+    registerHostMcpResolverRoutes(app, deps);
     const service = new OpenGeniClient({
       baseUrl: "http://fixture",
       apiKey: token,
       fetch: (input, init) => app.request(input, init),
     });
     const actors = [service.asUser("alice"), service.asUser("bob")];
+    if (configuration === "native")
+      await service.putHostMcpResolver(accountId, "instance:shared", {
+        operationId: crypto.randomUUID(),
+        expectedGeneration: 0,
+        url: "https://shared.example/credentials",
+        bearerToken: "shared-fixture",
+      });
     const grants = await Promise.all(
       actors.map(async (actor, i) => {
         const { hostBinding: _selector, ...ref } = connectionRef;
@@ -297,6 +314,40 @@ test.each(["configured", "session-local"] as const)(
       },
     });
     let physicalResolutions = 0;
+    const credential = async (request: McpCredentialsRequest) => {
+      physicalResolutions++;
+      expect(request.initiator).toEqual({ kind: "subject", subjectId: identities[1]!.subjectId });
+      expect(request.connectionRef.hostBinding).toEqual({
+        bindingId: grants[1]!.binding.id,
+        generation: 1,
+      });
+      return {
+        status: "ok" as const,
+        accountId,
+        workspaceId: workspace.id,
+        sessionId: request.sessionId,
+        provider: "example",
+        providerDomain: "tools.example",
+        scopes: ["read"],
+        connectionId: "account-1",
+        headers: { authorization: "Bearer synthetic" },
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      };
+    };
+    const connectionCredentials =
+      configuration === "native"
+        ? createNativeRemoteMcpCredentialsPort(settings, db.db, async (url, init) => {
+            expect(String(url)).toBe("https://shared.example/credentials");
+            expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer shared-fixture");
+            const envelope = JSON.parse(String(init?.body));
+            return Response.json({
+              version: 1,
+              requestId: envelope.requestId,
+              destinationUrl: envelope.request.destinationUrl,
+              resolution: await credential(envelope.request),
+            });
+          })
+        : { mcpCredentials: credential };
     const resolver = connectionTokenResolverForTurn({
       db: db.db,
       settings,
@@ -306,30 +357,7 @@ test.each(["configured", "session-local"] as const)(
       rootSessionId: session.id,
       attemptId,
       turn: claim.turn,
-      connectionCredentials: {
-        mcpCredentials: async (request) => {
-          physicalResolutions++;
-          expect(request.initiator).toEqual({
-            kind: "subject",
-            subjectId: identities[1]!.subjectId,
-          });
-          expect(request.connectionRef.hostBinding).toEqual({
-            bindingId: grants[1]!.binding.id,
-            generation: 1,
-          });
-          return {
-            status: "ok",
-            accountId,
-            workspaceId: workspace.id,
-            sessionId: session.id,
-            provider: "example",
-            providerDomain: "tools.example",
-            scopes: ["read"],
-            connectionId: "account-1",
-            headers: { authorization: "Bearer synthetic" },
-          };
-        },
-      },
+      connectionCredentials,
     });
     const resolved = await resolver({
       workspaceId: workspace.id,
@@ -339,6 +367,57 @@ test.each(["configured", "session-local"] as const)(
     });
     expect(resolved.status).toBe("ok");
     expect(physicalResolutions).toBe(1);
+    if (configuration === "native") {
+      await service.putHostMcpResolver(accountId, "instance:shared", {
+        operationId: crypto.randomUUID(),
+        expectedGeneration: 1,
+        url: "https://shared.example/credentials",
+        bearerToken: "shared-fixture",
+      });
+      if (resolved.status === "ok") expect(await resolved.authorizeProviderRequest!()).toBe(false);
+      expect(
+        (
+          await resolver({
+            workspaceId: workspace.id,
+            serverId: "host-tools",
+            destinationUrl: "https://tools.example/mcp",
+            connectionRef,
+          })
+        ).status,
+      ).toBe("ok");
+      // A child keeps the spawning actor/binding but resolves the current transport.
+      const childAttemptId = crypto.randomUUID();
+      const childClaim = await claimSessionWorkForAttempt(db.db, workspace.id, {
+        sessionId: child.id,
+        workflowId: child.temporalWorkflowId!,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: childAttemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (childClaim.action !== "claimed") throw new Error("expected child claim");
+      const childResolver = connectionTokenResolverForTurn({
+        db: db.db,
+        settings,
+        accountId,
+        workspaceId: workspace.id,
+        sessionId: child.id,
+        rootSessionId: session.id,
+        attemptId: childAttemptId,
+        turn: childClaim.turn,
+        connectionCredentials,
+      });
+      expect(
+        (
+          await childResolver({
+            workspaceId: workspace.id,
+            serverId: "host-tools",
+            destinationUrl: "https://tools.example/mcp",
+            connectionRef,
+          })
+        ).status,
+      ).toBe("ok");
+    }
     await bob.revokeHostMcpDelegation(workspace.id, grants[1]!.delegation.id, {
       expectedGeneration: 1,
     });

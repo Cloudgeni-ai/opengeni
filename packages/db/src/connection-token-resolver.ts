@@ -17,6 +17,7 @@ import type {
   TurnInitiator,
   TurnInitiatorContext,
 } from "@opengeni/contracts";
+import { hostMcpCredentialUseGuard } from "@opengeni/contracts";
 import {
   ConnectionUseAuthoritySnapshot,
   type ConnectionUseAttribution,
@@ -393,14 +394,27 @@ export function buildHostConnectionTokenResolver(
       if (denial) return durableDenial(denial);
     }
     const result = await resolve(structuredClone(snapshot));
+    const routeGuard = result.status === "ok" ? result[hostMcpCredentialUseGuard] : undefined;
+    const routeAuthorized = async () => {
+      try {
+        return routeGuard ? await routeGuard() : true;
+      } catch {
+        return false;
+      }
+    };
     if (requiresAuthorization) {
       const denial = await authorized();
       if (denial) return durableDenial(denial);
     }
+    if (routeGuard && !(await routeAuthorized())) return durableDenial("refresh_failed");
     assertHostMcpCredentialScope(result, context);
     const normalized = normalizeHostCredentialResolution(result, requestedRef, credentialTarget);
-    return normalized.status === "ok" && requiresAuthorization
-      ? { ...normalized, authorizeProviderRequest: async () => (await authorized()) === null }
+    return normalized.status === "ok" && (requiresAuthorization || routeGuard)
+      ? {
+          ...normalized,
+          authorizeProviderRequest: async () =>
+            (await authorized()) === null && (await routeAuthorized()),
+        }
       : normalized;
   };
 }
@@ -446,6 +460,14 @@ export function buildHostGatewayConnectionTokenResolver(
     await reauthorize();
     const result = await resolve(structuredClone(request));
     await reauthorize();
+    const routeGuard = result.status === "ok" ? result[hostMcpCredentialUseGuard] : undefined;
+    if (routeGuard) {
+      try {
+        if (!(await routeGuard())) return deny("refresh_failed");
+      } catch {
+        return deny("refresh_failed");
+      }
+    }
     for (const field of ["accountId", "workspaceId", "requestId"] as const) {
       if (result[field] !== request[field])
         throw new Error(`host gateway credential ${field} scope mismatch`);
@@ -461,7 +483,7 @@ export function buildHostGatewayConnectionTokenResolver(
       authorizeProviderRequest: async () => {
         try {
           await reauthorize();
-          return true;
+          return routeGuard ? await routeGuard() : true;
         } catch {
           return false;
         }

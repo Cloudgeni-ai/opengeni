@@ -26,6 +26,15 @@ the first text `sendMessage` captures its own explicit selection normally.
 See [remote host MCP credentials](remote-mcp-credentials.md) for registration,
 selection, replay, scheduled/child inheritance and physical-use checks.
 
+Standalone embedding backends can register an organization-owned credential
+resolver with `putHostMcpResolver`, keyed by their stable workspace
+`externalSource`. Future `ensureWorkspace` calls select it without per-workspace
+configuration. Registration is service-admin-only; participant `asUser` calls
+still select their own accepted binding. Endpoint/secret rotation changes the
+transport generation, not accepted user authority. The first registration opts
+the organization into exact namespace routing with no static fallback; see the
+linked guide for the explicit legacy-migration acknowledgement.
+
 ### Skill reading in direct runtime hosts
 
 For direct `buildOpenGeniAgent` use, pass `skillActivations` to provide immutable

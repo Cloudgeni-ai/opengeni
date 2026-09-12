@@ -1,6 +1,14 @@
 import type { Settings } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import {
+  resolveHostMcpResolverRoute,
+  hostMcpResolverRouteIsCurrent,
+  type Database,
+  type HostMcpResolverRoute,
+} from "@opengeni/db";
 import {
   McpConnectionResourceScope,
+  hostMcpCredentialUseGuard,
   type ConnectionCredentialsPort,
   type McpCredentialsRequest,
   type McpCredentialResolution,
@@ -144,11 +152,18 @@ export function createRemoteMcpCredentialsPort(
     "hostMcpCredentialResolversJson" | "environment" | "integrationsAllowPrivateNetworkTargets"
   >,
   transport: typeof pinnedFetch = pinnedFetch,
+  routes?: {
+    resolve: (input: { accountId: string; workspaceId: string }) => Promise<HostMcpResolverRoute>;
+    isCurrent: (
+      input: { accountId: string; workspaceId: string },
+      route: HostMcpResolverRoute,
+    ) => Promise<boolean>;
+  },
 ): ConnectionCredentialsPort {
-  if (!settings.hostMcpCredentialResolversJson) return {};
+  if (!settings.hostMcpCredentialResolversJson && !routes) return {};
   let entries: z.infer<typeof configuration>;
   try {
-    entries = configuration.parse(JSON.parse(settings.hostMcpCredentialResolversJson));
+    entries = configuration.parse(JSON.parse(settings.hostMcpCredentialResolversJson || "[]"));
     for (const entry of entries) validateHttpUrl(entry.url);
     if (new Set(entries.map((entry) => entry.accountId)).size !== entries.length) throw new Error();
   } catch {
@@ -188,15 +203,39 @@ export function createRemoteMcpCredentialsPort(
         : {}),
       reason,
     });
-    const config = byAccount.get(request.accountId);
+    let route: HostMcpResolverRoute = { mode: "legacy" };
+    try {
+      if (routes) route = await routes.resolve(request);
+    } catch {
+      return unavailable("refresh_failed");
+    }
+    if (route.mode === "denied") return unavailable("unsupported_auth");
+    const config = route.mode === "namespace" ? route : byAccount.get(request.accountId);
     if (!config || request.connectionRef.authoritySource !== "host")
       return unavailable("unsupported_auth");
+    const current = async () => {
+      try {
+        return routes ? await routes.isCurrent(request, route) : true;
+      } catch {
+        return false;
+      }
+    };
+    const finish = async (value: RemoteResolution): Promise<RemoteResolution> => {
+      if (!(await current())) return unavailable("refresh_failed");
+      const result = structuredClone(value);
+      if (result.status === "ok" && routes) result[hostMcpCredentialUseGuard] = current;
+      return result;
+    };
     // Snapshot before any asynchronous operation; never retain mutable caller
     // objects as the authority for a delayed response.
     if (new TextEncoder().encode(serialized).byteLength > 65_536)
       return unavailable("refresh_failed");
-    const pending = active.get(serialized);
-    if (pending) return structuredClone(await pending);
+    const activeKey = JSON.stringify([
+      route.mode === "namespace" ? [route.id, route.generation] : "legacy",
+      serialized,
+    ]);
+    const pending = active.get(activeKey);
+    if (pending) return finish(await pending);
     if (physicalRequests >= 128) return unavailable("refresh_failed");
     const run = async (): Promise<RemoteResolution> => {
       const requestId = crypto.randomUUID();
@@ -213,6 +252,7 @@ export function createRemoteMcpCredentialsPort(
         return await Promise.race([
           deadline,
           (async () => {
+            if (!(await current())) return unavailable("refresh_failed");
             const response = await transport(
               config.url,
               {
@@ -270,11 +310,11 @@ export function createRemoteMcpCredentialsPort(
       }
     };
     const task = run();
-    active.set(serialized, task);
+    active.set(activeKey, task);
     try {
-      return structuredClone(await task);
+      return finish(await task);
     } finally {
-      if (active.get(serialized) === task) active.delete(serialized);
+      if (active.get(activeKey) === task) active.delete(activeKey);
     }
   };
   return {
@@ -290,4 +330,32 @@ export function createRemoteMcpCredentialsPort(
       return result;
     },
   };
+}
+
+/** Native standalone transport; the database remains authoritative on every
+ * resolution/use. Embedded in-process ports retain their existing precedence. */
+export function createNativeRemoteMcpCredentialsPort(
+  settings: Settings,
+  db: Database,
+  transport: typeof pinnedFetch = pinnedFetch,
+): ConnectionCredentialsPort {
+  return createRemoteMcpCredentialsPort(settings, transport, {
+    resolve: (request) =>
+      resolveHostMcpResolverRoute(db, request, environmentsEncryptionKeyBytes(settings)),
+    isCurrent: (request, route) => hostMcpResolverRouteIsCurrent(db, request, route),
+  });
+}
+
+/** Parses only server configuration; never return parser errors containing secrets. */
+export function hasLegacyHostMcpResolver(
+  settings: Pick<Settings, "hostMcpCredentialResolversJson">,
+  accountId: string,
+): boolean {
+  try {
+    return configuration
+      .parse(JSON.parse(settings.hostMcpCredentialResolversJson || "[]"))
+      .some((entry) => entry.accountId === accountId);
+  } catch {
+    throw new Error("Invalid host MCP credential resolver configuration");
+  }
 }

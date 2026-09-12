@@ -288,6 +288,25 @@ binding provenance; it is not required to use `asUser` or Connect. See
 live actor/binding authority; the remote adapter alone does not implement
 offboarding, native linking or a complete external execution gateway.
 
+For independent backend instances, the server-only organization admin client
+can use `putHostMcpResolver(organizationId, externalSource, request)` once per
+stable workspace source. Future `ensureWorkspace` calls use the exact registered
+source without workspace-specific resolver setup. PUT requires `operationId`,
+`expectedGeneration` (0 for create), `url`, and a complete `bearerToken`.
+`getHostMcpResolver` returns metadata only; `revokeHostMcpResolver` requires an
+operation ID/current generation. `asUser`, `asLinkedUser`, workspace keys and
+browser cookies cannot administer routes. Existing bindings/grants and accepted
+initiators do not change when an admin rotates transport.
+
+The first registration opts the whole organization into namespace routing; a
+configured legacy resolver requires `acknowledgeLegacyRoutingReplacement: true`.
+Any retained row, even revoked, prevents static fallback. Missing/inactive
+sources deny rather than choosing another instance. Retried operations return
+historical metadata without restoring old configuration. Always GET current
+state before a new CAS update, and explicitly supply the secret for a new URL.
+Generation checks invalidate old resolved credentials before physical use;
+already-dispatched requests cannot be recalled. Keep every secret server-side.
+
 The request-time workspace tool gateway accepts verified external users and
 organization service keys. Tool catalog/operation permission filtering and
 existing approval semantics still apply. The new lanes recheck current key and
