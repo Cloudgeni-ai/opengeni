@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.23
+
+### Patch Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+
 ## 0.2.22
 
 ### Patch Changes

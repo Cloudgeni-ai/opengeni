@@ -1,5 +1,28 @@
 # @opengeni/runtime
 
+## 3.0.0
+
+### Major Changes
+
+- efeaa9c: Replace autonomous Memory and reviewed Knowledge authoring with structured Knowledge entries, exact revisions, evidence, groups and nonblocking review. Add centralized Agent learning defaults with chat and scheduled-task overrides, private original-file ownership, canonical source preparation and rebuildable retrieval. Retire legacy Memory/learning mutation APIs and SDK methods; migration 0461 requires a drained maintenance cutover and the matching runtime. See docs/knowledge.md and docs/deployment.md.
+
+### Patch Changes
+
+- 750060c: Support inline HTML visualizations, retained images, and embedded Sites in chat. Add a plain HTML Site client, preserve application request headers through the shared bridge, document visualization workflows, and use Image 2.5 Sunburst for Codex image generation.
+- 123cf57: Make agent-authored workspace instruction changes non-destructive: append new rules by default, require one exact anchor for edits or removals, and reserve complete replacement for an explicit mode while preserving baseline conflict checks and instruction budgets.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/config@1.2.1
+  - @opengeni/sdk@6.0.0
+  - @opengeni/codemode@0.5.8
+  - @opengeni/codex@0.2.23
+  - @opengeni/tool-gateway@0.1.9
+
 ## 2.6.0
 
 ### Minor Changes

@@ -1,5 +1,19 @@
 # @opengeni/browserd
 
+## 0.1.43
+
+### Patch Changes
+
+- 88f92b9: Reacquire the live capture source when a viewer renews while its previous subscription is retiring, preventing renewal from attaching to a stopped source.
+- Updated dependencies [50ac837]
+- Updated dependencies [ad9dc2f]
+- Updated dependencies [750060c]
+- Updated dependencies [da4a85f]
+- Updated dependencies [123cf57]
+- Updated dependencies [efeaa9c]
+  - @opengeni/contracts@4.0.0
+  - @opengeni/interaction@0.4.35
+
 ## 0.1.42
 
 ### Patch Changes
