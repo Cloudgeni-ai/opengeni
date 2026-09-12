@@ -276,16 +276,15 @@ export function DetailBody({
 
   return (
     <div
-      className={cn(
-        "flex min-h-0 flex-col",
-        inline
-          ? "[&_form]:flex [&_form]:flex-col [&_form>button]:ml-auto [&_form>button]:w-auto [&_[data-slot=button]]:text-xs [&_[data-slot=button]]:pointer-coarse:min-h-11"
-          : "h-full",
-      )}
+      className={cn("flex min-h-0 flex-col", inline ? "session-capability-card__setup" : "h-full")}
     >
       {inline && !showIdentity ? null : inline ? (
         <div className="flex items-start gap-3">
-          <CapabilityLogo src={logoSrc} name={item.name} className="size-[41px] rounded-[10px]" />
+          <CapabilityLogo
+            src={logoSrc}
+            name={item.name}
+            className="session-capability-identity-logo"
+          />
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-medium text-fg">{item.name}</h3>
             {item.providerDomain ? (
@@ -366,11 +365,11 @@ export function DetailBody({
         {inline && item.kind === "skill" ? (
           <div className="space-y-3 border-t border-border pt-3">
             <h4 className="text-xs font-medium text-fg">What this skill adds</h4>
-            <p className="text-xs leading-[1.8] text-fg-muted">
+            <p className="session-capability-card__lede text-fg-muted">
               {item.description || "Review this skill's source and version before installing."}
             </p>
             {curatedSkillProvenance(item) ? (
-              <details className="text-[11px] text-fg-subtle">
+              <details className="session-capability-card__fine text-fg-subtle">
                 <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-ring">
                   Review source and version
                 </summary>
@@ -567,7 +566,13 @@ export function DetailBody({
                   onChange={setConnectionOwnership}
                 />
               )}
-              <p className={cn("text-xs leading-[1.7] text-fg-subtle", !inline && "text-center")}>
+              <p
+                className={cn(
+                  inline
+                    ? "session-capability-card__copy text-fg-subtle"
+                    : "text-xs text-center text-fg-subtle",
+                )}
+              >
                 {connectionOwnership === "workspace"
                   ? `You'll authorize ${item.name} once for this workspace. Provider actions may appear as the account you connect.`
                   : `You'll authorize ${item.name} for your personal use, then return here.`}
@@ -648,14 +653,14 @@ function SkillControls({
     <div className="space-y-3">
       {setupOnly && !item.enabled ? (
         <div className="space-y-2">
-          <p className="text-[11px] font-medium text-fg">Install for</p>
-          <p className="inline-flex rounded-md border border-border bg-surface-2 px-[9px] py-[7px] text-[11px] text-fg">
+          <p className="session-capability-card__fine font-medium text-fg">Install for</p>
+          <p className="session-capability-card__install border border-border bg-surface-2 text-fg">
             Workspace
           </p>
-          <p className="text-[11px] leading-[1.6] text-fg-subtle">
+          <p className="session-capability-card__fine text-fg-subtle">
             Available to everyone on the team in this workspace.
           </p>
-          <p className="text-[11px] leading-[1.6] text-fg-subtle">
+          <p className="session-capability-card__fine text-fg-subtle">
             This library skill can currently be installed for the workspace only.
           </p>
         </div>
@@ -1077,8 +1082,8 @@ export function OwnershipSelector({
     const descriptionId = `${groupName}-description`;
     return (
       <fieldset className="space-y-2" aria-describedby={descriptionId}>
-        <legend className="text-[11px] font-medium text-fg">Connect for</legend>
-        <div className="flex flex-wrap gap-[5px]">
+        <legend className="session-capability-card__fine font-medium text-fg">Connect for</legend>
+        <div className="session-capability-card__choice">
           {(["workspace", "personal"] as const).map((ownership) => (
             <label key={ownership} className="relative cursor-pointer">
               <input
@@ -1089,13 +1094,13 @@ export function OwnershipSelector({
                 checked={value === ownership}
                 onChange={() => onChange(ownership)}
               />
-              <span className="inline-flex min-h-8 items-center rounded-[6px] border border-border px-[9px] py-[7px] text-[11px] text-fg-muted peer-checked:bg-surface-2 peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-ring pointer-coarse:min-h-11">
+              <span className="session-capability-card__choice-label border border-border text-fg-muted peer-checked:bg-surface-2 peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-ring">
                 {ownership === "workspace" ? "Workspace" : "Only me"}
               </span>
             </label>
           ))}
         </div>
-        <p id={descriptionId} className="text-[11px] leading-[1.6] text-fg-subtle">
+        <p id={descriptionId} className="session-capability-card__fine text-fg-subtle">
           {value === "workspace"
             ? "Shared with agents and automations in this workspace."
             : "Used only when work is authorized to act as you."}
@@ -1305,7 +1310,7 @@ function CredentialForm({
         </p>
       ) : null}
       {compact ? (
-        <p className="text-[11px] leading-[1.6] text-fg-subtle">
+        <p className="session-capability-card__fine text-fg-subtle">
           Your credential is stored encrypted, never in the conversation.
         </p>
       ) : null}

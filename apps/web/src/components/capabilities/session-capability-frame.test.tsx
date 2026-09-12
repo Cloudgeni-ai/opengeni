@@ -20,7 +20,7 @@ describe("compact conversation card states", () => {
   test("suggestion has the preview hierarchy, monogram and reassurance", () => {
     const html = renderToStaticMarkup(<SessionCapabilityFrame {...props} />);
     expect(html).toContain('data-state="suggested"');
-    expect(html).toContain("max-w-[540px]");
+    expect(html).toContain("session-capability-card");
     expect(html).toContain("Guidance only · no account access");
     expect(html).toContain("Review skill");
     expect(html).toContain("<span>W</span>");

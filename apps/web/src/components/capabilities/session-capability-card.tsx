@@ -11,7 +11,7 @@ import { capabilityLogoSource } from "./capability-logo-source";
 import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
 import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
-import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
+import { capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -52,8 +52,7 @@ export function SessionCapabilityCard({
     requestAnimationFrame(() => (opener.current ?? cardRef.current)?.focus());
   };
   const skill = recommendation.kind === "skill";
-  const plan = catalogItem ? capabilityConnectPlan(catalogItem) : null;
-  const apiKey = plan?.mode === "api_key";
+  const apiKey = catalogItem?.authKind === "api_key";
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}

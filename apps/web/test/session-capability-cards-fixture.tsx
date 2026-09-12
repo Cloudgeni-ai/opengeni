@@ -171,7 +171,7 @@ document.body.style.overflow = "visible";
 createRoot(document.getElementById("root")!).render(
   <main className="min-h-screen bg-bg p-4 text-fg sm:p-8">
     <h1 className="mb-3 text-xl font-semibold">Session capability cards</h1>
-    <p className="mb-6 max-w-[540px] text-sm text-fg-muted">
+    <p className="session-capability-card mb-6 text-sm text-fg-muted">
       Presentation fixture only. No provider requests or credential persistence.
     </p>
     <h2 className="sr-only">Connection suggestions</h2>

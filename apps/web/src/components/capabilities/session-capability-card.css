@@ -1,0 +1,54 @@
+/* Compact in-chat capability card: approved 540px shell and 41px identity. */
+.session-capability-card { width:100%; max-width:540px; }
+.session-capability-card__shell { overflow:hidden; border-radius:12px; }
+.session-capability-identity-logo { width:41px; height:41px; border-radius:10px; }
+.session-capability-card__header { display:flex; align-items:center; gap:12px; padding:18px 19px 12px; }
+.session-capability-card__type { flex-shrink:0; border-radius:5px; padding:4px 7px; font-size:10px; line-height:1; }
+.session-capability-card__done-mark { display:flex; width:23px; height:23px; flex-shrink:0; align-items:center; justify-content:center; }
+.session-capability-card__status,
+.session-capability-card__copy,
+.session-capability-card__actions,
+.session-capability-card__setup { padding-left:19px; padding-right:19px; }
+.session-capability-card__status { padding-bottom:16px; font-size:12px; line-height:1.7; }
+.session-capability-card__copy { padding-bottom:8px; font-size:12px; line-height:1.7; }
+.session-capability-card__actions { align-items:center; column-gap:12px; }
+.session-capability-card__actions[data-expanded="false"] { display:grid; grid-template-columns:minmax(0,1fr) auto; padding-bottom:14px; }
+.session-capability-card__actions[data-expanded="true"] { display:block; padding-bottom:12px; }
+.session-capability-card__reassure { display:flex; align-items:center; gap:8px; font-size:11px; line-height:1.6; }
+.session-capability-card__reassure svg { width:13px; height:13px; flex-shrink:0; }
+.session-capability-card__open { display:flex; justify-content:flex-end; }
+.session-capability-card__open [data-slot="button"] { height:35px; border-radius:7px; padding-left:13px; padding-right:13px; font-size:12px; }
+.session-capability-card__setup { padding-bottom:17px; }
+.session-capability-card__setup form { display:flex; flex-direction:column; }
+.session-capability-card__setup form > button { margin-left:auto; width:auto; }
+.session-capability-card__setup [data-slot="button"] { font-size:12px; }
+.session-capability-card__note { margin-top:10px; font-size:10px; line-height:1.6; }
+.session-capability-card__subtitle,
+.session-capability-card__status p,
+.session-capability-card__fine { font-size:11px; }
+.session-capability-card__lede { font-size:12px; line-height:1.8; }
+.session-capability-card__install { display:inline-flex; border-radius:6px; padding:7px 9px; font-size:11px; }
+.session-capability-card__choice { display:flex; flex-wrap:wrap; gap:5px; }
+.session-capability-card__choice-label {
+  display:inline-flex; min-height:32px; align-items:center; border-radius:6px; padding:7px 9px; font-size:11px;
+}
+.session-capability-card h3,
+.session-capability-card__subtitle { overflow-wrap:anywhere; }
+@media (max-width:600px) {
+  .session-capability-card__copy { padding-bottom:0; }
+  .session-capability-card__actions[data-expanded="false"] { display:block; }
+  .session-capability-card__reassure { margin-top:9px; }
+  .session-capability-card__open { padding-top:6px; }
+}
+@media (max-width:480px) {
+  .session-capability-card__header { gap:9px; padding:16px 14px 12px; }
+  .session-capability-card__status,
+  .session-capability-card__copy,
+  .session-capability-card__actions,
+  .session-capability-card__setup { padding-left:14px; padding-right:14px; }
+}
+@media (pointer:coarse) {
+  .session-capability-card__open [data-slot="button"],
+  .session-capability-card__setup [data-slot="button"],
+  .session-capability-card__choice-label { min-height:44px; }
+}
