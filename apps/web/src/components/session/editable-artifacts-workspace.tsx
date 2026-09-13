@@ -275,7 +275,7 @@ export function SessionEditableArtifactsWorkspace({
         ) : artifact.modality === "image" || artifact.modality === "file" ? (
           <RetainedArtifactRoute workspaceId={workspaceId} artifactId={artifact.id} embedded />
         ) : (
-          <EditableArtifactRoute workspaceId={workspaceId} artifactId={artifact.id} />
+          <EditableArtifactRoute workspaceId={workspaceId} artifactId={artifact.id} embedded />
         )}
       </div>
     </div>
