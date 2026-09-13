@@ -24,6 +24,7 @@ import {
 } from "@opengeni/testing";
 import { registerHostMcpResolverRoutes } from "../src/routes/host-mcp-resolvers";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 import { assertRuntimeDatabasePosture } from "@opengeni/db";
 
 let shared: SharedTestDatabase;
@@ -50,7 +51,7 @@ test("public organization administration routes two future instances and fences 
     name: "Resolver admin",
     prefix: "test",
     keyHash: createHash("sha256").update(token).digest("hex"),
-    permissions: ["account:admin", "workspace:create", "workspace:read"],
+    permissions: organizationApiKeyPermissionsForAccess("full"),
   });
   const settings = testSettings({
     databaseUrl: shared.appUrl,
@@ -277,13 +278,14 @@ test("registration denies delegated, external, workspace and non-admin credentia
       name: "Fixture",
       prefix: "test",
       keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: ["account:admin" as const],
+      permissions: organizationApiKeyPermissionsForAccess("full"),
     };
     if (index === 1) await createApiKey(db.db, { ...input, workspaceId: workspace.id });
     else
       await createOrganizationApiKey(db.db, {
         ...input,
-        permissions: index === 2 ? ["workspace:read"] : input.permissions,
+        permissions:
+          index === 2 ? organizationApiKeyPermissionsForAccess("read") : input.permissions,
       });
   }
   await ensureExternalIdentity(db.db, { accountId, externalId: "alice" });

@@ -47,6 +47,11 @@ does this automatically. `PUT` requires `operationId`, `expectedGeneration`,
 metadata only. `revokeHostMcpResolver` requires an operation ID and current
 generation. Schemas live in `@opengeni/contracts/host-mcp-resolvers`.
 
+Use an organization API key created with `access: "full"`. Its
+`workspace:admin` permission authorizes resolver administration only within that
+key's organization; `account:admin` is not required or minted. Read-only keys,
+workspace keys, delegated tokens, and `asUser()` requests cannot administer it.
+
 Source matching uses the authoritative workspace row and exact organization;
 sources are trimmed, case-sensitive routing labels, not external-user identity
 sources or access grants. Register before or after creating workspaces. Every

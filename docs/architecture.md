@@ -1666,7 +1666,8 @@ current participant's selection. See [remote host MCP credentials](remote-mcp-cr
 
 Native remote MCP resolver registration is organization-owned configuration,
 keyed by the authoritative workspace `externalSource`. Only a live organization
-service-admin key administers it; participants cannot choose callback routes.
+service key with full (`workspace:admin`) access administers it; participants
+cannot choose callback routes. Human `account:admin` is not granted to these keys.
 Any retained registration opts the organization into exact namespace routing,
 with no static fallback. Endpoint/secret updates preserve registration identity
 and accepted authority but increment a live physical-use transport generation.

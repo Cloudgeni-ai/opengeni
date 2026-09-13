@@ -49,6 +49,12 @@ exact namespace routing with no static fallback. See
 [remote host MCP credentials](remote-mcp-credentials.md#native-instance-registration)
 for the explicit legacy-migration acknowledgement and authority boundaries.
 
+`0467_host_resolver_full_organization_keys.sql` is a rolling correction to the
+existing write trigger: resolver administration uses the `workspace:admin`
+permission issued by full organization API keys, not human `account:admin`.
+Deploy the matching API/core code with the migration. No key rotation, added
+permissions, role provisioning change, or resolver re-registration is needed.
+
 ### Host MCP, native-link and Connect authority migrations (0443–0456)
 
 `0443_host_mcp_binding_registry.sql`, `0444_host_mcp_delegations.sql`, and
