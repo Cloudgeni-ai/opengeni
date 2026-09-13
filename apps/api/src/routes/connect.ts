@@ -75,6 +75,7 @@ import {
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
 import { executeConnectOperation } from "@opengeni/core";
 import { startMcpOAuth, requireIntegrationsStateSecret } from "../integrations/oauth-client";
+import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
@@ -225,6 +226,19 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               ? "available"
               : "needs_configuration",
         ownership: ["workspace"],
+        setup: ["oauth"],
+      }),
+      ConnectProvider.parse({
+        id: "gmail",
+        label: "Gmail",
+        family: "google",
+        readiness:
+          !external || !canWrite || !personal
+            ? "unsupported"
+            : mcpConfigured
+              ? "available"
+              : "needs_configuration",
+        ownership: personal ? ["personal"] : [],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -557,7 +571,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               providerId:
                 connection.metadata.mcpUrl === OPENGENI_PERSONAL_SLACK_MCP_URL
                   ? "slack-personal"
-                  : "mcp-oauth",
+                  : connection.metadata.mcpUrl === OFFICIAL_GMAIL_MCP_URL
+                    ? "gmail"
+                    : "mcp-oauth",
               label: connection.providerDomain,
               ownership: connection.subjectId === null ? "workspace" : "personal",
               status:
@@ -1007,16 +1023,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     }
-    if (["mcp-oauth", "slack-personal"].includes(before.providerId)) {
+    if (["mcp-oauth", "slack-personal", "gmail"].includes(before.providerId)) {
       if (action.type !== "credentials")
         throw new HTTPException(422, { message: "MCP OAuth requires a server URL" });
       const values =
         before.providerId === "slack-personal"
           ? { mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL }
-          : z
-              .object({ mcpUrl: z.string().url().max(4096) })
-              .strict()
-              .parse(action.values);
+          : before.providerId === "gmail"
+            ? { mcpUrl: OFFICIAL_GMAIL_MCP_URL }
+            : z
+                .object({ mcpUrl: z.string().url().max(4096) })
+                .strict()
+                .parse(action.values);
       return c.json(
         await executeConnectOperation({
           db: deps.db,
@@ -1552,6 +1570,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           [
             "mcp-oauth",
             "slack-personal",
+            "gmail",
             "mcp-bearer",
             "mcp-headers",
             "fiken-token",
@@ -1567,18 +1586,27 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             message: "MCP credential setup does not install an API integration instance",
           });
         if (
-          ["mcp-oauth", "slack-personal", "mcp-bearer", "mcp-headers", "fiken-token"].includes(
-            input.providerId,
-          )
+          [
+            "mcp-oauth",
+            "slack-personal",
+            "gmail",
+            "mcp-bearer",
+            "mcp-headers",
+            "fiken-token",
+          ].includes(input.providerId)
         ) {
           if (input.providerId === "slack-personal" && input.ownership !== "personal")
             throw new HTTPException(422, {
               message: "Hosted Slack MCP requires personal ownership",
             });
+          if (input.providerId === "gmail" && input.ownership !== "personal")
+            throw new HTTPException(422, {
+              message: "Gmail requires personal ownership; each user connects their own account",
+            });
           if (input.providerId === "fiken-token" && input.ownership !== "workspace")
             throw new HTTPException(422, { message: "Fiken is workspace-owned" });
           requireEnvironmentEncryption(deps.settings);
-          if (["mcp-oauth", "slack-personal"].includes(input.providerId))
+          if (["mcp-oauth", "slack-personal", "gmail"].includes(input.providerId))
             requireIntegrationsStateSecret(deps.settings);
           const existing = input.reconnectAccountId
             ? await getConnectionMetadata(
@@ -1593,11 +1621,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             (!existing ||
               (input.providerId === "fiken-token"
                 ? !isFikenConnection(existing)
-                : ["mcp-oauth", "slack-personal"].includes(input.providerId)
+                : ["mcp-oauth", "slack-personal", "gmail"].includes(input.providerId)
                   ? existing.kind !== "oauth2" ||
                     !existing.metadata.oauthDiscovery ||
                     (input.providerId === "slack-personal" &&
-                      existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL)
+                      existing.metadata.mcpUrl !== OPENGENI_PERSONAL_SLACK_MCP_URL) ||
+                    (input.providerId === "gmail" &&
+                      existing.metadata.mcpUrl !== OFFICIAL_GMAIL_MCP_URL)
                   : existing.kind !== "api_key" ||
                     existing.metadata.connectAdapter !== input.providerId) ||
               (existing.subjectId === null ? "workspace" : "personal") !== input.ownership)
@@ -1634,51 +1664,50 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 : {}),
               nextAction: {
                 type: "credentials",
-                fields:
-                  input.providerId === "slack-personal"
-                    ? []
-                    : input.providerId === "fiken-token"
-                      ? [
-                          {
-                            name: "apiToken",
-                            label: "Fiken API token",
-                            required: true,
-                            secret: true,
-                          },
-                          {
-                            name: "defaultCompanySlug",
-                            label: "Default company slug (optional)",
-                            required: false,
-                            secret: false,
-                          },
-                        ]
-                      : [
-                          {
-                            name: "mcpUrl",
-                            label: "MCP server URL",
-                            required: true,
-                            secret: false,
-                          },
-                          ...(input.providerId === "mcp-bearer"
+                fields: ["slack-personal", "gmail"].includes(input.providerId)
+                  ? []
+                  : input.providerId === "fiken-token"
+                    ? [
+                        {
+                          name: "apiToken",
+                          label: "Fiken API token",
+                          required: true,
+                          secret: true,
+                        },
+                        {
+                          name: "defaultCompanySlug",
+                          label: "Default company slug (optional)",
+                          required: false,
+                          secret: false,
+                        },
+                      ]
+                    : [
+                        {
+                          name: "mcpUrl",
+                          label: "MCP server URL",
+                          required: true,
+                          secret: false,
+                        },
+                        ...(input.providerId === "mcp-bearer"
+                          ? [
+                              {
+                                name: "token",
+                                label: "Bearer credential",
+                                required: true,
+                                secret: true,
+                              },
+                            ]
+                          : input.providerId === "mcp-headers"
                             ? [
                                 {
-                                  name: "token",
-                                  label: "Bearer credential",
+                                  name: "headers",
+                                  label: "Credential headers (JSON)",
                                   required: true,
                                   secret: true,
                                 },
                               ]
-                            : input.providerId === "mcp-headers"
-                              ? [
-                                  {
-                                    name: "headers",
-                                    label: "Credential headers (JSON)",
-                                    required: true,
-                                    secret: true,
-                                  },
-                                ]
-                              : []),
-                        ],
+                            : []),
+                      ],
               },
               expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
             },
