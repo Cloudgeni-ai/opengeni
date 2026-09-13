@@ -274,23 +274,25 @@ export function UsageBar({
   now: number;
 }) {
   if (!window) return null;
-  const pct = Math.min(100, Math.max(0, window.percent));
-  const danger = pct >= 90;
-  const limitReached = pct >= 100;
+  const pct = Math.min(100, Math.max(0, window.remaining));
+  const danger = pct <= 10;
+  const limitReached = pct <= 0;
   const reset = resetTimestamp(window, now);
   return (
     <div className="grid gap-1">
       <div className="flex flex-wrap items-center justify-between gap-x-2 text-xs text-fg-muted">
         <span>{label}</span>
         <span className="min-w-0 text-right">
-          {limitReached ? "limit reached" : `${pct}% used`}
+          {`${pct}% remaining`}
+          {limitReached ? " · limit reached" : ""}
           {reset ? ` · ${reset}` : ""}
         </span>
       </div>
       <div
         className="h-1.5 overflow-hidden rounded-full bg-surface-2"
         role="progressbar"
-        aria-label={`${label} usage`}
+        aria-label={`${label} remaining`}
+        aria-valuetext={`${pct}% remaining`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={pct}
@@ -305,20 +307,28 @@ export function UsageBar({
 }
 
 /** Compact inline meter for the collapsed subscription row. */
-function CompactUsageMeter({ label, window }: { label: string; window: CodexUsageWindow | null }) {
+export function CompactUsageMeter({
+  label,
+  window,
+}: {
+  label: string;
+  window: CodexUsageWindow | null;
+}) {
   if (!window) return null;
-  const pct = Math.min(100, Math.max(0, Math.round(window.percent)));
-  const danger = pct >= 90;
+  const remaining = Math.min(100, Math.max(0, window.remaining));
+  const pct = Math.round(remaining);
+  const danger = remaining <= 10;
   return (
     <div
       className="flex items-center gap-1.5 text-2xs text-fg-muted"
-      title={`${label} usage ${pct}%`}
+      title={`${label}: ${pct}% remaining`}
     >
       <span className="shrink-0">{label}</span>
       <div
         className="h-1 w-14 overflow-hidden rounded-full bg-surface-2"
         role="progressbar"
-        aria-label={`${label} usage`}
+        aria-label={`${label} remaining`}
+        aria-valuetext={`${pct}% remaining`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={pct}
@@ -328,7 +338,9 @@ function CompactUsageMeter({ label, window }: { label: string; window: CodexUsag
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="w-7 shrink-0 tabular-nums text-fg-subtle">{pct}%</span>
+      <span className="shrink-0 whitespace-nowrap tabular-nums text-fg-subtle">
+        {pct}% remaining
+      </span>
     </div>
   );
 }

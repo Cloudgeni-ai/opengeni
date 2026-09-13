@@ -53,13 +53,23 @@ function UsageRow(props: { label: string; window: CodexUsageWindow | null | unde
   return (
     <div className="flex items-center gap-2 text-2xs text-fg-subtle">
       <span className="w-10 shrink-0">{props.label}</span>
-      <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2">
+      <span
+        className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2"
+        role="progressbar"
+        aria-label={`${props.label} remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct}
+        aria-valuetext={`${Math.round(pct)}% remaining`}
+      >
         <span
           className={cn("block h-full rounded-full", danger ? "bg-status-waiting" : "bg-brand")}
           style={{ width: `${pct}%` }}
         />
       </span>
-      <span className="w-8 shrink-0 text-right tabular-nums">{Math.round(pct)}%</span>
+      <span className="shrink-0 whitespace-nowrap text-right tabular-nums">
+        {Math.round(pct)}% remaining
+      </span>
     </div>
   );
 }
@@ -70,13 +80,16 @@ function MiniBar({ account }: { account: CodexAccount | undefined | null }) {
   const pct = Math.min(100, Math.max(0, remaining));
   return (
     <span
-      className="inline-block h-1 w-8 shrink-0 overflow-hidden rounded-full bg-surface-2"
-      title={`${Math.round(pct)}% remaining`}
+      className="inline-flex shrink-0 items-center gap-1.5 text-2xs text-fg-subtle"
+      title={`${Math.round(pct)}% remaining in the tighter usage window`}
     >
-      <span
-        className={cn("block h-full rounded-full", pct <= 10 ? "bg-status-waiting" : "bg-brand")}
-        style={{ width: `${pct}%` }}
-      />
+      <span className="h-1 w-8 overflow-hidden rounded-full bg-surface-2" aria-hidden="true">
+        <span
+          className={cn("block h-full rounded-full", pct <= 10 ? "bg-status-waiting" : "bg-brand")}
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+      <span className="whitespace-nowrap tabular-nums">{Math.round(pct)}% remaining</span>
     </span>
   );
 }

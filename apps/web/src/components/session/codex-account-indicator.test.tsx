@@ -27,6 +27,8 @@ test("shows the blocked account instead of a healthy default and permits repeati
         {
           id: "blocked",
           label: "Blocked account",
+          fiveHour: { percent: 100, remaining: 0 },
+          weekly: { percent: 10, remaining: 90 },
           status: "active",
           plan: "pro",
           allocatorEnabled: true,
@@ -75,6 +77,15 @@ test("shows the blocked account instead of a healthy default and permits repeati
       ),
     );
     expect(document.body.textContent).toContain("Retry with");
+    const bars = document.querySelectorAll<HTMLElement>('[role="progressbar"]');
+    expect(bars.length).toBe(2);
+    expect(bars[0]!.getAttribute("aria-valuetext")).toBe("0% remaining");
+    expect(bars[1]!.getAttribute("aria-valuetext")).toBe("90% remaining");
+    expect((bars[1]!.firstElementChild as HTMLElement).style.width).toBe("90%");
+    const blockedOption = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (el) => el.textContent?.includes("Blocked account"),
+    );
+    expect(blockedOption?.textContent).toContain("0% remaining");
     const auto = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) =>
       el.textContent?.includes("Auto"),
     );
