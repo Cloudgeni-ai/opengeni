@@ -204,24 +204,26 @@ The routes live below
 `workspace:admin`.
 
 The agent-facing `instruction_policy_save` surface is deliberately an edit
-contract rather than an implicit complete-document save. The agent must read the
-active content and exact baseline before every change, then choose one mode:
+contract rather than a complete-document save. The agent must read the active
+content and exact baseline before every change, then choose one mode:
 
 - `append` is the normal mode for a new rule. It preserves the active content
   byte-for-byte and inserts only the blank-line separator needed before the new
   text;
 - `edit` replaces one exact `oldText` occurrence with `newText`, which may be
-  empty for a removal. A missing or repeated anchor fails closed;
-- `replace` replaces the complete active content and is reserved for an explicit
-  user request to do so.
+  empty for a removal. A missing, repeated, or complete-document anchor fails
+  closed.
 
-Every mode retains the active-head revision and activation-version compare-and-
-set. A stale baseline, invalid edit shape, ambiguous anchor, or result outside
-the agent-authored destination budget creates no revision. During a rolling
-deployment, a pre-migration application request without `editMode` retains the
-old complete-content replacement interpretation; the new contract requires the
-field, so an omission cannot become an accidental replacement once the new API
-is serving traffic.
+Agents cannot replace the complete instruction. An authorized human can use the
+manual workspace editor when a whole-policy rewrite is genuinely intended.
+Every agent mode retains the active-head revision and activation-version
+compare-and-set. A stale baseline, invalid edit shape, ambiguous or whole-policy
+anchor, or result outside the agent-authored destination budget creates no
+revision. During a rolling deployment, an older application request without
+`editMode` is accepted only when its proposed content preserves the complete
+active instruction byte-for-byte. Unsafe older pending revisions and explicit
+replacement revisions cannot be activated after the preservation guard is
+installed.
 
 ## Session role binding and accepted-turn snapshots
 
