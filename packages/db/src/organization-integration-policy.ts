@@ -5,14 +5,23 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import {
+  rawRows,
+  rlsContextForWorkspace,
+  setSubjectRlsContext,
+  withRlsContext,
+  type Database,
+} from "./database";
 
-export type OrganizationIntegrationPolicyScope = { accountId: string; workspaceId: string };
+export type OrganizationIntegrationPolicyScope = { accountId: string };
+export type OrganizationIntegrationAcquisitionScope = { accountId: string; workspaceId: string };
 const policyScope = z.object({
   accountId: z
     .string()
     .uuid()
     .transform((value) => value.toLowerCase()),
+});
+const acquisitionScope = policyScope.extend({
   workspaceId: z
     .string()
     .uuid()
@@ -28,7 +37,7 @@ export type AuthorizeOrganizationIntegrationPolicyAdministration = () => Promise
   subjectId: string;
 }>;
 
-async function fence(tx: Database, scope: OrganizationIntegrationPolicyScope): Promise<void> {
+async function requireReadCommitted(tx: Database): Promise<void> {
   const [isolation] = await rawRows<{ level: string }>(
     tx,
     sql`select current_setting('transaction_isolation') as level`,
@@ -36,14 +45,6 @@ async function fence(tx: Database, scope: OrganizationIntegrationPolicyScope): P
   if (isolation?.level !== "read committed") {
     throw new Error("Organization integration policy requires read committed isolation");
   }
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`}, 0))`,
-  );
-  const [workspace] = await rawRows(
-    tx,
-    sql`select id from workspaces where id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid for key share`,
-  );
-  if (!workspace) throw new Error("Organization integration policy workspace scope invalid");
 }
 
 async function read(
@@ -60,13 +61,22 @@ async function read(
 export async function getOrganizationIntegrationPolicy(
   db: Database,
   inputScope: OrganizationIntegrationPolicyScope,
+  authorize: AuthorizeOrganizationIntegrationPolicyAdministration,
 ): Promise<OrganizationIntegrationPolicy> {
   const scope = policyScope.parse(inputScope);
+  const actor = await authorize();
+  if (actor.accountId.toLowerCase() !== scope.accountId || !actor.subjectId)
+    throw new Error("Canonical organization administrator required");
   return withRlsContext(
     db,
-    scope,
+    { ...scope, workspaceId: null },
     async (tx) => {
-      await fence(tx, scope);
+      await requireReadCommitted(tx);
+      await setSubjectRlsContext(tx, actor.subjectId);
+      // Live authority only: no policy or organization advisory lock on reads.
+      await tx.execute(
+        sql`select opengeni_private.assert_organization_integration_policy_administrator(${scope.accountId}::uuid, ${actor.subjectId})`,
+      );
       return read(tx, scope);
     },
     undefined,
@@ -74,6 +84,10 @@ export async function getOrganizationIntegrationPolicy(
   );
 }
 
+/** Call before acquiring membership/workspace/credential locks in any enclosing
+ * transaction. The SQL operation owns policy-exclusive -> membership -> admin
+ * row order; it never locks a workspace and rejects acquisition-lock upgrades.
+ */
 export async function updateOrganizationIntegrationPolicy(
   db: Database,
   inputScope: OrganizationIntegrationPolicyScope,
@@ -87,13 +101,13 @@ export async function updateOrganizationIntegrationPolicy(
     throw new Error("Canonical organization administrator required");
   return withRlsContext(
     db,
-    scope,
+    { ...scope, workspaceId: null },
     async (tx) => {
-      await fence(tx, scope);
+      await requireReadCommitted(tx);
       await setSubjectRlsContext(tx, actor.subjectId);
       const [row] = await rawRows<{ result: unknown }>(
         tx,
-        sql`select opengeni_private.update_organization_integration_policy(${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${actor.subjectId}, ${JSON.stringify(request)}::jsonb) as result`,
+        sql`select opengeni_private.update_organization_integration_policy(${scope.accountId}::uuid, ${actor.subjectId}, ${JSON.stringify(request)}::jsonb) as result`,
       );
       return OrganizationIntegrationPolicy.parse(row?.result);
     },
@@ -102,8 +116,14 @@ export async function updateOrganizationIntegrationPolicy(
   );
 }
 
-/** Requires read committed isolation. Call BEFORE any acquisition effects or workspace/credential row locks. When
- * passed an existing transaction, its caller must already follow that prefix order.
+/** Requires read committed isolation. The shared policy fence precedes EVERY
+ * organization-membership, workspace/tenancy, and credential lock. In particular,
+ * persistProviderOAuthConnection may take the membership fence inside acquire.
+ * Policy writers take exclusive policy -> membership -> live administrator rows,
+ * and never workspace rows. Ordinary connection lifecycle writers do not take
+ * the policy fence. A caller passing an existing transaction must honor this
+ * prefix. Never administer policy inside or after an acquisition in that transaction:
+ * the SQL writer rejects shared-to-exclusive upgrades rather than risking deadlock.
  * All final persistence must use tx, never a separate connection. No automatic
  * retries: external effects cannot be rolled back. For slow external preparation,
  * preflight separately and use this guard for final persistence. Existing execution,
@@ -111,11 +131,17 @@ export async function updateOrganizationIntegrationPolicy(
  */
 export async function withOrganizationIntegrationAcquisition<T>(
   db: Database,
-  inputScope: OrganizationIntegrationPolicyScope,
+  inputScope: OrganizationIntegrationAcquisitionScope,
   integrationKeys: readonly (string | null)[],
   acquire: (tx: Database) => Promise<T>,
 ): Promise<T> {
-  const scope = policyScope.parse(inputScope);
+  const requested = acquisitionScope.parse(inputScope);
+  // Non-locking authoritative resolution before any new lock; repeat under the
+  // policy fence below so a moved/deleted workspace cannot retain stale scope.
+  const resolved = await rlsContextForWorkspace(db, requested.workspaceId);
+  if (resolved.accountId !== requested.accountId)
+    throw new Error("Organization integration policy workspace scope invalid");
+  const scope = { accountId: resolved.accountId, workspaceId: requested.workspaceId };
   // Snapshot caller classification so mutation while awaiting cannot change checks.
   const keys = [...integrationKeys];
   if (!keys.length)
@@ -124,13 +150,29 @@ export async function withOrganizationIntegrationAcquisition<T>(
     db,
     scope,
     async (tx) => {
-      await fence(tx, scope);
+      await requireReadCommitted(tx);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock_shared(hashtextextended(${`organization-integration-policy:${scope.accountId}`}, 0))`,
+      );
+      // No row lock here: the existing writer owns its canonical membership ->
+      // workspace prefix. All policy checks and callback writes share this tx.
+      const [workspace] = await rawRows(
+        tx,
+        sql`select id from workspaces where id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid`,
+      );
+      if (!workspace) throw new Error("Organization integration policy workspace scope invalid");
       const assert = async () => {
         const policy = await read(tx, scope);
         for (const key of keys) assertOrganizationIntegrationAllowed(policy, key);
       };
       await assert();
       const result = await acquire(tx);
+      const [finalWorkspace] = await rawRows(
+        tx,
+        sql`select id from workspaces where id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid for key share`,
+      );
+      if (!finalWorkspace)
+        throw new Error("Organization integration policy workspace scope changed before commit");
       await assert();
       return result;
     },

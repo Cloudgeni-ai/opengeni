@@ -487,7 +487,15 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     privateRoutines: [
       {
-        name: "update_organization_integration_policy(uuid, uuid, text, jsonb)",
+        name: "update_organization_integration_policy(uuid, text, jsonb)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      {
+        name: "assert_organization_integration_policy_administrator(uuid, text)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,

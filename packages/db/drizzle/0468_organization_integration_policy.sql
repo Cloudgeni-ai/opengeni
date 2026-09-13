@@ -45,17 +45,46 @@ CREATE POLICY organization_integration_policy_operation_account ON organization_
 
 -- This is a live fence, not authentication. The application must verify canonical
 -- administrator provenance before selecting the subject, including on replay.
-CREATE FUNCTION opengeni_private.update_organization_integration_policy(
-  p_account uuid, p_workspace uuid, p_actor text, p_request jsonb
-) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+CREATE FUNCTION opengeni_private.assert_organization_integration_policy_administrator(
+  p_account uuid, p_actor text
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
 DECLARE
   previous_marker text := current_setting('opengeni.organization_tenancy_lifecycle', true);
-  permissions_value jsonb; member_id uuid; prior organization_integration_policy_operations%ROWTYPE;
-  current_revision bigint; expected_revision bigint; operation_value uuid; result_value jsonb;
+  permissions_value jsonb; member_id uuid;
 BEGIN
-  IF p_account IS NULL OR p_workspace IS NULL OR p_actor IS NULL
+  IF p_account IS NULL OR p_actor IS NULL
     OR p_account IS DISTINCT FROM opengeni_private.current_account_id()
-    OR p_workspace IS DISTINCT FROM opengeni_private.current_workspace_id()
+    OR p_actor IS DISTINCT FROM opengeni_private.current_subject_id() THEN
+    RAISE EXCEPTION 'integration policy scope invalid' USING ERRCODE = '42501';
+  END IF;
+  IF p_actor LIKE 'api_key:%' THEN
+    SELECT permissions INTO permissions_value FROM api_keys
+      WHERE account_id = p_account AND 'api_key:' || id::text = p_actor
+        AND credential_kind = 'organization' AND workspace_id IS NULL AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > clock_timestamp()) FOR SHARE;
+    IF NOT coalesce(permissions_value ? 'workspace:admin', false) THEN
+      RAISE EXCEPTION 'organization administrator required' USING ERRCODE = '42501';
+    END IF;
+  ELSE
+    PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_private_session_settings', true);
+    SELECT id INTO member_id FROM organization_memberships
+      WHERE account_id = p_account AND subject_id = p_actor AND status = 'active' AND role IN ('owner','admin') FOR SHARE;
+    PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker, ''), true);
+    IF member_id IS NULL THEN RAISE EXCEPTION 'organization administrator required' USING ERRCODE = '42501'; END IF;
+  END IF;
+END $body$;
+REVOKE ALL ON FUNCTION opengeni_private.assert_organization_integration_policy_administrator(uuid,text) FROM PUBLIC;
+
+CREATE FUNCTION opengeni_private.update_organization_integration_policy(
+  p_account uuid, p_actor text, p_request jsonb
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+DECLARE
+  prior organization_integration_policy_operations%ROWTYPE;
+  current_revision bigint; expected_revision bigint; operation_value uuid; result_value jsonb;
+  policy_lock bigint := hashtextextended('organization-integration-policy:' || p_account::text, 0);
+BEGIN
+  IF p_account IS NULL OR p_actor IS NULL
+    OR p_account IS DISTINCT FROM opengeni_private.current_account_id()
     OR p_actor IS DISTINCT FROM opengeni_private.current_subject_id() THEN
     RAISE EXCEPTION 'integration policy scope invalid' USING ERRCODE = '42501';
   END IF;
@@ -78,26 +107,20 @@ BEGIN
     OR (SELECT count(*) <> count(DISTINCT k) FROM jsonb_array_elements(p_request -> 'allowedIntegrationKeys') k) THEN
     RAISE EXCEPTION 'integration policy request invalid' USING ERRCODE = '22023';
   END IF;
-  -- Canonical organization prefix BEFORE workspace, credential, membership locks.
-  -- Never acquire managed_accounts FOR UPDATE: ordinary workspace FK writers need it.
-  PERFORM pg_advisory_xact_lock(hashtextextended('organization-membership:' || p_account::text, 0));
-  PERFORM 1 FROM workspaces WHERE id = p_workspace AND account_id = p_account FOR KEY SHARE;
-  IF NOT FOUND THEN RAISE EXCEPTION 'workspace scope invalid' USING ERRCODE = '42501'; END IF;
-  IF p_actor LIKE 'api_key:%' THEN
-    SELECT permissions INTO permissions_value FROM api_keys
-      WHERE account_id = p_account AND 'api_key:' || id::text = p_actor
-        AND credential_kind = 'organization' AND workspace_id IS NULL AND revoked_at IS NULL
-        AND (expires_at IS NULL OR expires_at > clock_timestamp()) FOR SHARE;
-    IF NOT coalesce(permissions_value ? 'workspace:admin', false) THEN
-      RAISE EXCEPTION 'organization administrator required' USING ERRCODE = '42501';
-    END IF;
-  ELSE
-    PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_private_session_settings', true);
-    SELECT id INTO member_id FROM organization_memberships
-      WHERE account_id = p_account AND subject_id = p_actor AND status = 'active' AND role IN ('owner','admin') FOR SHARE;
-    PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker, ''), true);
-    IF member_id IS NULL THEN RAISE EXCEPTION 'organization administrator required' USING ERRCODE = '42501'; END IF;
+  -- Never upgrade a shared acquisition fence: two upgrading acquisitions deadlock.
+  -- This also detects a shared fence retained by a released nested savepoint.
+  IF EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+    AND mode = 'ShareLock' AND granted AND objsubid = 1
+    AND classid = ((policy_lock >> 32) & 4294967295)::oid
+    AND objid = (policy_lock & 4294967295)::oid) THEN
+    RAISE EXCEPTION 'policy mutation cannot upgrade an acquisition fence' USING ERRCODE = '55000';
   END IF;
+  -- Policy BEFORE membership: acquisition callbacks such as personal OAuth take
+  -- membership themselves. The inverse order cycles with their shared policy lock.
+  -- No workspace row is required or locked by this organization-only operation.
+  PERFORM pg_advisory_xact_lock(policy_lock);
+  PERFORM pg_advisory_xact_lock(hashtextextended('organization-membership:' || p_account::text, 0));
+  PERFORM opengeni_private.assert_organization_integration_policy_administrator(p_account, p_actor);
   SELECT * INTO prior FROM organization_integration_policy_operations
     WHERE account_id = p_account AND operation_id = operation_value;
   IF FOUND THEN
@@ -119,9 +142,10 @@ BEGIN
     VALUES (p_account, operation_value, p_actor, p_request, result_value);
   RETURN result_value;
 END $body$;
-REVOKE ALL ON FUNCTION opengeni_private.update_organization_integration_policy(uuid,uuid,text,jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.update_organization_integration_policy(uuid,text,jsonb) FROM PUBLIC;
 -- Explicit pg_temp LAST prevents temporary relation shadowing in the definer.
 DO $safe_path$
 BEGIN
-  EXECUTE format('ALTER FUNCTION opengeni_private.update_organization_integration_policy(uuid,uuid,text,jsonb) SET search_path = pg_catalog, %I, pg_temp', current_schema());
+  EXECUTE format('ALTER FUNCTION opengeni_private.update_organization_integration_policy(uuid,text,jsonb) SET search_path = pg_catalog, %I, pg_temp', current_schema());
+  EXECUTE format('ALTER FUNCTION opengeni_private.assert_organization_integration_policy_administrator(uuid,text) SET search_path = pg_catalog, %I, pg_temp', current_schema());
 END $safe_path$;

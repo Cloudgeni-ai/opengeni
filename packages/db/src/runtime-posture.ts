@@ -2171,31 +2171,32 @@ export function evaluateRuntimeDatabasePosture(
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
   if (tableByName.has("organization_integration_policies")) {
-    const routines = posture.privateRoutines.filter(
-      (routine) =>
-        routine.name === "update_organization_integration_policy(uuid, uuid, text, jsonb)",
-    );
-    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
-    const searchPaths = new Set([
-      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
-      `search_path=pg_catalog, ${targetSchema}, pg_temp`,
-    ]);
-    const routine = routines[0];
-    if (
-      routines.length !== 1 ||
-      !routine?.execute ||
-      routine.publicExecute ||
-      !routine.securityDefiner ||
-      !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
-      [
-        "organization_integration_policies",
-        "organization_integration_policy_operations",
-        "organization_memberships",
-        "api_keys",
-        "workspaces",
-      ].some((table) => tableByName.get(table)?.owner !== routine.owner)
-    ) {
-      violations.push("organization integration policy mutation capability is missing or unsafe");
+    for (const name of [
+      "update_organization_integration_policy(uuid, text, jsonb)",
+      "assert_organization_integration_policy_administrator(uuid, text)",
+    ]) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+      ]);
+      const routine = routines[0];
+      if (
+        routines.length !== 1 ||
+        !routine?.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
+        [
+          "organization_integration_policies",
+          "organization_integration_policy_operations",
+          "organization_memberships",
+          "api_keys",
+        ].some((table) => tableByName.get(table)?.owner !== routine.owner)
+      ) {
+        violations.push("organization integration policy mutation capability is missing or unsafe");
+      }
     }
   }
   const actualRlsTables = new Set(
