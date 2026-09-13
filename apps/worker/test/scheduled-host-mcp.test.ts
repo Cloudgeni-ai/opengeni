@@ -248,7 +248,7 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
         name: "Scheduled resolver",
         prefix: "test",
         keyHash: createHash("sha256").update(token).digest("hex"),
-        permissions: ["account:admin"],
+        permissions: ["workspace:admin"],
       });
       resolverActor = { accountId: owner.accountId, subjectId: `api_key:${key.id}` };
       await mutateHostMcpResolver(client.db, resolverActor, {
