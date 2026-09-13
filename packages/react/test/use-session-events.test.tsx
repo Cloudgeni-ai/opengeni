@@ -1364,6 +1364,86 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
+  test("newer page rejection preserves history and publishes the original error until explicit recovery", async () => {
+    const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
+    const failure = new Error("Sign in again to read this session");
+    let rejectNext = false;
+    const { client, listCalls } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (rejectNext) {
+          rejectNext = false;
+          throw failure;
+        }
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    await actRun(() => hook.result.current.loadOldest());
+    const before = hook.result.current;
+    rejectNext = true;
+    await actRun(async () => {
+      await expect(hook.result.current.loadNewer()).rejects.toBe(failure);
+    });
+    expect(hook.result.current.error).toBe(failure);
+    expect(hook.result.current.events).toBe(before.events);
+    expect(hook.result.current.lastSequence).toBe(before.lastSequence);
+    expect(hook.result.current.hasNewer).toBe(true);
+    expect(hook.result.current.loadingNewer).toBe(false);
+    const failedCursor = listCalls.at(-1)?.after;
+    await actRun(() => hook.result.current.loadNewer());
+    expect(listCalls.at(-1)?.after).toBe(failedCursor);
+    expect(hook.result.current.error).toBeNull();
+    const sequences = hook.result.current.events.map((row) => row.sequence);
+    expect(sequences).toEqual([...new Set(sequences)].sort((a, b) => a - b));
+    expect(sequences.at(-1)).toBeGreaterThan(before.events.at(-1)!.sequence);
+    await hook.unmount();
+  });
+
+  test("late newer page rejection cannot publish into a replacement session", async () => {
+    const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
+    let reject!: (reason: Error) => void;
+    let holdNext = false;
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (holdNext) {
+          holdNext = false;
+          return await new Promise<SessionEvent[]>((_resolve, rejectPromise) => {
+            reject = rejectPromise;
+          });
+        }
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      (id: string) => useSessionEvents(id, { client, workspaceId: WORKSPACE_ID }),
+      SESSION_ID,
+    );
+    await flush(20);
+    await actRun(() => hook.result.current.loadOldest());
+    holdNext = true;
+    let pending!: Promise<boolean>;
+    await actRun(() => {
+      pending = hook.result.current.loadNewer();
+    });
+    await hook.rerender(SECOND_SESSION_ID);
+    await flush(20);
+    const replacement = hook.result.current.events;
+    await actRun(async () => {
+      reject(new Error("previous session unavailable"));
+      expect(await pending).toBe(false);
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.events).toBe(replacement);
+    expect(hook.result.current.loadingNewer).toBe(false);
+    await hook.unmount();
+  });
+
   test("loadNewer pages forward; jumpToLatest reloads the live tip", async () => {
     const store = Array.from({ length: 12_000 }, (_, index) => event(index + 1));
     const { client, listCalls, streamCalls } = scriptedClient({ store });
