@@ -6,6 +6,7 @@ import {
   DEFAULT_INTEGRATION_RESPONSE_BYTES,
   DEFAULT_INTEGRATION_TIMEOUT_MS,
   MAX_INTEGRATION_SPEC_BYTES,
+  MAX_CURATED_INTEGRATION_SPEC_BYTES,
   MAX_INTEGRATION_TOOLS,
   fetchWithDeadline,
   readIntegrationResponse,
@@ -102,12 +103,25 @@ const forbiddenParameterHeaders = new Set([
   "transfer-encoding",
 ]);
 
-export function parseOpenApiDocument(source: string | Uint8Array): Record<string, unknown> {
+export function parseOpenApiDocument(
+  source: string | Uint8Array,
+  options: { maxBytes?: number } = {},
+): Record<string, unknown> {
+  const maxBytes = options.maxBytes ?? MAX_INTEGRATION_SPEC_BYTES;
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > MAX_CURATED_INTEGRATION_SPEC_BYTES
+  ) {
+    throw new RangeError(
+      `OpenAPI parser limit must be between 1 and ${MAX_CURATED_INTEGRATION_SPEC_BYTES} bytes`,
+    );
+  }
   const bytes = typeof source === "string" ? Buffer.byteLength(source) : source.byteLength;
-  if (bytes === 0 || bytes > MAX_INTEGRATION_SPEC_BYTES) {
+  if (bytes === 0 || bytes > maxBytes) {
     throw new IntegrationProtocolError(
       "openapi_spec_size",
-      `OpenAPI document must be between 1 and ${MAX_INTEGRATION_SPEC_BYTES} bytes`,
+      `OpenAPI document must be between 1 and ${maxBytes} bytes`,
     );
   }
   const text =

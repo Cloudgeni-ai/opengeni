@@ -22,6 +22,7 @@ export type IntegrationDefinitionSource =
       kind: "openapi";
       url: string;
       operationPathPrefixes?: readonly string[];
+      excludedOperationPathPrefixes?: readonly string[];
     }>;
 
 export interface IntegrationDefinition {
@@ -314,6 +315,8 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
     operationPathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
+    // Excel's nested workbook API is a separate surface, not file management.
+    excludedOperationPathPrefixes: ["/drives/{drive-id}/items/{driveItem-id}/workbook"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   authentication: microsoftOAuth(["Files.ReadWrite.All", "Sites.ReadWrite.All"]),
@@ -350,12 +353,17 @@ export function filterOpenApiDocumentForDefinition(
     return document;
   }
   const operationPathPrefixes = definition.source.operationPathPrefixes;
+  const excludedOperationPathPrefixes = definition.source.excludedOperationPathPrefixes ?? [];
   if (!isRecord(document.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
   }
   const paths = Object.fromEntries(
-    Object.entries(document.paths).filter(([path]) =>
-      operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)),
+    Object.entries(document.paths).filter(
+      ([path]) =>
+        operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)) &&
+        !excludedOperationPathPrefixes.some(
+          (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+        ),
     ),
   );
   if (Object.keys(paths).length === 0) {

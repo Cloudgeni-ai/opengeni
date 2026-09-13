@@ -10,6 +10,7 @@ import {
   googleDiscoveryToOpenApi,
   integrationDefinitionById,
   parseOpenApiDocument,
+  MAX_CURATED_INTEGRATION_SPEC_BYTES,
   type IntegrationCredentialResolver,
   type IntegrationInvocationAuthority,
   type IntegrationTransport,
@@ -21,8 +22,6 @@ import {
   type IntegrationSource,
 } from "@opengeni/contracts";
 import type { StoredApiIntegrationRevision } from "@opengeni/db";
-
-const MAX_CURATED_DEFINITION_SOURCE_BYTES = 64 * 1024 * 1024;
 
 export type ApiIntegrationConnectionDescriptor = {
   id: string;
@@ -86,13 +85,18 @@ async function resolveDefinition(
   const bytes = await fetchIntegrationSourceDocument(
     input.transport,
     definition.source.url,
-    MAX_CURATED_DEFINITION_SOURCE_BYTES,
+    MAX_CURATED_INTEGRATION_SPEC_BYTES,
   );
   let document: Record<string, unknown>;
   if (definition.source.kind === "google_discovery") {
     document = googleDiscoveryToOpenApi(JSON.parse(new TextDecoder().decode(bytes)));
   } else {
-    document = filterOpenApiDocumentForDefinition(parseOpenApiDocument(bytes), definition);
+    document = filterOpenApiDocumentForDefinition(
+      parseOpenApiDocument(bytes, {
+        maxBytes: MAX_CURATED_INTEGRATION_SPEC_BYTES,
+      }),
+      definition,
+    );
   }
   const identity = integrationInstallationIdentity("openapi", definition.id, definition.source.url);
   const revision = compileOpenApiRevision(document, {
