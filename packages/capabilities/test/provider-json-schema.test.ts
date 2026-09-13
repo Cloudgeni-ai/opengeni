@@ -1,5 +1,35 @@
 import { expect, test } from "bun:test";
 import { compileOpenApiRevision, createOpenApiMcpServer, invokeOpenApiOperation } from "../src";
+import {
+  MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
+  MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  filterOpenApiDocumentForDefinition,
+} from "../src";
+
+test("Contacts and OneDrive request delegated scopes supported by personal accounts", () => {
+  expect(MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION.authentication.scopes).toEqual([
+    "offline_access",
+    "User.Read",
+    "Contacts.ReadWrite",
+    "People.Read",
+  ]);
+  expect(MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes).toEqual([
+    "offline_access",
+    "User.Read",
+    "Files.ReadWrite.All",
+  ]);
+  const filtered = filterOpenApiDocumentForDefinition(
+    {
+      paths: {
+        "/me/drive": {},
+        "/me/followedSites": {},
+        "/me/followedSites/{id}": {},
+      },
+    },
+    MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  );
+  expect(Object.keys(filtered.paths as object)).toEqual(["/me/drive"]);
+});
 
 const document = {
   openapi: "3.1.0",

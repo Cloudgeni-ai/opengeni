@@ -306,7 +306,7 @@ export const MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION: IntegrationDefin
     operationPathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read.All"]),
+  authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read"]),
   facets: [accountIdentityFacet("microsoft")],
 };
 
@@ -320,12 +320,12 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
     schemaMode: "provider_validated_json",
-    operationPathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
+    operationPathPrefixes: ["/me/drive", "/me/drives", "/drives", "/shares"],
     // Excel's nested workbook API is a separate surface, not file management.
     excludedOperationPathPrefixes: ["/drives/{drive-id}/items/{driveItem-id}/workbook"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  authentication: microsoftOAuth(["Files.ReadWrite.All", "Sites.ReadWrite.All"]),
+  authentication: microsoftOAuth(["Files.ReadWrite.All"]),
   facets: [driveKnowledgeFacet("microsoft-onedrive"), accountIdentityFacet("microsoft")],
 };
 

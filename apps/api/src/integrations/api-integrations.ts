@@ -236,8 +236,8 @@ function resolvedPreview(input: {
   requiredScopes: string[];
   authScheme: Record<string, unknown>;
 }): ResolvedApiIntegrationPreview {
-  // Pretty JSON is a conservative upper bound for PostgreSQL jsonb::text,
-  // whose separators add whitespace beyond compact JSON. Refuse during preview,
+  // Include whitespace headroom for PostgreSQL jsonb::text when estimating size.
+  // The database constraint remains authoritative. Refuse during preview,
   // before the execute-once installation claims an operation it cannot persist.
   if (Buffer.byteLength(JSON.stringify(input.revision, null, 2), "utf8") > 4 * 1024 * 1024) {
     throw new Error("Compiled integration exceeds the supported 4 MiB storage limit");

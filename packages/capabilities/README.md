@@ -48,3 +48,8 @@ are omitted because the adapter returns an HTTP-result envelope. This avoids
 expanding Graph's recursive entity graph into every operation. Custom OpenAPI
 sources retain their full schema compilation. The mode participates in the
 immutable revision digest; preview refuses revisions above the persistence bound.
+
+Contacts uses delegated `People.Read` for `/me/people`. OneDrive uses
+`Files.ReadWrite.All` and excludes the organization-only followed-sites API;
+neither requires organization-wide people or SharePoint permissions merely to
+connect a personal Microsoft account.
