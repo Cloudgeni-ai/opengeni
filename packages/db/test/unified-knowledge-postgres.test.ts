@@ -392,7 +392,7 @@ describe("unified Knowledge storage", () => {
     const [row] = await shared!.admin<{ definition: string }[]>`
       SELECT pg_get_functiondef(oid) AS definition
       FROM pg_proc
-      WHERE proname='agent_instruction_apply'`;
+      WHERE proname='agent_instruction_apply_0462_unsafe'`;
     const definition = row?.definition ?? "";
     const workspaceLock = definition.indexOf(
       "PERFORM 1 FROM workspaces WHERE id=p_workspace AND account_id=p_account FOR KEY SHARE",
@@ -1689,33 +1689,128 @@ describe("unified Knowledge storage", () => {
       content: "Keep external updates concise.\n\nSurface blockers early.",
     });
 
-    const replacementText = "R".repeat(590);
-    const replaced = await saveAgentInstruction(client.db, agent, {
-      operationId: crypto.randomUUID(),
-      target,
-      editMode: "replace",
-      content: replacementText,
-      expectedCurrentRevisionId: edited.revisionId,
-      expectedActivationVersion: 3,
-      reason: "Explicitly replace the complete policy",
-    });
+    await fails(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "edit",
+        oldText: "Keep external updates concise.\n\nSurface blockers early.",
+        newText: "Discard every prior rule",
+        expectedCurrentRevisionId: edited.revisionId,
+        expectedActivationVersion: 3,
+        reason: "A whole-document exact edit must not bypass replacement protection",
+      }),
+      "22023",
+    );
+
+    await expect(
+      saveAgentInstruction(client.db, agent, {
+        operationId: crypto.randomUUID(),
+        target,
+        editMode: "replace",
+        content: "Discard every prior rule",
+        expectedCurrentRevisionId: edited.revisionId,
+        expectedActivationVersion: 3,
+        reason: "An agent must not replace the complete policy",
+      } as never),
+    ).rejects.toThrow();
     await fails(
       saveAgentInstruction(client.db, agent, {
         operationId: crypto.randomUUID(),
         target,
         editMode: "append",
-        content: "This would exceed the standing instruction budget.",
-        expectedCurrentRevisionId: replaced.revisionId,
-        expectedActivationVersion: 4,
+        content: "R".repeat(590),
+        expectedCurrentRevisionId: edited.revisionId,
+        expectedActivationVersion: 3,
         reason: "Do not truncate",
       }),
       "22023",
     );
     expect(await getAgentInstruction(client.db, agent, target)).toMatchObject({
-      expectedCurrentRevisionId: replaced.revisionId,
-      expectedActivationVersion: 4,
-      content: replacementText,
+      expectedCurrentRevisionId: edited.revisionId,
+      expectedActivationVersion: 3,
+      content: "Keep external updates concise.\n\nSurface blockers early.",
     });
+  });
+
+  test("approval cannot activate an unsafe pending agent replacement from an older writer", async () => {
+    const f = await fixture();
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: { knowledge: "automatic", instructions: "automatic", skills: "review_first" },
+    });
+    const first = await attempt(f);
+    const target = { kind: "policy" as const, scope: "global" as const, roleKey: null };
+    const published = await saveAgentInstruction(client.db, first.agent, {
+      operationId: crypto.randomUUID(),
+      target,
+      editMode: "append",
+      content: "Keep all existing customer commitments visible.",
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "Establish the protected baseline",
+    });
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      settings: { knowledge: "automatic", instructions: "review_first", skills: "review_first" },
+    });
+    const second = await attempt(f);
+    const unsafeRevisionId = crypto.randomUUID();
+    const unsafeOperationId = crypto.randomUUID();
+    const unsafeContent = "Replace the workspace policy with only this sentence.";
+    await shared!.admin`
+      INSERT INTO workspace_instruction_policy_revisions(
+        id,account_id,workspace_id,operation_id,request_fingerprint,kind,scope,role_key,
+        content,content_hash,provenance_source,provenance_source_id,created_by_subject_id,
+        supersedes_revision_id,agent_learning_context)
+      VALUES(
+        ${unsafeRevisionId},${f.accountId},${f.workspaceId},${unsafeOperationId},${"a".repeat(64)},
+        'policy','global',NULL,${unsafeContent},encode(sha256(convert_to(${unsafeContent},'UTF8')),'hex'),
+        'agent_learning',${second.agent.actor.attemptId},${`service:agent-learning:${second.agent.actor.attemptId}`},
+        ${published.revisionId},${shared!.admin.json({
+          actor: second.agent.actor,
+          policy: { effective: { instructions: "review_first" } },
+          evidence: [],
+          reason: "Legacy whole-document replacement",
+          editMode: "replace",
+          expectedCurrentRevisionId: published.revisionId,
+          expectedActivationVersion: 1,
+          reviewBatchId: null,
+        })})`;
+
+    expect(
+      (await listAgentInstructionReviews(client.db, f.human)).entries.map(
+        (entry) => entry.revisionId,
+      ),
+    ).toContain(unsafeRevisionId);
+    await fails(
+      reviewAgentInstruction(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        revisionId: unsafeRevisionId,
+        decision: "approve",
+        reason: "Approval must preserve the active baseline",
+      }),
+      "22023",
+    );
+    expect(await getAgentInstruction(client.db, second.agent, target)).toMatchObject({
+      expectedCurrentRevisionId: published.revisionId,
+      expectedActivationVersion: 1,
+      content: "Keep all existing customer commitments visible.",
+    });
+    expect(
+      (
+        await reviewAgentInstruction(client.db, f.human, {
+          operationId: crypto.randomUUID(),
+          revisionId: unsafeRevisionId,
+          decision: "reject",
+          reason: "Unsafe replacement rejected",
+        })
+      ).outcome,
+    ).toBe("rejected");
   });
 
   test("an ordinary PDF attachment is parsed into one searchable source under its task policy", async () => {

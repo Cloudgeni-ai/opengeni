@@ -61,6 +61,7 @@ const withheldMigrationNames = [
   // Patches the instruction writer introduced by 0461 and therefore belongs
   // behind the same historical replay boundary.
   "0462_agent_instruction_non_destructive_edits.sql",
+  "0466_agent_instruction_activation_preservation.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
