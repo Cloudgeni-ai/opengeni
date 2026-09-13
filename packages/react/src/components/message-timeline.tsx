@@ -465,11 +465,14 @@ export function MessageTimeline({
   const newerScopeRef = useRef(newerBoundaryKey);
   newerScopeRef.current = newerBoundaryKey;
   const newerAttemptRef = useRef<{ pending: boolean } | null>(null);
+  const newerRetryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [newerRetryPending, setNewerRetryPending] = useState(false);
   const [newerFailure, setNewerFailure] = useState<{ key: string; message: string } | null>(null);
   useEffect(() => {
     newerScopeRef.current = newerBoundaryKey;
     newerAttemptRef.current = null;
     setNewerFailure(null);
+    setNewerRetryPending(false);
     return () => {
       newerScopeRef.current = "";
       newerAttemptRef.current = null;
@@ -487,7 +490,7 @@ export function MessageTimeline({
       }
       const attempt = { pending: true };
       newerAttemptRef.current = attempt;
-      setNewerFailure(null);
+      if (explicitRetry) setNewerRetryPending(true);
       const isCurrent = () =>
         newerAttemptRef.current === attempt && newerScopeRef.current === newerBoundaryKey;
       // Both synchronous host errors and rejected promises belong to this
@@ -496,11 +499,20 @@ export function MessageTimeline({
         .then(() => (isCurrent() ? onLoadNewer() : undefined))
         .then(
           () => {
-            if (isCurrent()) newerAttemptRef.current = null;
+            if (!isCurrent()) return;
+            newerAttemptRef.current = null;
+            // The successful page removes the recovery control. Return focus
+            // to the reading surface without moving the reader's viewport.
+            if (document.activeElement === newerRetryButtonRef.current) {
+              scrollRef.current?.focus({ preventScroll: true });
+            }
+            setNewerFailure(null);
+            setNewerRetryPending(false);
           },
           (reason: unknown) => {
             if (!isCurrent()) return;
             attempt.pending = false;
+            setNewerRetryPending(false);
             setNewerFailure({
               key: newerBoundaryKey,
               message: reason instanceof Error ? reason.message : String(reason),
@@ -2119,13 +2131,17 @@ export function MessageTimeline({
                                 Couldn’t load later activity. {newerFailure.message}
                               </p>
                               <button
+                                ref={newerRetryButtonRef}
                                 type="button"
                                 data-og-retry-newer=""
                                 className="min-h-11 rounded-og-md border border-og-border px-3 py-2 text-og-fg hover:bg-og-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
-                                disabled={loadingNewer}
+                                aria-disabled={loadingNewer || newerRetryPending}
+                                aria-busy={newerRetryPending}
                                 onClick={() => requestNewer(true)}
                               >
-                                Retry later activity
+                                {newerRetryPending
+                                  ? "Retrying later activity…"
+                                  : "Retry later activity"}
                               </button>
                             </div>
                           ) : null}

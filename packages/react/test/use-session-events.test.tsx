@@ -1404,6 +1404,52 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
+  test("older rows do not resolve a newer failure, but explicit start/latest navigation clears it", async () => {
+    const store = Array.from({ length: SESSION_EVENT_BROWSER_MAX_COUNT + 51 }, (_, index) =>
+      event(index + 1),
+    );
+    const failure = new Error("Later history unavailable");
+    let rejectNext = false;
+    const { client } = scriptedClient({
+      store,
+      streamEvents: store,
+      listEvents: async (options) => {
+        if (rejectNext) {
+          rejectNext = false;
+          throw failure;
+        }
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID, replay: "full" }),
+      undefined,
+    );
+    await flush(100);
+    await actRun(() => hook.result.current.loadOlder());
+    expect(hook.result.current.hasNewer).toBe(true);
+    rejectNext = true;
+    await actRun(async () => {
+      await expect(hook.result.current.loadNewer()).rejects.toBe(failure);
+    });
+    const oldest = hook.result.current.events[0]!.sequence;
+    await actRun(() => hook.result.current.loadOlder());
+    expect(hook.result.current.events[0]!.sequence).toBeLessThan(oldest);
+    expect(hook.result.current.error).toBe(failure);
+    await actRun(() => hook.result.current.jumpToLatest());
+    expect(hook.result.current.error).toBeNull();
+    await flush(100);
+    await actRun(() => hook.result.current.loadOlder());
+    expect(hook.result.current.hasOlder).toBe(true);
+    rejectNext = true;
+    await actRun(async () => {
+      await expect(hook.result.current.loadNewer()).rejects.toBe(failure);
+    });
+    await actRun(() => hook.result.current.loadOldest());
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("late newer page rejection cannot publish into a replacement session", async () => {
     const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
     let reject!: (reason: Error) => void;
@@ -1420,7 +1466,7 @@ describe("useSessionEvents", () => {
         return listPage(store, options);
       },
     });
-    const hook = await renderHook(
+    const hook = await renderHook<UseSessionEventsResult, string>(
       (id: string) => useSessionEvents(id, { client, workspaceId: WORKSPACE_ID }),
       SESSION_ID,
     );

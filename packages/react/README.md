@@ -604,9 +604,10 @@ state remains application-owned; durable draft and session state remain in
   `onLoadNewer={loadNewer}` (or return its promise from your wrapper) to
   `MessageTimeline`: it catches the request failure, shows the error and an
   explicit **Retry later activity** action, and does not automatically retry
-  the failed boundary. A successful retry or history navigation clears that
-  failure. Late failures from a previous session are ignored. A host that
-  discards the promise must handle its own rejected request.
+  the failed boundary. A successful retry, jump to the start/latest window,
+  or session change clears that failure. Loading older rows alone does not
+  resolve a failed newer read. Late failures from a previous session are ignored.
+  A host that discards the promise must handle its own rejected request.
 - `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction

@@ -232,15 +232,19 @@ test.each(["promise", "synchronous"])(
     await intersect(r.container);
     expect(calls).toBe(1);
     const retry = r.container.querySelector<HTMLButtonElement>("[data-og-retry-newer]")!;
+    retry.focus();
     await actRun(() => {
       retry.click();
       retry.click();
     });
     expect(calls).toBe(2);
+    expect(document.activeElement).toBe(retry);
+    expect(retry.getAttribute("aria-busy")).toBe("true");
     await intersect(r.container);
     expect(calls).toBe(2);
     await actRun(() => recovery.resolve(true));
     expect(r.container.querySelector("[data-og-newer-error]")).toBeNull();
+    expect(document.activeElement).toBe(r.container.querySelector("[data-og-timeline-scroller]"));
     await intersect(r.container);
     expect(calls).toBe(3);
     await r.unmount();
