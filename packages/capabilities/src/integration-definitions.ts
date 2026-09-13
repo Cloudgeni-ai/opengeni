@@ -23,6 +23,8 @@ export type IntegrationDefinitionSource =
       url: string;
       operationPathPrefixes?: readonly string[];
       excludedOperationPathPrefixes?: readonly string[];
+      /** Expose JSON bodies without expanding the provider entity graph. */
+      schemaMode?: "provider_validated_json";
     }>;
 
 export interface IntegrationDefinition {
@@ -214,6 +216,7 @@ export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinitio
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: [
       "/me/messages",
       "/me/mailFolders",
@@ -238,6 +241,7 @@ export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefin
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: [
       "/me/calendar",
       "/me/calendars",
@@ -298,6 +302,7 @@ export const MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION: IntegrationDefin
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
   },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
@@ -314,6 +319,7 @@ export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = 
   source: {
     kind: "openapi",
     url: MICROSOFT_GRAPH_OPENAPI_URL,
+    schemaMode: "provider_validated_json",
     operationPathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
     // Excel's nested workbook API is a separate surface, not file management.
     excludedOperationPathPrefixes: ["/drives/{drive-id}/items/{driveItem-id}/workbook"],

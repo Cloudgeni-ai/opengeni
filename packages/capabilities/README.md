@@ -37,3 +37,14 @@ Integration Definitions keep their existing local MCP adapters without
 claiming this descriptor. Google Drive remains one functional Integration row
 with its existing Connection and facet authority. See
 `docs/design/first-party-mcp-bridges.md`.
+
+## Curated Microsoft Graph schemas
+
+Microsoft definitions explicitly use `provider_validated_json`: JSON request
+bodies remain JSON values, and Graph validates their fields. Path/query/header
+schemas, required bodies, media types, scopes, destinations and write approvals
+are retained. Binary/text body schemas are retained. Optional response schemas
+are omitted because the adapter returns an HTTP-result envelope. This avoids
+expanding Graph's recursive entity graph into every operation. Custom OpenAPI
+sources retain their full schema compilation. The mode participates in the
+immutable revision digest; preview refuses revisions above the persistence bound.
