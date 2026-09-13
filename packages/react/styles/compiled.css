@@ -1785,6 +1785,9 @@
 :where(.og-root).max-w-md,:where(.og-root) .max-w-md {
     max-width: var(--container-md);
   }
+:where(.og-root).max-w-prose,:where(.og-root) .max-w-prose {
+    max-width: 65ch;
+  }
 :where(.og-root).max-w-sm,:where(.og-root) .max-w-sm {
     max-width: var(--container-sm);
   }
