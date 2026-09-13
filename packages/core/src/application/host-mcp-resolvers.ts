@@ -30,10 +30,9 @@ export async function hostMcpResolverForRequest(
     throw new HTTPException(422, { message: "invalid resolver identity" });
   const access = await requireAccessContext(context, deps);
   const service = accountScopedApiKeyWorkspaceAuthority(access);
-  const account = access.accountGrants.find(
-    (grant) => grant.accountId === id.data && grant.subjectId === access.subjectId,
-  );
-  if (!service || service.accountId !== id.data || !account?.permissions.includes("account:admin"))
+  // Full organization keys carry workspace:admin, not human account:admin.
+  // The stamped authority proves the exact organization service-key lane.
+  if (!service || service.accountId !== id.data || !service.permissions.includes("workspace:admin"))
     throw new HTTPException(403, {
       message: "resolver administration requires an organization service key",
     });
