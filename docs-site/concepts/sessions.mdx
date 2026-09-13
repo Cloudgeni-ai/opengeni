@@ -38,6 +38,24 @@ When a session is waiting on you (a tool approval or a structured question), a n
 
 A session can carry repositories, uploaded files, workspace documents, selected tools, and Skills. Tool selection is durable session state: an explicit tool list is taken verbatim, and omitting it selects the workspace default.
 
+## Artifacts
+
+The workspace **Artifacts** page brings together Sites, documents, spreadsheets,
+presentations, images, and published files. Use its type filters, title search,
+sorting, and grid or list view to find an output without reopening its conversation.
+The session's Artifacts panel shows outputs associated with that conversation.
+
+Published images are retained in workspace storage and can display directly in
+chat. Opening them does not require starting the compute sandbox. A file merely
+created in the filesystem is not published automatically: the agent must publish
+the output it intends to deliver. Input attachments and temporary files do not
+automatically become library entries.
+
+Images have image previews; types without an available static preview show a
+type/title fallback. Opening a Site uses its existing interactive viewer. Small
+inline HTML visualizations can remain in chat; save one as a Site when it should
+also be discoverable in the workspace library.
+
 ## Child sessions
 
 An agent can spawn child sessions for parallel or delegated work. Children run as ordinary sessions, and their terminal results are delivered back to the parent as durable input the parent's next turn sees.

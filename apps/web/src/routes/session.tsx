@@ -9,6 +9,7 @@ import { loadSessionFeedback } from "../lib/session-feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
+import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
@@ -1146,22 +1147,34 @@ function SessionDock(props: {
   const [artifactRequest, setArtifactRequest] = useState<{
     sessionId: string;
     artifactId: string;
+    artifactKind?: SessionEditableArtifactSummary["modality"];
     requestId: number;
     tab: string;
   } | null>(null);
   const currentArtifactRequest =
     artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
   const artifactSummaries = [...artifactState.artifacts];
-  // A just-published Site may be linked before discovery refresh completes, or
+  // A just-published artifact may be linked before discovery refresh completes, or
   // belong to another session in this workspace. The viewer still authorizes its read.
   if (
     currentArtifactRequest &&
-    !artifactSummaries.some((item) => item.id === currentArtifactRequest.artifactId)
+    !artifactSummaries.some(
+      (item) =>
+        item.id === currentArtifactRequest.artifactId &&
+        (!currentArtifactRequest.artifactKind ||
+          item.modality === currentArtifactRequest.artifactKind ||
+          (currentArtifactRequest.artifactKind === "file" && item.modality === "image")),
+    )
   ) {
     artifactSummaries.push({
       id: currentArtifactRequest.artifactId,
-      modality: "site",
-      title: "Site",
+      modality: currentArtifactRequest.artifactKind ?? "site",
+      title:
+        currentArtifactRequest.artifactKind === "image"
+          ? "Image"
+          : currentArtifactRequest.artifactKind === "file"
+            ? "File"
+            : "Site",
     });
   }
   const trailingTabs: WorkspaceTab[] = [
@@ -1227,12 +1240,26 @@ function SessionDock(props: {
             // links retain the normal full-page destination.
             if (
               target.editable &&
-              !artifactSummaries.some((item) => item.id === target.id && item.modality !== "site")
+              !artifactSummaries.some(
+                (item) => item.id === target.id && isEditableArtifactKind(item.modality),
+              )
             )
               return false;
             setArtifactRequest((previous) => ({
               sessionId: props.sessionId,
               artifactId: target.id,
+              artifactKind:
+                target.kind === "file"
+                  ? (artifactSummaries.find(
+                      (item) =>
+                        item.id === target.id &&
+                        (item.modality === "file" || item.modality === "image"),
+                    )?.modality ?? "file")
+                  : target.editable
+                    ? artifactSummaries.find(
+                        (item) => item.id === target.id && isEditableArtifactKind(item.modality),
+                      )?.modality
+                    : "site",
               requestId: (previous?.requestId ?? 0) + 1,
               tab: "artifacts",
             }));
@@ -1277,6 +1304,7 @@ function useSessionEditableArtifactSummaries(input: {
   const [retrySequence, setRetrySequence] = useState(0);
   const [loaded, setLoaded] = useState<{
     key: string;
+    client: typeof context.client;
     status: SessionEditableArtifactsStatus;
     artifacts: readonly SessionEditableArtifactSummary[];
   } | null>(null);
@@ -1284,12 +1312,18 @@ function useSessionEditableArtifactSummaries(input: {
   useEffect(() => {
     let current = true;
     setLoaded((previous) =>
-      previous?.key === authorityKey && previous.status === "ready"
+      previous?.key === authorityKey &&
+      previous.client === context.client &&
+      previous.status === "ready"
         ? previous
         : {
             key: authorityKey,
+            client: context.client,
             status: "loading",
-            artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+            artifacts:
+              previous?.key === authorityKey && previous.client === context.client
+                ? previous.artifacts
+                : [],
           },
     );
     void import("@/lib/session-artifact-discovery")
@@ -1298,11 +1332,17 @@ function useSessionEditableArtifactSummaries(input: {
           input.workspaceId,
           input.sessionId,
           () => current,
+          context.client,
         );
         if (current) {
           setLoaded((previous) => ({
             key: authorityKey,
-            ...reconcile(previous?.key === authorityKey ? previous.artifacts : []),
+            client: context.client,
+            ...reconcile(
+              previous?.key === authorityKey && previous.client === context.client
+                ? previous.artifacts
+                : [],
+            ),
           }));
         }
       })
@@ -1310,8 +1350,12 @@ function useSessionEditableArtifactSummaries(input: {
         if (!current) return;
         setLoaded((previous) => ({
           key: authorityKey,
+          client: context.client,
           status: "error",
-          artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+          artifacts:
+            previous?.key === authorityKey && previous.client === context.client
+              ? previous.artifacts
+              : [],
         }));
       });
     return () => {
@@ -1320,10 +1364,17 @@ function useSessionEditableArtifactSummaries(input: {
       // unhandled AbortError from the SDK/fetch boundary on every mount.
       current = false;
     };
-  }, [authorityKey, input.refreshSequence, input.sessionId, input.workspaceId, retrySequence]);
+  }, [
+    authorityKey,
+    context.client,
+    input.refreshSequence,
+    input.sessionId,
+    input.workspaceId,
+    retrySequence,
+  ]);
 
   const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
-  return loaded?.key === authorityKey
+  return loaded?.key === authorityKey && loaded.client === context.client
     ? { artifacts: loaded.artifacts, status: loaded.status, retry }
     : { artifacts: [], status: "loading", retry };
 }
@@ -2172,11 +2223,13 @@ function SessionChatPane(props: {
             workspaceId={props.session.workspaceId}
             artifactId={artifactId}
             alt={image.alt}
+            showArtifactLink
+            fromSession={props.session.id}
           />
         </Suspense>
       ) : null;
     },
-    [props.session.workspaceId],
+    [props.session.workspaceId, props.session.id],
   );
   const renderInteractiveBlock = useCallback(
     (block: { kind: "html" | "site"; content: string }) => (

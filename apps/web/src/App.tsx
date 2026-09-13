@@ -133,6 +133,10 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyRetainedArtifactRoute = lazyRouteComponent(
+  () => import("@/routes/retained-artifact"),
+  "RetainedArtifactRoute",
+);
 const LazyIdentityLinkRoute = lazyRouteComponent(
   () => import("@/routes/identity-link"),
   "IdentityLinkRoute",
@@ -455,6 +459,12 @@ const workspaceEditableArtifactRoute = createRoute({
   validateSearch: artifactReturnSearch,
   component: EditableArtifact,
 });
+const workspaceRetainedArtifactRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts/files/$artifactId",
+  validateSearch: artifactReturnSearch,
+  component: RetainedArtifact,
+});
 const workspaceOrganizationRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "organization",
@@ -523,6 +533,7 @@ const routeTree = rootRoute.addChildren([
     workspaceMemoryRoute,
     workspaceStateRoute,
     workspaceArtifactsRoute,
+    workspaceRetainedArtifactRoute,
     workspaceArtifactDetailRoute,
     workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
@@ -756,6 +767,12 @@ function EditableArtifact() {
   const params = workspaceEditableArtifactRoute.useParams();
   const { fromSession } = workspaceEditableArtifactRoute.useSearch();
   return <LazyEditableArtifactRoute {...params} fromSession={fromSession} />;
+}
+
+function RetainedArtifact() {
+  const params = workspaceRetainedArtifactRoute.useParams();
+  const { fromSession } = workspaceRetainedArtifactRoute.useSearch();
+  return <LazyRetainedArtifactRoute {...params} fromSession={fromSession} />;
 }
 
 function Organization() {

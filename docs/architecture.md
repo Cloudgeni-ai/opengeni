@@ -1280,6 +1280,12 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
+Workspace/session discovery shares `/artifact-catalog` across Sites, editable
+artifacts, generated images, and published files, preserving existing content
+authority. File provenance stays separate from bytes; `kind:id` identifies list
+entries. Browsing never executes Sites or wakes compute. See
+[`artifact-library.md`](artifact-library.md).
+
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).

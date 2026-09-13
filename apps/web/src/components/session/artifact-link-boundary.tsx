@@ -7,7 +7,7 @@ export function ArtifactLinkBoundary({
   children,
 }: {
   workspaceId: string;
-  onOpen: (artifact: { id: string; editable: boolean }) => boolean;
+  onOpen: (artifact: { id: string; editable: boolean; kind?: "file" }) => boolean;
   children: ReactNode;
 }) {
   return (

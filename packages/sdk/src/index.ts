@@ -1,3 +1,9 @@
+export type {
+  ArtifactCatalogKind,
+  ArtifactCatalogItem,
+  ArtifactCatalogListOptions,
+  ArtifactCatalogListResponse,
+} from "./artifact-catalog";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type {
