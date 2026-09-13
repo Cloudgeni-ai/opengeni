@@ -178,7 +178,12 @@ collection placement are separated under Details, collapsed until requested;
 following an evidence link keeps a Back path to
 the proposal. History expands separately alongside Details, above entry
 actions. Details is omitted when there is no supporting metadata. New entries show their proposed text, with long text expandable.
-Editing before approval and optional bulk selection remain available. A
+Workspace instruction review loads the current active instruction beside the
+complete proposed revision before enabling approval. If that comparison cannot
+be loaded, approval remains disabled. The activation ledger independently
+rejects legacy or explicit agent replacements that would discard the active
+instruction; reject those proposals and recreate them as an append or localized
+edit. Editing Knowledge before approval and optional bulk selection remain available. A
 selection of up to 100 exact revisions can be reviewed atomically. A complete
 loaded group of up to 100 entries has an Approve all action; larger groups use
 selections. Approval orders pending evidence before dependent findings. Rejected

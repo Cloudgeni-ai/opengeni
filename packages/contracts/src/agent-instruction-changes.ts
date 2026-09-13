@@ -3,7 +3,7 @@ import { AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "./agent-aut
 import { KnowledgeEntryEvidence } from "./knowledge-entries";
 import { WorkspaceInstructionPolicyTarget } from "./workspace-instruction-policies";
 
-export const AgentInstructionEditMode = z.enum(["append", "edit", "replace"]);
+export const AgentInstructionEditMode = z.enum(["append", "edit"]);
 export type AgentInstructionEditMode = z.infer<typeof AgentInstructionEditMode>;
 
 export const AgentInstructionSaveRequest = z
@@ -48,14 +48,14 @@ export const AgentInstructionSaveRequest = z
       context.addIssue({
         code: "custom",
         path: ["content"],
-        message: "Append and replace changes require non-empty content",
+        message: "Append changes require non-empty content",
       });
     }
     if (value.oldText !== undefined || value.newText !== undefined) {
       context.addIssue({
         code: "custom",
         path: [value.oldText !== undefined ? "oldText" : "newText"],
-        message: "Append and replace changes use content, not oldText or newText",
+        message: "Append changes use content, not oldText or newText",
       });
     }
   })
