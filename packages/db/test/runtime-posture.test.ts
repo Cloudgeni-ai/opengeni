@@ -487,6 +487,14 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     privateRoutines: [
       {
+        name: "update_organization_integration_policy(uuid, uuid, text, jsonb)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      {
         name: "workspace_rls_visible(uuid, uuid)",
         owner: "opengeni_migrator",
         execute: true,
@@ -683,6 +691,11 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 2
             : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
@@ -703,7 +716,14 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1 + 2;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1 + 2 + 2;
+      for (const table of [
+        "organization_integration_policies",
+        "organization_integration_policy_operations",
+      ] as const) {
+        expect(FORCE_RLS_TABLES).toContain(table);
+        expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT"]);
+      }
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_resolvers).toEqual(["SELECT", "INSERT", "UPDATE"]);
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_resolver_operations).toEqual(["SELECT", "INSERT"]);
       expect(FORCE_RLS_TABLES).toContain("mcp_operations");
@@ -830,6 +850,49 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("integration policy mutation requires a same-owner definer with a safe search path", () => {
+    const fixture = () => {
+      const posture = safePosture();
+      for (const name of [
+        "organization_integration_policies",
+        "organization_integration_policy_operations",
+        "organization_memberships",
+        "api_keys",
+        "workspaces",
+      ]) {
+        if (!posture.tables.some((table) => table.name === name))
+          posture.tables.push({ ...posture.tables[0]!, name });
+      }
+      return posture;
+    };
+    expect(evaluateRuntimeDatabasePosture(fixture(), options)).not.toContain(
+      "organization integration policy mutation capability is missing or unsafe",
+    );
+    for (const patch of [
+      { execute: false },
+      { publicExecute: true },
+      { securityDefiner: false },
+      { owner: "other_owner" },
+      { configuration: ["search_path=public"] },
+    ]) {
+      const posture = fixture();
+      const routine = posture.privateRoutines.find((candidate) =>
+        candidate.name.startsWith("update_organization_integration_policy("),
+      )!;
+      Object.assign(routine, patch);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "organization integration policy mutation capability is missing or unsafe",
+      );
+    }
+    const missing = fixture();
+    missing.privateRoutines = missing.privateRoutines.filter(
+      (candidate) => !candidate.name.startsWith("update_organization_integration_policy("),
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "organization integration policy mutation capability is missing or unsafe",
+    );
   });
 
   test("external membership operation seams require the live credential authority owner", () => {

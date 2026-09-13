@@ -888,6 +888,8 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -1300,6 +1302,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "preference_registry_events",
   "preference_registry_snapshots",
   "session_tenancy_activations",
@@ -2166,6 +2170,34 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  if (tableByName.has("organization_integration_policies")) {
+    const routines = posture.privateRoutines.filter(
+      (routine) =>
+        routine.name === "update_organization_integration_policy(uuid, uuid, text, jsonb)",
+    );
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+    ]);
+    const routine = routines[0];
+    if (
+      routines.length !== 1 ||
+      !routine?.execute ||
+      routine.publicExecute ||
+      !routine.securityDefiner ||
+      !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
+      [
+        "organization_integration_policies",
+        "organization_integration_policy_operations",
+        "organization_memberships",
+        "api_keys",
+        "workspaces",
+      ].some((table) => tableByName.get(table)?.owner !== routine.owner)
+    ) {
+      violations.push("organization integration policy mutation capability is missing or unsafe");
+    }
+  }
   const actualRlsTables = new Set(
     posture.tables.filter((table) => table.rlsEnabled).map((table) => table.name),
   );

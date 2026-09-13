@@ -1,0 +1,387 @@
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { createDb, withRlsContext, type DbClient } from "../src/database";
+import { sql } from "drizzle-orm";
+import postgres from "postgres";
+import { rawRows, setSubjectRlsContext } from "../src/database";
+import {
+  getOrganizationIntegrationPolicy,
+  updateOrganizationIntegrationPolicy,
+  withOrganizationIntegrationAcquisition,
+} from "../src/organization-integration-policy";
+
+let shared: SharedTestDatabase | null;
+let client: DbClient;
+const scope = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() };
+const other = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() };
+const keyId = crypto.randomUUID();
+const authorize = async () => ({ accountId: scope.accountId, subjectId: `api_key:${keyId}` });
+const request = (
+  expectedRevision: number,
+  mode: "restricted" | "unrestricted",
+  allowedIntegrationKeys: string[] = [],
+) => ({ expectedRevision, mode, allowedIntegrationKeys, operationId: crypto.randomUUID() });
+
+beforeAll(async () => {
+  // Optional dedicated, already migrated native fixture; never points at a live database.
+  const nativeAdmin = process.env.OPENGENI_INTEGRATION_POLICY_TEST_ADMIN_URL;
+  const nativeApp = process.env.OPENGENI_INTEGRATION_POLICY_TEST_APP_URL;
+  shared =
+    nativeAdmin && nativeApp
+      ? {
+          admin: postgres(nativeAdmin),
+          adminUrl: nativeAdmin,
+          appUrl: nativeApp,
+          release: async () => {
+            await shared?.admin.end();
+          },
+        }
+      : await acquireSharedTestDatabase("integration_policy");
+  if (!shared) throw new Error("Real PostgreSQL required for integration policy tests");
+  client = createDb(shared.appUrl);
+  for (const target of [scope, other]) {
+    await shared.admin`insert into managed_accounts (id, name) values (${target.accountId}, 'Example organization')`;
+    await shared.admin`insert into workspaces (id, account_id, name) values (${target.workspaceId}, ${target.accountId}, 'Example workspace')`;
+  }
+  await shared.admin`insert into api_keys (id, account_id, name, credential_kind, prefix, key_hash, permissions)
+    values (${keyId}, ${scope.accountId}, 'Example key', 'organization', 'example', ${crypto.randomUUID()}, '["workspace:admin"]'::jsonb)`;
+}, 120000);
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+});
+
+test("default, workspace isolation, exact replay, revision conflict, deny-all and unknown", async () => {
+  expect(await getOrganizationIntegrationPolicy(client.db, scope)).toEqual({
+    mode: "unrestricted",
+    allowedIntegrationKeys: [],
+    revision: 0,
+  });
+  await expect(
+    getOrganizationIntegrationPolicy(client.db, { ...scope, workspaceId: other.workspaceId }),
+  ).rejects.toThrow();
+  const first = request(0, "restricted", ["sample", "custom-mcp"]);
+  const result = await updateOrganizationIntegrationPolicy(client.db, scope, first, authorize);
+  expect(result.revision).toBe(1);
+  expect(await updateOrganizationIntegrationPolicy(client.db, scope, first, authorize)).toEqual(
+    result,
+  );
+  await expect(
+    updateOrganizationIntegrationPolicy(
+      client.db,
+      scope,
+      { ...first, mode: "unrestricted" },
+      authorize,
+    ),
+  ).rejects.toThrow();
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, request(0, "unrestricted"), authorize),
+  ).rejects.toThrow();
+  expect((await getOrganizationIntegrationPolicy(client.db, other)).revision).toBe(0);
+  await withOrganizationIntegrationAcquisition(
+    client.db,
+    scope,
+    ["sample", "custom-mcp"],
+    async () => undefined,
+  );
+  for (const key of [null, "unknown", "sample.example", "custom-openapi"]) {
+    let effect = false;
+    await expect(
+      withOrganizationIntegrationAcquisition(client.db, scope, [key], async () => {
+        effect = true;
+      }),
+    ).rejects.toThrow();
+    expect(effect).toBe(false);
+  }
+  await updateOrganizationIntegrationPolicy(client.db, scope, request(1, "restricted"), authorize);
+  await expect(
+    withOrganizationIntegrationAcquisition(client.db, scope, ["sample"], async () => undefined),
+  ).rejects.toThrow();
+  expect(await updateOrganizationIntegrationPolicy(client.db, scope, first, authorize)).toEqual(
+    result,
+  );
+});
+
+test("admin proof required and live key authority rechecked; direct DML unavailable", async () => {
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, request(2, "unrestricted"), async () => ({
+      accountId: other.accountId,
+      subjectId: `api_key:${keyId}`,
+    })),
+  ).rejects.toThrow();
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, request(2, "unrestricted"), async () => {
+      throw new Error("unverified caller");
+    }),
+  ).rejects.toThrow();
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, request(2, "unrestricted"), async () => ({
+      accountId: scope.accountId,
+      subjectId: "user:ordinary",
+    })),
+  ).rejects.toThrow();
+  await expect(
+    withRlsContext(client.db, scope, (tx) =>
+      tx.execute(sql`update organization_integration_policies set revision = 99`),
+    ),
+  ).rejects.toThrow();
+});
+
+test("acquisition fence serializes policy change until commit, then denies fresh acquisitions", async () => {
+  await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    request(2, "unrestricted"),
+    authorize,
+  );
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const acquisition = withOrganizationIntegrationAcquisition(
+    client.db,
+    { accountId: scope.accountId.toUpperCase(), workspaceId: scope.workspaceId.toUpperCase() },
+    [null],
+    async (tx) => {
+      await tx.execute(sql`select 1`);
+      entered();
+      await gate;
+    },
+  );
+  await started;
+  let settled = false;
+  const change = updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    request(3, "restricted"),
+    authorize,
+  ).then((result) => {
+    settled = true;
+    return result;
+  });
+  try {
+    let waiting = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const rows = await shared!
+        .admin`select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.datname=current_database() and l.locktype='advisory' and not l.granted`;
+      if (rows.length) {
+        waiting = true;
+        break;
+      }
+      await Bun.sleep(10);
+    }
+    expect(waiting).toBe(true);
+    expect(settled).toBe(false);
+  } finally {
+    release();
+    await acquisition;
+    await change;
+  }
+  await expect(
+    withOrganizationIntegrationAcquisition(client.db, scope, [null], async () => undefined),
+  ).rejects.toThrow();
+});
+
+test("same operation converges concurrently and replay still requires a live full organization key", async () => {
+  const before = await getOrganizationIntegrationPolicy(client.db, scope);
+  const operation = request(before.revision, "unrestricted");
+  const [left, right] = await Promise.all([
+    updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize),
+    updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize),
+  ]);
+  expect(left).toEqual(right);
+  expect(left.revision).toBe(before.revision + 1);
+  for (const permissions of [["account:admin"], ["members:manage"], []]) {
+    await shared!
+      .admin`update api_keys set permissions = ${JSON.stringify(permissions)}::jsonb where id = ${keyId}`;
+    await expect(
+      updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize),
+    ).rejects.toThrow();
+  }
+  await shared!
+    .admin`update api_keys set permissions = '["workspace:admin"]'::jsonb, revoked_at = now() where id = ${keyId}`;
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize),
+  ).rejects.toThrow();
+  await shared!
+    .admin`update api_keys set revoked_at = null, expires_at = now() - interval '1 second' where id = ${keyId}`;
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize),
+  ).rejects.toThrow();
+  await shared!
+    .admin`update api_keys set expires_at = null, credential_kind = 'workspace', workspace_id = ${scope.workspaceId} where id = ${keyId}`;
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize),
+  ).rejects.toThrow();
+  await shared!
+    .admin`update api_keys set credential_kind = 'organization', workspace_id = null where id = ${keyId}`;
+  expect(await updateOrganizationIntegrationPolicy(client.db, scope, operation, authorize)).toEqual(
+    left,
+  );
+});
+
+test("human administrator live membership, direct SQL scope, and RLS isolation", async () => {
+  const subjectId = "user:example-administrator";
+  const membershipId = crypto.randomUUID();
+  await shared!
+    .admin`insert into organization_memberships (id, account_id, subject_id, role, status, personal_workspace_id)
+    values (${membershipId}, ${other.accountId}, ${subjectId}, 'admin', 'active', ${other.workspaceId})`;
+  const human = async () => ({ accountId: other.accountId, subjectId });
+  const operation = request(0, "restricted", ["custom-graphql"]);
+  expect(
+    (await updateOrganizationIntegrationPolicy(client.db, other, operation, human)).revision,
+  ).toBe(1);
+  await shared!
+    .admin`update organization_memberships set role = 'member' where id = ${membershipId}`;
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, other, operation, human),
+  ).rejects.toThrow();
+  await shared!
+    .admin`update organization_memberships set role = 'admin', status = 'suspended' where id = ${membershipId}`;
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, other, operation, human),
+  ).rejects.toThrow();
+  await withRlsContext(client.db, scope, async (tx) => {
+    const rows = await rawRows(
+      tx,
+      sql`select account_id from organization_integration_policies where account_id = ${other.accountId}::uuid`,
+    );
+    expect(rows).toHaveLength(0);
+  });
+  await expect(
+    withRlsContext(client.db, scope, async (tx) => {
+      await setSubjectRlsContext(tx, `api_key:${keyId}`);
+      await tx.execute(
+        sql`select opengeni_private.update_organization_integration_policy(${other.accountId}::uuid, ${other.workspaceId}::uuid, ${`api_key:${keyId}`}, ${JSON.stringify(request(1, "unrestricted"))}::jsonb)`,
+      );
+    }),
+  ).rejects.toThrow();
+  const roles = await rawRows<{ rolsuper: boolean; rolbypassrls: boolean }>(
+    client.db,
+    sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
+  );
+  expect(roles[0]).toEqual({ rolsuper: false, rolbypassrls: false });
+});
+
+test("final check rolls back same-transaction restriction and acquisition effects", async () => {
+  const before = await getOrganizationIntegrationPolicy(client.db, scope);
+  expect(before.mode).toBe("unrestricted");
+  const operation = request(before.revision, "restricted");
+  await expect(
+    withOrganizationIntegrationAcquisition(client.db, scope, [null], async (tx) => {
+      await tx.execute(
+        sql`update workspaces set name = 'Must roll back' where id = ${scope.workspaceId}::uuid`,
+      );
+      await updateOrganizationIntegrationPolicy(tx, scope, operation, authorize);
+    }),
+  ).rejects.toThrow();
+  expect(await getOrganizationIntegrationPolicy(client.db, scope)).toEqual(before);
+  const [workspace] = await shared!
+    .admin`select name from workspaces where id = ${scope.workspaceId}`;
+  expect(workspace!.name).toBe("Example workspace");
+  await expect(
+    withOrganizationIntegrationAcquisition(client.db, scope, [], async () => undefined),
+  ).rejects.toThrow();
+});
+
+test("a policy change winning the fence denies the waiting acquisition before effects", async () => {
+  const before = await getOrganizationIntegrationPolicy(client.db, scope);
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const writer = withRlsContext(
+    client.db,
+    scope,
+    async (tx) => {
+      await updateOrganizationIntegrationPolicy(
+        tx,
+        scope,
+        request(before.revision, "restricted"),
+        authorize,
+      );
+      entered();
+      await gate;
+    },
+    undefined,
+    "none",
+  );
+  await started;
+  let effect = false;
+  const acquisition = withOrganizationIntegrationAcquisition(
+    client.db,
+    scope,
+    ["sample"],
+    async () => {
+      effect = true;
+    },
+  );
+  // Attach the rejection handler before releasing the writer.
+  const denied = acquisition.then(
+    () => false,
+    () => true,
+  );
+  try {
+    let waiting = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const rows = await shared!
+        .admin`select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.datname=current_database() and l.locktype='advisory' and not l.granted`;
+      if (rows.length) {
+        waiting = true;
+        break;
+      }
+      await Bun.sleep(10);
+    }
+    expect(waiting).toBe(true);
+    expect(effect).toBe(false);
+  } finally {
+    release();
+    await writer;
+    expect(await denied).toBe(true);
+  }
+  expect(effect).toBe(false);
+});
+
+test("local subject name is not DB admin authority without the canonical live membership", async () => {
+  const local = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() };
+  await shared!
+    .admin`insert into managed_accounts (id, name, external_source, external_id) values (${local.accountId}, 'Local example', 'opengeni:local', 'default')`;
+  await shared!
+    .admin`insert into workspaces (id, account_id, name) values (${local.workspaceId}, ${local.accountId}, 'Local example')`;
+  const verifiedLocal = async () => ({ accountId: local.accountId, subjectId: "dev" });
+  const operation = request(0, "restricted");
+  await expect(
+    updateOrganizationIntegrationPolicy(client.db, local, operation, verifiedLocal),
+  ).rejects.toThrow();
+  await shared!
+    .admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id) values (${local.accountId}, 'dev', 'owner', 'active', ${local.workspaceId})`;
+  expect(
+    (await updateOrganizationIntegrationPolicy(client.db, local, operation, verifiedLocal))
+      .revision,
+  ).toBe(1);
+});
+
+test("repeatable-read transactions cannot acquire using a stale policy snapshot", async () => {
+  let effect = false;
+  await expect(
+    withRlsContext(
+      client.db,
+      scope,
+      (tx) =>
+        withOrganizationIntegrationAcquisition(tx, scope, ["sample"], async () => {
+          effect = true;
+        }),
+      { isolationLevel: "repeatable read" },
+      "none",
+    ),
+  ).rejects.toThrow("read committed");
+  expect(effect).toBe(false);
+});

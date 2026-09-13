@@ -26,6 +26,7 @@ import { defineConfig } from "tsup";
 // than inlined. drizzle-orm and postgres stay normal runtime deps, externalized.
 export default defineConfig({
   entry: {
+    "organization-integration-policy": "src/organization-integration-policy.ts",
     "workspace-tool-defaults": "src/workspace-tool-defaults.ts",
     index: "src/index.ts",
     "managed-auth-session-sets": "src/managed-auth-session-sets.ts",
