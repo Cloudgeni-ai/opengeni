@@ -26,6 +26,7 @@ import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerHostMcpBindingRoutes } from "../src/routes/host-mcp-bindings";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 import { registerHostMcpResolverRoutes } from "../src/routes/host-mcp-resolvers";
+import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 
 let shared: SharedTestDatabase;
 let db: DbClient;
@@ -69,7 +70,7 @@ test.each(["configured", "session-local", "native"] as const)(
       name: "Host admission fixture",
       prefix: "test",
       keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: [...permissions],
+      permissions: organizationApiKeyPermissionsForAccess("full"),
     });
     const identities = await Promise.all(
       ["alice", "bob"].map(async (externalId) => {
