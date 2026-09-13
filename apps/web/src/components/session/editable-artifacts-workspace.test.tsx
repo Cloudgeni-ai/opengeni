@@ -10,7 +10,9 @@ import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 mock.module("@/routes/editable-artifact", () => ({
-  EditableArtifactRoute: () => null,
+  EditableArtifactRoute: ({ embedded }: { embedded?: boolean }) => (
+    <div data-native-preview>{embedded ? "Embedded native artifact" : "Full native artifact"}</div>
+  ),
 }));
 mock.module("@/routes/artifacts", () => ({
   ArtifactDetailRoute: ({ artifactId, embedded }: { artifactId: string; embedded?: boolean }) => (
@@ -109,6 +111,9 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       ).toBe(`document:${id}`);
       expect(container.querySelector("[data-site-preview]")).toBeNull();
       expect(selections).toEqual([`document:${id}`]);
+      expect(container.querySelector("[data-native-preview]")?.textContent).toBe(
+        "Embedded native artifact",
+      );
     } finally {
       await act(async () => root.unmount());
       container.remove();

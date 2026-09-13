@@ -42,10 +42,21 @@ const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
 /** First-party consumer of the exact public SDK/React editable-artifact API. */
 export function EditableArtifactRoute({
   fromSession,
+  embedded = false,
   ...params
-}: Readonly<{ workspaceId: string; artifactId: string; fromSession?: string | undefined }>) {
+}: Readonly<{
+  workspaceId: string;
+  artifactId: string;
+  fromSession?: string | undefined;
+  embedded?: boolean;
+}>) {
+  if (embedded) return <EditableArtifactContent {...params} />;
   return (
-    <ArtifactSessionPage workspaceId={params.workspaceId} fromSession={fromSession}>
+    <ArtifactSessionPage
+      workspaceId={params.workspaceId}
+      fromSession={fromSession}
+      showAllArtifacts
+    >
       <EditableArtifactContent {...params} />
     </ArtifactSessionPage>
   );

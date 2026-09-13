@@ -20,6 +20,7 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 const sessionId = "33333333-3333-4333-8333-333333333333";
 const artifactId = "22222222-2222-4222-8222-222222222222";
 const sessionPath = `/workspaces/${workspaceId}/sessions/${sessionId}`;
+const fixtureSearch = new URLSearchParams(location.search);
 let opened = false;
 function Preview() {
   return (
@@ -108,8 +109,29 @@ const artifact = createRoute({
     );
   },
 });
+const native = createRoute({
+  getParentRoute: () => root,
+  path: "/workspaces/$workspaceId/artifacts/editable/$artifactId",
+  validateSearch: artifactReturnSearch,
+  component: () => {
+    const { fromSession } = native.useSearch();
+    return (
+      <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession} showAllArtifacts>
+        <div className="min-h-0 flex-1 p-4">
+          <h1>Native {fixtureSearch.get("modality")} editor</h1>
+          <p>{fixtureSearch.get("state") ?? "Ready"}</p>
+        </div>
+      </ArtifactSessionPage>
+    );
+  },
+});
+const library = createRoute({
+  getParentRoute: () => root,
+  path: "/workspaces/$workspaceId/artifacts",
+  component: () => <h1>Workspace artifacts</h1>,
+});
 const router = createRouter({
-  routeTree: root.addChildren([session, artifact]),
-  history: createMemoryHistory({ initialEntries: [sessionPath] }),
+  routeTree: root.addChildren([session, artifact, native, library]),
+  history: createMemoryHistory({ initialEntries: [fixtureSearch.get("entry") ?? sessionPath] }),
 });
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);
