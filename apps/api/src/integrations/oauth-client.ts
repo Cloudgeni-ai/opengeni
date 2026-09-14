@@ -1,5 +1,5 @@
 import { safeReturnPath } from "./oauth-return-path";
-import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
+import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -340,6 +340,41 @@ export async function claimOAuthAcquisition(
       },
     }),
   );
+}
+
+type IntegrationSourceSelection = Record<string, unknown> & {
+  id: string;
+  syncEnabled: boolean;
+  readPolicy: "allow" | "ask" | "block";
+};
+
+/** Compare server-bound selections, not provider classification. Removing a
+ * source, disabling sync, or narrowing its read permission acquires no authority.
+ * Generation/timestamp bookkeeping does not turn an unchanged save into setup. */
+export function integrationSourceSelectionRequiresAcquisition(
+  previous: readonly IntegrationSourceSelection[],
+  requested: readonly IntegrationSourceSelection[],
+): boolean {
+  const rank = { block: 0, ask: 1, allow: 2 };
+  const config = (source: IntegrationSourceSelection) => {
+    const {
+      selectedAt: _selectedAt,
+      configGeneration: _generation,
+      syncEnabled: _enabled,
+      readPolicy: _readPolicy,
+      ...binding
+    } = source;
+    return stableJson(binding);
+  };
+  return requested.some((source) => {
+    const existing = previous.find((candidate) => candidate.id === source.id);
+    return (
+      !existing ||
+      (!existing.syncEnabled && source.syncEnabled) ||
+      rank[source.readPolicy] > rank[existing.readPolicy] ||
+      config(existing) !== config(source)
+    );
+  });
 }
 
 export async function finishOAuthAcquisition(

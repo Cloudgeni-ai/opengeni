@@ -9,11 +9,15 @@ import {
   getConnectAttempt,
   listConnectionsMetadata,
   type DbClient,
+  installApiIntegration,
+  configureIntegrationFacet,
+  encryptEnvironmentValue,
+  getConnectionMetadata,
 } from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
 import { FIKEN_CREDENTIAL_ROLE, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import type { ConnectAttempt } from "@opengeni/contracts/connect";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -23,9 +27,31 @@ import {
   claimOAuthAcquisition,
   finishOAuthAcquisition,
   startMcpOAuth,
+  integrationSourceSelectionRequiresAcquisition,
 } from "../src/integrations/oauth-client";
-import { startAtlassianOAuth } from "../src/integrations/atlassian";
-import { startGoogleDriveOAuth } from "../src/integrations/google-drive";
+import {
+  startAtlassianOAuth,
+  saveAtlassianSources,
+  transitionAtlassianLifecycle,
+} from "../src/integrations/atlassian";
+import {
+  startGoogleDriveOAuth,
+  saveGoogleDriveSource,
+  saveGoogleDriveFacetSource,
+  transitionGoogleDriveLifecycle,
+} from "../src/integrations/google-drive";
+import {
+  ATLASSIAN_CREDENTIAL_LABEL,
+  ATLASSIAN_CREDENTIAL_ROLE,
+  ATLASSIAN_PROVIDER_DOMAIN,
+  ATLASSIAN_REQUIRED_SCOPES,
+} from "@opengeni/contracts/atlassian";
+import {
+  GOOGLE_DRIVE_CREDENTIAL_LABEL,
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GOOGLE_DRIVE_READONLY_SCOPE,
+} from "@opengeni/contracts/google-drive";
 import {
   completeFikenOAuthCallback,
   prepareFikenTokenInstall,
@@ -431,4 +457,369 @@ test("linked Fiken completed receipt and provider denial remain readable under r
     "cancelled",
   );
   expect(exchanges).toBe(1);
+});
+
+test("source comparison preserves nochange/removal/narrowing and detects new authority", () => {
+  const source = {
+    id: "source",
+    syncEnabled: true,
+    readPolicy: "ask" as const,
+    syncCadence: "hourly",
+    destination: { workspaceId: "a" },
+    selectedAt: "old",
+    configGeneration: 1,
+  };
+  expect(integrationSourceSelectionRequiresAcquisition([source], [])).toBe(false);
+  expect(
+    integrationSourceSelectionRequiresAcquisition(
+      [source],
+      [{ ...source, selectedAt: "new", configGeneration: 2 }],
+    ),
+  ).toBe(false);
+  expect(
+    integrationSourceSelectionRequiresAcquisition(
+      [source],
+      [{ ...source, syncEnabled: false, readPolicy: "block" }],
+    ),
+  ).toBe(false);
+  expect(integrationSourceSelectionRequiresAcquisition([], [source])).toBe(true);
+  expect(
+    integrationSourceSelectionRequiresAcquisition([source], [{ ...source, readPolicy: "allow" }]),
+  ).toBe(true);
+  expect(
+    integrationSourceSelectionRequiresAcquisition([{ ...source, syncEnabled: false }], [source]),
+  ).toBe(true);
+  expect(
+    integrationSourceSelectionRequiresAcquisition(
+      [source],
+      [{ ...source, destination: { workspaceId: "b" } }],
+    ),
+  ).toBe(true);
+});
+
+async function sourceConnection(
+  provider: "google-drive" | "atlassian",
+  state: "paused" | "active",
+  credentialEncrypted = "fixture-ciphertext",
+) {
+  const lifecycle = { state, recoverable: true, observedAt: new Date().toISOString() };
+  const metadata =
+    provider === "google-drive"
+      ? {
+          credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+          credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+          googlePermissionId: "fixture-permission",
+          googleEmail: "fixture@example.test",
+          googleDisplayName: "Fixture",
+          accessMode: "readonly",
+          verifiedAt: new Date().toISOString(),
+          lifecycle,
+          selectedSources: [],
+        }
+      : {
+          credentialRole: ATLASSIAN_CREDENTIAL_ROLE,
+          credentialLabel: ATLASSIAN_CREDENTIAL_LABEL,
+          atlassianAccountId: "fixture-account",
+          displayName: "Fixture",
+          accessMode: "readonly",
+          verifiedAt: new Date().toISOString(),
+          lifecycle,
+          selectedSources: [],
+          sites: [
+            {
+              cloudId: "fixture-cloud",
+              name: "Fixture",
+              url: "https://fixture.atlassian.net",
+              products: [],
+            },
+          ],
+        };
+  return createConnection(client.db, {
+    ...scope,
+    providerDomain:
+      provider === "google-drive" ? GOOGLE_DRIVE_PROVIDER_DOMAIN : ATLASSIAN_PROVIDER_DOMAIN,
+    kind: "oauth2",
+    credentialEncrypted,
+    metadata,
+    grantedScopes:
+      provider === "google-drive" ? [GOOGLE_DRIVE_READONLY_SCOPE] : [...ATLASSIAN_REQUIRED_SCOPES],
+    createdBySubjectId: scope.subjectId,
+  });
+}
+
+test("provider resume gates paused acquisition, preserving already-active convergence and pause", async () => {
+  for (const provider of ["google-drive", "atlassian"] as const) {
+    const api = deps();
+    const transition =
+      provider === "google-drive" ? transitionGoogleDriveLifecycle : transitionAtlassianLifecycle;
+    const connection = await sourceConnection(provider, "paused");
+    const input = {
+      workspaceId: scope.workspaceId,
+      subjectId: scope.subjectId,
+      connectionId: connection.id,
+      payload: { action: "resume" as const, expectedVersion: connection.version },
+    };
+    await allow([]);
+    await expect(transition(api, input)).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
+    await allow([provider]);
+    const resumed = await transition(api, input);
+    await allow([]);
+    const nochange = await transition(api, {
+      ...input,
+      payload: { action: "resume", expectedVersion: resumed.version },
+    });
+    expect(nochange.metadata.lifecycle).toMatchObject({ state: "active" });
+    const paused = await transition(api, {
+      ...input,
+      payload: { action: "pause", expectedVersion: nochange.version },
+    });
+    expect(paused.metadata.lifecycle).toMatchObject({ state: "paused" });
+  }
+});
+
+test("legacy provider source additions deny before provider use while empty selection remains available", async () => {
+  await allow([]);
+  const api = deps();
+  let providerCalls = 0;
+  const unexpectedProvider = async () => {
+    providerCalls++;
+    throw new Error("Unexpected source provider request");
+  };
+  api.googleDriveFetch = unexpectedProvider;
+  api.atlassianFetch = unexpectedProvider;
+  for (const provider of ["google-drive", "atlassian"] as const) {
+    const connection = await sourceConnection(provider, "active");
+    const source =
+      provider === "google-drive"
+        ? {
+            id: "folder-fixture",
+            name: "Folder",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          }
+        : {
+            id: "source-fixture",
+            cloudId: "fixture-cloud",
+            siteName: "Fixture",
+            siteUrl: "https://fixture.atlassian.net",
+            resourceId: "project-fixture",
+            key: "TEST",
+            name: "Project",
+            kind: "jira_project",
+          };
+    const save = provider === "google-drive" ? saveGoogleDriveSource : saveAtlassianSources;
+    const input = {
+      ...scope,
+      connectionId: connection.id,
+      grant: scope as never,
+      canManageOrganizationDestination: false,
+      canManageWorkspaceDestination: true,
+      canManagePersonalDestination: false,
+      payload: {
+        sources: [source],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        syncEnabled: false,
+        readPolicy: "allow",
+      },
+    };
+    await expect(save(api, input)).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
+    const cleared = await save(api, { ...input, payload: { ...input.payload, sources: [] } });
+    expect(cleared.metadata.selectedSources).toEqual([]);
+  }
+  expect(providerCalls).toBe(0);
+});
+
+test("Drive source facet preserves receipts/nochange/reduction and cannot forge curated provenance", async () => {
+  await allow(["custom:openapi"]);
+  const api = deps();
+  api.googleDriveFetch = async () => {
+    throw new Error("No provider request expected for receipt/nochange/reduction");
+  };
+  const connection = await sourceConnection("google-drive", "active");
+  const definitionId = `policy-drive-${crypto.randomUUID()}`;
+  const capabilityId = `api:${definitionId}`;
+  const installed = await installApiIntegration(client.db, {
+    ...scope,
+    capabilityId,
+    definitionId,
+    definitionProvenance: "workspace",
+    pluginKey: `integration/${definitionId}`,
+    serverId: definitionId.replaceAll("-", "_"),
+    name: "Drive facet fixture",
+    providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+    protocol: "openapi",
+    baseUrl: "https://www.googleapis.com/drive/v3/",
+    connectionId: connection.id,
+    authScheme: { kind: "none" },
+    requiredScopes: [],
+    ownership: "either",
+    facetDefinitions: [
+      {
+        facetKey: "source",
+        kind: "knowledge_source",
+        configSchema: { type: "object" },
+        capabilities: { provider: "google-drive", connectionRequired: true },
+      },
+    ],
+    revision: {
+      id: `openapi:${"2".repeat(24)}`,
+      protocol: "openapi",
+      definitionId,
+      contentSha256: "2".repeat(64),
+      source: { url: "https://fixture.example.test/openapi.json" },
+      title: "Drive facet fixture",
+      tools: [
+        {
+          id: "list_files",
+          operationKey: "listFiles",
+          name: "List files",
+          description: "List files",
+          inputSchema: { type: "object", properties: {} },
+          safety: "read",
+          approvalMode: "never",
+          deprecated: false,
+        },
+      ],
+      bindings: {
+        list_files: {
+          method: "get",
+          pathTemplate: "/files",
+          serverUrl: "https://www.googleapis.com/drive/v3/",
+          parameters: [],
+        },
+      },
+    },
+  });
+  const sources = ["folder-one", "folder-two"].map((id) => ({
+    id,
+    name: id,
+    mimeType: "application/vnd.google-apps.folder",
+    driveId: null,
+  }));
+  const config = {
+    sources: sources.map(({ driveId: _driveId, ...source }) => ({
+      ...source,
+      sourceKind: "folder",
+      includeDescendants: true,
+    })),
+    destination: {
+      authorityKind: "workspace",
+      authorityAccountId: scope.accountId,
+      authorityWorkspaceId: scope.workspaceId,
+    },
+    syncCadence: "hourly",
+    readPolicy: "allow",
+  };
+  const idempotencyKey = crypto.randomUUID();
+  const identity = {
+    ...scope,
+    capabilityId,
+    instanceKey: installed.instanceKey,
+    facetKey: "source",
+  };
+  const seeded = await configureIntegrationFacet(client.db, {
+    ...identity,
+    displayName: "Fixture source",
+    config,
+    idempotencyKey,
+  });
+  const input = {
+    ...identity,
+    canManageOrganizationDestination: false,
+    canManageWorkspaceDestination: true,
+    canManagePersonalDestination: false,
+    payload: {
+      sources,
+      destination: { authorityKind: "workspace", collectionId: null },
+      syncCadence: "hourly",
+      syncEnabled: false,
+      readPolicy: "allow",
+      idempotencyKey,
+    },
+  };
+  await allow([]);
+  const replayed = await saveGoogleDriveFacetSource(api, input);
+  expect(replayed.binding?.id).toBe(seeded.binding?.id);
+  const unchanged = await saveGoogleDriveFacetSource(api, {
+    ...input,
+    payload: { ...input.payload, idempotencyKey: crypto.randomUUID() },
+  });
+  expect(unchanged.binding?.id).toBe(seeded.binding?.id);
+  const reduced = await saveGoogleDriveFacetSource(api, {
+    ...input,
+    payload: {
+      ...input.payload,
+      sources: sources.slice(0, 1),
+      expectedVersion: unchanged.binding!.version,
+      idempotencyKey: crypto.randomUUID(),
+    },
+  });
+  expect(reduced.binding?.config.sources).toHaveLength(1);
+  await allow(["google-drive"]);
+  await expect(
+    saveGoogleDriveFacetSource(api, {
+      ...input,
+      payload: {
+        ...input.payload,
+        expectedVersion: reduced.binding!.version,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    }),
+  ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
+});
+
+test("Drive source verification stays outside the policy transaction and late restriction prevents selection persistence", async () => {
+  await allow(["google-drive"]);
+  const api = deps();
+  await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
+    values (${scope.accountId}, ${scope.workspaceId}, ${scope.subjectId}, 'Fixture', 'admin', '["workspace:admin"]'::jsonb)
+    on conflict (workspace_id, subject_id) do nothing`;
+  const encrypted = encryptEnvironmentValue(
+    requireEnvironmentEncryption(api.settings),
+    JSON.stringify({
+      access_token: "fixture-access",
+      token_type: "Bearer",
+      expires_at: new Date(Date.now() + 3600000).toISOString(),
+    }),
+  );
+  const connection = await sourceConnection("google-drive", "active", encrypted);
+  const source = {
+    id: "folder-late",
+    name: "Folder late",
+    mimeType: "application/vnd.google-apps.folder",
+    driveId: null,
+  };
+  let providerCalls = 0;
+  api.googleDriveFetch = async () => {
+    providerCalls++;
+    await allow([]);
+    return Response.json(source);
+  };
+  await expect(
+    saveGoogleDriveSource(api, {
+      ...scope,
+      connectionId: connection.id,
+      grant: scope as never,
+      canManageOrganizationDestination: false,
+      canManageWorkspaceDestination: true,
+      canManagePersonalDestination: false,
+      payload: {
+        sources: [source],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        syncEnabled: false,
+        readPolicy: "allow",
+      },
+    }),
+  ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
+  expect(providerCalls).toBe(1);
+  const retained = await getConnectionMetadata(
+    client.db,
+    scope.workspaceId,
+    connection.id,
+    scope.subjectId,
+  );
+  expect(retained?.version).toBe(connection.version);
+  expect(retained?.metadata.selectedSources).toEqual([]);
 });
