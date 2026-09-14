@@ -95,11 +95,15 @@ BEGIN
       THEN
         RAISE EXCEPTION 'Organization usage window or granularity is invalid' USING ERRCODE = '22023';
       END IF;
-      -- Pages enumerate workspaces, including zero-use workspaces, so page
-      -- discovery never requires another full-period fact scan.
+      -- Match listSharedWorkspacesForAccount: canonical membership pointers
+      -- exclude EVERY Personal workspace before lookahead/cursor selection.
+      -- Names, kind guesses and caller-owned Personal exceptions are forbidden.
+      -- Period totals remain actor-visible accounting across the account;
+      -- this shared-only inventory deliberately need not sum to those totals.
       SELECT coalesce(array_agg(id ORDER BY id), '{}'::uuid[]) INTO page_ids
       FROM (SELECT id FROM %1$I.workspaces
         WHERE account_id = context_account_id
+          AND id IN (SELECT workspace_id FROM %1$I.list_organization_workspace_ids(context_account_id))
           AND (p_after_workspace_id IS NULL OR id > p_after_workspace_id)
         ORDER BY id LIMIT 51) page;
       IF cardinality(page_ids) > 50 THEN

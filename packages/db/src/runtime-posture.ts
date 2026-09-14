@@ -3580,17 +3580,17 @@ export function evaluateRuntimeDatabasePosture(
         "organization usage capability has unsafe owner or direct runtime privileges",
       );
     }
-    const routine = posture.privateRoutines.find(
+    const aggregateRoutine = posture.privateRoutines.find(
       (routine) =>
         routine.name ===
         "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
     );
     if (
-      !routine ||
-      !routine.securityDefiner ||
-      !routine.execute ||
-      routine.publicExecute ||
-      routine.owner !== capability.owner
+      !aggregateRoutine ||
+      !aggregateRoutine.securityDefiner ||
+      !aggregateRoutine.execute ||
+      aggregateRoutine.publicExecute ||
+      aggregateRoutine.owner !== capability.owner
     ) {
       violations.push("organization usage aggregate capability is missing or unsafe");
     }

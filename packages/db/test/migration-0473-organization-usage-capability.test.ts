@@ -14,6 +14,7 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 const migrationPath = new URL(
   "../drizzle/0473_organization_usage_analytical_capability.sql",
@@ -61,7 +62,11 @@ beforeAll(async () => {
   appUrl.username = "opengeni_app";
   appUrl.password = owned.appPassword;
   client = createDb(appUrl.toString(), { max: 2 });
-  app = postgres(appUrl.toString(), { max: 1, prepare: false });
+  app = postgres(appUrl.toString(), {
+    max: 1,
+    prepare: false,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
 }, 900_000);
 
 afterAll(async () => {
@@ -95,6 +100,11 @@ describe("0473 organization usage analytical capability", () => {
     expect(source).toContain("usage_row.session_id IS NULL OR session_row.id IS NOT NULL");
     expect(source).toContain("p_include_period OR usage_row.workspace_id = ANY(page_ids)");
     expect(source).toContain("context_account_id IS DISTINCT FROM p_account_id");
+    const sharedInventory = source.indexOf(
+      "id IN (SELECT workspace_id FROM %1$I.list_organization_workspace_ids(context_account_id))",
+    );
+    expect(sharedInventory).toBeGreaterThan(0);
+    expect(sharedInventory).toBeLessThan(source.indexOf("ORDER BY id LIMIT 51"));
     expect(source).not.toMatch(
       /DISABLE ROW LEVEL SECURITY|NO FORCE ROW LEVEL SECURITY|row_security\s*=\s*off/i,
     );

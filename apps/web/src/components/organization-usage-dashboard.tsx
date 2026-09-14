@@ -105,11 +105,12 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           { signal: controller.signal },
         );
         if (active) setPageState({ key: pageKey, data: page });
-      } catch (error) {
+      } catch (pageLoadError) {
         if (active)
           setPageState({
             key: pageKey,
-            error: error instanceof Error ? error : new Error(String(error)),
+            error:
+              pageLoadError instanceof Error ? pageLoadError : new Error(String(pageLoadError)),
           });
       }
     })();
@@ -248,7 +249,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <caption className="pb-3 text-left text-sm font-semibold text-fg">
-                By workspace
+                By shared workspace
               </caption>
               <thead>
                 <tr className="border-b border-border text-fg-muted">
@@ -278,6 +279,10 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
               </tbody>
             </table>
           </div>
+          <p className="text-xs text-fg-subtle">
+            Personal workspaces are not listed. Period totals include all usage you can view, so
+            shared workspace rows may not add up to the period total.
+          </p>
           {(cursor || page?.nextWorkspaceCursor) && (
             <div className="flex gap-2">
               {cursor && (

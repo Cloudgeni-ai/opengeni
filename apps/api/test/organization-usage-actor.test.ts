@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import {
@@ -10,6 +11,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createDb,
+  createOrganizationApiKey,
   createSession,
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
@@ -250,4 +252,68 @@ test("actual HTTP summary and workspace pages preserve owner-private vs other bi
       expect(denied.status).toBe(403);
     }
   }
+
+  // Canonical Personal pointers, not names or currently visible usage, govern
+  // organization inventory. Zero-use Personal metadata must never be exposed.
+  const personalRows = await shared.admin<Array<{ id: string }>>`select personal_workspace_id as id
+    from organization_memberships where account_id = ${grant.accountId} and personal_workspace_id is not null`;
+  expect(personalRows.length).toBeGreaterThan(0);
+  const personalIds = personalRows.map((row) => row.id);
+  for (const id of personalIds) {
+    await shared.admin`update workspaces set name = 'SECRET PERSONAL WORKSPACE' where id = ${id}`;
+  }
+  const sharedIds = [grant.workspaceId!];
+  for (let i = 0; i < 51; i++) {
+    const id = crypto.randomUUID();
+    sharedIds.push(id);
+    await shared.admin`insert into workspaces (id, account_id, name) values (${id}, ${grant.accountId}, ${`Shared HTTP workspace ${i}`})`;
+  }
+  const rawKey = `og_usage_http_${crypto.randomUUID()}`;
+  await createOrganizationApiKey(client.db, {
+    accountId: grant.accountId,
+    name: "Usage inventory HTTP key",
+    prefix: rawKey.slice(0, 12),
+    keyHash: createHash("sha256").update(rawKey).digest("hex"),
+    permissions: ["billing:read"],
+  });
+  for (const authorization of [
+    await token("user:other-billing-reader", grant.accountId, grant.workspaceId!),
+    `Bearer ${rawKey}`,
+  ]) {
+    const response = await app.request(url("usage-summary", grant.accountId), {
+      headers: { authorization },
+    });
+    expect(response.status).toBe(200);
+    const first = (await response.json()) as OrganizationUsageSummary;
+    expect(first.workspaces).toHaveLength(50);
+    expect(first.nextWorkspaceCursor).not.toBeNull();
+    expect(sharedIds).toContain(first.nextWorkspaceCursor!);
+    const continuation = await app.request(
+      `${url("usage-workspaces", grant.accountId, first.until)}&afterWorkspaceId=${first.nextWorkspaceCursor}`,
+      { headers: { authorization } },
+    );
+    expect(continuation.status).toBe(200);
+    const second = (await continuation.json()) as OrganizationUsageSummary;
+    expect(second.workspaces).toHaveLength(2);
+    expect(second.nextWorkspaceCursor).toBeNull();
+    expect(
+      new Set([...first.workspaces, ...second.workspaces].map((row) => row.workspaceId)),
+    ).toEqual(new Set(sharedIds));
+    for (const result of [first, second]) {
+      const wire = JSON.stringify(result);
+      expect(wire).not.toContain("SECRET PERSONAL WORKSPACE");
+      for (const id of personalIds) expect(wire).not.toContain(id);
+    }
+  }
+  // Accounting remains complete for visible sessionless facts even when their
+  // Personal workspace metadata is deliberately absent from the shared table.
+  await shared.admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at)
+    values (${grant.accountId}, ${personalIds[0]!}, 'model.cost', 7, 'usd_micros', ${crypto.randomUUID()}, ${new Date()})`;
+  const reconciled = await app.request(url("usage-summary", grant.accountId), {
+    headers: { authorization: `Bearer ${rawKey}` },
+  });
+  expect(reconciled.status).toBe(200);
+  const accounting = (await reconciled.json()) as OrganizationUsageSummary;
+  expect(accounting.totals.find((row) => row.eventType === "model.cost")?.quantity).toBe("30");
+  expect(JSON.stringify(accounting)).not.toContain(personalIds[0]!);
 }, 180_000);
