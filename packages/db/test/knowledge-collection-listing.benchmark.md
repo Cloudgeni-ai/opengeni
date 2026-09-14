@@ -44,7 +44,29 @@ function-body replacement, not a new authority or a visibility cache.
   exactly. EXPLAIN ANALYZE/BUFFERS is a separate execution after timing.
 - No production database or provider was accessed or changed.
 
-## Results: 240 members, five measured runs, limit 20 (+1 sentinel)
+## Corrected security configuration: 250 members, limit 20 (+1 sentinel)
+
+Independent review found that the initial migration and test-only baseline
+recaptured the ambient search path instead of retaining the historical hardened
+schema lookup order. The migration now explicitly pins the installation schema,
+`pg_catalog`, and `pg_temp`; the baseline preserves that metadata and does not
+grant the application direct execution of internal helpers. This correction is
+required for release, regardless of performance.
+
+With both definitions hardened, a fresh comparison using one warmup and three
+measured runs produced exact full-response JSON parity:
+
+| Request | Baseline median | Optimized median | Baseline / optimized buffer hits |
+| --- | ---: | ---: | ---: |
+| Collection members, 250 | 4,121.97 ms | 151.19 ms | 3,988,588 / 15,594 |
+
+That is approximately 27.26x faster. Baseline samples were 4,125.14, 4,121.97,
+and 4,119.79 ms; optimized samples were 152.94, 150.46, and 151.19 ms.
+This is the confirmation run for the corrected implementation. The earlier
+tables below remain diagnostic evidence, not benchmarks of the final security
+metadata. They must not be presented as final-release latency guarantees.
+
+## Earlier diagnostic results: 240 members, five measured runs, limit 20 (+1 sentinel)
 
 | Request | Baseline median | Optimized median | Baseline / optimized buffer hits |
 | --- | ---: | ---: | ---: |
@@ -69,7 +91,7 @@ after recursive visibility filtering; the new plan has two scalar-subquery index
 scans on `(account_id,id)`, each emitting exactly one endpoint. This diagnostic
 plan is retained separately from end-to-end capability timings.
 
-## Results: 2,400 members, three measured runs, limit 20 (+1 sentinel)
+## Earlier diagnostic results: 2,400 members, three measured runs, limit 20 (+1 sentinel)
 
 | Request | Baseline median | Optimized median | Baseline / optimized buffer hits |
 | --- | ---: | ---: | ---: |
@@ -82,7 +104,7 @@ The separate EXPLAIN executions took 174,627.83 and 1,178.29 ms. Both wrote 526
 temporary blocks: the unchanged materialized candidate work can still spill.
 This larger comparison runs only the collection request, not the root/flat cases.
 
-## Smaller collections and JIT control, limit 20 (+1 sentinel)
+## Earlier diagnostic smaller collections and JIT control, limit 20 (+1 sentinel)
 
 A supplemental run used 10, 50, and 250 members with the same fixture shape.
 Each size reused one fixture across both implementations and both JIT settings;
@@ -121,7 +143,14 @@ source revocation/restoration, unavailable relationship endpoints, denied raw
 table access and forged context, human-review requirements, missing/cross-account
 endpoints, duplicate IDs, array ordering, and published-first/pending-only endpoints.
 
-Validation passed: six new PostgreSQL tests (111 assertions), all 38 existing
+After search-path hardening, nine PostgreSQL tests passed (136 assertions),
+including metadata, harmless temporary-table shadowing, and embedded-schema
+metadata regressions that failed before the correction. The embedded-schema
+case is metadata-only in a rolled-back transaction; application-role shadowing
+and full parity tests use the fully migrated public schema. The broader existing
+unified suite was not rerun during that remediation.
+
+Earlier validation passed: six new PostgreSQL tests (111 assertions), all 38 existing
 unified-Knowledge PostgreSQL tests (204 assertions), eight release-schema contract
 tests (267 assertions), DB typecheck, and migration schema-registration,
 FORCE-RLS-backfill, timeout-budget, and ordinal guards. The existing unified suite
