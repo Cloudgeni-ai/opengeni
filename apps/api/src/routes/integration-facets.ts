@@ -1,10 +1,12 @@
 import {
+  assertOrganizationIntegrationAllowed,
   IntegrationFacetMutationResult,
   IntegrationFacetRemovalResult,
   IntegrationInstanceFacetsResponse,
   MutateIntegrationFacetRequest,
   UpsertIntegrationFacetRequest,
 } from "@opengeni/contracts";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
   hasPermission,
   requireAccessGrant,
@@ -179,20 +181,28 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
         }
         return c.json(
           IntegrationFacetMutationResult.parse(
-            await configureIntegrationFacet(deps.db, {
-              accountId: grant.accountId,
-              workspaceId,
-              subjectId: grant.subjectId,
-              capabilityId,
-              instanceKey,
-              facetKey,
-              displayName: payload.displayName,
-              config: payload.config,
-              ...(payload.expectedVersion !== undefined
-                ? { expectedVersion: payload.expectedVersion }
-                : {}),
-              idempotencyKey: payload.idempotencyKey,
-            }),
+            await withOrganizationIntegrationPolicyFence(
+              deps.db,
+              { accountId: grant.accountId, workspaceId },
+              (tx, policy) =>
+                configureIntegrationFacet(tx, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  subjectId: grant.subjectId,
+                  capabilityId,
+                  instanceKey,
+                  facetKey,
+                  displayName: payload.displayName,
+                  config: payload.config,
+                  ...(payload.expectedVersion !== undefined
+                    ? { expectedVersion: payload.expectedVersion }
+                    : {}),
+                  idempotencyKey: payload.idempotencyKey,
+                  // Generic installed facets do not prove a curated identity or
+                  // validated custom protocol solely from their ID/domain/metadata.
+                  beforeAcquire: async () => assertOrganizationIntegrationAllowed(policy, null),
+                }),
+            ),
           ),
           payload.expectedVersion === undefined ? 201 : 200,
         );
@@ -212,17 +222,23 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
         try {
           return c.json(
             IntegrationFacetMutationResult.parse(
-              await setIntegrationFacetLifecycle(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                subjectId: grant.subjectId,
-                capabilityId: decoded(c.req.param("capabilityId")),
-                instanceKey: decoded(c.req.param("instanceKey")),
-                facetKey: decoded(c.req.param("facetKey")),
-                action,
-                expectedVersion: payload.expectedVersion,
-                idempotencyKey: payload.idempotencyKey,
-              }),
+              await withOrganizationIntegrationPolicyFence(
+                deps.db,
+                { accountId: grant.accountId, workspaceId },
+                (tx, policy) =>
+                  setIntegrationFacetLifecycle(tx, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    subjectId: grant.subjectId,
+                    capabilityId: decoded(c.req.param("capabilityId")),
+                    instanceKey: decoded(c.req.param("instanceKey")),
+                    facetKey: decoded(c.req.param("facetKey")),
+                    action,
+                    expectedVersion: payload.expectedVersion,
+                    idempotencyKey: payload.idempotencyKey,
+                    beforeAcquire: async () => assertOrganizationIntegrationAllowed(policy, null),
+                  }),
+              ),
             ),
           );
         } catch (error) {

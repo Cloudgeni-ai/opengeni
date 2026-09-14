@@ -174,6 +174,15 @@ type IntegrationInstanceContext = {
   connectionId: string | null;
 };
 
+/** Trusted server callback, never part of a serialized mutation request. The
+ * caller must acquire its policy fence before invoking the facet operation.
+ * IDs/domains in this context identify installed records, not curated provenance.
+ */
+export type IntegrationFacetAcquisitionAuthorizer = (
+  tx: Database,
+  context: Readonly<IntegrationInstanceContext>,
+) => Promise<void>;
+
 export async function listIntegrationInstanceFacets(
   db: Database,
   workspaceId: string,
@@ -290,6 +299,7 @@ export async function configureIntegrationFacet(
     config: Record<string, unknown>;
     expectedVersion?: number;
     idempotencyKey: string;
+    beforeAcquire?: IntegrationFacetAcquisitionAuthorizer;
   },
 ): Promise<IntegrationFacetMutationResult> {
   const requestDigest = integrationFacetConfigureRequestDigest(input);
@@ -298,6 +308,26 @@ export async function configureIntegrationFacet(
     const definition = await requireFacetDefinition(tx, context, input.facetKey);
     assertFacetConfig(input.config, definition.configSchema);
     await requireFacetConnection(tx, input, context, definition.capabilities);
+    if (input.beforeAcquire) {
+      // Match upsertIntegrationFacetBinding's advisory -> row prefix before
+      // deciding whether this request adds authority. The upsert reuses both
+      // transaction locks, including the absent-row insertion fence.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`integration-binding:${input.workspaceId}:${definition.id}:${input.instanceKey}`}, 0))`,
+      );
+      const existing = await loadFacetBinding(tx, context, input.instanceKey, definition.id, true);
+      const owner = facetOwner(input.capabilityId, input.instanceKey, input.facetKey);
+      const owners = existing ? await listIntegrationFacetBindingOwners(tx, existing.id) : [];
+      if (
+        !existing ||
+        existing.status !== "active" ||
+        existing.connectionId !== context.connectionId ||
+        stableJson(existing.config) !== stableJson(input.config) ||
+        !owners.some((current) => current.kind === owner.kind && current.id === owner.id)
+      ) {
+        await input.beforeAcquire(tx, context);
+      }
+    }
     const result = await upsertIntegrationFacetBinding(tx, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -343,6 +373,7 @@ export async function setIntegrationFacetLifecycle(
     action: "pause" | "resume";
     expectedVersion: number;
     idempotencyKey: string;
+    beforeAcquire?: IntegrationFacetAcquisitionAuthorizer;
   },
 ): Promise<IntegrationFacetMutationResult> {
   const requestDigest = sha256(
@@ -352,6 +383,7 @@ export async function setIntegrationFacetLifecycle(
       workspaceId: undefined,
       subjectId: undefined,
       idempotencyKey: undefined,
+      beforeAcquire: undefined,
     }),
   );
   return await withFacetOperation(db, input, requestDigest, "update", async (tx) => {
@@ -370,6 +402,9 @@ export async function setIntegrationFacetLifecycle(
     }
     await assertDirectFacetOwnership(tx, binding.id, input);
     const targetStatus = input.action === "pause" ? "paused" : "active";
+    if (input.action === "resume" && binding.status !== "active") {
+      await input.beforeAcquire?.(tx, context);
+    }
     let row = binding;
     if (binding.status !== targetStatus) {
       const [updated] = await tx
