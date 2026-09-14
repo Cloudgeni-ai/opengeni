@@ -128,9 +128,6 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           {props.error}
         </p>
       ) : null}
-      <p className="shrink-0 px-2 pt-2 pb-1 text-2xs text-fg-subtle">
-        Switches apply to this conversation.
-      </p>
     </>
   );
 }
