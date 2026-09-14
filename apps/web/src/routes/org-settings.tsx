@@ -24,6 +24,7 @@ import { OrganizationCodexSubscriptions } from "@/components/organization-codex-
 import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
+import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
@@ -711,6 +712,15 @@ export function OrgSettingsRoute({
         {section === "retention" ? (
           <OrganizationRetentionSection
             key={identityKey}
+            client={client}
+            identity={adminIdentity}
+            actorRole={actorRole}
+            managedSession={organizationAdministratorSession}
+          />
+        ) : null}
+        {section === "integrations" ? (
+          <OrganizationIntegrationsSection
+            key={`${identityKey}:integrations`}
             client={client}
             identity={adminIdentity}
             actorRole={actorRole}
