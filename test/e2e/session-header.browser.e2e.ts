@@ -252,14 +252,15 @@ describe("responsive production session header", () => {
       const page = await context.newPage();
       await page.goto(`${webBaseUrl}/workspaces/${fixture.workspaceId}/sessions/${session.id}`);
       const header = page.locator("header");
-      await header.getByText("Work is still in progress.", { exact: false }).waitFor();
-      expect(await header.innerText()).toContain("Waiting · recheck at");
+      const waitStatus = page.locator("[data-session-wait-status]");
+      await waitStatus.getByText("Waiting for CI to finish", { exact: true }).waitFor();
+      expect(await waitStatus.innerText()).toContain("Checks again at");
+      expect(await header.locator("[data-session-wait-badge]").innerText()).toBe("Waiting");
       const waitLabel = page
-        .locator(
-          `a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"] [data-session-row-state]`,
-        )
+        .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)
         .first();
       await waitLabel.waitFor();
+      expect(await waitLabel.getAttribute("aria-label")).toContain("Waiting ·");
       expect(await waitLabel.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
       await page.screenshot({ path: "/tmp/opengeni-wait-live-route.png", fullPage: true });
       await shared.admin`update sessions set input_wait_until = now() - interval '1 second' where id = ${session.id}`;
@@ -272,6 +273,8 @@ describe("responsive production session header", () => {
       });
       await publishDurableSessionEvents(bus, fixture.workspaceId, session.id, settled.events);
       await header.getByText("Queued", { exact: true }).waitFor();
+      await waitStatus.waitFor({ state: "detached" });
+      await page.locator("[data-session-dispatch-wait]").waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
       expect(await header.innerText()).not.toContain("Idle");
     } finally {
