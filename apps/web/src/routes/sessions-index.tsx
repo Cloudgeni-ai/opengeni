@@ -73,6 +73,7 @@ import { toast } from "sonner";
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
+import { NewSessionStarters } from "@/components/new-session-starters";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -1351,7 +1352,7 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
-        <div ref={composerRegionRef} className="mt-8">
+        <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
           <ConsoleComposer
             workspaceId={workspaceId}
             composer={createComposer}
@@ -1534,6 +1535,13 @@ function SessionsIndexRouteContent({
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
+        <NewSessionStarters
+          disabled={busy || newSessionDraft.loading}
+          onSelect={(prompt) => {
+            setMessage(prompt);
+            composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+          }}
+        />
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}
